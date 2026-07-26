@@ -81,7 +81,7 @@ def test_confirm_y_n():
 def test_run_tool_propagates_esc():
     saved_confirm = m._confirm
     # make write_file's _confirm raise
-    m._confirm = lambda action: (_ for _ in ()).throw(m._EscToChat(action))
+    m._confirm = lambda action, **kw: (_ for _ in ()).throw(m._EscToChat(action))
     builtins.print = lambda *a, **k: None
     # suppress the spinner so we don't spawn a thread
     m.LifeSpinner = type("NoSpinner", (), {
@@ -160,7 +160,7 @@ def test_model_turn_native_esc():
     ]
     m.open_stream = lambda messages, **kw: iter(chunks)
     # Esc on the FIRST tool; the second should be skipped, not re-prompted.
-    m._confirm = lambda action: (_ for _ in ()).throw(m._EscToChat(action))
+    m._confirm = lambda action, **kw: (_ for _ in ()).throw(m._EscToChat(action))
     try:
         messages = [{"role": "system", "content": m.SYSTEM},
                     {"role": "user", "content": "do it"}]
