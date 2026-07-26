@@ -29,6 +29,43 @@ def _inside_code_fence(text, index):
     return text.count("```", 0, index) % 2 == 1
 
 
+def _escape_bare_control_chars(raw):
+    """Escape literal newline/tab/carriage-return characters that appear
+    inside JSON string literals, without touching anything outside strings.
+
+    Small models routinely emit a multi-line string value as raw newlines
+    (e.g. `"content": "line one\nline two"` written with an actual newline
+    byte instead of the two-character `\n` escape) — strict JSON forbids
+    unescaped control characters in strings, so json.loads rejects the whole
+    call with "Invalid control character". This is a mechanical, unambiguous
+    fix-up (not a parse of arbitrary malformed JSON), so it's tried as a
+    fallback before giving up and asking the model to retry the whole call.
+    """
+    out = []
+    in_string = False
+    i = 0
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if in_string and c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(raw[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            in_string = not in_string
+            out.append(c)
+            i += 1
+            continue
+        if in_string and c in "\n\r\t":
+            out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[c])
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def parse_text_calls_with_errors(content):
     """Like parse_text_calls(), but also returns per-tag parse error strings.
 
@@ -54,13 +91,22 @@ def parse_text_calls_with_errors(content):
             pos = match.end()
             continue
         found_tag = True
-        try:
-            obj = json.loads(match.group(1))
-            calls.append((obj["name"], obj.get("arguments", {})))
-        except json.JSONDecodeError as e:
-            errors.append(f"invalid JSON ({e}): {match.group(1)[:120]!r}")
-        except KeyError:
-            errors.append(f"missing \"name\" field: {match.group(1)[:120]!r}")
+        raw_body = match.group(1)
+        obj = None
+        parse_exc = None
+        for candidate in (raw_body, _escape_bare_control_chars(raw_body)):
+            try:
+                obj = json.loads(candidate)
+                break
+            except json.JSONDecodeError as e:
+                parse_exc = e
+        if obj is None:
+            errors.append(f"invalid JSON ({parse_exc}): {raw_body[:120]!r}")
+        else:
+            try:
+                calls.append((obj["name"], obj.get("arguments", {})))
+            except KeyError:
+                errors.append(f"missing \"name\" field: {raw_body[:120]!r}")
         pos = match.end()
     return (calls, errors) if found_tag else ([], [])
 

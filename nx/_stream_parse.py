@@ -26,6 +26,27 @@ from . import _state as st
 from . import REASONING_ONLY_TIME_LIMIT
 
 
+# Text-protocol tool-call tag openers (see _text_fallback.py's TOOL_TAG /
+# NX_TOOL_TAG). Native tool-calling servers (Qwen chat templates etc.) never
+# put these in `content` — the call arrives as structured `delta.tool_calls`
+# instead, hidden behind the "generating tool call" status line below. A
+# server with no native tool-calling convention (Gemma et al.) has nowhere
+# else to put the tagged call, so it comes back as plain `content` and would
+# otherwise stream the raw `<tool_call>{"name": ...}` JSON straight into the
+# chat like ordinary prose — this detects the tag opening mid-stream so it
+# gets hidden the same way native tool_calls already are.
+_TEXT_TOOL_TAG_OPENERS = ("<tool_call>", "[nx_tool_call]")
+
+
+def _first_tool_tag_index(text):
+    idx = None
+    for opener in _TEXT_TOOL_TAG_OPENERS:
+        i = text.find(opener)
+        if i != -1 and (idx is None or i < idx):
+            idx = i
+    return idx
+
+
 def _tool_call_progress(tcs):
     parts = []
     for i in sorted(tcs):
@@ -68,6 +89,7 @@ class StreamParser:
         self.last_chunk = None
         self.tool_status_active = False
         self.last_tool_status = 0.0
+        self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
 
     # --- tool-call status line (throttled) ---------------------------------
     def show_tool_status(self, force=False):
@@ -172,10 +194,6 @@ class StreamParser:
             print()
             print(f"{DIM}  ──────────────{RESET}")
         self.mode = "say"
-        if self.say_live is None:
-            self.say_live = Live(console=self._say_console, refresh_per_second=12,
-                                  transient=False)
-            self.say_live.start()
         chunk = raw_chunk
         if _LEAKED_SPECIAL_TOKEN_RE.search(chunk):
             chunk = _strip_leaked_tokens(chunk)
@@ -193,7 +211,44 @@ class StreamParser:
         if chunk:
             self.content.append(chunk)
             self.streamed_chars += len(chunk)
-            self.say_live.update(Markdown("".join(self.content)))
+            if not self.in_text_tool_tag:
+                full = "".join(self.content)
+                tag_idx = _first_tool_tag_index(full)
+                if tag_idx is None:
+                    if self.say_live is None:
+                        self.say_live = Live(console=self._say_console,
+                                             refresh_per_second=12, transient=False)
+                        self.say_live.start()
+                    self.say_live.update(Markdown(full))
+                else:
+                    # Tag opened mid-stream: commit whatever prose came
+                    # before it, close the live panel, and fall through to
+                    # the throttled tool-status line below — same treatment
+                    # native tool_calls deltas already get, instead of
+                    # streaming raw <tool_call>{"name": ...} JSON as if it
+                    # were ordinary prose.
+                    #
+                    # The opener itself can arrive split across SSE chunks
+                    # (e.g. "<tool_call" in one delta, ">..." in the next) —
+                    # until the closing ">" lands, _first_tool_tag_index()
+                    # can't see the full opener yet, so that dangling partial
+                    # fragment gets live-rendered as if it were prose one
+                    # chunk earlier. Live.stop() with transient=False freezes
+                    # whatever was last rendered, so without re-rendering to
+                    # the (tag-free) prefix right before stopping, that stray
+                    # partial-opener frame would be the one left on screen.
+                    prefix = full[:tag_idx]
+                    if self.say_live is None and prefix.strip():
+                        self.say_live = Live(console=self._say_console,
+                                             refresh_per_second=12, transient=False)
+                        self.say_live.start()
+                    if self.say_live is not None:
+                        self.say_live.update(Markdown(prefix))
+                        self.say_live.stop()
+                        self.say_live = None
+                    self.in_text_tool_tag = True
+            if self.in_text_tool_tag:
+                self.show_tool_status()
         if ((LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT)
                 or (REPEAT_CHUNK_LIMIT > 0 and self.repeat_chunk_run >= REPEAT_CHUNK_LIMIT)):
             kind = ("special-token collapse" if self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT

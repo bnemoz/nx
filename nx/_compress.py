@@ -109,12 +109,31 @@ RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", 
 # right up until that first confirmation (and for servers/templates that
 # never go native, i.e. permanently text-protocol), our `<tool_call>`-tag
 # grammar is the only thing constraining malformed JSON, so it stays on.
+# NX_GRAMMAR is now only a fallback gate: once the startup capability probe
+# (nx/_capability.py, run at each switch_source()) lands on a source, its
+# verdict (CAPABILITY_NATIVE/GRAMMAR/TEXT) decides whether the grammar gets
+# attached, regardless of this env var — see _grammar_extra_body() below.
 NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not in ("", "0")
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
 
 
 def _grammar_extra_body(tools):
-    if not NX_GRAMMAR or not tools or st._NATIVE_TOOL_CALLS_CONFIRMED:
+    if not tools or st._NATIVE_TOOL_CALLS_CONFIRMED:
+        return None
+    # The startup capability probe (nx/_capability.py) takes precedence over
+    # the NX_GRAMMAR opt-in once it lands: CAPABILITY_NATIVE means llama.cpp
+    # is already constraining tool_calls itself (skip, same as the reactive
+    # _NATIVE_TOOL_CALLS_CONFIRMED check above); CAPABILITY_GRAMMAR means the
+    # grammar demonstrably helps on this source, so attach it even without
+    # NX_GRAMMAR set; CAPABILITY_TEXT means it didn't help in the probe, so
+    # skip it (plain text-protocol parsing only). While the probe is still
+    # pending (None), fall back to the old NX_GRAMMAR env-var gate.
+    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+    if capability is not None:
+        from ._capability import CAPABILITY_GRAMMAR
+        if capability != CAPABILITY_GRAMMAR:
+            return None
+    elif not NX_GRAMMAR:
         return None
     key = tuple(t.get("function", {}).get("name") for t in tools)
     if key not in _grammar_cache:

@@ -63,6 +63,12 @@ class Source:
         # Whether this source's /tokenize endpoint has been confirmed working
         # (True), confirmed absent/broken (False), or not yet tried (None).
         self._tokenize_ok = None
+        # Tool-calling protocol this source's model actually uses, one of
+        # _capability.CAPABILITY_NATIVE / _GRAMMAR / _TEXT, or None before the
+        # startup probe (nx/_capability.py: ensure_capability_probe()) lands.
+        # Cached here (not a global) so switching back to a previously-probed
+        # source doesn't need to re-learn it. Reset in switch_source().
+        self._capability = None
         # Per-request body fields the OpenAI SDK doesn't accept as kwargs, merged
         # into every chat.completions.create() call via extra_body. The canonical
         # use is OpenRouter provider routing — a `provider` object whose `order`
@@ -571,6 +577,14 @@ def switch_source(name, model_override=None):
     # way — let _grammar_extra_body() re-derive it from this source's actual
     # behavior instead of carrying over the previous source's confirmation.
     st._NATIVE_TOOL_CALLS_CONFIRMED = False
+    # A model override (e.g. /source together <other-model>) may point the
+    # same Source at a different model with different behavior — drop the
+    # cached capability so it's re-probed; a bare switch back to an
+    # already-probed source's default model keeps its prior answer.
+    if model_override:
+        src._capability = None
+    from ._capability import ensure_capability_probe
+    ensure_capability_probe(src)
     return True
 
 
