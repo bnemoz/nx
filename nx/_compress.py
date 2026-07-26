@@ -22,6 +22,7 @@ from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
 from ._sessions_io import _prune_empty_assistant_messages, _drop_leading_dangling_tool_turns
 from ._metrics import _abbr
+from ._grammar import build_tool_call_grammar
 from . import _state as st
 from . import TOOLS
 
@@ -86,6 +87,30 @@ RECOVERY_DRY_ALLOWED_LENGTH = None if RECOVERY_BACKEND == "vllm" else _env_int("
 # agent must emit verbatim is never penalized as "repetition".
 RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", ":", "\"", "*", "/", "\\", "`", "'"]
 
+# Grammar-constrained tool calls: opt-in (NX_GRAMMAR=1) since the request
+# fields involved (llama.cpp's `grammar` + `grammar_triggers`) are a
+# llama.cpp server extension whose exact shape has shifted across versions,
+# unlike the long-stable min_p/DRY knobs above. Only meaningful for the
+# text-protocol fallback (see nx/_grammar.py) so it's skipped for vLLM (which
+# has its own, differently-shaped guided-decoding fields) — an unsupported
+# server just gets the field ignored or the request rejected, in which case
+# open_stream()'s existing no-tools/no-extra fallback ladder drops it.
+NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not in ("", "0")
+_grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
+
+
+def _grammar_extra_body(tools):
+    if not NX_GRAMMAR or not tools:
+        return None
+    key = tuple(t.get("function", {}).get("name") for t in tools)
+    if key not in _grammar_cache:
+        grammar, trigger = build_tool_call_grammar(tools)
+        _grammar_cache[key] = None if grammar is None else {
+            "grammar": grammar,
+            "grammar_triggers": [{"type": "word", "value": trigger}],
+        }
+    return _grammar_cache[key]
+
 
 def _recovery_sampling_opts():
     """Loop-breaking sampler for recovery retries (see RECOVERY_* constants).
@@ -145,6 +170,11 @@ def open_stream(messages, tools=TOOLS, tool_choice=None, max_tokens=None,
         # branches below carry it through unchanged.
         if st.ACTIVE:
             request_opts.update(st.ACTIVE.extra_request_kwargs())
+        grammar_extra = _grammar_extra_body(tools)
+        if grammar_extra:
+            # Merge (not overwrite) — a source's own extra_body (e.g.
+            # OpenRouter provider routing) must survive alongside grammar.
+            request_opts.setdefault("extra_body", {}).update(grammar_extra)
         try:
             _log_event("req", {"model": st.MODEL, "messages": messages, "tools": tools, "stream": True, **request_opts})
             stream = st.client.chat.completions.create(

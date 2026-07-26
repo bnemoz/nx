@@ -105,10 +105,24 @@ turns fold into a summary automatically — see `/autocompress`.
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
+| `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
 
 `nx --help` covers flags; the source (grep `_env_int`/`_env_float` calls in
 `nx/`) has the full env var list — dozens more knobs tune recovery samplers,
 stall detection, undo depth, etc., all with sane defaults.
+
+Servers without native tool-calling fall back to a `<tool_call>{...}
+</tool_call>` text protocol, parsed out of the assistant's reply — small
+models occasionally emit truncated or invalid JSON in that tag, which the
+parser tries to recover from after the fact. Setting `NX_GRAMMAR=1` against a
+llama.cpp server instead constrains generation with a GBNF grammar (derived
+from the active tool schemas) once the model emits the `<tool_call>` trigger,
+so malformed JSON becomes unsamplable rather than something to clean up.
+It's opt-in and llama.cpp-only — the `grammar`/`grammar_triggers` request
+fields are a llama.cpp server extension, not part of the OpenAI API, and
+their exact shape has moved across llama.cpp versions; an unsupported server
+just has the field ignored or rejected (falling back automatically, same as
+an `NX_SOURCE_*_EXTRA_BODY` a server doesn't recognize).
 
 ## Commands
 
