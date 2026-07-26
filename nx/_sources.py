@@ -266,7 +266,8 @@ class Source:
             return self._context_window
         mid = model or self.model or self.resolve_model()
         if self._is_local():
-            n = self._ctx_from_models(mid) or self._ctx_from_props()
+            n = self._ctx_from_models(mid) or self._ctx_from_props() \
+                or self._ctx_from_lmstudio(mid)
             if n is None:
                 n = self._ctx_from_overrun_probe(mid)
         else:
@@ -345,6 +346,35 @@ class Source:
             if isinstance(v, int) and v > 0:
                 return v
         return None
+
+    def _ctx_from_lmstudio(self, mid):
+        """LM Studio's native GET /api/v0/models exposes loaded_context_length
+        (the context the model is actually running with) per entry — unlike
+        the OpenAI-compat /v1/models, which omits any length field, and unlike
+        the overrun probe, which doesn't work: LM Studio silently clamps an
+        over-large max_tokens instead of returning a 400. Returns int or
+        None."""
+        try:
+            root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
+            with urllib.request.urlopen(root + "/api/v0/models", timeout=5) as r:
+                data = json.loads(r.read().decode("utf-8")).get("data", [])
+        except Exception:
+            return None
+        pick = None
+        if mid:
+            mtail = mid.rsplit("/", 1)[-1].lower()
+            for m in data:
+                mid_field = (m.get("id") or "").lower()
+                if mid_field == mid.lower() or \
+                   mid_field.rsplit("/", 1)[-1] == mtail:
+                    pick = m
+                    break
+        if pick is None and data:
+            pick = data[0]
+        if not isinstance(pick, dict):
+            return None
+        v = pick.get("loaded_context_length") or pick.get("max_context_length")
+        return v if isinstance(v, int) and v > 0 else None
 
     def _ctx_from_overrun_probe(self, mid):
         """Send a chat completion with max_tokens far beyond any real context
