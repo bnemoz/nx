@@ -488,7 +488,9 @@ def _cmd_undo(user, state):
             return
         print(f"{DIM}  pending undo checkpoints (most recent first):{RESET}")
         for i, c in enumerate(checkpoints, 1):
-            print(f"  {DIM}{i:>2}{RESET}  {c['tool']:<11} {c['path']}  {DIM}({_fmt_when(c.get('ts'))}){RESET}")
+            files = c["files"]
+            paths = files[0]["path"] if len(files) == 1 else f"{len(files)} files: " + ", ".join(f["path"] for f in files)
+            print(f"  {DIM}{i:>2}{RESET}  {c['tool']:<11} {paths}  {DIM}({_fmt_when(c.get('ts'))}){RESET}")
         return
     entry, msg = _m.undo_last()
     color = C.ERROR if msg.startswith("ERROR") else DIM

@@ -578,9 +578,6 @@ from ._tools import (
 )
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, undo_last, list_checkpoints
 
-_UNDOABLE_TOOLS = ("write_file", "edit_file", "multi_edit", "sed_edit")
-
-
 def write_file(path, content, **_):
     if not _confirm(f"write {path} ({len(content)} bytes)"):
         return "DENIED by user"
@@ -688,6 +685,7 @@ def sed_edit(pattern, replacement, path, count=0, flags="", **_):
     action = f"sed_edit {len(changes)} file(s), {total} replacement(s)"
     if not _confirm(action, preview="\n".join(previews)):
         return "DENIED by user"
+    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n in changes])
     for f, _src, new_src, _n in changes:
         with open(f, "w") as fh:
             fh.write(new_src)
@@ -1400,7 +1398,9 @@ def run_tool(name, args):
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
         if cached is not None:
             return cached[0]
-    undo_snapshot = _undo_snapshot(args.get("path")) if name in _UNDOABLE_TOOLS else None
+    # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
+    # since a glob path isn't a real file to snapshot here.
+    undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit") else None
     # newline so the tool arrow gets its own line — streamed text uses end=""
     # and would otherwise run straight into the indicator
     arg_preview = json.dumps(args)
@@ -1443,7 +1443,7 @@ def run_tool(name, args):
     elif name in ("write_file", "edit_file", "multi_edit") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
         if result != "DENIED by user":
-            _undo_push(name, undo_snapshot)
+            _undo_push(name, [undo_snapshot])
     elif name == "run_bash":
         # bash can touch any path; cheaper to drop the whole cache than to parse the command.
         st._TOOL_RESULT_CACHE.clear()

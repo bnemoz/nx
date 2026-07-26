@@ -3,10 +3,13 @@
 `run_tool()` in `nx/__init__.py` snapshots a file's prior contents just
 before `write_file`/`edit_file`/`multi_edit` apply, and pushes the snapshot
 here once the tool call actually succeeds (denied/errored calls never touched
-the file, so they push nothing). The `/undo` REPL command pops the most
-recent entry and restores it — this is deliberately per-file, not a batch
-transaction: undoing a `multi_edit` reverts the whole file to its pre-edit
-state in one step, same as undoing a single `edit_file`.
+the file, so they push nothing). `sed_edit` can touch a whole glob of files
+in one call, so it snapshots each matched file itself and pushes them as one
+entry (see nx/__init__.py). Either way, one stack entry = one tool call, and
+it may cover several files: the `/undo` REPL command pops the most recent
+entry and restores every file in it in one step, so undoing a `multi_edit`
+or `sed_edit` call reverts all the files it touched together, not one at a
+time.
 """
 import os
 import time
@@ -38,10 +41,14 @@ def snapshot(path):
     return {"path": path, "existed": existed, "content": content}
 
 
-def push_checkpoint(tool, snap):
-    if snap is None:
+def push_checkpoint(tool, snaps):
+    """`snaps` is a list of per-file snapshot dicts (as from `snapshot()`);
+    entries with a None snapshot are dropped. Pushes nothing if the list ends
+    up empty (e.g. every file was unreadable)."""
+    files = [s for s in snaps if s is not None]
+    if not files:
         return
-    st._UNDO_STACK.append({"tool": tool, "ts": time.time(), **snap})
+    st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": files})
     if len(st._UNDO_STACK) > MAX_UNDO:
         del st._UNDO_STACK[0]
 
@@ -52,20 +59,27 @@ def list_checkpoints():
 
 
 def undo_last():
-    """Revert the most recent checkpointed write/edit. Returns (entry, message)."""
+    """Revert every file in the most recent checkpointed call. Returns (entry, message)."""
     if not st._UNDO_STACK:
         return None, "nothing to undo"
     entry = st._UNDO_STACK.pop()
-    path = entry["path"]
-    try:
-        if entry["existed"]:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(entry["content"])
-            msg = f"reverted {entry['tool']} on {path}"
-        else:
-            if os.path.exists(path):
-                os.remove(path)
-            msg = f"reverted {entry['tool']} on {path} (file did not exist before, removed)"
-        return entry, msg
-    except OSError as e:
-        return entry, f"ERROR: failed to undo {path}: {e}"
+    reverted, errors = [], []
+    for snap in entry["files"]:
+        path = snap["path"]
+        try:
+            if snap["existed"]:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(snap["content"])
+            else:
+                if os.path.exists(path):
+                    os.remove(path)
+            reverted.append(path)
+        except OSError as e:
+            errors.append(f"{path}: {e}")
+    if errors:
+        msg = f"reverted {entry['tool']} on {len(reverted)} file(s); FAILED: " + "; ".join(errors)
+    elif len(reverted) == 1:
+        msg = f"reverted {entry['tool']} on {reverted[0]}"
+    else:
+        msg = f"reverted {entry['tool']} on {len(reverted)} file(s): {', '.join(reverted)}"
+    return entry, msg
