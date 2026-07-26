@@ -73,6 +73,49 @@ def test_tool_call_with_surrounding_prose_still_parses():
     ]
 
 
+def test_parse_text_calls_with_errors_reports_malformed_json():
+    content = '<tool_call>{"name": "read_file", "arguments": {path: "foo.py"}}</tool_call>'
+
+    calls, errors = m.parse_text_calls_with_errors(content)
+
+    assert calls == []
+    assert len(errors) == 1
+    assert "invalid JSON" in errors[0]
+
+
+def test_parse_text_calls_with_errors_salvages_good_call_alongside_bad():
+    content = (
+        '<tool_call>{"name": "read_file", "arguments": {"path": "a.py"}}</tool_call>'
+        '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'
+    )
+
+    calls, errors = m.parse_text_calls_with_errors(content)
+
+    assert calls == [("read_file", {"path": "a.py"})]
+    assert len(errors) == 1
+
+
+def test_malformed_tool_call_triggers_one_corrective_retry():
+    messages = [{"role": "system", "content": "sys"}]
+    text = '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'
+
+    status = m._handle_text_tool_calls(messages, text, malformed_call_count=0)
+
+    assert status == m.TURN_MALFORMED_CALL
+    assert messages[-2] == {"role": "assistant", "content": text}
+    assert messages[-1]["role"] == "user"
+    assert "did not parse" in messages[-1]["content"]
+
+
+def test_malformed_tool_call_gives_up_after_one_retry():
+    messages = [{"role": "system", "content": "sys"}]
+    text = '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'
+
+    status = m._handle_text_tool_calls(messages, text, malformed_call_count=1)
+
+    assert status is None  # falls through to being treated as a plain-text answer
+
+
 def test_tool_result_sanitizer_escapes_legacy_tool_tags():
     content = (
         'line 1\n'

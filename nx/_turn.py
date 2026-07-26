@@ -29,7 +29,7 @@ from ._special_tokens import (
 )
 from ._stream_parse import StreamParser
 from ._text_fallback import (
-    parse_text_calls, _escape_tool_protocol_delimiters, _sanitize_tool_result,
+    parse_text_calls_with_errors, _escape_tool_protocol_delimiters, _sanitize_tool_result,
     TOOL_TAGS, TOOL_RESULT_PROTOCOL_NOTE, TOOL_RESULT_CHARS,
 )
 from ._compress import (
@@ -82,6 +82,7 @@ TURN_STALL = "stall"  # reasoning-only stall → nudge to act (full tools retain
 TURN_EMPTY = "empty"  # assistant emitted no content and no tool calls → silent stall
 TURN_ESC = "esc"  # user pressed Esc at an approval prompt → drop to chat input
 TURN_REDIRECT = "redirect"  # user typed+submitted a new instruction right after Esc
+TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unparseable → one corrective retry
 
 
 def _ctx_field(prompt_n):
@@ -353,7 +354,7 @@ def _handle_native_tool_calls(messages, tcs, text, finish_reasons,
     return TURN_TOOL
 
 
-def _handle_text_tool_calls(messages, text):
+def _handle_text_tool_calls(messages, text, malformed_call_count=0):
     """Execute the text-protocol fallback tool-calling path for one streamed turn.
 
     Parses <tool_call>... blocks (or legacy [nx_tool_call]...) from the model's text, records the
@@ -361,9 +362,27 @@ def _handle_text_tool_calls(messages, text):
     user turn (the format the text-fallback protocol expects). If the user
     presses Esc at an approval, remaining calls are cancelled. Returns a
     TURN_* status for model_turn, or None if no text-protocol calls were found.
+
+    If a tag was present but every call in it failed to parse (bad JSON, no
+    "name"), that used to fall straight through to being treated as the final
+    answer — the model's intent silently dropped. Instead, on the first such
+    failure, feed back a short correction (mirrors _assess_risk()'s retry loop
+    in nx/_risk.py) and return TURN_MALFORMED_CALL so the loop retries once
+    before giving up to the generic stall path.
     """
-    calls = parse_text_calls(text)
+    calls, errors = parse_text_calls_with_errors(text)
     if not calls:
+        if errors and malformed_call_count < 1:
+            print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {errors[0]}; "
+                  f"nudging correction (attempt {malformed_call_count + 1}/1){RESET}")
+            messages.append({"role": "assistant", "content": text})
+            messages.append({"role": "user", "content": (
+                "[Runtime note: Your last tool call did not parse — "
+                f"{errors[0]}. Re-emit it as a single well-formed "
+                "<tool_call>{\"name\": ..., \"arguments\": {...}}</tool_call> "
+                "block with valid JSON.]"
+            )})
+            return TURN_MALFORMED_CALL
         return None
     messages.append({"role": "assistant", "content": text})
     obs = []
@@ -522,7 +541,8 @@ def _handle_loop_cut(messages, forced_final, reasoning_loop_cut_count,
 
 # --- one model turn (streamed), returns TURN_* status -----------------------
 def model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
-               empty_turn_count=0, forced_final=False, recovery_sampling=False):
+               empty_turn_count=0, forced_final=False, recovery_sampling=False,
+               malformed_call_count=0):
     # Start the spinner BEFORE open_stream() so the HTTP-handshake + interrupt-
     # watcher-setup window (which can be tens of ms on a warm local server but
     # seconds on a cold/wake-from-sleep one) isn't a frozen green-text gap.
@@ -731,7 +751,7 @@ def model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=
         return _handle_native_tool_calls(messages, parser.tcs, text, parser.finish_reasons,
                                          malformed_stream_cut_count)
 
-    status = _handle_text_tool_calls(messages, text)  # text-fallback path
+    status = _handle_text_tool_calls(messages, text, malformed_call_count)  # text-fallback path
     if status is not None:
         return status
 
@@ -792,6 +812,7 @@ def _run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
     reasoning_loop_cuts = 0
     malformed_stream_cuts = 0
     empty_turn_cuts = 0
+    malformed_call_cuts = 0
     # Go through the top-level package (not a bare same-module reference) so
     # a test that monkeypatches `nx.model_turn` (to avoid a real model
     # round-trip) takes effect on every call this loop makes.
@@ -800,7 +821,8 @@ def _run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
-                            recovery_sampling=recovery_sampling)
+                            recovery_sampling=recovery_sampling,
+                            malformed_call_count=malformed_call_cuts)
         if on_step is not None:
             on_step()
         force_final = False
@@ -823,6 +845,9 @@ def _run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
         if status == TURN_EMPTY:
             empty_turn_cuts += 1
             recovery_sampling = True  # more entropy to escape the empty-output attractor
+            continue
+        if status == TURN_MALFORMED_CALL:
+            malformed_call_cuts += 1
             continue
         if status == TURN_STALL:
             reasoning_loop_cuts += 1

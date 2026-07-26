@@ -29,23 +29,17 @@ def _inside_code_fence(text, index):
     return text.count("```", 0, index) % 2 == 1
 
 
-def parse_text_calls(content):
-    """Pull text-protocol tool-call tags out of an assistant message.
+def parse_text_calls_with_errors(content):
+    """Like parse_text_calls(), but also returns per-tag parse error strings.
 
-    Small models routinely add a sentence of chatter before/after (or between)
-    tags despite SYSTEM asking for the tag alone, so this scans for tags
-    anywhere in the text rather than anchoring to the start — any prose
-    preamble/postamble/interstitial text is just ignored, not treated as
-    disqualifying. Tags inside a ``` fenced code block are still treated as
-    documentation/examples, not executable calls, since that's the common
-    false-positive case (docs, code samples) this protocol has to avoid.
-    Individual calls with malformed JSON are skipped rather than discarding
-    the whole message, since small models often emit one good call alongside
-    a malformed one.
+    Returns (calls, errors). `errors` has one short description per tag that
+    matched but failed to parse (bad JSON or missing "name") — used to build a
+    retry-with-correction nudge instead of silently dropping the model's intent.
     """
     text = content or ""
     pos = 0
     calls = []
+    errors = []
     found_tag = False
     n = len(text)
     while pos < n:
@@ -63,10 +57,29 @@ def parse_text_calls(content):
         try:
             obj = json.loads(match.group(1))
             calls.append((obj["name"], obj.get("arguments", {})))
-        except (json.JSONDecodeError, KeyError):
-            pass  # malformed call: skip it, salvage any other valid calls
+        except json.JSONDecodeError as e:
+            errors.append(f"invalid JSON ({e}): {match.group(1)[:120]!r}")
+        except KeyError:
+            errors.append(f"missing \"name\" field: {match.group(1)[:120]!r}")
         pos = match.end()
-    return calls if found_tag else []
+    return (calls, errors) if found_tag else ([], [])
+
+
+def parse_text_calls(content):
+    """Pull text-protocol tool-call tags out of an assistant message.
+
+    Small models routinely add a sentence of chatter before/after (or between)
+    tags despite SYSTEM asking for the tag alone, so this scans for tags
+    anywhere in the text rather than anchoring to the start — any prose
+    preamble/postamble/interstitial text is just ignored, not treated as
+    disqualifying. Tags inside a ``` fenced code block are still treated as
+    documentation/examples, not executable calls, since that's the common
+    false-positive case (docs, code samples) this protocol has to avoid.
+    Individual calls with malformed JSON are skipped rather than discarding
+    the whole message, since small models often emit one good call alongside
+    a malformed one.
+    """
+    return parse_text_calls_with_errors(content)[0]
 
 
 def _escape_tool_protocol_delimiters(text):

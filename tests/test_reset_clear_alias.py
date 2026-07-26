@@ -28,7 +28,8 @@ def fake_open_stream(msgs):
 
 
 def fake_model_turn(msgs, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
-                    empty_turn_count=0, forced_final=False, recovery_sampling=False):
+                    empty_turn_count=0, forced_final=False, recovery_sampling=False,
+                    malformed_call_count=0):
     return False  # no tool calls → REPL moves to next prompt
 
 

@@ -1371,7 +1371,8 @@ MANUAL_RECOVERY_NUDGE = (
 from ._text_fallback import (
     TOOL_TAG_PATTERN, NX_TOOL_TAG_PATTERN, TOOL_TAG, NX_TOOL_TAG,
     TOOL_TAGS, TOOL_PROTOCOL_TAG_RE, TOOL_RESULT_PROTOCOL_NOTE,
-    parse_text_calls, _escape_tool_protocol_delimiters, _sanitize_tool_result,
+    parse_text_calls, parse_text_calls_with_errors,
+    _escape_tool_protocol_delimiters, _sanitize_tool_result,
 )
 
 
@@ -1491,7 +1492,7 @@ from ._compress import (
 # --- one model turn (streamed), returns TURN_* status -----------------------
 from ._turn import (
     _LoggingStream, TURN_DONE, TURN_TOOL, TURN_STREAM_CUT,
-    TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, _ctx_field,
+    TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL, _ctx_field,
     _ensure_ctx_probe, _print_stats_footer, _handle_forced_final_tool_call,
     _handle_native_tool_calls, _handle_text_tool_calls, _handle_loop_cut,
     model_turn, _run_model_turn_loop,
