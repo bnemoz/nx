@@ -29,6 +29,9 @@ def parse_text_calls(content):
 
     Literal protocol tags can appear in files, docs, and code examples. Treat
     them as executable only when the whole assistant message is protocol text.
+    Individual calls with malformed JSON are skipped rather than discarding
+    the whole message, since small models often emit one good call alongside
+    a malformed one.
     """
     text = content or ""
     pos = 0
@@ -49,7 +52,7 @@ def parse_text_calls(content):
             obj = json.loads(match.group(1))
             calls.append((obj["name"], obj.get("arguments", {})))
         except (json.JSONDecodeError, KeyError):
-            return []
+            pass  # malformed call: skip it, salvage any other valid calls
         pos = match.end()
     return calls
 
