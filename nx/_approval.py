@@ -215,19 +215,22 @@ def _confirm(action, preview=None):
     stops and the REPL drops back to the chat input.
 
     Flow:
-      1. YOLO → True (no call, no prompt).
+      1. YOLO → True (no call, no prompt). `preview` is still printed so
+         diffs stay colored instead of falling back to plain tool-output text.
       2. Ask the model for a risk level (skipped in step 1).
-      3. If APPROVE_LEVEL is set and level ≤ APPROVE_LEVEL → auto-allow.
+      3. If APPROVE_LEVEL is set and level ≤ APPROVE_LEVEL → auto-allow,
+         printing `preview` (if given) after the auto-allow line.
       4. Otherwise prompt (Y/n/esc), showing the level + reason so the user
          has context. If `preview` (e.g. a diff from `_diff_preview`) is
-         given, it's printed just above the prompt — only when we actually
-         reach an interactive prompt, not on auto-allow, to avoid noise.
+         given, it's printed just above the prompt.
 
     Reads module globals YOLO and APPROVE_LEVEL at call time — /yolo and
     /approval reassign them mid-session, and we must always see the latest
     value, not a snapshot from when the tool function was defined.
     """
     if st.YOLO:
+        if preview:
+            print(preview)
         return True
     # If a tool spinner is running, keep it alive during the risk-classifier
     # request and pause it only around our own terminal I/O. Otherwise a slow
@@ -254,6 +257,8 @@ def _confirm(action, preview=None):
             short = reason if len(reason) <= 80 else reason[:77] + "..."
             pause_spinner()
             print(f"{DIM}  ↳ auto-allow [{level}] {action}  ({short}){RESET}")
+            if preview:
+                print(preview)
             return True
         short = reason if len(reason) <= 80 else reason[:77] + "..."
         lvl_color = {"low": DIM, "medium": C.WARNING, "high": C.ERROR}[level]
