@@ -119,6 +119,20 @@ COMPRESS_KEEP = None
 # --- usage metrics -------------------------------------------------------------
 _METRICS = None  # set to a _Metrics() instance in _metrics.py
 
+# --- native tool-calling confirmation ------------------------------------------
+# Set True by _handle_native_tool_calls() the first time a turn actually comes
+# back with structured `tool_calls` deltas (native mode). Read by
+# _compress.py's _grammar_extra_body() to skip attaching our own <tool_call>
+# text-tag GBNF grammar once native mode is confirmed: llama.cpp already
+# derives its own argument-constraining grammar internally from `tools=`
+# for templates it recognizes as native-tool-call-capable, and there is no
+# client-observable trigger string to hook a *second*, argument-level grammar
+# off of in that mode — sending our own `grammar` field would at best be
+# redundant and at worst fight/override llama.cpp's own tool-calling grammar.
+# Reset per source switch (see switch_source()) since a different endpoint
+# may behave differently.
+_NATIVE_TOOL_CALLS_CONFIRMED = False
+
 # --- write/edit checkpoint stack (for /undo) -----------------------------------
 # Populated by run_tool() after a successful write_file/edit_file/multi_edit;
 # see _undo.py for the entry shape and undo_last()'s restore logic.

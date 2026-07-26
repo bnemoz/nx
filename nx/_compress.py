@@ -90,17 +90,31 @@ RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", 
 # Grammar-constrained tool calls: opt-in (NX_GRAMMAR=1) since the request
 # fields involved (llama.cpp's `grammar` + `grammar_triggers`) are a
 # llama.cpp server extension whose exact shape has shifted across versions,
-# unlike the long-stable min_p/DRY knobs above. Only meaningful for the
-# text-protocol fallback (see nx/_grammar.py) so it's skipped for vLLM (which
+# unlike the long-stable min_p/DRY knobs above. It's skipped for vLLM (which
 # has its own, differently-shaped guided-decoding fields) — an unsupported
 # server just gets the field ignored or the request rejected, in which case
 # open_stream()'s existing no-tools/no-extra fallback ladder drops it.
+#
+# Meaningful only for the text-protocol fallback, NOT once native tool-calling
+# is confirmed (st._NATIVE_TOOL_CALLS_CONFIRMED, set by
+# _handle_native_tool_calls() in _turn.py the first time a turn actually comes
+# back with structured tool_calls). llama.cpp already builds its own
+# argument-constraining grammar internally from `tools=` for chat templates it
+# recognizes as native-tool-call-capable, with no separate client-observable
+# trigger to hook a second grammar off of — sending our own `grammar` field
+# on top of that would either be redundant or override/fight llama.cpp's own
+# native grammar (some server versions reject `tools` + explicit `grammar`
+# together outright). So once a session is confirmed native, we stop
+# attaching ours and just let llama.cpp's built-in constraint do the job;
+# right up until that first confirmation (and for servers/templates that
+# never go native, i.e. permanently text-protocol), our `<tool_call>`-tag
+# grammar is the only thing constraining malformed JSON, so it stays on.
 NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not in ("", "0")
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
 
 
 def _grammar_extra_body(tools):
-    if not NX_GRAMMAR or not tools:
+    if not NX_GRAMMAR or not tools or st._NATIVE_TOOL_CALLS_CONFIRMED:
         return None
     key = tuple(t.get("function", {}).get("name") for t in tools)
     if key not in _grammar_cache:

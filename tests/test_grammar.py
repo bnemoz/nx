@@ -90,4 +90,37 @@ os.environ.pop("NX_GRAMMAR", None)
 os.environ.pop("NX_BACKEND", None)
 importlib.reload(_compress)
 
+# --- once native tool-calling is confirmed, stop attaching our own grammar ---
+# (llama.cpp already derives its own argument-constraining grammar from
+# `tools=` for native-capable templates; ours would only duplicate/fight it —
+# see the docstrings in nx/_grammar.py and nx/_compress.py.)
+from nx import _state as st
+
+os.environ["NX_GRAMMAR"] = "1"
+importlib.reload(_compress)
+assert _compress.NX_GRAMMAR is True
+st._NATIVE_TOOL_CALLS_CONFIRMED = False
+assert _compress._grammar_extra_body(TOOLS) is not None
+st._NATIVE_TOOL_CALLS_CONFIRMED = True
+assert _compress._grammar_extra_body(TOOLS) is None
+st._NATIVE_TOOL_CALLS_CONFIRMED = False  # restore for any later test in this process
+
+# --- _handle_native_tool_calls() sets the confirmation flag ---
+import nx._turn as _turn
+st._NATIVE_TOOL_CALLS_CONFIRMED = False
+tcs = {0: {"id": "call_1", "name": "read_file", "args": '{"path": "x"}'}}
+_orig_run_tool = _turn.run_tool
+_turn.run_tool = lambda name, args: "ok"
+try:
+    messages = []
+    _turn._handle_native_tool_calls(messages, tcs, None, [], 0)
+finally:
+    _turn.run_tool = _orig_run_tool
+assert st._NATIVE_TOOL_CALLS_CONFIRMED is True
+st._NATIVE_TOOL_CALLS_CONFIRMED = False  # reset so this test doesn't leak state
+
+os.environ.pop("NX_GRAMMAR", None)
+os.environ.pop("NX_BACKEND", None)
+importlib.reload(_compress)
+
 print("test_grammar.py: all assertions passed")

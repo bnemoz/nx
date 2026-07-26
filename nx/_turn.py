@@ -294,6 +294,7 @@ def _handle_native_tool_calls(messages, tcs, text, finish_reasons,
     approval, the remaining calls are marked CANCELLED/SKIPPED so the message
     history stays valid. Returns a TURN_* status for model_turn.
     """
+    st._NATIVE_TOOL_CALLS_CONFIRMED = True  # server is actually using native tool_calls this session
     ordered = [tcs[i] for i in sorted(tcs)]
     parsed_args = []
     parse_error = None

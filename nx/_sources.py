@@ -567,6 +567,10 @@ def switch_source(name, model_override=None):
     # multi-model host like Together) means the cached max-context may no longer
     # apply — drop it so the footer re-probes against the new model next turn.
     src._context_window = None
+    # Different endpoint/model may not confirm native tool-calling the same
+    # way — let _grammar_extra_body() re-derive it from this source's actual
+    # behavior instead of carrying over the previous source's confirmation.
+    st._NATIVE_TOOL_CALLS_CONFIRMED = False
     return True
 
 

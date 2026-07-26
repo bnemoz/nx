@@ -13,6 +13,19 @@ string/integer/boolean/enum properties, plus one array-of-objects case) —
 see build_tool_call_grammar()'s docstring. Any schema shape outside that
 subset falls back to a permissive `value` rule (any JSON scalar/object/array)
 rather than raising, per the repo's "degrade, don't demand" convention.
+
+This grammar is only wired up (see nx/_compress.py's _grammar_extra_body())
+while a session is in the text-protocol fallback, or hasn't yet been
+confirmed to be using native tool-calling. Once a turn actually comes back
+with native `tool_calls` deltas, llama.cpp is already constraining argument
+generation with its own internally-derived grammar for that request (it
+builds one automatically from `tools=` for chat templates it recognizes as
+tool-call-capable) — there's no separate, client-observable trigger string
+to hook a second grammar off of in that mode, and llama.cpp has no notion of
+an argument-only (as opposed to whole-response) custom grammar for native
+tool calls. So _grammar_extra_body() stops attaching this grammar once
+native mode is confirmed, rather than fighting or duplicating llama.cpp's
+own constraint.
 """
 import json
 
