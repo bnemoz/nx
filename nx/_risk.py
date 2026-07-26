@@ -100,20 +100,67 @@ _SAFE_BASH_COMMANDS = {
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep",
     "find", "which", "type", "file", "stat", "echo", "whoami", "date",
     "printenv", "diff", "tree", "basename", "dirname", "realpath", "du",
-    "df", "env", "true", "false",
+    "df", "env", "true", "false", "mkdir", "touch",
 }
 _SAFE_GIT_SUBCOMMANDS = {"status", "diff", "log", "branch", "show", "remote", "tag", "blame"}
 _SHELL_METACHARACTERS_RE = re.compile(r"[;&|<>`$(){}\n*?~]")
 
+# Contained-but-not-reversible bash commands, matching RISK_SYSTEM's own
+# "medium" bucket verbatim ("cp, mv, pip install in a venv, running tests,
+# git commit"). Same no-metacharacters/single-command constraint as the low
+# fast path above.
+_MEDIUM_BASH_COMMANDS = {"cp", "mv", "pytest"}
+_MEDIUM_GIT_SUBCOMMANDS = {"commit", "add", "checkout", "switch", "stash", "fetch", "pull", "merge"}
+
+# Commands/flag combos that are unambiguously RISK_SYSTEM's "high" bucket
+# regardless of arguments — destructive, hard to reverse, or system-level.
+# Deliberately narrow (exact command names, explicit flag checks) since a
+# false "high" only costs an extra prompt, but a false "low"/"medium" would
+# skip one entirely.
+_HIGH_RISK_BASH_COMMANDS = {"dd", "mkfs", "shutdown", "reboot", "poweroff", "halt", "shred"}
+_HIGH_RISK_GIT_PATTERNS = {
+    ("push", "--force"), ("push", "-f"), ("reset", "--hard"), ("clean", "-f"),
+    ("clean", "-fd"), ("clean", "-fdx"), ("branch", "-D"),
+}
+
+
+def _rm_is_recursive_force(parts):
+    """True when `parts` (an `rm` invocation, argv already split) combines
+    recursive and force flags in any order/grouping (-rf, -fr, -r -f, --recursive
+    --force, etc.) — the case RISK_SYSTEM calls out by name as high."""
+    recursive = force = False
+    for a in parts[1:]:
+        if a in ("-r", "-R", "--recursive"):
+            recursive = True
+        elif a in ("-f", "--force"):
+            force = True
+        elif re.match(r"^-[a-zA-Z]+$", a):
+            if "r" in a.lower():
+                recursive = True
+            if "f" in a:
+                force = True
+    return recursive and force
+
 
 def _local_risk_hint(action):
-    """Return ("low", reason) when `action` is unambiguously read-only per
-    RISK_SYSTEM's own definition, without a model round-trip. Returns None
-    for anything else (including parse failures), so the caller falls
-    through to _assess_risk() exactly as before this existed."""
-    if not action.startswith("run: "):
+    """Return (level, reason) when `action` is unambiguously classifiable per
+    RISK_SYSTEM's own bucket definitions, without a model round-trip. Returns
+    None for anything ambiguous (including parse failures), so the caller
+    falls through to _assess_risk() exactly as before this existed."""
+    if action.startswith("run: "):
+        return _local_risk_hint_bash(action[len("run: "):].strip())
+    path = _extract_action_path(action)
+    if path is None:
         return None
-    command = action[len("run: "):].strip()
+    scope = _classify_action_path(path).get("path_scope")
+    if scope == "in_project":
+        return ("medium", "writes a file inside the project")
+    # Outside-project writes need judgment calls the model is better placed
+    # to make (dotfiles vs. a legitimate sibling project) — fall through.
+    return None
+
+
+def _local_risk_hint_bash(command):
     if not command or _SHELL_METACHARACTERS_RE.search(command):
         return None
     try:
@@ -123,13 +170,28 @@ def _local_risk_hint(action):
     if not parts:
         return None
     cmd = parts[0]
-    if cmd == "git" and len(parts) > 1 and parts[1] in _SAFE_GIT_SUBCOMMANDS:
-        return ("low", f"read-only git {parts[1]}")
+    if cmd == "rm" and _rm_is_recursive_force(parts):
+        return ("high", "recursive forced delete")
+    if cmd == "chmod" and any(a in ("-R", "--recursive") for a in parts[1:]):
+        return ("high", "recursive chmod")
+    if cmd in _HIGH_RISK_BASH_COMMANDS:
+        return ("high", f"destructive/system command {cmd}")
+    if cmd == "git" and len(parts) > 1:
+        sub = parts[1]
+        if any(sub == p[0] and p[1] in parts[2:] for p in _HIGH_RISK_GIT_PATTERNS):
+            return ("high", f"destructive git {sub}")
+        if sub in _SAFE_GIT_SUBCOMMANDS:
+            return ("low", f"read-only git {sub}")
+        if sub in _MEDIUM_GIT_SUBCOMMANDS:
+            return ("medium", f"contained git {sub}")
+        return None
     if cmd == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
                               for a in parts[1:]):
         return None  # find can destroy or run arbitrary commands with these
     if cmd in _SAFE_BASH_COMMANDS:
         return ("low", f"read-only {cmd}")
+    if cmd in _MEDIUM_BASH_COMMANDS:
+        return ("medium", f"contained {cmd}")
     return None
 
 

@@ -37,9 +37,14 @@ def test_find_with_delete_or_exec_falls_through():
     assert m._local_risk_hint("run: find . -exec rm {} ;") is None
 
 
+def test_destructive_git_subcommand_is_high_locally():
+    assert m._local_risk_hint("run: git push --force") == ("high", "destructive git push")
+    assert m._local_risk_hint("run: git reset --hard") == ("high", "destructive git reset")
+
+
 def test_unsafe_git_subcommand_falls_through():
-    assert m._local_risk_hint("run: git push --force") is None
-    assert m._local_risk_hint("run: git reset --hard") is None
+    assert m._local_risk_hint("run: git rebase -i HEAD~3") is None
+    assert m._local_risk_hint("run: git push origin main") is None
 
 
 def test_shell_metacharacters_always_fall_through():
@@ -49,15 +54,25 @@ def test_shell_metacharacters_always_fall_through():
         assert m._local_risk_hint(f"run: {cmd}") is None, cmd
 
 
+def test_recursive_force_rm_is_high_locally():
+    assert m._local_risk_hint("run: rm -rf /tmp/foo") == ("high", "recursive forced delete")
+
+
 def test_unknown_command_falls_through():
-    assert m._local_risk_hint("run: rm -rf /tmp/foo") is None
+    assert m._local_risk_hint("run: rm /tmp/foo") is None
     assert m._local_risk_hint("run: curl http://example.com") is None
 
 
+def test_in_project_write_or_edit_is_medium_locally():
+    level, reason = m._local_risk_hint("write foo.py (10 bytes)")
+    assert level == "medium", (level, reason)
+    level, reason = m._local_risk_hint("edit foo.py")
+    assert level == "medium", (level, reason)
+
+
 def test_non_run_actions_fall_through():
-    assert m._local_risk_hint("write foo.py (10 bytes)") is None
-    assert m._local_risk_hint("edit foo.py") is None
     assert m._local_risk_hint("compress 5 older turns (keep last 2)") is None
+    assert m._local_risk_hint(f"write {os.path.join(_tmp, 'outside.py')} (10 bytes)") is None
 
 
 def test_empty_or_unparseable_command_falls_through():
