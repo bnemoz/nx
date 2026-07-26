@@ -91,7 +91,8 @@ _STATE_NAMES = frozenset((
     "YOLO", "APPROVE_LEVEL", "DEFAULT_APPROVE_LEVEL", "PROJECT_ROOT",
     "_ACTIVE_SPINNER", "RISK_CONNECTION_RETRIES", "RISK_CONNECTION_RETRY_SECONDS",
     "_INTERRUPT_THREAD", "_SESSION_HAS_BACKGROUNDED", "_PENDING_BACKGROUND_NOTICE",
-    "_CONSECUTIVE_EDITS", "_MULTI_EDIT_UNLOCKED",
+    "_PENDING_MULTI_EDIT_NOTICE",
+    "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
     "REASONING_ONLY_RETRY_LIMIT", "MALFORMED_STREAM_RETRY_LIMIT",
     "FORCED_FINAL_MAX_TOKENS", "EMPTY_TURN_RETRY_LIMIT", "REASONING_ONLY_CHAR_LIMIT",
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
@@ -1133,19 +1134,18 @@ TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the f
 st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash call in this session actually backgrounds
 st._PENDING_BACKGROUND_NOTICE = None  # set by run_tool() on that first flip; flushed once by model_turn (see _flush_pending_background_notice)
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
-st._MULTI_EDIT_UNLOCKED = False  # flips True once _CONSECUTIVE_EDITS hits the threshold — see run_tool()
+st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
+st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
 
-_MULTI_EDIT_UNLOCK_THRESHOLD = 2  # ≥2 single edits in a row before multi_edit's schema is offered
+_MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires
 
 
 def _active_tools():
-    """The tool schema list to send this turn. wait_background/multi_edit are
-    each included only once their unlock condition has fired — see run_tool()."""
+    """The tool schema list to send this turn. wait_background is included
+    only once run_bash has actually backgrounded this session — see run_tool()."""
     tools = TOOLS
     if not st._SESSION_HAS_BACKGROUNDED:
         tools = [t for t in tools if t["function"]["name"] != "wait_background"]
-    if not st._MULTI_EDIT_UNLOCKED:
-        tools = [t for t in tools if t["function"]["name"] != "multi_edit"]
     return tools
 
 
@@ -1161,10 +1161,10 @@ def _messages_show_prior_backgrounding(messages):
     return False
 
 
-def _messages_show_prior_multi_edit_unlock(messages):
+def _messages_show_prior_multi_edit_nudge(messages):
     """True if a loaded transcript already used multi_edit, or made ≥2
-    edit_file calls, so resuming doesn't lose access _active_tools() would
-    otherwise have granted by now (see call sites in _repl.py)."""
+    edit_file calls, so resuming doesn't re-fire a nudge run_tool() would
+    already have sent by now (see call sites in _repl.py)."""
     edit_calls = 0
     for msg in messages:
         for call in (msg.get("tool_calls") or []):
@@ -1173,7 +1173,7 @@ def _messages_show_prior_multi_edit_unlock(messages):
                 return True
             if fn_name == "edit_file":
                 edit_calls += 1
-                if edit_calls >= _MULTI_EDIT_UNLOCK_THRESHOLD:
+                if edit_calls >= _MULTI_EDIT_NUDGE_THRESHOLD:
                     return True
     return False
 
@@ -1257,6 +1257,20 @@ BACKGROUND_GUIDANCE = (
     "/proc/<pid>/io, du), and only kill it if genuinely hung.\n"
     "- Treat exit 130 (SIGINT) / `context canceled` as a signal-of-a-signal, "
     "not a command failure — check the command's own logs before retrying.]"
+)
+
+# Same pattern as BACKGROUND_GUIDANCE above: paid once, only in sessions where
+# it's relevant. Fires the first time _CONSECUTIVE_EDITS hits
+# _MULTI_EDIT_NUDGE_THRESHOLD, to steer away from the observed failure mode of
+# grinding through several more single edit_file calls on the same file
+# instead of switching to one multi_edit batch (multi_edit's schema is sent
+# from the start — see _active_tools — this is a usage nudge, not an unlock).
+MULTI_EDIT_GUIDANCE = (
+    "[Runtime note: you've made several edit_file calls in a row. If you have "
+    "more literal find/replace changes left to make in a file (even just 2-3 "
+    "more), batch them into ONE multi_edit call (edits=[{old,new},...]) "
+    "instead of continuing with separate edit_file calls — it's one approval "
+    "instead of several, and applies atomically.]"
 )
 
 
@@ -1468,8 +1482,9 @@ def run_tool(name, args):
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE
     if name == "edit_file" and not result.startswith("ERROR"):
         st._CONSECUTIVE_EDITS += 1
-        if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_UNLOCK_THRESHOLD:
-            st._MULTI_EDIT_UNLOCKED = True
+        if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_NUDGE_THRESHOLD and not st._MULTI_EDIT_NUDGED:
+            st._MULTI_EDIT_NUDGED = True
+            st._PENDING_MULTI_EDIT_NOTICE = MULTI_EDIT_GUIDANCE
     elif name != "edit_file":
         st._CONSECUTIVE_EDITS = 0
     return result

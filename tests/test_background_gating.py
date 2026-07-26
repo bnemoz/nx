@@ -42,12 +42,12 @@ teardown_function = lambda _function: _reset_background_state()
 def test_active_tools_excludes_wait_background_by_default():
     names = [t["function"]["name"] for t in m._active_tools()]
     assert "wait_background" not in names
-    # multi_edit is also gated off until _MULTI_EDIT_UNLOCKED flips (see
-    # _active_tools()) — a fresh session hasn't earned it yet either.
-    assert "multi_edit" not in names
+    # multi_edit's schema is sent from the start (unlike wait_background) —
+    # only a usage nudge is deferred, not availability (see _active_tools()).
+    assert "multi_edit" in names
     assert set(names) == {"read_file", "write_file", "edit_file", "list_dir",
                           "run_bash", "search_files", "git_status", "git_diff",
-                          "sed_edit"}
+                          "sed_edit", "multi_edit"}
 
 
 def test_active_tools_includes_wait_background_once_flag_set():

@@ -83,9 +83,10 @@ _INTERRUPT_REDIRECT_PREFILL = ""
 _SESSION_HAS_BACKGROUNDED = False
 _PENDING_BACKGROUND_NOTICE = None
 
-# --- lazy multi_edit unlock ---------------------------------------------------
+# --- multi_edit batching nudge ------------------------------------------------
 _CONSECUTIVE_EDITS = 0
-_MULTI_EDIT_UNLOCKED = False
+_MULTI_EDIT_NUDGED = False
+_PENDING_MULTI_EDIT_NOTICE = None
 
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time

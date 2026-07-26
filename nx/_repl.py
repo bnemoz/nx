@@ -39,7 +39,7 @@ from . import (
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT,
     _write_session, _load_session, _list_sessions, _delete_session,
     _resolve_session, _new_session_id, _messages_show_prior_backgrounding,
-    _messages_show_prior_multi_edit_unlock,
+    _messages_show_prior_multi_edit_nudge,
     _maybe_refresh_description, list_bg_jobs,
 )
 
@@ -424,7 +424,7 @@ def _cmd_reset(user, state):
     sys.stdout.flush()
     state.messages = _initial_messages()
     st._SESSION_HAS_BACKGROUNDED = False
-    st._MULTI_EDIT_UNLOCKED = False
+    st._MULTI_EDIT_NUDGED = False
     st._CONSECUTIVE_EDITS = 0
     print(f"{DIM}  context cleared{RESET}")
     # A reset forks a new session id so the fresh chat isn't written
@@ -568,7 +568,7 @@ def _cmd_resume_handler(user, state):
     state.session_id = new_sid
     state.messages[:] = _session_messages(new_sid)
     st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(state.messages)
-    st._MULTI_EDIT_UNLOCKED = _messages_show_prior_multi_edit_unlock(state.messages)
+    st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(state.messages)
     state.session_dirty = False
     # Reload the cumulative-token recorder from the resumed
     # session's saved totals so they keep climbing from here.
@@ -671,7 +671,7 @@ def _repl():
             messages = [m for m in messages if m.get("role") != "system"]
             messages.insert(0, {"role": "system", "content": SYSTEM})
             st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(messages)
-            st._MULTI_EDIT_UNLOCKED = _messages_show_prior_multi_edit_unlock(messages)
+            st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(messages)
             n_msgs = len([m for m in messages if m.get("role") != "system"])
             title = data.get("title") or "(untitled)"
             print(f"{DIM}  ↻ resumed session {session_id} ({title!r}, "

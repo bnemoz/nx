@@ -48,6 +48,9 @@ def _flush_pending_background_notice(messages):
     if st._PENDING_BACKGROUND_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
         st._PENDING_BACKGROUND_NOTICE = None
+    if st._PENDING_MULTI_EDIT_NOTICE:
+        messages.append({"role": "user", "content": st._PENDING_MULTI_EDIT_NOTICE})
+        st._PENDING_MULTI_EDIT_NOTICE = None
 
 
 def _last_is_dangling_tool(messages):
