@@ -380,7 +380,10 @@ def _handle_text_tool_calls(messages, text, malformed_call_count=0):
                 "[Runtime note: Your last tool call did not parse — "
                 f"{errors[0]}. Re-emit it as a single well-formed "
                 "<tool_call>{\"name\": ..., \"arguments\": {...}}</tool_call> "
-                "block with valid JSON.]"
+                "block with valid JSON. For example:\n"
+                "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"nx/_turn.py\"}}</tool_call>\n"
+                "<tool_call>{\"name\": \"search_files\", \"arguments\": {\"pattern\": \"TODO\", \"path\": \".\"}}</tool_call>\n"
+                "<tool_call>{\"name\": \"run_bash\", \"arguments\": {\"cmd\": \"ls -la\"}}</tool_call>]"
             )})
             return TURN_MALFORMED_CALL
         return None
