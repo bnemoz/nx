@@ -35,24 +35,32 @@ def _deny_edits():
 
 
 def test_no_op_edit_errors_without_prompting():
+    saved_confirm = m._confirm
     calls = []
     m._confirm = lambda action, preview=None: calls.append(1) or True
-    path = _write("noop.py", "def add(a, b):\n    return a + b\n")
-    res = m.edit_file(path, "def add(a, b):\n    return a + b\n",
-                       "def add(a, b):\n    return a + b\n")
-    assert res.startswith("ERROR"), res
-    assert not calls, "no-op edit should not prompt for confirmation"
-    with open(path) as f:
-        assert f.read() == "def add(a, b):\n    return a + b\n"
+    try:
+        path = _write("noop.py", "def add(a, b):\n    return a + b\n")
+        res = m.edit_file(path, "def add(a, b):\n    return a + b\n",
+                           "def add(a, b):\n    return a + b\n")
+        assert res.startswith("ERROR"), res
+        assert not calls, "no-op edit should not prompt for confirmation"
+        with open(path) as f:
+            assert f.read() == "def add(a, b):\n    return a + b\n"
+    finally:
+        m._confirm = saved_confirm
 
 
 def test_real_edit_still_prompts_and_writes():
-    _allow_edits()
-    path = _write("real.py", "def add(a, b):\n    return a + b\n")
-    res = m.edit_file(path, "return a + b", "return a + b  # commented differently")
-    assert res.startswith("edited"), res
-    with open(path) as f:
-        assert "commented differently" in f.read()
+    saved_confirm = m._confirm
+    try:
+        _allow_edits()
+        path = _write("real.py", "def add(a, b):\n    return a + b\n")
+        res = m.edit_file(path, "return a + b", "return a + b  # commented differently")
+        assert res.startswith("edited"), res
+        with open(path) as f:
+            assert "commented differently" in f.read()
+    finally:
+        m._confirm = saved_confirm
 
 
 def test_ambiguous_match_errors():
