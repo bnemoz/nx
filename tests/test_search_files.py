@@ -103,6 +103,12 @@ def test_never_calls_confirm():
     assert called["n"] == 0, "search_files must not call _confirm (read-only)"
 
 
+def test_context_lines_include_surrounding_code():
+    root = _make_tree()
+    out = m.search_files("return 'apple'", path=root, glob="a.py", context=1)
+    assert "def foo():" in out and "def bar():" in out
+
+
 def test_nonexistent_dir_surfaces_error():
     out = m.search_files("x", path=os.path.join(_tmp, "no-such-dir-xyz"))
     # grep/rg report the missing path; we surface it as an ERROR string

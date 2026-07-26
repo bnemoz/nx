@@ -608,6 +608,8 @@ def edit_file(path, old, new, **_):
     if src.count(old) != 1:
         return f"ERROR: `old` matched {src.count(old)} times (need exactly 1)"
     new_src = src.replace(old, new)
+    if new_src == src:
+        return f"ERROR: no change to {path} (`old` and `new` are identical)"
     if not _confirm(f"edit {path}", preview=_diff_preview(src, new_src)):
         return "DENIED by user"
     with open(path, "w") as f:
@@ -1098,23 +1100,23 @@ DISPATCH = {
 }
 
 TOOLS = [
-    {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total.",
+    {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total. Do NOT use this to hunt for one function/section in a file you haven't seen yet -- use search_files first to find it, then read_file only if you still need more surrounding context.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Replace one exact occurrence of old->new in file. Use raw text; read_file's `<n>\\t` prefixes auto-stripped if pasted.",
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace one exact occurrence of old->new in file. Use raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer this (or multi_edit) over sed_edit whenever old/new is literal text, even across multiple lines.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
     {"type": "function", "function": {"name": "list_dir", "description": "List directory",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
-    {"type": "function", "function": {"name": "search_files", "description": "Regex content search (ripgrep/grep) -> path:line:match hits. Read-only, no approval. Hits feed read_file(path, offset=line).",
-        "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "regex (not glob)"}, "path": {"type": "string", "description": "file/dir to search (default \".\")"}, "glob": {"type": "string", "description": "include filter e.g. \"*.py\""}, "max_results": {"type": "integer", "description": "cap (default 100; <=0 -> 1000)"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "search_files", "description": "Regex content search (ripgrep/grep) -> path:line:match hits. Read-only, no approval. Pass context=N for N surrounding lines per hit (skip read_file for targeted look-ups); otherwise hits feed read_file(path, offset=line).",
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "regex (not glob)"}, "path": {"type": "string", "description": "file/dir to search (default \".\")"}, "glob": {"type": "string", "description": "include filter e.g. \"*.py\""}, "max_results": {"type": "integer", "description": "cap (default 100; <=0 -> 1000)"}, "context": {"type": "integer", "description": "lines of context before/after each match (default 0)"}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "git_status", "description": "git status --short -b. Read-only, no approval.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}}}}},
     {"type": "function", "function": {"name": "git_diff", "description": "git diff (unstaged by default). Read-only, no approval.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}, "staged": {"type": "boolean", "description": "true = git diff --staged"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
-    {"type": "function", "function": {"name": "multi_edit", "description": "Atomic multi find/replace on one file, all-or-nothing. edits=[{old,new},...], each old must match exactly once, applied in order. One approval for whole batch.",
+    {"type": "function", "function": {"name": "multi_edit", "description": "Atomic multi find/replace on one file (literal old->new, not regex), all-or-nothing. edits=[{old,new},...], each old must match exactly once, applied in order. One approval for whole batch. Use for several literal changes at once instead of sed_edit.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
-    {"type": "function", "function": {"name": "sed_edit", "description": "Regex find/replace (Python re) over file or glob (e.g. \"src/**/*.py\"). flags: i/m/s chars = IGNORECASE/MULTILINE/DOTALL. count caps replacements/file (0=unlimited). One approval for all matched files.",
+    {"type": "function", "function": {"name": "sed_edit", "description": "Regex find/replace (Python re) over file or glob (e.g. \"src/**/*.py\"). Only use when the change actually needs regex/glob (e.g. a pattern across many files) -- for literal text in one known file, use edit_file/multi_edit instead, they need no escaping. flags: i/m/s chars = IGNORECASE/MULTILINE/DOTALL. count caps replacements/file (0=unlimited). One approval for all matched files.",
         "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "replacement": {"type": "string"}, "path": {"type": "string"}, "count": {"type": "integer"}, "flags": {"type": "string"}}, "required": ["pattern", "replacement", "path"]}}},
     {"type": "function", "function": {"name": "run_bash", "description": "Shell cmd, detached (setsid), non-blocking. Quick (~3s poll) returns output directly; long ones background -> PID+log path, check via read_file(log_path). Never use `sleep N` as chain trick (whole cmd backgrounds). timeout=N only if cmd KNOWN to finish in ~Ns (e.g. timeout=35 for `sleep 30`); leading `sleep N` auto-extends poll to N+10s. Logs at ~/.nx/bg-logs/, auto-cleaned (~50 files/7d).",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "sync wait secs (default unset=~3s poll; 0=wait indefinitely)"}}, "required": ["command"]}}},
@@ -1197,6 +1199,10 @@ FINAL_ANSWER_TOOL_CHOICE = {
 
 SYSTEM = """Terminal coding agent, cwd = user's current directory.
 Use tools to inspect/modify code. One concrete step at a time.
+Locating something (a function, string, section) in a file you haven't
+already read in full? search_files FIRST, always -- even on small files.
+read_file is for reading a file you already need in full, never for finding
+a thing inside one.
 
 No native tool calls? Emit text-protocol call exactly:
 <tool_call>{"name": "read_file", "arguments": {"path": "foo.py"}}</tool_call>

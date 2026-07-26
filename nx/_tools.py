@@ -43,8 +43,13 @@ def read_file(path, offset=1, limit=None, **_):
     if body and not body.endswith("\n"):
         body += "\n"
     if start > 0 or end < total:
+        tip = ""
+        if start == 0 and end < total:
+            tip = (" Looking for one function/section rather than the whole "
+                   "file? STOP paging -- call search_files(pattern, context=N) "
+                   "instead, it finds it in one shot.")
         return (f"[{path}: lines {start + 1}-{end} of {total}; "
-                f"call read_file with offset/limit to page]\n" + body)
+                f"call read_file with offset/limit to page.{tip}]\n" + body)
     return body
 
 
@@ -70,7 +75,7 @@ def list_dir(path=".", **_):
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def search_files(pattern, path=".", glob=None, max_results=100, **_):
+def search_files(pattern, path=".", glob=None, max_results=100, context=0, **_):
     """Search file contents for a regex `pattern` and return `path:line:match`
     hits (ripgrep-style). Falls back to `grep -rn` when `rg` isn't installed, so
     the tool works with only a POSIX grep present — nx adds no new runtime
@@ -80,13 +85,16 @@ def search_files(pattern, path=".", glob=None, max_results=100, **_):
     never goes through the approval / risk classifier — that's the whole point
     of a native search tool instead of shelling out to grep via `run_bash`
     (which *would* need its own risk-classification pass). `path:line` hits map
-    directly onto `read_file(path, offset=line)`.
+    directly onto `read_file(path, offset=line)`; pass `context` when the
+    surrounding lines are needed too, so a targeted question doesn't force a
+    full read_file of a large file just to see what's around a match.
 
     Args:
       pattern: regex (not a glob).
       path: file or directory to search under (default ".").
       glob: optional include filter, e.g. "*.py" (rg `-g` / grep `--include`).
       max_results: cap on matches returned (default 100; <=0 -> 1000).
+      context: lines of context before/after each match (rg/grep `-C`).
     """
     if not pattern or not str(pattern).strip():
         return "ERROR: `pattern` is empty"
@@ -96,14 +104,22 @@ def search_files(pattern, path=".", glob=None, max_results=100, **_):
         max_results = 100
     if max_results <= 0:
         max_results = 1000
+    try:
+        context = max(0, int(context))
+    except (TypeError, ValueError):
+        context = 0
     if shutil.which("rg"):
         cmd = ["rg", "-n", "--no-heading", "--color=never", "-e", str(pattern)]
+        if context:
+            cmd += ["-C", str(context)]
         if glob:
             cmd += ["-g", str(glob)]
         cmd += ["--", str(path)]
     else:
         cmd = ["grep", "-rn", "-E", "--color=never", "--exclude-dir=.git",
                "-e", str(pattern)]
+        if context:
+            cmd += ["-C", str(context)]
         if glob:
             cmd += ["--include=" + str(glob)]
         cmd += ["--", str(path)]
