@@ -103,6 +103,24 @@ def test_no_glob_match_is_error():
     assert res.startswith("ERROR: no files matched")
 
 
+def test_replacement_with_backslash_is_literal_not_re_escape():
+    _allow_edits()
+    path = _write("se8.txt", "foo\n")
+    res = m.sed_edit(r"foo", r"C:\Users\1new", path)
+    assert res.startswith("edited 1 file(s), 1 replacement(s)")
+    with open(path) as f:
+        assert f.read() == "C:\\Users\\1new\n"
+
+
+def test_replacement_with_backreference_syntax_is_literal():
+    _allow_edits()
+    path = _write("se9.txt", "foo\n")
+    res = m.sed_edit(r"foo", r"\1 literal", path)
+    assert res.startswith("edited 1 file(s), 1 replacement(s)")
+    with open(path) as f:
+        assert f.read() == "\\1 literal\n"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

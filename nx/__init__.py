@@ -682,7 +682,11 @@ def sed_edit(pattern, replacement, path, count=0, flags="", **_):
     for f in files:
         with open(f) as fh:
             src = fh.read()
-        new_src, n = rx.subn(replacement, src, count=count or 0)
+        # replacement is always literal text, never a backreference template:
+        # escape backslashes so `\1`, `\U`, a Windows path, etc. don't get
+        # interpreted as re.subn's replacement-string syntax.
+        literal_replacement = replacement.replace("\\", "\\\\")
+        new_src, n = rx.subn(literal_replacement, src, count=count or 0)
         if n == 0:
             continue
         diff = _diff_preview(src, new_src)
