@@ -579,7 +579,12 @@ from ._tools import (
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, undo_last, list_checkpoints
 
 def write_file(path, content, **_):
-    if not _confirm(f"write {path} ({len(content)} bytes)"):
+    try:
+        with open(path) as f:
+            before = f.read()
+    except (FileNotFoundError, IsADirectoryError):
+        before = ""
+    if not _confirm(f"write {path} ({len(content)} bytes)", preview=_diff_preview(before, content)):
         return "DENIED by user"
     with open(path, "w") as f:
         f.write(content)
@@ -1093,7 +1098,7 @@ DISPATCH = {
 TOOLS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Overwrite file",
+    {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "edit_file", "description": "Replace one exact occurrence of old->new in file. Use raw text; read_file's `<n>\\t` prefixes auto-stripped if pasted.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
