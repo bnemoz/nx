@@ -1104,7 +1104,7 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Replace one exact occurrence of old->new in file. Use raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer this (or multi_edit) over sed_edit whenever old/new is literal text, even across multiple lines.",
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace one exact occurrence of old->new in an EXISTING file (errors if missing -- use write_file for a new file). Use raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer this (or multi_edit) over sed_edit whenever old/new is literal text, even across multiple lines.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
     {"type": "function", "function": {"name": "list_dir", "description": "List directory",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
@@ -1115,9 +1115,9 @@ TOOLS = [
     {"type": "function", "function": {"name": "git_diff", "description": "git diff (unstaged by default). Read-only, no approval.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}, "staged": {"type": "boolean", "description": "true = git diff --staged"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
     {"type": "function", "function": {"name": "multi_edit", "description": "Atomic multi find/replace on one file (literal old->new, not regex), all-or-nothing. edits=[{old,new},...], each old must match exactly once, applied in order. One approval for whole batch. Use for several literal changes at once instead of sed_edit.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "description": "list of {old, new} objects, e.g. [{\"old\": \"a\", \"new\": \"b\"}] -- an actual JSON array, not a string", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
     {"type": "function", "function": {"name": "sed_edit", "description": "Regex find/replace (Python re) over file or glob (e.g. \"src/**/*.py\"). Only use when the change actually needs regex/glob (e.g. a pattern across many files) -- for literal text in one known file, use edit_file/multi_edit instead, they need no escaping. flags: i/m/s chars = IGNORECASE/MULTILINE/DOTALL. count caps replacements/file (0=unlimited). One approval for all matched files.",
-        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "replacement": {"type": "string"}, "path": {"type": "string"}, "count": {"type": "integer"}, "flags": {"type": "string"}}, "required": ["pattern", "replacement", "path"]}}},
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "replacement": {"type": "string"}, "path": {"type": "string"}, "count": {"type": "integer", "description": "max replacements per file (default 0 = unlimited)"}, "flags": {"type": "string", "description": "i/m/s = IGNORECASE/MULTILINE/DOTALL (default \"\" = none)"}}, "required": ["pattern", "replacement", "path"]}}},
     {"type": "function", "function": {"name": "run_bash", "description": "Shell cmd, detached (setsid), non-blocking. Quick (~3s poll) returns output directly; long ones background -> PID+log path, check via read_file(log_path). Never use `sleep N` as chain trick (whole cmd backgrounds). timeout=N only if cmd KNOWN to finish in ~Ns (e.g. timeout=35 for `sleep 30`); leading `sleep N` auto-extends poll to N+10s. Logs at ~/.nx/bg-logs/, auto-cleaned (~50 files/7d).",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "sync wait secs (default unset=~3s poll; 0=wait indefinitely)"}}, "required": ["command"]}}},
 ]
@@ -1187,7 +1187,7 @@ FINAL_ANSWER_TOOL = {"type": "function", "function": {
                 "type": "string",
                 "description": "Complete concise answer to show user. Short, no trail-off.",
             },
-            "status": {"type": "string", "enum": ["answered", "blocked"]},
+            "status": {"type": "string", "enum": ["answered", "blocked"], "description": "Optional, omit unless you cannot proceed without more info from the user -- then set \"blocked\"."},
         },
         "required": ["answer"],
     },
@@ -1208,7 +1208,9 @@ No native tool calls? Emit text-protocol call exactly:
 <tool_call>{"name": "read_file", "arguments": {"path": "foo.py"}}</tool_call>
 Prefer the tag alone; wait for Observation. Tool-call examples in prose/code-block only (not standalone). Task done -> reply plain prose.
 
-Shell cmds: detached (setsid), never block you. Quick (few sec) -> output directly. Long -> backgrounds, gives PID+log path; check via read_file()."""
+Shell cmds run detached (setsid); they never block you.
+- Finishes quickly -> output returned directly.
+- Takes long -> backgrounds; you get PID + log path, check via read_file(log_path)."""
 
 from ._agents import _load_agents_md_note
 
