@@ -24,11 +24,21 @@ TOOL_RESULT_PROTOCOL_NOTE = (
 TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
 
 
-def parse_text_calls(content):
-    """Pull standalone text-protocol tool-call messages.
+def _inside_code_fence(text, index):
+    """True if `index` falls inside a ``` fenced block (odd fence count before it)."""
+    return text.count("```", 0, index) % 2 == 1
 
-    Literal protocol tags can appear in files, docs, and code examples. Treat
-    them as executable only when the whole assistant message is protocol text.
+
+def parse_text_calls(content):
+    """Pull text-protocol tool-call tags out of an assistant message.
+
+    Small models routinely add a sentence of chatter before/after (or between)
+    tags despite SYSTEM asking for the tag alone, so this scans for tags
+    anywhere in the text rather than anchoring to the start — any prose
+    preamble/postamble/interstitial text is just ignored, not treated as
+    disqualifying. Tags inside a ``` fenced code block are still treated as
+    documentation/examples, not executable calls, since that's the common
+    false-positive case (docs, code samples) this protocol has to avoid.
     Individual calls with malformed JSON are skipped rather than discarding
     the whole message, since small models often emit one good call alongside
     a malformed one.
@@ -36,25 +46,27 @@ def parse_text_calls(content):
     text = content or ""
     pos = 0
     calls = []
-    while pos < len(text):
-        while pos < len(text) and text[pos].isspace():
-            pos += 1
-        if pos >= len(text):
-            break
+    found_tag = False
+    n = len(text)
+    while pos < n:
         match = None
         for tag in TOOL_TAGS:
-            match = tag.match(text, pos)
-            if match:
-                break
+            m = tag.search(text, pos)
+            if m and (match is None or m.start() < match.start()):
+                match = m
         if not match:
-            return []
+            break
+        if _inside_code_fence(text, match.start()):
+            pos = match.end()
+            continue
+        found_tag = True
         try:
             obj = json.loads(match.group(1))
             calls.append((obj["name"], obj.get("arguments", {})))
         except (json.JSONDecodeError, KeyError):
             pass  # malformed call: skip it, salvage any other valid calls
         pos = match.end()
-    return calls
+    return calls if found_tag else []
 
 
 def _escape_tool_protocol_delimiters(text):

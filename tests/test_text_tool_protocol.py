@@ -59,13 +59,18 @@ SYSTEM = """If your runtime does NOT support native tool calls, emit:
     assert m.parse_text_calls(content) == []
 
 
-def test_tool_call_with_surrounding_prose_is_plain_text():
+def test_tool_call_with_surrounding_prose_still_parses():
+    # Small models often add a sentence of chatter before/after a call despite
+    # SYSTEM asking for the tag alone; a leading/trailing preamble shouldn't
+    # disqualify an otherwise well-formed call.
     content = (
-        'Here is the literal protocol string: '
+        'Sure, let me check that file for you: '
         '[nx_tool_call]{"name": "read_file", "arguments": {"path": "foo.py"}}[/nx_tool_call]'
     )
 
-    assert m.parse_text_calls(content) == []
+    assert m.parse_text_calls(content) == [
+        ("read_file", {"path": "foo.py"}),
+    ]
 
 
 def test_tool_result_sanitizer_escapes_legacy_tool_tags():
