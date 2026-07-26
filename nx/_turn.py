@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from openai import APIConnectionError, APIError
+from ._openai_client import APIConnectionError, APIError
 import httpx
 from rich.console import Console
 from ._ansi import (

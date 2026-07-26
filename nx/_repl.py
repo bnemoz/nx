@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 
-from openai import APIConnectionError
+from ._openai_client import APIConnectionError
 
 from . import _ansi
 from ._ansi import DIM, BOLD, RESET, C

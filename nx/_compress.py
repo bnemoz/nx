@@ -15,7 +15,7 @@ import re
 import time
 
 import httpx
-from openai import APIConnectionError
+from ._openai_client import APIConnectionError
 
 from ._ansi import DIM, RESET, C
 from ._env import _env_int, _env_float

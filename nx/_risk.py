@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import time
 
-from openai import APIConnectionError
+from ._openai_client import APIConnectionError
 
 from ._logging import _log_event
 from . import _state as st

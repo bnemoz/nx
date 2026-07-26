@@ -23,8 +23,8 @@ THRESHOLDS (on the content we control, ~1339 today):
 
 TOKENIZER: prefers tiktoken (cl100k_base) when installed for a real count;
 falls back to a conservative chars/3.5 estimate otherwise so the guard still
-runs with zero extra dependencies. nx's only runtime dep is `openai`,
-and we don't add one for a test. The fallback over-counts ~7% vs cl100k on
+runs with zero extra dependencies, and we don't add one for a test. The
+fallback over-counts ~7% vs cl100k on
 code/JSON, which is the safe direction for a guard — it trips slightly
 early, never late.
 """

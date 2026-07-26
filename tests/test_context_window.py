@@ -31,17 +31,20 @@ sys.argv = ["nx.py"]
 import nx as m  # noqa: E402
 
 
-# --- helpers: fake OpenAI model objects with __pydantic_extra__ ----------------
+# --- helpers: fake model-list entries -----------------------------------------
 class _FakeModel:
-    """Stand-in for openai.types.model.Model. The real one keeps unknown fields
-    in __pydantic_extra__ (config extra='allow'); resolve_context_window reads
-    meta.n_ctx / context_length from there."""
+    """Stand-in for a GET /v1/models entry. resolve_context_window() reads
+    meta.n_ctx / context_length out of the raw dict via model_dump()."""
     def __init__(self, mid, extra=None):
         self.id = mid
         self.created = 0
         self.object = "model"
         self.owned_by = "test"
-        self.__pydantic_extra__ = extra or {}
+        self._extra = extra or {}
+
+    def model_dump(self):
+        return {"id": self.id, "created": self.created, "object": self.object,
+                "owned_by": self.owned_by, **self._extra}
 
 
 class _FakeModelsPage:

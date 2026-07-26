@@ -18,7 +18,7 @@ import re
 import sys
 import urllib.request
 
-from openai import OpenAI
+from ._openai_client import OpenAI
 
 from ._ansi import RESET, C
 from . import _state as st
@@ -299,8 +299,9 @@ class Source:
             pick = data[0]
         if pick is None:
             return None
-        # OpenAI SDK preserves unknown fields in __pydantic_extra__.
-        extra = getattr(pick, "__pydantic_extra__", None) or {}
+        # Model objects carry unknown/extra fields (e.g. llama.cpp's "meta")
+        # straight in their raw dict.
+        extra = pick.model_dump() or {}
         meta = extra.get("meta") if isinstance(extra, dict) else None
         if isinstance(meta, dict):
             for k in ("n_ctx", "context_length", "context_window",

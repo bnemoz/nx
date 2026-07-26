@@ -13,8 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "openai",
-    "httpx<0.28",  # openai<1.55 passes proxies=; httpx>=0.28 removed it
+    "httpx",
     "rich",
 ]
 

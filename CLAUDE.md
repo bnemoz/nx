@@ -9,7 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `_repl.py`, `_sources.py`, `_chatbox.py`, etc.). It used to be a single ~5300-line
 `nx.py` file kept deliberately dependency-minimal; it has since been split into a
 proper package (see the "Extract ... into nx/_x.py" commits in the git log) and
-picked up real dependencies (`openai`, `httpx`, `rich`) where they earn their keep.
+picked up real dependencies (`httpx`, `rich`) where they earn their keep. It talks to
+the OpenAI-compatible `/chat/completions` and `/models` endpoints directly over `httpx`
+(`nx/_openai_client.py`) rather than depending on the `openai` SDK — that package eagerly
+imports typed models for admin/batches/evals/graders/responses/azure/bedrock that nx
+never touches, which dominated its import-time RSS for a handful of call sites nx's own
+thin client now covers directly.
 Context-frugality — keeping the per-turn token floor low relative to heavier agent
 frameworks — is still a real design value (see `README.md` and `nx --tokens`), but
 it is no longer the sole organizing constraint: don't block a clean module boundary or
@@ -20,7 +25,7 @@ every turn regardless of how the code is organized internally.
 ## Setup
 
 ```bash
-uv pip install -r requirements.txt    # openai, httpx<0.28 (pinned: openai<1.55 passes proxies= that httpx>=0.28 removed), rich
+uv pip install -e .    # httpx, rich
 ```
 
 To develop against a real backend, point it at a local OpenAI-compatible server (llama.cpp,

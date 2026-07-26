@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """nx — a deliberately tiny coding agent for self-hosted or remote models.
 
-One file, one dep (`openai`), no TUI framework. Points at any OpenAI-compatible
-endpoint (vLLM / llama.cpp / SGLang / Z.ai / OpenAI itself). Survives models
-whose native tool-calling isn't wired up yet by falling back to parsing
+A small package, no TUI framework, and no `openai` SDK dependency — nx talks
+to `/chat/completions` and `/models` directly over `httpx` (see
+`nx/_openai_client.py`). Points at any OpenAI-compatible endpoint (vLLM /
+llama.cpp / SGLang / Z.ai / OpenAI itself). Survives models whose native
+tool-calling isn't wired up yet by falling back to parsing
 <tool_call>...</tool_call> tags out of the text — the convention most open
 models (Hermes/Qwen/Nemotron) emit.
 
-  pip install openai
+  pip install httpx rich
   export NX_BASE_URL=http://localhost:8000/v1   # your served endpoint
   export NX_MODEL=your-model-name
   export NX_API_KEY=sk-noop                    # any string; local servers ignore it
@@ -68,7 +70,7 @@ import urllib.error
 import urllib.request
 
 import httpx
-from openai import OpenAI, APIConnectionError, APIError
+from ._openai_client import OpenAI, APIConnectionError, APIError
 
 # --- env file ---------------------------------------------------------------
 from ._env import _load_env_file
