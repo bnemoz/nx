@@ -1468,8 +1468,11 @@ def run_tool(name, args):
     result = _sanitize_tool_result(result)
     # box the result; the preview is a further display-only trim of the (already
     # context-bounded) result
-    preview = result if len(result) < 800 else result[:800] + f"\n... [{len(result) - 800} more chars]"
-    for line in preview.splitlines():
+    preview_lines = result.splitlines()
+    if len(preview_lines) > 8:
+        hidden = len(preview_lines) - 8
+        preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+    for line in preview_lines:
         print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{line}{RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
