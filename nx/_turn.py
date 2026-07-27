@@ -198,6 +198,8 @@ def _print_stats_footer(usage, timings, streamed_chars, t_first, elapsed, text, 
         prompt_ms = timings.get("prompt_ms", 0)
         ttft = (prompt_ms / 1000.0) if prompt_ms else t_first
         parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
+        if st.MODEL:
+            parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
@@ -205,16 +207,20 @@ def _print_stats_footer(usage, timings, streamed_chars, t_first, elapsed, text, 
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0
         prompt_n = usage.prompt_tokens or 0
-        tps = gen_n / elapsed if elapsed > 0 else 0
+        gen_elapsed = elapsed - t_first if t_first else elapsed
+        tps = gen_n / gen_elapsed if gen_elapsed > 0 else 0
         ctx = _ctx_field(prompt_n)
         parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
+        if st.MODEL:
+            parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
         if t_first:
             parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
         print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
     elif streamed_chars > 0:
         gen_n = max(1, streamed_chars // 4)
-        tps = gen_n / elapsed if elapsed > 0 else 0
+        gen_elapsed = elapsed - t_first if t_first else elapsed
+        tps = gen_n / gen_elapsed if gen_elapsed > 0 else 0
         print(f"{DIM}  └ ≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok · "
               f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s · "
               f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall{RESET}")

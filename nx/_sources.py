@@ -43,6 +43,12 @@ class Source:
                  http_headers=None):
         self.name = name
         self.base_url = base_url
+        if base_url and not re.search(r"/v\d+/?$", base_url):
+            sys.stderr.write(
+                f"nx: warning: source {name!r} base_url {base_url!r} has no "
+                f"/v1 suffix — OpenAI-compat endpoints (/chat/completions, "
+                f"/models) live under /v1; requests will likely 404\n"
+            )
         self.api_key = api_key or "sk-noop"
         self.model = model or None  # None → ask the server at resolve time
         # Default HTTP headers sent on every request. Used by aggregators like
@@ -291,6 +297,8 @@ class Source:
             data = self.client.models.list(timeout=10).data
         except Exception:
             return None
+        if not data:
+            return None
         # Prefer the entry whose id matches the active model (multi-model
         # hosts), else the first. Match loosely on a trailing token so a full
         # path id ("…/GLM-5.2-…gguf") still hits a short alias ("GLM-5.2").
@@ -357,7 +365,7 @@ class Source:
         try:
             root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
             with urllib.request.urlopen(root + "/api/v0/models", timeout=5) as r:
-                data = json.loads(r.read().decode("utf-8")).get("data", [])
+                data = json.loads(r.read().decode("utf-8")).get("data") or []
         except Exception:
             return None
         pick = None
