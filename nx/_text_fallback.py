@@ -6,8 +6,12 @@ import re
 
 from ._env import _env_int
 
-TOOL_TAG_PATTERN = r"<tool_call>\s*(\{.*?\})\s*</tool_call>"
-NX_TOOL_TAG_PATTERN = r"\[nx_tool_call\]\s*(\{.*?\})\s*\[/nx_tool_call\]"
+TOOL_TAG_PATTERN = (
+    r"<tool_call\s*>\s*(\{.*?\})\s*"
+    r"(?:</tool_call\s*>|(?=<tool_call\s*>)|(?=\[nx_tool_call\])|$)")
+NX_TOOL_TAG_PATTERN = (
+    r"\[nx_tool_call\]\s*(\{.*?\})\s*"
+    r"(?:\[/nx_tool_call\]|(?=\[nx_tool_call\])|(?=<tool_call\s*>)|$)")
 TOOL_TAG = re.compile(TOOL_TAG_PATTERN, re.DOTALL)
 NX_TOOL_TAG = re.compile(NX_TOOL_TAG_PATTERN, re.DOTALL)
 # <tool_call> is what SYSTEM now asks for (the convention most open-weight
