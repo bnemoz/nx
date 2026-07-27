@@ -674,8 +674,7 @@ def model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=
     if stream_error is not None:
         if parser.mode in ("think", "say"):
             print()
-        if parser.mode == "think" and st.REASONING_VISIBLE:
-            print(f"{DIM}  ──────────────{RESET}")
+        parser.close_think_block()
         print(RESET)
         if isinstance(stream_error, httpx.TimeoutException):
             print(f"{C.WARNING}  ✂ STREAM TIMEOUT — server stopped delivering chunks; "

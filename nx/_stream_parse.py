@@ -90,6 +90,7 @@ class StreamParser:
         self.tool_status_active = False
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
+        self.think_start = None
 
     # --- tool-call status line (throttled) ---------------------------------
     def show_tool_status(self, force=False):
@@ -107,6 +108,20 @@ class StreamParser:
             sys.stdout.write(CLEAR_LINE)
             sys.stdout.flush()
             self.tool_status_active = False
+
+    def close_think_block(self):
+        """Print the reasoning-block closer + elapsed duration. Call once
+        when leaving "think" mode, however that happens (content, tool
+        call, stream end, or error) — no-op if not currently in think mode."""
+        if self.mode != "think" or self.think_start is None:
+            return
+        elapsed = time.time() - self.think_start
+        if st.REASONING_VISIBLE:
+            print()
+            print(f"{DIM}  ────────────── (thought for {elapsed:.1f}s){RESET}")
+        else:
+            print(f"{DIM}  (thought for {elapsed:.1f}s){RESET}")
+        self.think_start = None
 
     # --- per-chunk entry point ----------------------------------------------
     def process(self, chunk):
@@ -143,6 +158,7 @@ class StreamParser:
     def _handle_reasoning(self, rc):
         """Returns True if the stream should be cut (collapse detected)."""
         if self.mode != "think":
+            self.think_start = time.time()
             if st.REASONING_VISIBLE:
                 print(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
             else:
@@ -190,9 +206,7 @@ class StreamParser:
     def _handle_content(self, raw_chunk):
         """Returns True if the stream should be cut (collapse detected)."""
         self.clear_tool_status()
-        if self.mode == "think" and st.REASONING_VISIBLE:
-            print()
-            print(f"{DIM}  ──────────────{RESET}")
+        self.close_think_block()
         self.mode = "say"
         chunk = raw_chunk
         if _LEAKED_SPECIAL_TOKEN_RE.search(chunk):
@@ -264,9 +278,7 @@ class StreamParser:
 
     def _handle_tool_call_delta(self, tc):
         if self.mode == "think":
-            if st.REASONING_VISIBLE:
-                print()
-                print(f"{DIM}  ──────────────{RESET}")
+            self.close_think_block()
             self.mode = None
         elif self.mode == "say":
             if self.say_live is not None:
@@ -287,7 +299,5 @@ class StreamParser:
         """Close out any open reasoning/say block. Call once the loop ends
         for any reason (normal end, interrupt, error) before reading back
         mode/say_live elsewhere."""
-        if self.mode == "think" and st.REASONING_VISIBLE:
-            print()
-            print(f"{DIM}  ──────────────{RESET}")
+        self.close_think_block()
         print(RESET)
