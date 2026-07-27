@@ -26,6 +26,16 @@ from . import _state as st
 from . import REASONING_ONLY_TIME_LIMIT
 
 
+def _fmt_think_duration(elapsed):
+    """ms below 1s, seconds below 1min, else 'Xmin Ys'."""
+    if elapsed < 1:
+        return f"{elapsed * 1000:.0f}ms"
+    if elapsed < 60:
+        return f"{elapsed:.1f}s"
+    mins, secs = divmod(int(round(elapsed)), 60)
+    return f"{mins}min {secs}s"
+
+
 # Text-protocol tool-call tag openers (see _text_fallback.py's TOOL_TAG /
 # NX_TOOL_TAG). Native tool-calling servers (Qwen chat templates etc.) never
 # put these in `content` — the call arrives as structured `delta.tool_calls`
@@ -116,11 +126,12 @@ class StreamParser:
         if self.mode != "think" or self.think_start is None:
             return
         elapsed = time.time() - self.think_start
+        dur = _fmt_think_duration(elapsed)
         if st.REASONING_VISIBLE:
             print()
-            print(f"{DIM}  ────────────── (thought for {elapsed:.1f}s){RESET}")
+            print(f"{DIM}  ────────────── (thought for {dur}){RESET}")
         else:
-            print(f"{DIM}  (thought for {elapsed:.1f}s){RESET}")
+            print(f"{DIM}  (thought for {dur}){RESET}")
         self.think_start = None
 
     # --- per-chunk entry point ----------------------------------------------
