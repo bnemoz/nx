@@ -3,6 +3,7 @@ out of assistant text for servers without native tool-calling, and sanitize
 tool results before they re-enter message history."""
 import json
 import re
+from typing import Any, List, Tuple
 
 from ._env import _env_int
 
@@ -28,12 +29,15 @@ TOOL_RESULT_PROTOCOL_NOTE = (
 TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
 
 
-def _inside_code_fence(text, index):
+def _inside_code_fence(text: str, index: int) -> bool:
     """True if `index` falls inside a ``` fenced block (odd fence count before it)."""
     return text.count("```", 0, index) % 2 == 1
 
 
-def _escape_bare_control_chars(raw):
+_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _escape_bare_control_chars(raw: str) -> str:
     """Escape literal newline/tab/carriage-return characters that appear
     inside JSON string literals, without touching anything outside strings.
 
@@ -52,8 +56,7 @@ def _escape_bare_control_chars(raw):
     while i < n:
         c = raw[i]
         if in_string and c == "\\" and i + 1 < n:
-            out.append(c)
-            out.append(raw[i + 1])
+            out.append(raw[i:i + 2])
             i += 2
             continue
         if c == '"':
@@ -61,8 +64,8 @@ def _escape_bare_control_chars(raw):
             out.append(c)
             i += 1
             continue
-        if in_string and c in "\n\r\t":
-            out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[c])
+        if in_string and c in _CONTROL_ESCAPES:
+            out.append(_CONTROL_ESCAPES[c])
             i += 1
             continue
         out.append(c)
@@ -73,13 +76,13 @@ def _escape_bare_control_chars(raw):
 TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
-def _strip_trailing_commas(raw):
+def _strip_trailing_commas(raw: str) -> str:
     """Drop a comma immediately before a closing `}`/`]` — small models often
     leave one behind after reordering or dropping the last argument."""
     return TRAILING_COMMA_RE.sub(r"\1", raw)
 
 
-def _single_quotes_to_double(raw):
+def _single_quotes_to_double(raw: str) -> str:
     """Swap `'` for `"` when the body has no double quotes at all — i.e. the
     model wrote the whole object with Python-style single-quoted strings.
     Skipped whenever a `"` is already present, since blindly swapping would
@@ -89,7 +92,7 @@ def _single_quotes_to_double(raw):
     return raw.replace("'", '"')
 
 
-def repair_json_candidates(raw):
+def repair_json_candidates(raw: str) -> List[str]:
     """Cheap, mechanical JSON repair heuristics, worth trying before treating
     a parse failure as fatal (see `_escape_bare_control_chars` docstring for
     the rationale: small models produce fixable-not-fatal JSON far more often
@@ -110,7 +113,8 @@ def repair_json_candidates(raw):
     return candidates
 
 
-def parse_text_calls_with_errors(content):
+def parse_text_calls_with_errors(
+        content: str) -> Tuple[List[Tuple[str, Any]], List[str]]:
     """Like parse_text_calls(), but also returns per-tag parse error strings.
 
     Returns (calls, errors). `errors` has one short description per tag that
@@ -119,16 +123,13 @@ def parse_text_calls_with_errors(content):
     """
     text = content or ""
     pos = 0
-    calls = []
-    errors = []
+    calls: List[Tuple[str, Any]] = []
+    errors: List[str] = []
     found_tag = False
     n = len(text)
     while pos < n:
-        match = None
-        for tag in TOOL_TAGS:
-            m = tag.search(text, pos)
-            if m and (match is None or m.start() < match.start()):
-                match = m
+        matches = (m for m in (tag.search(text, pos) for tag in TOOL_TAGS) if m)
+        match = min(matches, key=lambda m: m.start(), default=None)
         if not match:
             break
         if _inside_code_fence(text, match.start()):
@@ -155,7 +156,7 @@ def parse_text_calls_with_errors(content):
     return (calls, errors) if found_tag else ([], [])
 
 
-def parse_text_calls(content):
+def parse_text_calls(content: str) -> List[Tuple[str, Any]]:
     """Pull text-protocol tool-call tags out of an assistant message.
 
     Small models routinely add a sentence of chatter before/after (or between)
@@ -172,7 +173,7 @@ def parse_text_calls(content):
     return parse_text_calls_with_errors(content)[0]
 
 
-def _escape_tool_protocol_delimiters(text):
+def _escape_tool_protocol_delimiters(text: Any) -> Any:
     """Neutralize active tool-call delimiters in untrusted tool output."""
     if not isinstance(text, str):
         return text
@@ -186,7 +187,7 @@ def _escape_tool_protocol_delimiters(text):
     return text
 
 
-def _sanitize_tool_result(text):
+def _sanitize_tool_result(text: Any) -> Any:
     """Neutralize active protocol delimiters, dedup, and cap tool results.
 
     Large, near-duplicate tool outputs (find/ls/grep path dumps) are the fuel

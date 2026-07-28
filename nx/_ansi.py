@@ -1,4 +1,6 @@
 """ANSI color/cursor constants and the terminal waiting animation (LifeSpinner)."""
+from __future__ import annotations
+
 import contextlib
 import os
 import random
@@ -6,10 +8,12 @@ import sys
 import termios
 import threading
 import time
+from collections.abc import Iterator
+from typing import Literal
 
 
 @contextlib.contextmanager
-def raw_mode(fd, *, icrnl=False):
+def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
     """Put fd into raw (non-canonical, no-echo) mode for the duration of the
     block, restoring the original attributes on exit. Centralizes the
     termios save/restore/flag-twiddle that used to be copy-pasted across
@@ -32,7 +36,7 @@ def raw_mode(fd, *, icrnl=False):
         except Exception:
             pass
 
-def _rgb(hex_color):
+def _rgb(hex_color: str) -> str:
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     return f"\033[38;2;{r};{g};{b}m"
 
@@ -46,7 +50,7 @@ SHOW_CURSOR = "\033[?25h"
 # used for reasoning-block text, where plain SGR-2 dim or ANSI bright-black
 # (90) is unreadable on many terminals, so it needs its own legible-but-muted
 # hue per theme rather than a fixed gray.
-THEMES = {
+THEMES: dict[str, dict[str, str]] = {
     "mocha": {   # Catppuccin Mocha (default) — dark
         "cyan": "89dceb", "green": "a6e3a1", "yellow": "f9e2af",
         "red": "f38ba8", "magenta": "cba6f7", "gray": "7f849c",
@@ -73,7 +77,7 @@ THEMES = {
     },
 }
 DEFAULT_THEME = "mocha"
-_PALETTE_KEYS = ("cyan", "green", "yellow", "red", "magenta", "gray")
+_PALETTE_KEYS: tuple[str, ...] = ("cyan", "green", "yellow", "red", "magenta", "gray")
 
 # Semantic roles used across the codebase, each backed by one of the six
 # palette hues above by default. Centralizing the role→hue mapping here means
@@ -81,7 +85,7 @@ _PALETTE_KEYS = ("cyan", "green", "yellow", "red", "magenta", "gray")
 # needs to know about roles. Each role can also be overridden independently
 # via `NX_<ROLE>_COLOR` (see _parse_color_override), e.g. NX_TEXT_COLOR=green,
 # NX_STATUS_BAR_COLOR=ffaa00, NX_REASONING_TEXT_COLOR=gray.
-ROLE_DEFAULTS = {
+ROLE_DEFAULTS: dict[str, str] = {
     "TEXT": "green",           # the model's final answer text
     "REASONING_TEXT": "gray",  # reasoning/thinking block text
     "STATUS_BAR": "cyan",      # per-turn stats footer (tok/s, ctx, ttft, wall)
@@ -94,7 +98,10 @@ ROLE_DEFAULTS = {
 }
 
 
-def _parse_color_override(env_name):
+_ColorOverride = tuple[Literal["palette", "hex"], str]
+
+
+def _parse_color_override(env_name: str) -> _ColorOverride | None:
     """Resolve `NX_<ROLE>_COLOR` to either a palette key (resolved dynamically
     against the active theme, so it tracks theme switches) or a literal 6-digit
     hex (theme-independent). Returns None if unset or invalid."""
@@ -112,7 +119,9 @@ def _parse_color_override(env_name):
     return None
 
 
-_ROLE_OVERRIDES = {role: _parse_color_override(f"NX_{role}_COLOR") for role in ROLE_DEFAULTS}
+_ROLE_OVERRIDES: dict[str, _ColorOverride | None] = {
+    role: _parse_color_override(f"NX_{role}_COLOR") for role in ROLE_DEFAULTS
+}
 
 
 class _Colors:
@@ -121,11 +130,11 @@ class _Colors:
     call time (not via plain name imports), so `set_theme()` mutating this
     single shared instance is immediately visible everywhere."""
 
-    def __init__(self, name):
+    def __init__(self, name: str) -> None:
         self.name = name
         self._apply(THEMES[name])
 
-    def _apply(self, hexes):
+    def _apply(self, hexes: dict[str, str]) -> None:
         self.CYAN = _rgb(hexes["cyan"])
         self.GREEN = _rgb(hexes["green"])
         self.YELLOW = _rgb(hexes["yellow"])
@@ -152,7 +161,7 @@ if _requested_theme and _requested_theme not in THEMES:
 C = _Colors(_requested_theme if _requested_theme in THEMES else DEFAULT_THEME)
 
 
-def set_theme(name):
+def set_theme(name: str) -> bool:
     """Switch the active theme in place. Returns True if `name` is a known theme."""
     if name not in THEMES:
         return False
@@ -161,7 +170,7 @@ def set_theme(name):
     return True
 
 
-def swatch(theme_name):
+def swatch(theme_name: str) -> str:
     """Return a one-line rendered sample of `theme_name`'s colors (cyan/green/yellow/red/magenta/gray)."""
     hexes = THEMES[theme_name]
     order = ("cyan", "green", "yellow", "red", "magenta", "gray")
@@ -176,18 +185,18 @@ def swatch(theme_name):
 _GOL_W = 24
 _GOL_ALIVE = "█"
 _GOL_DEAD = "·"
-_GOL_GLIDER = {(0, 0), (1, 1), (2, 1), (0, 2), (1, 0)}  # 5-cell, period-4
+_GOL_GLIDER: set[tuple[int, int]] = {(0, 0), (1, 1), (2, 1), (0, 2), (1, 0)}  # 5-cell, period-4
 
 
 class LifeSpinner:
-    def __init__(self, width=_GOL_W, tick_ms=90, label="thinking"):
+    def __init__(self, width: int = _GOL_W, tick_ms: int = 90, label: str = "thinking") -> None:
         self.w = width
         self.tick = tick_ms / 1000
         self.label = label  # shown before the cells ("thinking" / "running" / ...)
         self._stop = threading.Event()
-        self._t = None
+        self._t: threading.Thread | None = None
 
-    def _seed(self):
+    def _seed(self) -> list[int]:
         row = [0] * self.w
         x = random.randrange(self.w)
         for dx, _ in _GOL_GLIDER:
@@ -199,7 +208,7 @@ class LifeSpinner:
             row[random.randrange(self.w)] = 1
         return row
 
-    def _step(self, row):
+    def _step(self, row: list[int]) -> list[int]:
         # A 1-row GoL is degenerate (cells have only 2 neighbors). Cheat: treat
         # the row as the middle of a 3-row toroidal world where the rows above
         # and below mirror the current one. Gives every cell the standard 8
@@ -213,35 +222,37 @@ class LifeSpinner:
             nxt[x] = 1 if (cur and n in (2, 3)) or (not cur and n == 3) else 0
         return nxt
 
-    def _run(self):
+    def _render(self, row: list[int]) -> str:
+        return (CLEAR_LINE + "  " + DIM + f"{self.label} " + RESET +
+                "".join(_GOL_ALIVE if c else _GOL_DEAD for c in row))
+
+    def _run(self) -> None:
         sys.stdout.write(HIDE_CURSOR)
         try:
             row = self._seed()
             # initial render — also reserve the line so subsequent prints don't shift things
-            sys.stdout.write(CLEAR_LINE + "  " + DIM + f"{self.label} " + RESET +
-                             "".join(_GOL_ALIVE if c else _GOL_DEAD for c in row))
+            sys.stdout.write(self._render(row))
             sys.stdout.flush()
             while not self._stop.is_set():
                 time.sleep(self.tick)
                 if self._stop.is_set():
                     break
                 row = self._step(row)
-                sys.stdout.write(CLEAR_LINE + "  " + DIM + f"{self.label} " + RESET +
-                                 "".join(_GOL_ALIVE if c else _GOL_DEAD for c in row))
+                sys.stdout.write(self._render(row))
                 sys.stdout.flush()
         finally:
             # wipe the spinner line and restore cursor
             sys.stdout.write(CLEAR_LINE + SHOW_CURSOR)
             sys.stdout.flush()
 
-    def start(self):
+    def start(self) -> None:
         if not sys.stdout.isatty():
             return  # headless (piped/redirected) — no spinner animation
         self._stop.clear()
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop.set()
         if self._t:
             self._t.join(timeout=0.5)

@@ -15,15 +15,30 @@ usage): `input_tokens` EXCLUDES cached tokens (cache is broken out into
 (reasoning is broken out into `reasoning_tokens`). Dashboards that want a
 "total in" sum input + cache_read; a "total out" sum output + reasoning.
 """
+from __future__ import annotations
+
 import json
-import os
 import time
 import urllib.request
+from os import environ
+from typing import Any, TypedDict
 
 from . import _state as st
 
 
-def _normalize_usage(usage, timings, fallback_chars=0, fallback_prompt_chars=0):
+class UsageDelta(TypedDict):
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    reasoning_tokens: int
+
+
+def _normalize_usage(
+    usage: Any,
+    timings: Any,
+    fallback_chars: int = 0,
+    fallback_prompt_chars: int = 0,
+) -> UsageDelta | None:
     """Pull a {input, output, cache_read, reasoning} token dict out of a
     finished model call, from whichever the server gave us: the standard
     streaming `usage` object (OpenAI/Z.ai) or the llama.cpp `timings` extra
@@ -101,8 +116,14 @@ class _Metrics:
     after the first failure so a missing dashboard never slows the REPL.
     """
 
-    def __init__(self, session_id, model=None, source=None, started_at=None,
-                 push_url=None):
+    def __init__(
+        self,
+        session_id: str,
+        model: str | None = None,
+        source: str | None = None,
+        started_at: float | None = None,
+        push_url: str | None = None,
+    ) -> None:
         self.session_id = session_id
         self.model = model
         self.source = source
@@ -113,19 +134,19 @@ class _Metrics:
         self.reasoning_tokens = 0
         self.api_calls = 0
         self.push_url = push_url
-        self._push_disabled = False   # latched off after the first failure
+        self._push_disabled = False  # latched off after the first failure
 
-    def add(self, delta):
+    def add(self, delta: UsageDelta | None) -> None:
         """Accumulate a per-call usage dict from _normalize_usage()."""
         if not delta:
             return
-        self.input_tokens += int(delta.get("input_tokens") or 0)
-        self.output_tokens += int(delta.get("output_tokens") or 0)
-        self.cache_read_tokens += int(delta.get("cache_read_tokens") or 0)
-        self.reasoning_tokens += int(delta.get("reasoning_tokens") or 0)
+        self.input_tokens += delta.get("input_tokens") or 0
+        self.output_tokens += delta.get("output_tokens") or 0
+        self.cache_read_tokens += delta.get("cache_read_tokens") or 0
+        self.reasoning_tokens += delta.get("reasoning_tokens") or 0
         self.api_calls += 1
 
-    def as_meta(self):
+    def as_meta(self) -> dict[str, Any]:
         """The fields merged into the session JSON on save."""
         return {
             "input_tokens": self.input_tokens,
@@ -136,7 +157,7 @@ class _Metrics:
             "started_at": self.started_at,
         }
 
-    def flush(self):
+    def flush(self) -> None:
         """Fire the optional HTTP push. Cumulative totals, so the endpoint
         can compute its own deltas (agentdash's /api/tokens/push does)."""
         if not self.push_url or self._push_disabled:
@@ -171,16 +192,16 @@ class _Metrics:
 st._METRICS = None
 
 
-def _env_metrics_url():
+def _env_metrics_url() -> str | None:
     """NX_METRICS_URL — optional endpoint to receive cumulative token
     totals after each turn. Default unset (metrics stay local to the session
     JSON, nothing leaves the machine). No scheme/host validation beyond
     "looks like a URL" — a bad value just latches the push off on first try."""
-    url = os.environ.get("NX_METRICS_URL", "").strip()
+    url = environ.get("NX_METRICS_URL", "").strip()
     return url or None
 
 
-def _abbr(n):
+def _abbr(n: int) -> str:
     """Compact token count for the stats footer: 832 → '832', 1500 → '1.5K',
     78825 → '78K', 1234567 → '1.2M'. Keeps the footer tidy once context grows."""
     n = int(n)
@@ -195,7 +216,7 @@ def _abbr(n):
     return f"{n // 1_000_000}M"
 
 
-def _precise_abbr(n):
+def _precise_abbr(n: int) -> str:
     """Like _abbr but keeps two decimals in the K/M/B ranges.
 
     Used for the live tool-call-args counter ("generating tool call write_file

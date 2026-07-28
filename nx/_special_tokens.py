@@ -14,6 +14,8 @@ history and on the next turn the model sees its own gibberish in context,
 reinforcing the collapse and often drifting into regurgitated training data
 (Chinese-language passages are a common artifact).
 """
+from __future__ import annotations
+
 import re
 
 from ._env import _env_int
@@ -32,7 +34,7 @@ LEAKED_TOKEN_RUN_LIMIT = _env_int("NX_LEAKED_TOKEN_RUN_LIMIT", 3)
 REPEAT_CHUNK_LIMIT = _env_int("NX_REPEAT_CHUNK_LIMIT", 6)
 
 
-def _strip_leaked_tokens(text):
+def _strip_leaked_tokens(text: str) -> str:
     """Remove tokenizer-internal special tokens that leaked into model output.
 
     DeepSeek's ``<｜begin▁of▁sentence｜>`` (full-width pipe) is a tokenizer
@@ -47,7 +49,7 @@ def _strip_leaked_tokens(text):
     return _LEAKED_SPECIAL_TOKEN_RE.sub("", text)
 
 
-def _is_leak_chunk(chunk):
+def _is_leak_chunk(chunk: str) -> bool:
     """True if a streamed content/reasoning chunk is (mostly) leaked special
     tokens — i.e. the model has entered the special-token collapse."""
     if not chunk:

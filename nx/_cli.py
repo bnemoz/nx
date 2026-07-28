@@ -7,7 +7,10 @@ imported, every other concern (sources, approval, tools, the turn loop,
 compression, the REPL loop itself) already has a stable home, so this is
 "change imports," not "change imports and logic simultaneously."
 """
+from __future__ import annotations
+
 import sys
+from pathlib import Path
 
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
@@ -36,7 +39,7 @@ full in-session command list. See README.md for the full NX_* env var table.
 """
 
 
-def _cli_version():
+def _cli_version() -> str:
     from importlib.metadata import version, PackageNotFoundError
     try:
         return version("nx")
@@ -44,7 +47,7 @@ def _cli_version():
         return "unknown"
 
 
-def _cli_help_or_version(argv):
+def _cli_help_or_version(argv: list[str]) -> bool:
     if "-h" in argv or "--help" in argv:
         sys.stdout.write(_HELP_TEXT)
         return True
@@ -54,7 +57,7 @@ def _cli_help_or_version(argv):
     return False
 
 
-def _run_one_shot():
+def _run_one_shot() -> bool:
     """Non-interactive entry point for --prompt-file. Reads the instruction,
     runs _run_model_turn_loop once, and exits with a status code."""
     if _PROMPT_FILE is None:
@@ -64,8 +67,7 @@ def _run_one_shot():
         instruction = sys.stdin.read()
     else:
         try:
-            with open(_PROMPT_FILE, "r", encoding="utf-8") as f:
-                instruction = f.read()
+            instruction = Path(_PROMPT_FILE).read_text(encoding="utf-8")
         except OSError as e:
             sys.stderr.write(f"nx: cannot read --prompt-file {e.filename!r}: {e}\n")
             sys.exit(2)
@@ -98,7 +100,7 @@ def _run_one_shot():
     sys.exit(0)
 
 
-def main():
+def main() -> None:
     # --help/--version short-circuit before any source/network setup.
     if _cli_help_or_version(sys.argv[1:]):
         return

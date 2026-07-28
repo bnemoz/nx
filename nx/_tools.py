@@ -4,15 +4,18 @@ edit tools. write_file/edit_file/multi_edit/run_bash/wait_background stay in
 __init__.py because they call _confirm() (reads the YOLO/APPROVE_LEVEL
 globals) and, for the bash tools, SESSION_HOME/_USER_INTERRUPTED/_log_event.
 """
+from __future__ import annotations
+
 import os
 import re
 import shutil
 import subprocess
+from typing import Any
 
 from ._env import _env_int
 
 
-def read_file(path, offset=1, limit=None, **_):
+def read_file(path: str, offset: int = 1, limit: int | None = None, **_: Any) -> str:
     """Read a file as numbered lines (1-based, `cat -n` style: right-aligned
     line number, a tab, then the line). Large files return only a window — pass
     offset (start line) and limit (max lines) to page through the rest. A header
@@ -56,7 +59,7 @@ def read_file(path, offset=1, limit=None, **_):
 _LINE_NUM_PREFIX = re.compile(r"^ *\d+\t")
 
 
-def _strip_line_numbers(text):
+def _strip_line_numbers(text: str) -> str:
     """Remove read_file's `<n>\\t` line-number prefixes from a pasted block.
     Only strips when EVERY non-empty line carries one (i.e. the whole block came
     from numbered read_file output) — so ordinary edits, and code that merely
@@ -68,14 +71,21 @@ def _strip_line_numbers(text):
     return text
 
 
-def list_dir(path=".", **_):
+def list_dir(path: str = ".", **_: Any) -> str:
     try:
         return "\n".join(sorted(os.listdir(path)))
     except OSError as e:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def search_files(pattern, path=".", glob=None, max_results=100, context=0, **_):
+def search_files(
+    pattern: str,
+    path: str = ".",
+    glob: str | None = None,
+    max_results: int = 100,
+    context: int = 0,
+    **_: Any,
+) -> str:
     """Search file contents for a regex `pattern` and return `path:line:match`
     hits (ripgrep-style). Falls back to `grep -rn` when `rg` isn't installed, so
     the tool works with only a POSIX grep present — nx adds no new runtime
@@ -145,11 +155,11 @@ def search_files(pattern, path=".", glob=None, max_results=100, context=0, **_):
     return shown
 
 
-def _run_git(args, path):
+def _run_git(args: list[str], path: str) -> tuple[str | None, str | None]:
     if not shutil.which("git"):
         return None, "ERROR: git not found on PATH"
     try:
-        proc = subprocess.run(["git", "-C", str(path)] + args,
+        proc = subprocess.run(["git", "-C", str(path), *args],
                                capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
         return None, "ERROR: git command timed out after 15s"
@@ -160,7 +170,7 @@ def _run_git(args, path):
     return proc.stdout, None
 
 
-def git_status(path=".", **_):
+def git_status(path: str = ".", **_: Any) -> str:
     """`git status --short -b`, read-only like `git diff`/`git log` — never
     goes through the approval / risk classifier (same rationale as
     `search_files`: a dedicated native tool beats shelling out via `run_bash`
@@ -172,7 +182,7 @@ def git_status(path=".", **_):
     return out.strip() or "[clean working tree]"
 
 
-def git_diff(path=".", staged=False, file=None, **_):
+def git_diff(path: str = ".", staged: bool = False, file: str | None = None, **_: Any) -> str:
     """`git diff` (or `git diff --staged` / `git diff -- <file>`), read-only —
     see `git_status` docstring for why this is a native tool rather than
     `run_bash("git diff")`.

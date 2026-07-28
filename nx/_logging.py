@@ -8,12 +8,15 @@ background thread instead, so the caller's `.write()` is just a
 `queue.put()` and never waits on disk I/O. Rotates once the file passes
 LOG_MAX_BYTES so it stays bounded without needing to be rotated by hand.
 """
+from __future__ import annotations
+
 import atexit
 import json
 import os
 import queue
 import threading
 import time
+from typing import Any
 
 from ._env import _env_int
 
@@ -28,24 +31,24 @@ class _AsyncLogWriter:
     as a drop-in for `_llog`, which both `_log_event` and `_LoggingStream`
     call `.write()` on."""
 
-    def __init__(self, path, max_bytes):
+    def __init__(self, path: str, max_bytes: int) -> None:
         self._path = path
         self._max_bytes = max_bytes
-        self._queue = queue.Queue()
+        self._queue: queue.Queue[str] = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True,
                                          name="nx-log-writer")
         self._thread.start()
 
-    def write(self, line):
+    def write(self, line: str) -> None:
         self._queue.put(line)
 
-    def flush(self):
+    def flush(self) -> None:
         """Block until every currently queued line has been written. Called
         at interpreter exit so a normal shutdown never drops trailing log
         lines that were still in flight on the writer thread."""
         self._queue.join()
 
-    def _run(self):
+    def _run(self) -> None:
         f = open(self._path, "a", buffering=1)
         try:
             while True:
@@ -74,7 +77,7 @@ _llog = _AsyncLogWriter(LOG_PATH, LOG_MAX_BYTES)
 atexit.register(_llog.flush)
 
 
-def _log_event(direction, payload):
+def _log_event(direction: str, payload: Any) -> None:
     """direction: 'req' (outgoing) or 'resp' (incoming SSE chunk). Enqueues
     onto the background writer thread (see _AsyncLogWriter) rather than
     writing inline, so a slow disk never adds latency to the caller."""

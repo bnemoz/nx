@@ -6,11 +6,18 @@ __init__.py because it's keyed off SESSION_HOME, a module global that /reload
 in tests reassigns from NX_HOME/NX_SESSIONS_DIR — see the reload
 semantics note in __init__.py's sessions section.
 """
+from __future__ import annotations
+
 import secrets
 import time
+from typing import Any
+
+Message = dict[str, Any]
 
 
-def _flatten_message_text(m, per_msg=None, tool_call_arg_chars=None):
+def _flatten_message_text(
+    m: Message, per_msg: int | None = None, tool_call_arg_chars: int | None = None
+) -> str:
     """Collapse one message to a single display string: tool calls render as
     `→ name(...)`, list-content (multi-part) is joined, newlines become
     spaces. Shared by transcript printing, memory rendering, and session
@@ -38,13 +45,13 @@ def _flatten_message_text(m, per_msg=None, tool_call_arg_chars=None):
     return content
 
 
-def _new_session_id():
+def _new_session_id() -> str:
     """Short, unguessable, sortable-ish: YYYYMMDD-HHMMSS-<6 hex>."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{secrets.token_hex(3)}"
 
 
-def _safe_title(text, maxlen=60):
+def _safe_title(text: Any, maxlen: int = 60) -> str | None:
     """Turn the first user message into a filesystem-safe-ish title.
 
     Collapses whitespace, strips control chars, clamps length. We don't
@@ -60,7 +67,7 @@ def _safe_title(text, maxlen=60):
     return text or None
 
 
-def _is_empty_assistant_message(msg):
+def _is_empty_assistant_message(msg: Message) -> bool:
     if msg.get("role") != "assistant" or msg.get("tool_calls"):
         return False
     content = msg.get("content")
@@ -80,7 +87,7 @@ def _is_empty_assistant_message(msg):
     return False
 
 
-def _drop_leading_dangling_tool_turns(msgs):
+def _drop_leading_dangling_tool_turns(msgs: list[Message]) -> tuple[list[Message], int]:
     """Trim leading turns that would break a chat template's tool_call/result
     boundary if `msgs` were sent as-is (e.g. `open_stream` on the full history,
     or `compress()` sizing its verbatim tail).
@@ -116,7 +123,7 @@ def _drop_leading_dangling_tool_turns(msgs):
     return msgs, n_dropped
 
 
-def _prune_empty_assistant_messages(messages):
+def _prune_empty_assistant_messages(messages: list[Message]) -> int:
     """Drop assistant turns that have neither visible content nor tool calls."""
     if not isinstance(messages, list):
         return 0
@@ -127,7 +134,7 @@ def _prune_empty_assistant_messages(messages):
     return removed
 
 
-def _short_id(session_id):
+def _short_id(session_id: str | None) -> str:
     """The scannable tail of a session id (the 6-hex suffix), for listings.
 
     The full id is `YYYYMMDD-HHMMSS-XXXXXX`; in a list of recent sessions the
@@ -138,7 +145,7 @@ def _short_id(session_id):
     return session_id or ""
 
 
-def _summarize_session_data(session_id, data):
+def _summarize_session_data(session_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """The small listing summary (id, title, preview, …) pulled out of a
     full session dict. Shared by the sidecar-index writer and the
     full-parse fallback in _session_summary_from_file, so both paths
@@ -163,7 +170,7 @@ def _summarize_session_data(session_id, data):
     }
 
 
-def _session_matches_query(summary, query):
+def _session_matches_query(summary: dict[str, Any], query: str | None) -> bool:
     if not query:
         return True
     q = query.lower()

@@ -27,7 +27,10 @@ tool calls. So _grammar_extra_body() stops attaching this grammar once
 native mode is confirmed, rather than fighting or duplicating llama.cpp's
 own constraint.
 """
+from __future__ import annotations
+
 import json
+from typing import Any
 
 WS_RULE = r'ws ::= [ \t\n]*'
 STRING_RULE = (
@@ -47,20 +50,20 @@ ARRAY_RULE = r'array ::= "[" ws (value ("," ws value)*)? "]" ws'
 PRIMITIVES = [WS_RULE, STRING_RULE, INTEGER_RULE, BOOLEAN_RULE, VALUE_RULE, OBJECT_RULE, ARRAY_RULE]
 
 
-def _gbnf_literal(s):
+def _gbnf_literal(s: str) -> str:
     """A GBNF quoted-literal matching the exact JSON encoding of `s`."""
     return json.dumps(json.dumps(s))
 
 
-def _enum_rule(values):
+def _enum_rule(values: list[str]) -> str:
     return " | ".join(f'{_gbnf_literal(v)} ws' for v in values)
 
 
-def _kv_rule(name, value_ref):
+def _kv_rule(name: str, value_ref: str) -> str:
     return f'{_gbnf_literal(name)} ws ":" ws {value_ref}'
 
 
-def _value_ref(schema, rule_name, rules):
+def _value_ref(schema: Any, rule_name: str, rules: dict[str, str]) -> str:
     """Return a GBNF symbol/expression for `schema`, adding any helper rules
     it needs (e.g. a nested object-array item rule) to `rules`."""
     if not isinstance(schema, dict):
@@ -84,7 +87,7 @@ def _value_ref(schema, rule_name, rules):
     return "value"
 
 
-def _object_rule_body(schema, rule_name, rules):
+def _object_rule_body(schema: dict[str, Any], rule_name: str, rules: dict[str, str]) -> str:
     """Build the GBNF body for a flat-object schema.
 
     Assumes (true of every schema in TOOLS today) that required properties
@@ -98,7 +101,7 @@ def _object_rule_body(schema, rule_name, rules):
     if not props:
         return '"{" ws "}" ws'
 
-    def cont(i):
+    def cont(i: int) -> str:
         if i == len(props):
             return ""
         name, pschema = props[i]
@@ -120,7 +123,11 @@ def _object_rule_body(schema, rule_name, rules):
     return f'"{{" ws {body} "}}" ws'
 
 
-def build_tool_call_grammar(tools, tag_open="<tool_call>", tag_close="</tool_call>"):
+def build_tool_call_grammar(
+    tools: list[dict[str, Any]],
+    tag_open: str = "<tool_call>",
+    tag_close: str = "</tool_call>",
+) -> tuple[str | None, str]:
     """Build a GBNF grammar accepting exactly one `{"name": ..., "arguments":
     {...}}</tool_call>` body (the trigger tag itself is consumed by the
     lazy-grammar trigger, not the grammar) matching one of `tools`' schemas.
@@ -128,8 +135,8 @@ def build_tool_call_grammar(tools, tag_open="<tool_call>", tag_close="</tool_cal
     Returns (grammar_text, tag_open) — tag_open is the literal string a
     llama.cpp lazy-grammar trigger should fire on.
     """
-    rules = {}
-    alts = []
+    rules: dict[str, str] = {}
+    alts: list[str] = []
     for tool in tools:
         fn = tool.get("function", {})
         name = fn.get("name")

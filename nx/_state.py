@@ -16,28 +16,40 @@ the test suite relies on extensively — keeps working unchanged and stays in
 sync with whatever any submodule does via `st.ACTIVE`.
 """
 
+from __future__ import annotations
+
+import os
+import threading
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
+
+    from ._metrics import _Metrics
+    from ._sources import Source
+
 # --- sources / active model connection --------------------------------------
-SOURCES = {}        # name → Source
-SOURCE_ORDER = []   # preserve definition order for /source listing
-ACTIVE = None       # current Source
+SOURCES: dict[str, "Source"] = {}
+SOURCE_ORDER: list[str] = []   # preserve definition order for /source listing
+ACTIVE: "Source | None" = None
 
 # `client` and `MODEL` mirror the active source; switch_source() reassigns
 # both. Every function that needs them does a call-time lookup (via this
 # module), so a mid-session swap is picked up instantly.
-client = None
-MODEL = None
+client: "httpx.Client | None" = None
+MODEL: str | None = None
 
 # Updated by model_turn() on every turn that reports a prompt-token count.
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
-_LAST_PROMPT_TOKENS = 0
+_LAST_PROMPT_TOKENS: int = 0
 
 # --- approval gating ---------------------------------------------------------
-YOLO = False
-APPROVE_LEVEL = None
-DEFAULT_APPROVE_LEVEL = None
+YOLO: bool = False
+APPROVE_LEVEL: str | None = None
+DEFAULT_APPROVE_LEVEL: str | None = None
 
 
-def toggle_yolo():
+def toggle_yolo() -> bool:
     """Flip YOLO mode, mirroring /yolo. Shared by the Shift+Tab handlers in
     _chatbox.py's editor and _approval.py's approval prompt so both stay in
     sync instead of each re-implementing the toggle independently."""
@@ -46,21 +58,22 @@ def toggle_yolo():
     APPROVE_LEVEL = None if YOLO else DEFAULT_APPROVE_LEVEL
     return YOLO
 
+
 # Project root used by the risk classifier's path-scoping. Set once at
 # startup by _detect_project_root() in _risk.py / _approval.py.
-PROJECT_ROOT = None
+PROJECT_ROOT: str | None = None
 
 # Set by run_tool() while a tool body is executing; read by _confirm() to
 # pause/resume the spinner around approval prompts / risk-classifier calls.
-_ACTIVE_SPINNER = None
+_ACTIVE_SPINNER: Any | None = None
 
-RISK_CONNECTION_RETRIES = None
-RISK_CONNECTION_RETRY_SECONDS = None
+RISK_CONNECTION_RETRIES: int | None = None
+RISK_CONNECTION_RETRY_SECONDS: float | None = None
 
 # --- interrupt watcher --------------------------------------------------------
 # (the Event objects themselves are created once in _interrupt.py; this
 # module only holds the thread handle, which does get reassigned.)
-_INTERRUPT_THREAD = None
+_INTERRUPT_THREAD: threading.Thread | None = None
 
 # Text the user typed *after* pressing Esc, while the watcher was still armed
 # and draining stdin during the disarm handshake. Written only by the watcher
@@ -70,37 +83,37 @@ _INTERRUPT_THREAD = None
 # model_turn() injects the text directly as the next user turn instead of
 # dropping to a blank prompt. Otherwise it's partial text, consumed as a
 # prefill for the next read_multiline() call in the REPL.
-_INTERRUPT_REDIRECT_TEXT = ""
-_INTERRUPT_REDIRECT_SUBMITTED = False
+_INTERRUPT_REDIRECT_TEXT: str = ""
+_INTERRUPT_REDIRECT_SUBMITTED: bool = False
 
 # Set by model_turn() when an Esc-interrupt captured a partial (no Enter yet)
 # redirect line. The REPL consumes-and-clears this as the `initial` prefill
 # for its next read_multiline() call so the user's half-typed line reappears
 # in the prompt instead of vanishing.
-_INTERRUPT_REDIRECT_PREFILL = ""
+_INTERRUPT_REDIRECT_PREFILL: str = ""
 
 # --- background run_bash notice ----------------------------------------------
-_SESSION_HAS_BACKGROUNDED = False
-_PENDING_BACKGROUND_NOTICE = None
+_SESSION_HAS_BACKGROUNDED: bool = False
+_PENDING_BACKGROUND_NOTICE: str | None = None
 
 # --- multi_edit batching nudge ------------------------------------------------
-_CONSECUTIVE_EDITS = 0
-_MULTI_EDIT_NUDGED = False
-_PENDING_MULTI_EDIT_NOTICE = None
+_CONSECUTIVE_EDITS: int = 0
+_MULTI_EDIT_NUDGED: bool = False
+_PENDING_MULTI_EDIT_NOTICE: str | None = None
 
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time
 # by the module that owns each setting (_turn.py, _compress.py) — this is
 # just the shared home so a cross-module `st.NAME = x` mutation (tests, or
 # /autocompress etc.) is visible everywhere.
-REASONING_ONLY_RETRY_LIMIT = None
-MALFORMED_STREAM_RETRY_LIMIT = None
-FORCED_FINAL_MAX_TOKENS = None
-EMPTY_TURN_RETRY_LIMIT = None
-REASONING_ONLY_CHAR_LIMIT = None
-RECOVERY_TEMPERATURE = None
-RECOVERY_TOP_P = None
-MAX_MODEL_TURNS = None
+REASONING_ONLY_RETRY_LIMIT: int | None = None
+MALFORMED_STREAM_RETRY_LIMIT: int | None = None
+FORCED_FINAL_MAX_TOKENS: int | None = None
+EMPTY_TURN_RETRY_LIMIT: int | None = None
+REASONING_ONLY_CHAR_LIMIT: int | None = None
+RECOVERY_TEMPERATURE: float | None = None
+RECOVERY_TOP_P: float | None = None
+MAX_MODEL_TURNS: int | None = None
 
 # --- reasoning display ---------------------------------------------------
 # Whether live reasoning_content is streamed to the terminal as it arrives.
@@ -108,17 +121,16 @@ MAX_MODEL_TURNS = None
 # mechanism as /theme); the full text of the most recent turn's reasoning
 # is always captured into _LAST_REASONING regardless, so /reasoning show
 # works even right after switching into collapsed mode.
-import os as _os
-REASONING_VISIBLE = _os.environ.get("NX_REASONING_VISIBLE", "1") not in ("0", "false", "off")
-_LAST_REASONING = ""
+REASONING_VISIBLE: bool = os.environ.get("NX_REASONING_VISIBLE", "1") not in ("0", "false", "off")
+_LAST_REASONING: str = ""
 
 # --- auto context-compression -------------------------------------------------
-AUTOCOMPRESS_PERCENT = None
-AUTOCOMPRESS_DEFAULT = None
-COMPRESS_KEEP = None
+AUTOCOMPRESS_PERCENT: float | None = None
+AUTOCOMPRESS_DEFAULT: float | None = None
+COMPRESS_KEEP: int | None = None
 
 # --- usage metrics -------------------------------------------------------------
-_METRICS = None  # set to a _Metrics() instance in _metrics.py
+_METRICS: "_Metrics | None" = None  # set to a _Metrics() instance in _metrics.py
 
 # --- native tool-calling confirmation ------------------------------------------
 # Set True by _handle_native_tool_calls() the first time a turn actually comes
@@ -132,16 +144,16 @@ _METRICS = None  # set to a _Metrics() instance in _metrics.py
 # redundant and at worst fight/override llama.cpp's own tool-calling grammar.
 # Reset per source switch (see switch_source()) since a different endpoint
 # may behave differently.
-_NATIVE_TOOL_CALLS_CONFIRMED = False
+_NATIVE_TOOL_CALLS_CONFIRMED: bool = False
 
 # --- write/edit checkpoint stack (for /undo) -----------------------------------
 # Populated by run_tool() after a successful write_file/edit_file/multi_edit;
 # see _undo.py for the entry shape and undo_last()'s restore logic.
-_UNDO_STACK = []
+_UNDO_STACK: list[dict[str, Any]] = []
 
 # --- read-only tool result cache ----------------------------------------------
 # Keyed by (tool name, json.dumps(sorted args)) -> tool result string. Populated
 # and consulted only by run_tool() for idempotent reads (read_file/list_dir);
 # invalidated per-path on write_file/edit_file/multi_edit and cleared entirely
 # on run_bash (which can touch anything). See run_tool()'s docstring note.
-_TOOL_RESULT_CACHE = {}
+_TOOL_RESULT_CACHE: dict[tuple[str, str], str] = {}

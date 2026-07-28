@@ -51,12 +51,15 @@ Four events:
                         chatbox can inherit VMIN=0/ISIG-off, breaking Enter
                         and leaving the terminal stuck in raw mode.
 """
+from __future__ import annotations
+
 import os
 import select
 import sys
 import termios
 import threading
 import time
+from typing import Any
 
 from . import _state as st
 
@@ -68,7 +71,7 @@ _INTERRUPT_RESTORED.set()  # initially: nothing to restore (OK to proceed)
 st._INTERRUPT_THREAD = None
 
 
-def _interrupt_watcher():
+def _interrupt_watcher() -> None:
     """Persistent daemon: park while idle, read stdin for bare Esc while armed.
 
     When armed (during model generation) stdin is put into raw mode (ISIG off so
@@ -89,10 +92,10 @@ def _interrupt_watcher():
     if not os.isatty(fd):
         return
     try:
-        old = termios.tcgetattr(fd)
+        old: list[Any] = termios.tcgetattr(fd)
     except Exception:
         return
-    new = old[:]
+    new: list[Any] = old[:]
     new[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
     new[0] &= ~termios.ICRNL
     new[6][termios.VMIN] = 0
@@ -158,7 +161,7 @@ def _interrupt_watcher():
             _INTERRUPT_RESTORED.set()
 
 
-def _drain_redirect_text(fd, raw_termios):
+def _drain_redirect_text(fd: int, raw_termios: list[Any]) -> str:
     """After a bare Esc fires, keep reading stdin (still in raw mode) for a
     short grace window so a user typing a redirect right away isn't cut off
     mid-word. Returns the typed text, ending in "\n" if Enter was pressed
@@ -171,7 +174,7 @@ def _drain_redirect_text(fd, raw_termios):
     widget — full editing happens in the chatbox once the redirect is either
     injected or handed over as a prefill.
     """
-    buf = []
+    buf: list[str] = []
     deadline = time.time() + 2.0  # generous — covers stream-close + tool teardown
     while _INTERRUPT_ARMED.is_set() and time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 0.05)
@@ -184,7 +187,7 @@ def _drain_redirect_text(fd, raw_termios):
         if c in (b"\r", b"\n"):
             buf.append("\n")
             break
-        if c == b"\x7f" or c == b"\x08":  # backspace
+        if c in (b"\x7f", b"\x08"):  # backspace
             if buf:
                 buf.pop()
             continue
@@ -200,7 +203,7 @@ def _drain_redirect_text(fd, raw_termios):
     return "".join(buf)
 
 
-def _ensure_interrupt_watcher():
+def _ensure_interrupt_watcher() -> None:
     """Start the singleton interrupt watcher thread if it isn't already alive.
 
     Called lazily before the first model turn (and defensively on every turn —

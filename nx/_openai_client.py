@@ -11,7 +11,10 @@ Response objects are generic dict-attribute wrappers (`_Obj`) rather than
 typed models — nx's own code (`_stream_parse.py`, `_metrics.py`) only ever
 does `getattr`/`.get()`-style access on them, so exact typing isn't needed.
 """
+from __future__ import annotations
+
 import json
+from typing import Any, Iterator
 
 import httpx
 
@@ -21,7 +24,14 @@ class APIError(Exception):
     (or None), mirroring the attribute nx's context-window overrun probe
     (`_sources.py:_ctx_from_overrun_probe`) reads to extract the server's
     error message."""
-    def __init__(self, message="", *, body=None, status_code=None, request=None):
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        body: Any = None,
+        status_code: int | None = None,
+        request: httpx.Request | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.body = body
@@ -32,7 +42,7 @@ class APIError(Exception):
 class APIConnectionError(APIError):
     """Raised when the request never reached a server (DNS/refused/timeout),
     as opposed to APIError for a reachable server returning an error status."""
-    def __init__(self, message="connection error", *, request=None):
+    def __init__(self, message: str = "connection error", *, request: httpx.Request | None = None):
         super().__init__(message, request=request)
 
 
@@ -45,10 +55,10 @@ class _Obj:
     exclusivity)."""
     __slots__ = ("_raw",)
 
-    def __init__(self, raw):
+    def __init__(self, raw: Any):
         object.__setattr__(self, "_raw", raw if isinstance(raw, dict) else {})
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         v = self._raw.get(name)
         if isinstance(v, dict):
             return _Obj(v)
@@ -56,14 +66,14 @@ class _Obj:
             return [_Obj(x) if isinstance(x, dict) else x for x in v]
         return v
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"_Obj({self._raw!r})"
 
-    def model_dump(self):
+    def model_dump(self) -> dict[str, Any]:
         return self._raw
 
     @property
-    def model_extra(self):
+    def model_extra(self) -> dict[str, Any]:
         return self._raw
 
 
@@ -72,10 +82,10 @@ class _ChatStream:
     `data:` line (skipping the terminal `[DONE]`). `.close()` releases the
     underlying connection — mirrors the openai SDK stream object's contract
     that `_LoggingStream`/`open_stream()` callers rely on."""
-    def __init__(self, resp):
+    def __init__(self, resp: httpx.Response):
         self._resp = resp
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[_Obj]:
         for line in self._resp.iter_lines():
             if not line or not line.startswith("data:"):
                 continue
@@ -88,18 +98,28 @@ class _ChatStream:
                 continue
             yield _Obj(obj)
 
-    def close(self):
+    def close(self) -> None:
         self._resp.close()
 
 
 class _Completions:
-    def __init__(self, client):
+    def __init__(self, client: "OpenAI"):
         self._client = client
 
-    def create(self, *, model, messages, stream=False, tools=None,
-               tool_choice=None, stream_options=None, timeout=None,
-               extra_body=None, **kwargs):
-        payload = {"model": model, "messages": messages, "stream": stream}
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        stream: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        stream_options: dict[str, Any] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> _ChatStream | _Obj:
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
         if tools is not None:
             payload["tools"] = tools
         if tool_choice is not None:
@@ -118,15 +138,15 @@ class _Completions:
 
 
 class _Chat:
-    def __init__(self, client):
+    def __init__(self, client: "OpenAI"):
         self.completions = _Completions(client)
 
 
 class _Models:
-    def __init__(self, client):
+    def __init__(self, client: "OpenAI"):
         self._client = client
 
-    def list(self, timeout=None):
+    def list(self, timeout: float | httpx.Timeout | None = None) -> _Obj:
         req = self._client._client.build_request("GET", "/models", timeout=timeout)
         resp = self._client._send(req, stream=False)
         return _Obj(resp.json())
@@ -135,7 +155,12 @@ class _Models:
 class OpenAI:
     """Just enough of `openai.OpenAI` for nx: base_url + api_key + optional
     default_headers, `.chat.completions.create()`, `.models.list()`."""
-    def __init__(self, base_url, api_key=None, default_headers=None):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        default_headers: dict[str, str] | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if default_headers:
@@ -149,7 +174,7 @@ class OpenAI:
         self.chat = _Chat(self)
         self.models = _Models(self)
 
-    def _send(self, req, stream):
+    def _send(self, req: httpx.Request, stream: bool) -> httpx.Response:
         try:
             resp = self._client.send(req, stream=stream)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,

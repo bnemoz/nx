@@ -19,6 +19,7 @@ import os
 import re
 import select
 import sys
+from typing import Optional
 
 from ._ansi import DIM, RESET, C, raw_mode
 from ._risk import _local_risk_hint, LEVEL_ORDER
@@ -30,7 +31,7 @@ _DIFF_CONTEXT = 2
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def _diff_preview(before, after, *, context=_DIFF_CONTEXT):
+def _diff_preview(before: str, after: str, *, context: int = _DIFF_CONTEXT) -> str:
     """Render a colored unified diff of `before` -> `after` for the approval
     prompt, with old/new line numbers prefixed on each line. Returns "" if the
     two are identical. Purely a terminal-UX helper — never sent to the model,
@@ -62,7 +63,7 @@ def _diff_preview(before, after, *, context=_DIFF_CONTEXT):
     return "\n".join(out)
 
 
-def _diff_hunk(before, after, *, context=3):
+def _diff_hunk(before: str, after: str, *, context: int = 3) -> str:
     """Plain (no-ANSI) unified diff of `before` -> `after`, for feeding back to
     the model as tool output so it doesn't need to read_file the whole file
     again just to see what changed. Returns "" if identical."""
@@ -80,13 +81,13 @@ _LEVEL_ALIASES = {
 }
 
 
-def _normalize_level(arg):
+def _normalize_level(arg: str) -> Optional[str]:
     """Resolve 'med' → 'medium', 'hi' → 'high', etc. Returns the canonical
     level name or None if the input isn't recognised."""
     return _LEVEL_ALIASES.get(arg.lower().strip())
 
 
-def _normalize_approval(arg):
+def _normalize_approval(arg: str) -> tuple[Optional[str], Optional[str]]:
     """Resolve approval setting aliases.
 
     Returns (kind, value):
@@ -100,13 +101,12 @@ def _normalize_approval(arg):
         return "prompt_all", None
     if raw == "yolo":
         return "yolo", None
-    lvl = _normalize_level(raw)
-    if lvl:
+    if lvl := _normalize_level(raw):
         return "level", lvl
     return None, None
 
 
-def _approval_display():
+def _approval_display() -> str:
     if st.YOLO:
         return "off (yolo)"
     if st.APPROVE_LEVEL is None:
@@ -114,7 +114,7 @@ def _approval_display():
     return st.APPROVE_LEVEL
 
 
-def _apply_approval(kind, level=None, *, update_default=True):
+def _apply_approval(kind: Optional[str], level: Optional[str] = None, *, update_default: bool = True) -> bool:
     if kind == "yolo":
         st.YOLO = True
         st.APPROVE_LEVEL = None
@@ -143,7 +143,7 @@ class _EscToChat(Exception):
     pass
 
 
-def _ask_approval(prompt):
+def _ask_approval(prompt: str) -> str:
     """Read a single keypress for a Y/n/esc approval prompt. Returns one of
     'y', 'n', 'esc'. Esc is accepted both as the bare Esc key (read in raw
     mode) and as the letter 'e'/'E' for terminals where raw mode isn't
@@ -209,7 +209,7 @@ def _ask_approval(prompt):
         return result
 
 
-def _confirm(action, preview=None):
+def _confirm(action: str, preview: Optional[str] = None) -> bool:
     """Decide whether to run `action`. Returns True to proceed, False to deny.
     Raises `_EscToChat` if the user presses Esc — propagating up so the turn
     stops and the REPL drops back to the chat input.

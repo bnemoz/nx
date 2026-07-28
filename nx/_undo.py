@@ -11,8 +11,11 @@ entry and restores every file in it in one step, so undoing a `multi_edit`
 or `sed_edit` call reverts all the files it touched together, not one at a
 time.
 """
+from __future__ import annotations
+
 import os
 import time
+from typing import Optional, TypedDict
 
 from ._env import _env_int
 from . import _state as st
@@ -20,7 +23,19 @@ from . import _state as st
 MAX_UNDO = _env_int("NX_MAX_UNDO", 20)
 
 
-def _read_prior(path):
+class FileSnapshot(TypedDict):
+    path: str
+    existed: bool
+    content: Optional[str]
+
+
+class Checkpoint(TypedDict):
+    tool: str
+    ts: float
+    files: list[FileSnapshot]
+
+
+def _read_prior(path: str) -> Optional[str]:
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -28,7 +43,7 @@ def _read_prior(path):
         return None
 
 
-def snapshot(path):
+def snapshot(path: Optional[str]) -> Optional[FileSnapshot]:
     """Capture a file's state before a write/edit tool touches it."""
     if not path:
         return None
@@ -41,7 +56,7 @@ def snapshot(path):
     return {"path": path, "existed": existed, "content": content}
 
 
-def push_checkpoint(tool, snaps):
+def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     """`snaps` is a list of per-file snapshot dicts (as from `snapshot()`);
     entries with a None snapshot are dropped. Pushes nothing if the list ends
     up empty (e.g. every file was unreadable)."""
@@ -53,26 +68,26 @@ def push_checkpoint(tool, snaps):
         del st._UNDO_STACK[0]
 
 
-def list_checkpoints():
+def list_checkpoints() -> list[Checkpoint]:
     """Pending checkpoints, most recent first — for `/undo --list`."""
     return list(reversed(st._UNDO_STACK))
 
 
-def undo_last():
+def undo_last() -> tuple[Optional[Checkpoint], str]:
     """Revert every file in the most recent checkpointed call. Returns (entry, message)."""
     if not st._UNDO_STACK:
         return None, "nothing to undo"
-    entry = st._UNDO_STACK.pop()
-    reverted, errors = [], []
+    entry: Checkpoint = st._UNDO_STACK.pop()
+    reverted: list[str] = []
+    errors: list[str] = []
     for snap in entry["files"]:
         path = snap["path"]
         try:
             if snap["existed"]:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(snap["content"])
-            else:
-                if os.path.exists(path):
-                    os.remove(path)
+            elif os.path.exists(path):
+                os.remove(path)
             reverted.append(path)
         except OSError as e:
             errors.append(f"{path}: {e}")

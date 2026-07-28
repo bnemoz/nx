@@ -23,12 +23,18 @@ every switch_source() since a different endpoint/model may behave
 differently. Never raises: any probe failure degrades to CAPABILITY_TEXT
 after the delay budget, matching the "degrade, don't demand" convention.
 """
+from __future__ import annotations
+
 import json
 import re
 import threading
+from typing import TYPE_CHECKING
 
 from ._grammar import build_tool_call_grammar
 from . import _state as st
+
+if TYPE_CHECKING:
+    from ._sources import Source
 
 CAPABILITY_NATIVE = "native"
 CAPABILITY_GRAMMAR = "grammar"
@@ -56,7 +62,7 @@ _PROBE_MESSAGES = [
 _PROBE_GRAMMAR, _PROBE_TRIGGER = build_tool_call_grammar([_PROBE_TOOL])
 
 
-def _valid_probe_tool_call(name, raw_args):
+def _valid_probe_tool_call(name: str | None, raw_args: str | None) -> bool:
     if name != "nx_probe":
         return False
     try:
@@ -66,7 +72,7 @@ def _valid_probe_tool_call(name, raw_args):
     return isinstance(args, dict) and "echo" in args
 
 
-def _probe_native(src, mid):
+def _probe_native(src: "Source", mid: str) -> bool:
     """One non-streaming request with tools=[_PROBE_TOOL]. Returns True if the
     server answers with a structurally valid native tool_calls entry."""
     try:
@@ -92,7 +98,7 @@ def _probe_native(src, mid):
 _TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 
-def _probe_grammar(src, mid):
+def _probe_grammar(src: "Source", mid: str) -> bool:
     """One non-streaming request with the GBNF grammar for _PROBE_TOOL
     attached via extra_body. Returns True if a well-formed <tool_call> tag
     with valid JSON comes back."""
@@ -123,7 +129,7 @@ def _probe_grammar(src, mid):
         obj.get("name"), json.dumps(obj.get("arguments") or {}))
 
 
-def probe_capability(src, mid):
+def probe_capability(src: "Source", mid: str) -> str:
     """Classify src's tool-calling protocol for model `mid`. Never raises;
     worst case (both probes fail/error) returns CAPABILITY_TEXT."""
     if _probe_native(src, mid):
@@ -133,10 +139,10 @@ def probe_capability(src, mid):
     return CAPABILITY_TEXT
 
 
-_PROBE_STARTED = set()  # id(Source) currently being probed (avoid dupe threads)
+_PROBE_STARTED: set[int] = set()  # id(Source) currently being probed (avoid dupe threads)
 
 
-def ensure_capability_probe(src):
+def ensure_capability_probe(src: "Source | None") -> None:
     """Start a background thread to classify `src`'s tool-calling protocol if
     it isn't already known and no probe is in flight for it. The result lands
     in src._capability; callers (_grammar_extra_body, the native/text branch
