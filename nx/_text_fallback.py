@@ -70,6 +70,46 @@ def _escape_bare_control_chars(raw):
     return "".join(out)
 
 
+TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _strip_trailing_commas(raw):
+    """Drop a comma immediately before a closing `}`/`]` — small models often
+    leave one behind after reordering or dropping the last argument."""
+    return TRAILING_COMMA_RE.sub(r"\1", raw)
+
+
+def _single_quotes_to_double(raw):
+    """Swap `'` for `"` when the body has no double quotes at all — i.e. the
+    model wrote the whole object with Python-style single-quoted strings.
+    Skipped whenever a `"` is already present, since blindly swapping would
+    then also corrupt apostrophes inside otherwise-valid string literals."""
+    if '"' in raw:
+        return raw
+    return raw.replace("'", '"')
+
+
+def repair_json_candidates(raw):
+    """Cheap, mechanical JSON repair heuristics, worth trying before treating
+    a parse failure as fatal (see `_escape_bare_control_chars` docstring for
+    the rationale: small models produce fixable-not-fatal JSON far more often
+    than genuinely unparseable output). Returns candidate strings to try with
+    `json.loads`, original first, each subsequent one a incrementally more
+    aggressive repair.
+    """
+    candidates = [raw]
+    step = _escape_bare_control_chars(raw)
+    if step != raw:
+        candidates.append(step)
+    step2 = _strip_trailing_commas(step)
+    if step2 != step:
+        candidates.append(step2)
+    step3 = _single_quotes_to_double(step2)
+    if step3 != step2:
+        candidates.append(step3)
+    return candidates
+
+
 def parse_text_calls_with_errors(content):
     """Like parse_text_calls(), but also returns per-tag parse error strings.
 
@@ -98,7 +138,7 @@ def parse_text_calls_with_errors(content):
         raw_body = match.group(1)
         obj = None
         parse_exc = None
-        for candidate in (raw_body, _escape_bare_control_chars(raw_body)):
+        for candidate in repair_json_candidates(raw_body):
             try:
                 obj = json.loads(candidate)
                 break

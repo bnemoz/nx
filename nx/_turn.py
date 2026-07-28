@@ -30,7 +30,7 @@ from ._special_tokens import (
 from ._stream_parse import StreamParser
 from ._text_fallback import (
     parse_text_calls_with_errors, _escape_tool_protocol_delimiters, _sanitize_tool_result,
-    TOOL_TAGS, TOOL_RESULT_PROTOCOL_NOTE, TOOL_RESULT_CHARS,
+    TOOL_TAGS, TOOL_RESULT_PROTOCOL_NOTE, TOOL_RESULT_CHARS, repair_json_candidates,
 )
 from ._compress import (
     open_stream, compress, _maybe_autocompress, _nudge_current_user_turn,
@@ -305,11 +305,19 @@ def _handle_native_tool_calls(messages, tcs, text, finish_reasons,
     parsed_args = []
     parse_error = None
     for c in ordered:
-        try:
-            parsed_args.append(json.loads(c["args"] or "{}"))
-        except json.JSONDecodeError as e:
-            parse_error = (c, e)
+        raw = c["args"] or "{}"
+        obj = None
+        err = None
+        for candidate in repair_json_candidates(raw):
+            try:
+                obj = json.loads(candidate)
+                break
+            except json.JSONDecodeError as e:
+                err = e
+        if obj is None:
+            parse_error = (c, err)
             break
+        parsed_args.append(obj)
     if parse_error is not None:
         c, err = parse_error
         detail = _tool_args_parse_error(c, err, finish_reasons)
