@@ -142,6 +142,31 @@ def _rm_is_recursive_force(parts: list[str]) -> bool:
     return recursive and force
 
 
+
+# Paths whose write/edit is self-executing or affects trust boundaries beyond
+# "this one file's contents" — git hooks run on checkout/commit with no
+# further confirmation, CI workflow files run on a shared runner on push/PR,
+# and Makefile/build-script targets are commonly invoked blindly. These stay
+# "high" even though they resolve in_project, since the in-project "medium"
+# bucket assumes contained/reversible effects, which none of these are.
+_SENSITIVE_RELPATH_RES = [
+    re.compile(r"(^|/)\.git/hooks/"),
+    re.compile(r"(^|/)\.github/workflows/"),
+    re.compile(r"(^|/)\.githooks/"),
+]
+_SENSITIVE_BASENAMES = {"makefile", "gnumakefile"}
+
+
+def _is_sensitive_project_path(abs_path: str, project_root: str) -> bool:
+    try:
+        rel = os.path.relpath(abs_path, project_root).replace(os.sep, "/")
+    except ValueError:
+        return False
+    if os.path.basename(abs_path).lower() in _SENSITIVE_BASENAMES:
+        return True
+    return any(rx.search(rel) for rx in _SENSITIVE_RELPATH_RES)
+
+
 def _local_risk_hint(action: str) -> tuple[str, str] | None:
     """Return (level, reason) when `action` is unambiguously classifiable per
     RISK_SYSTEM's own bucket definitions, without a model round-trip. Returns
@@ -152,8 +177,11 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
     path = _extract_action_path(action)
     if path is None:
         return None
-    scope = _classify_action_path(path).get("path_scope")
+    info = _classify_action_path(path)
+    scope = info.get("path_scope")
     if scope == "in_project":
+        if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT):
+            return ("high", "writes a self-executing hook/CI/build file")
         return ("medium", "writes a file inside the project")
     # Outside-project writes need judgment calls the model is better placed
     # to make (dotfiles vs. a legitimate sibling project) — fall through.
