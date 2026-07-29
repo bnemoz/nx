@@ -125,51 +125,44 @@ def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
     return [(o, "") for _, o in scored]
 
 
-# Lazily-built, process-lifetime cache of project-relative file paths, used
-# for '@file' completion. Not refreshed mid-session (files added after the
-# chatbox first renders won't show up) -- a cheap tradeoff for a suggestion
-# list, not a source of truth for what gets read.
-_FILE_INDEX: list[str] | None = None
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
               ".mypy_cache", ".pytest_cache", ".ruff_cache"}
-_FILE_INDEX_CAP = 5000
 
 
-def _build_file_index() -> list[str]:
-    """Breadth-first so the cap truncates depth evenly across the tree instead
-    of exhausting the budget inside one early, file-heavy branch and leaving
-    later directories (and all their subfolders) completely unindexed."""
-    global _FILE_INDEX
-    from collections import deque
-
-    from ._risk import _detect_project_root
-    root = _detect_project_root()
-    files: list[str] = []
-    queue: deque[str] = deque([root])
-    while queue:
-        dirpath = queue.popleft()
-        try:
-            entries = sorted(os.scandir(dirpath), key=lambda e: e.name)
-        except OSError:
+def _file_entries(root: str, directory: str) -> list[str]:
+    """Return visible immediate children of *directory*, relative to *root*."""
+    try:
+        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except OSError:
+        return []
+    result = []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
             continue
-        for entry in entries:
-            if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
-                continue
-            rel = os.path.relpath(entry.path, root)
-            is_dir = entry.is_dir(follow_symlinks=False)
-            files.append(rel + "/" if is_dir else rel)
-            if len(files) >= _FILE_INDEX_CAP:
-                _FILE_INDEX = files
-                return files
-            if is_dir:
-                queue.append(entry.path)
-    _FILE_INDEX = files
-    return files
+        rel = os.path.relpath(entry.path, root)
+        result.append(rel + "/" if entry.is_dir(follow_symlinks=False) else rel)
+    return result
 
 
 def _match_file_paths(prefix: str) -> list[str]:
-    """`prefix` excludes the leading '@'. Returns matching relative paths, best first."""
-    files = _FILE_INDEX if _FILE_INDEX is not None else _build_file_index()
+    """Complete the typed directory, without building a capped tree-wide cache.
+
+    Once a user has typed ``@a/b/``, only ``a/b`` is read. This keeps each
+    lookup small, reflects files created during the session, and works at any
+    depth instead of silently omitting paths after an arbitrary index limit.
+    """
+    from ._risk import _detect_project_root
+
+    root = os.path.realpath(_detect_project_root())
+    parent_part, _ = os.path.split(prefix)
+    directory = os.path.realpath(os.path.join(root, parent_part))
+    try:
+        if os.path.commonpath((root, directory)) != root:
+            return []
+    except ValueError:
+        return []
+
+    files = _file_entries(root, directory)
     q = prefix.lower()
     if not q:
         return files[:8]
@@ -180,6 +173,13 @@ def _match_file_paths(prefix: str) -> list[str]:
             scored.append((s, f))
     scored.sort(key=lambda t: -t[0])
     return [f for _, f in scored[:8]]
+
+
+def _accept_file_completion(line: str, col: int, start: int, chosen: str) -> tuple[str, int]:
+    """Insert a file completion, keeping a selected directory open to browse."""
+    suffix = "" if chosen.endswith("/") else " "
+    completed = line[:start] + "@" + chosen + suffix + line[col:]
+    return completed, start + 1 + len(chosen) + len(suffix)
 
 
 def _at_token_at_cursor(line: str, col: int) -> tuple[int, str] | None:
@@ -524,8 +524,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                     if current_kind == "file" and current_matches:
                         chosen = current_matches[sel_idx][0]
                         line = buf[row]
-                        buf[row] = line[:current_at_start or 0] + "@" + chosen + " " + line[col:]
-                        col = (current_at_start or 0) + 1 + len(chosen) + 1
+                        buf[row], col = _accept_file_completion(
+                            line, col, current_at_start or 0, chosen)
                         render()
                         continue
                     if current_kind == "slash" and current_matches and len(buf) == 1 \
@@ -557,8 +557,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                     if current_matches and current_kind == "file":
                         chosen = current_matches[sel_idx][0]
                         line = buf[row]
-                        buf[row] = line[:current_at_start or 0] + "@" + chosen + " " + line[col:]
-                        col = (current_at_start or 0) + 1 + len(chosen) + 1
+                        buf[row], col = _accept_file_completion(
+                            line, col, current_at_start or 0, chosen)
                     elif current_kind == "arg" and current_matches:
                         cmd = buf[row].split(" ", 1)[0]
                         buf[row] = cmd + " " + current_matches[sel_idx][0]
@@ -586,5 +586,3 @@ def read_multiline(initial: str = "", history: list[str] | None = None) -> str:
         raise
     except (OSError, termios.error):
         return _chatbox_fallback(f"{C.ACCENT}you ›{RESET} ")
-
-
