@@ -136,19 +136,33 @@ _FILE_INDEX_CAP = 5000
 
 
 def _build_file_index() -> list[str]:
+    """Breadth-first so the cap truncates depth evenly across the tree instead
+    of exhausting the budget inside one early, file-heavy branch and leaving
+    later directories (and all their subfolders) completely unindexed."""
     global _FILE_INDEX
+    from collections import deque
+
     from ._risk import _detect_project_root
     root = _detect_project_root()
     files: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-        names = [(dn, True) for dn in dirnames] + [(fn, False) for fn in filenames]
-        for name, is_dir in names:
-            rel = os.path.relpath(os.path.join(dirpath, name), root)
+    queue: deque[str] = deque([root])
+    while queue:
+        dirpath = queue.popleft()
+        try:
+            entries = sorted(os.scandir(dirpath), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
+                continue
+            rel = os.path.relpath(entry.path, root)
+            is_dir = entry.is_dir(follow_symlinks=False)
             files.append(rel + "/" if is_dir else rel)
             if len(files) >= _FILE_INDEX_CAP:
                 _FILE_INDEX = files
                 return files
+            if is_dir:
+                queue.append(entry.path)
     _FILE_INDEX = files
     return files
 
