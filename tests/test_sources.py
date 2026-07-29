@@ -55,6 +55,18 @@ assert nx.SOURCES["zai"].api_key == "fake-zai-key-12345", "$indirection failed"
 assert nx.SOURCES["zai"].model == "glm-x-preview"
 print("  PASS\n")
 
+# --- Test 2b: unresolved API-key indirection must not become sk-noop ---
+os.environ.pop("NX_MISSING_API_KEY", None)
+try:
+    nx._resolve_api_key("$NX_MISSING_API_KEY")
+except ValueError as e:
+    assert "NX_MISSING_API_KEY" in str(e)
+    assert "not set or empty" in str(e)
+else:
+    raise AssertionError("unresolved API-key reference should fail loudly")
+print("TEST 2b: unresolved API-key reference fails loudly")
+print("  PASS\n")
+
 # --- Test 3: switch_source ---
 print("TEST 3: switch_source('zai')")
 old_client_id = id(nx.client)

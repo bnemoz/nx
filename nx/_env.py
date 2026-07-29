@@ -10,6 +10,24 @@ def _env_file_path() -> str:
     return os.path.expanduser(os.environ.get("NX_ENV_FILE", "~/.env"))
 
 
+def _parse_env_value(value: str) -> str:
+    """Return a .env value, removing comments outside quoted values.
+
+    A ``#`` begins a comment only when it follows whitespace. This keeps
+    values such as URLs or secrets containing a literal ``#`` intact while
+    supporting the usual ``KEY=value # explanation`` form.
+    """
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    comment_at = next(
+        (i for i, char in enumerate(value)
+         if char == "#" and i > 0 and value[i - 1].isspace()),
+        None,
+    )
+    return value[:comment_at].rstrip() if comment_at is not None else value
+
+
 def _load_env_file() -> None:
     try:
         with open(_env_file_path(), encoding="utf-8") as f:
@@ -27,10 +45,7 @@ def _load_env_file() -> None:
             k = k[len("export "):].strip()
         if not k or k in os.environ:
             continue
-        v = v.strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-            v = v[1:-1]
-        os.environ[k] = v
+        os.environ[k] = _parse_env_value(v)
 
 
 def _matches_key(line: str, name: str) -> bool:

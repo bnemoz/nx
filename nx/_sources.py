@@ -417,9 +417,21 @@ class Source:
 
 
 def _resolve_api_key(val: str | None) -> str | None:
-    """$name → look up env var (populated from ~/.env if present); else literal."""
+    """$name → look up a non-empty env var; otherwise return the literal.
+
+    A missing reference is a configuration error. Returning an empty string
+    here would let ``Source`` replace it with its local-server ``sk-noop``
+    placeholder, making a typo in a remote API key look valid until a request
+    fails much later.
+    """
     if val and val.startswith("$"):
-        return os.environ.get(val[1:], "")
+        name = val[1:]
+        resolved = os.environ.get(name)
+        if not resolved:
+            raise ValueError(
+                f"nx: API key reference {val!r} is unresolved: "
+                f"environment variable {name!r} is not set or empty")
+        return resolved
     return val
 
 
