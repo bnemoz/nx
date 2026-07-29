@@ -147,14 +147,22 @@ def _ask_approval(prompt: str) -> str:
     """Read a single keypress for a Y/n/esc approval prompt. Returns one of
     'y', 'n', 'esc'. Esc is accepted both as the bare Esc key (read in raw
     mode) and as the letter 'e'/'E' for terminals where raw mode isn't
-    usable. Falls back to line-based `input()` when stdin isn't a TTY."""
+    usable. Falls back to line-based `input()` when stdin isn't a TTY.
+
+    Only an explicit Y (or Enter, the documented default) permits an action.
+    Invalid input is discarded and the prompt is shown again; it must never
+    inherit the default approval, especially for high-risk actions.
+    """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         ans = input(prompt).strip().lower()
+        if ans in ("", "y", "yes"):
+            return "y"
         if ans in ("esc", "e", "\x1b"):
             return "esc"
         if ans == "n":
             return "n"
-        return "y"
+        print("Unrecognized response; please enter Y, n, or esc.")
+        return _ask_approval(prompt)
     fd = sys.stdin.fileno()
     with raw_mode(fd):
         sys.stdout.write(prompt)
@@ -183,13 +191,13 @@ def _ask_approval(prompt: str) -> str:
                     # escape sequence, approving this one action without
                     # ever setting YOLO — see changelog).
                     st.toggle_yolo()
-                    sys.stdout.write(f"{DIM}yolo {'on' if st.YOLO else 'off'} → Y{RESET}\n")
+                    sys.stdout.write(f"{DIM}yolo {'on' if st.YOLO else 'off'}; please press Y, n, or esc{RESET}\n")
                     sys.stdout.flush()
-                    return "y"
-                # Any other non-bare-Esc sequence (arrow keys etc.) → default proceed.
-                sys.stdout.write("\n")
+                    return _ask_approval(prompt)
+                # Any other non-bare-Esc sequence is discarded and reprompted.
+                sys.stdout.write(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}\n")
                 sys.stdout.flush()
-                return "y"
+                return _ask_approval(prompt)
             sys.stdout.write(f"{DIM}esc{RESET}\n")
             sys.stdout.flush()
             return "esc"
@@ -203,7 +211,9 @@ def _ask_approval(prompt: str) -> str:
         elif c in ("e", "E"):
             shown, result = "esc", "esc"
         else:
-            shown, result = f"{c} → Y (default)", "y"
+            sys.stdout.write(f"{DIM}unrecognized response; please press Y, n, or esc{RESET}\n")
+            sys.stdout.flush()
+            return _ask_approval(prompt)
         sys.stdout.write(f"{DIM}{shown}{RESET}\n")
         sys.stdout.flush()
         return result
