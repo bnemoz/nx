@@ -1,8 +1,9 @@
 """Read-only tool bodies with no approval/global-state dependency: read_file,
 list_dir, search_files, and the line-number-stripping helper shared by the
-edit tools. write_file/edit_file/multi_edit/run_bash/wait_background stay in
-__init__.py because they call _confirm() (reads the YOLO/APPROVE_LEVEL
-globals) and, for the bash tools, SESSION_HOME/_USER_INTERRUPTED/_log_event.
+edit tools. The mutating tools live in their own submodules instead:
+write_file/edit_file/multi_edit/sed_edit in _edit_tools.py, run_bash/
+wait_background in _bash_jobs.py — both need _confirm() (reads the YOLO/
+APPROVE_LEVEL globals) and other state this module deliberately avoids.
 """
 from __future__ import annotations
 

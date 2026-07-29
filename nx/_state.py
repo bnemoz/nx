@@ -28,6 +28,13 @@ if TYPE_CHECKING:
     from ._sources import Source
     from ._undo import Checkpoint
 
+# --- sessions filesystem root -------------------------------------------------
+# Set (and re-set on every /reload) by __init__.py's top-level assignment from
+# NX_HOME. Kept here so _bash_jobs.py's background-log paths (which live under
+# SESSION_HOME/bg-logs) stay in sync with a mid-test reload without a circular
+# import back into __init__.py.
+SESSION_HOME: str = os.path.expanduser("~/.nx")
+
 # --- sources / active model connection --------------------------------------
 SOURCES: dict[str, "Source"] = {}
 SOURCE_ORDER: list[str] = []   # preserve definition order for /source listing
