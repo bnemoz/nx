@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
-from . import SYSTEM, _PROMPT_FILE, _initial_messages
+from . import _PROMPT_FILE, _initial_messages
 from ._repl import _repl, _cli_sessions, _cli_tokens
 
 _HELP_TEXT = """\

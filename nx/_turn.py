@@ -17,30 +17,28 @@ from ._openai_client import APIConnectionError, APIError
 import httpx
 from rich.console import Console
 from ._ansi import (
-    DIM, BOLD, RESET, LifeSpinner, C,
+    DIM, RESET, LifeSpinner, C,
 )
 from ._approval import _EscToChat
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED, _ensure_interrupt_watcher,
 )
-from ._logging import _log_event, _llog
 from ._metrics import _abbr, _normalize_usage
 from ._special_tokens import (
     LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT, _strip_leaked_tokens,
 )
 from ._stream_parse import StreamParser
 from ._text_fallback import (
-    parse_text_calls_with_errors, _escape_tool_protocol_delimiters, _sanitize_tool_result,
-    TOOL_TAGS, TOOL_RESULT_PROTOCOL_NOTE, TOOL_RESULT_CHARS, repair_json_candidates,
+    parse_text_calls_with_errors, _sanitize_tool_result, repair_json_candidates,
 )
 from ._compress import (
-    open_stream, compress, _maybe_autocompress, _nudge_current_user_turn,
-    _flush_pending_background_notice, _last_is_dangling_tool, RUNTIME_NOTE_RE,
+    _nudge_current_user_turn,
+    _flush_pending_background_notice, _last_is_dangling_tool,
 )
 from ._env import _env_int
 from . import _state as st
 from . import (
-    TOOLS, FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
+    FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
     REASONING_STALL_NUDGE, FORCED_FINAL_NUDGE, EMPTY_TURN_NUDGE,
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,

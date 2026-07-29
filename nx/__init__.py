@@ -50,30 +50,20 @@ Env:   NX_APPROVAL=<all|low|medium|high|yolo>  (persistent default approval mode
 """
 from __future__ import annotations
 
-import atexit
 import glob
 import json
 import os
-import queue
-import random
 import re
 import secrets
-import select
 import shlex
-import unicodedata
-import shutil
 import subprocess
 import sys
-import termios
-import threading
 import time
 import types as _types
 import urllib.error
-import urllib.request
 from typing import Any
 
-import httpx
-from ._openai_client import OpenAI, APIConnectionError, APIError
+from ._openai_client import APIConnectionError, APIError
 
 # --- env file ---------------------------------------------------------------
 from ._env import _load_env_file

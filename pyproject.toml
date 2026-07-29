@@ -25,3 +25,9 @@ packages = ["nx"]
 
 [dependency-groups]
 dev = ["pytest"]
+
+[tool.ruff.lint.per-file-ignores]
+# nx/__init__.py re-exports names from submodules (consumed as `nx.X` by tests
+# and external callers) and imports each submodule right above the section of
+# code that uses it, rather than all at the top — both intentional.
+"nx/__init__.py" = ["F401", "E402"]

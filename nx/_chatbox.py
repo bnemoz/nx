@@ -305,7 +305,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         if _str_width(hints) > max_hints:
             hints = _str_slice_by_width(hints, max_hints - 1) + "…" if max_hints > 1 else "…"
         top_fill = max(0, box_w - 11 - _str_width(hints))
-        stats = f"{len(buf)} line{'s' if len(buf) != 1 else ''} · {sum(len(l) for l in buf)} chars"
+        stats = f"{len(buf)} line{'s' if len(buf) != 1 else ''} · {sum(len(line) for line in buf)} chars"
         max_stats = max(0, box_w - 6)
         if _str_width(stats) > max_stats:
             stats = _str_slice_by_width(stats, max_stats - 1) + "…" if max_stats > 1 else "…"

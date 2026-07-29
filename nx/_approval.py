@@ -71,7 +71,7 @@ def _diff_hunk(before: str, after: str, *, context: int = 3) -> str:
         return ""
     lines = difflib.unified_diff(
         before.splitlines(), after.splitlines(), n=context, lineterm="")
-    return "\n".join(l for l in lines if not (l.startswith("+++") or l.startswith("---")))
+    return "\n".join(line for line in lines if not (line.startswith("+++") or line.startswith("---")))
 
 # Accept full words and common abbreviations (med, hi, lo, m, h, l …).
 _LEVEL_ALIASES = {

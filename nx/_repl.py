@@ -1021,16 +1021,20 @@ def _cli_tokens(args: list[str]) -> bool:
     else:
         probe = None
     if probe is not None:
-        count = lambda text: st.ACTIVE.tokenize_count(text)
+        def count(text):
+            return st.ACTIVE.tokenize_count(text)
         method = f"server /tokenize ({st.ACTIVE.name})"
     else:
         try:
             import tiktoken
             enc = tiktoken.get_encoding("cl100k_base")
-            count = lambda text: len(enc.encode(text))
+
+            def count(text):
+                return len(enc.encode(text))
             method = "tiktoken/cl100k_base (approximate for non-OpenAI models; no /tokenize endpoint found)"
         except ImportError:
-            count = lambda text: max(1, round(len(text) / 3.5))
+            def count(text):
+                return max(1, round(len(text) / 3.5))
             method = "chars/3.5 estimate (no /tokenize endpoint found; pip install tiktoken for a closer approximation)"
     system_tokens = count(SYSTEM)
     tools_tokens = count(json.dumps(tools))

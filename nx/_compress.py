@@ -12,9 +12,8 @@ conversation so in-progress work isn't disturbed.
 """
 from __future__ import annotations
 
-import json
+import os
 import re
-import time
 from typing import Any
 
 import httpx
@@ -71,7 +70,6 @@ MAX_COMPLETION_TOKENS = _env_int("NX_MAX_TOKENS", 16000)
 
 # Backend hint. Set NX_BACKEND=vllm to disable llama.cpp-only recovery
 # knobs (min_p, repeat_penalty, DRY) that vLLM's speculative decoder rejects.
-import os
 RECOVERY_BACKEND = os.environ.get("NX_BACKEND", "").strip().lower()
 
 # Recovery sampler. A gibberish/repetition collapse is a LOW-ENTROPY attractor:

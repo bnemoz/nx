@@ -31,7 +31,6 @@ import threading
 from typing import TYPE_CHECKING
 
 from ._grammar import build_tool_call_grammar
-from . import _state as st
 
 if TYPE_CHECKING:
     from ._sources import Source
