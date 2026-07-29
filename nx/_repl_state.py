@@ -1,0 +1,106 @@
+"""`_ReplState` plus the session-persistence helpers (`_save_current`,
+`_fresh_metrics`, `_reload_metrics_totals`) that every REPL command module
+needs to touch. Split out on its own, below `_repl.py` and the `_cmd_*`
+command modules, so none of them have to import each other to reach these.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from ._metrics import _Metrics, _env_metrics_url
+from ._sessions_io import _safe_title
+from ._sources import _provider_order
+from ._ansi import C, RESET
+from . import _state as st
+from . import _write_session, _load_session
+
+
+class _ReplState:
+    """Mutable REPL session state, threaded through command handlers instead
+    of relying on closures/nonlocal — lets every slash command live as a
+    plain module-level function dispatched from one table (see
+    `_REPL_COMMANDS` in `_repl.py`), rather than some commands being nested
+    if/elif branches and others being separately-extracted `_cmd_*` functions."""
+    __slots__ = ("messages", "session_id", "session_dirty", "history")
+
+    def __init__(
+        self,
+        messages: list[dict[str, Any]],
+        session_id: str | None,
+        session_dirty: bool,
+        history: list[str],
+    ) -> None:
+        self.messages = messages
+        self.session_id = session_id
+        self.session_dirty = session_dirty
+        self.history = history
+
+
+def _save_current(state: _ReplState, meta: dict[str, Any] | None = None) -> None:
+    """Persist `state.messages` to the current session file.
+
+    Title is auto-derived from the first user message (unless the user
+    has set one explicitly with /save <title>). Source and cwd are
+    recorded so a resume can re-select the right endpoint.
+    """
+    if state.session_id is None:
+        return
+    m = dict(meta or {})
+    if "title" not in m:
+        first_user = next(
+            (msg["content"] for msg in state.messages
+             if msg.get("role") == "user" and isinstance(msg.get("content"), str)),
+            "",
+        )
+        t = _safe_title(first_user)
+        if t:
+            m["title"] = t
+    m.setdefault("source", st.ACTIVE.name if st.ACTIVE else None)
+    m.setdefault("cwd", os.getcwd())
+    m.setdefault("model", st.MODEL)
+    # Record the active provider routing (if any) so a /resume re-applies
+    # the same OpenRouter upstream choice. Stored as a bare `order` list
+    # (not the whole extra_body) to keep the session JSON minimal and to
+    # avoid persisting unrelated request-body keys a future feature might add.
+    if st.ACTIVE:
+        order = _provider_order(st.ACTIVE)
+        if order:
+            m["provider"] = order
+    # Merge cumulative token totals into the session JSON so they persist
+    # across restarts and are available to any metrics consumer that reads
+    # the session files (e.g. a dashboard). This is always-on — the numbers
+    # are already in hand from the stats footer, so storing them costs
+    # nothing and a local session log is useful regardless of a push sink.
+    if st._METRICS is not None:
+        m.update(st._METRICS.as_meta())
+    try:
+        _write_session(state.session_id, state.messages, m)
+    except OSError as e:
+        print(f"{C.ERROR}  ✗ couldn't save session: {type(e).__name__}: {e}{RESET}")
+    # Fire-and-forget push to the optional metrics endpoint. Only does
+    # anything if NX_METRICS_URL is set; self-disables on first
+    # failure so a down/absent dashboard never slows the REPL.
+    if st._METRICS is not None:
+        st._METRICS.flush()
+
+
+def _fresh_metrics(session_id: str) -> _Metrics:
+    return _Metrics(
+        session_id, model=st.MODEL,
+        source=st.ACTIVE.name if st.ACTIVE else None,
+        push_url=_env_metrics_url())
+
+
+def _reload_metrics_totals(session_id: str) -> None:
+    if st._METRICS is None:
+        return
+    saved = _load_session(session_id) or {}
+    if isinstance(saved.get("input_tokens"), int):
+        st._METRICS.input_tokens = int(saved.get("input_tokens") or 0)
+        st._METRICS.output_tokens = int(saved.get("output_tokens") or 0)
+        st._METRICS.cache_read_tokens = int(saved.get("cache_read_tokens") or 0)
+        st._METRICS.reasoning_tokens = int(saved.get("reasoning_tokens") or 0)
+        st._METRICS.api_calls = int(saved.get("api_calls") or 0)
+        if saved.get("started_at"):
+            st._METRICS.started_at = float(saved["started_at"])
