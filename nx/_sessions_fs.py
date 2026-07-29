@@ -17,6 +17,8 @@ them up lazily via `import nx as _m` rather than binding them at import time
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import time
@@ -56,6 +58,22 @@ def _index_path() -> str:
     return os.path.join(_sessions_dir(), ".index.json")
 
 
+@contextmanager
+def _exclusive_file_lock(path: str):
+    """Hold an advisory interprocess lock associated with ``path``.
+
+    Session saves are a read-modify-write operation, not just an atomic
+    replacement. The separate lock file keeps the lock valid while the JSON
+    file itself is replaced; the OS releases it if the process exits.
+    """
+    with open(path + ".lock", "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _load_index() -> dict[str, Any]:
     """The sidecar listing index: {session_id: summary dict}. Missing or
     corrupt just returns {}, so callers degrade to a full per-file parse —
@@ -85,9 +103,37 @@ def _update_index(session_id: str, data: dict[str, Any]) -> None:
     full transcript on disk (some can be large — tool outputs, diffs, …).
     Called from _write_session on every save, so the index stays at least
     as fresh as the file it mirrors."""
-    idx = _load_index()
-    idx[session_id] = _summarize_session_data(session_id, data)
-    _write_index(idx)
+    # Different session writers also share this read-modify-write sidecar.
+    # Protect it separately, since their per-session locks are distinct.
+    with _exclusive_file_lock(_index_path()):
+        idx = _load_index()
+        idx[session_id] = _summarize_session_data(session_id, data)
+        _write_index(idx)
+
+
+def _merge_session_messages(
+    existing: list[dict[str, Any]], incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep transcript entries from both writers when ``incoming`` is stale.
+
+    Each REPL owns an in-memory snapshot. Once another process has appended
+    to that session, replacing the file with the stale snapshot would lose
+    those turns. Both snapshots normally share a prefix, so retain the
+    committed transcript and append the other writer's divergent suffix.
+    """
+    if existing == incoming:
+        return incoming
+    if len(existing) <= len(incoming) and existing == incoming[:len(existing)]:
+        return incoming
+    if len(incoming) <= len(existing) and incoming == existing[:len(incoming)]:
+        return existing
+
+    prefix_len = 0
+    for saved, proposed in zip(existing, incoming):
+        if saved != proposed:
+            break
+        prefix_len += 1
+    return existing + incoming[prefix_len:]
 
 
 def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None) -> None:
@@ -101,38 +147,44 @@ def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[s
     os.makedirs(d, exist_ok=True)
     _prune_empty_assistant_messages(messages)
     path = _session_path(session_id)
-    now = time.time()
-    existing = {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            existing = json.load(f)
-        if not isinstance(existing, dict):
-            existing = {}
-    except (OSError, IOError, json.JSONDecodeError):
-        pass
-    # Start from the existing metadata so partial writes (e.g. the session
-    # description refresh, which only passes {"description", "desc_turns"})
-    # don't clobber fields a prior _save_current wrote — token totals,
-    # started_at, etc.  Then let `meta` override on top.
-    data = dict(existing)
-    data["id"] = session_id
-    data["messages"] = messages
-    data["created_at"] = existing.get("created_at", now)
-    data["updated_at"] = now
-    if meta:
-        for k, v in meta.items():
-            if v is not None:
-                data[k] = v
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
-    try:
-        os.utime(path, (data["updated_at"], data["updated_at"]))
-    except (OSError, TypeError, ValueError):
-        pass
-    _update_index(session_id, data)
-
+    # The lock spans reading the current revision through replacing it. A
+    # rename alone prevents corruption, but does not prevent lost updates.
+    with _exclusive_file_lock(path):
+        now = time.time()
+        existing = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                existing = json.load(f)
+            if not isinstance(existing, dict):
+                existing = {}
+        except (OSError, IOError, json.JSONDecodeError):
+            pass
+        existing_messages = existing.get("messages")
+        if not isinstance(existing_messages, list):
+            existing_messages = []
+        # Re-read under the lock and compare with the caller's snapshot. On
+        # a stale save, preserve the committed suffix instead of silently
+        # letting the last writer replace it.
+        merged_messages = _merge_session_messages(existing_messages, messages)
+        data = dict(existing)
+        data["id"] = session_id
+        data["messages"] = merged_messages
+        data["created_at"] = existing.get("created_at", now)
+        data["updated_at"] = now
+        data["revision"] = int(existing.get("revision", 0) or 0) + 1
+        if meta:
+            for k, v in meta.items():
+                if v is not None:
+                    data[k] = v
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        try:
+            os.utime(path, (data["updated_at"], data["updated_at"]))
+        except (OSError, TypeError, ValueError):
+            pass
+        _update_index(session_id, data)
 
 def _load_session(session_id: str) -> dict[str, Any] | None:
     """Read a session file. Returns the dict (id, messages, meta…) or None."""

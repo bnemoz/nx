@@ -88,6 +88,26 @@ def test_write_is_atomic_and_merges_meta():
     print("PASS — re-write preserves existing meta + timestamps")
 
 
+def test_stale_session_save_merges_concurrent_turns():
+    """A stale writer must not replace a turn another process already saved."""
+    sid = "20250101-120000-concurrent"
+    base = [_msg("user", "start")]
+    first_writer = base + [_msg("assistant", "first reply")]
+    second_writer = base + [_msg("user", "second question")]
+
+    m._write_session(sid, base)
+    m._write_session(sid, first_writer)
+    # This is a separate process's stale in-memory snapshot: it did not see
+    # first_writer's reply when it constructed its transcript.
+    m._write_session(sid, second_writer)
+
+    loaded = m._load_session(sid)
+    assert loaded is not None
+    assert loaded["messages"] == first_writer + [_msg("user", "second question")]
+    assert loaded["revision"] == 3
+    print("PASS — stale session save preserves both writers' turns")
+
+
 def test_load_missing_returns_none():
     assert m._load_session("does-not-exist-999") is None
     print("PASS — load of a missing id returns None")
