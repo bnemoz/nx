@@ -48,7 +48,7 @@ Four events:
                         raw-mode termios as its "old" state. Without this
                         handshake the disarm is asynchronous (the watcher may
                         still be in select(0.1) when the chatbox runs) and the
-                        chatbox can inherit VMIN=0/ISIG-off, breaking Enter
+                        chatbox can inherit VMIN=0, breaking Enter
                         and leaving the terminal stuck in raw mode.
 """
 from __future__ import annotations
@@ -79,8 +79,8 @@ st._INTERRUPT_THREAD = None
 def _interrupt_watcher() -> None:
     """Persistent daemon: park while idle, read stdin for bare Esc while armed.
 
-    When armed (during model generation) stdin is put into raw mode (ISIG off so
-    Ctrl+C still kills the process) so we can read without echo. A bare Esc (not
+    When armed (during model generation) stdin is put into raw mode while
+    leaving ISIG enabled, so Ctrl+C still kills the process. A bare Esc (not
     the start of an arrow-key / bracketed-paste / etc. CSI sequence) sets
     _USER_INTERRUPTED. When disarmed (between turns, while the chatbox owns
     stdin) we restore termios and park on _INTERRUPT_ARMED — doing NOTHING with
@@ -101,7 +101,10 @@ def _interrupt_watcher() -> None:
     except Exception:
         return
     new: list[Any] = old[:]
-    new[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
+    # Keep ISIG enabled: clearing it turns Ctrl+C into an ordinary \x03 byte,
+    # which this Esc-only watcher would discard instead of letting the tty
+    # generate SIGINT.
+    new[3] &= ~(termios.ECHO | termios.ICANON)
     new[0] &= ~termios.ICRNL
     new[6][termios.VMIN] = 0
     new[6][termios.VTIME] = 0

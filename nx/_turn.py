@@ -632,7 +632,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # restored cooked mode. Without this handshake the watcher's termios
     # restore is asynchronous (it may still be in select(0.1) when we
     # return), and the chatbox can capture the watcher's raw-mode termios
-    # as its "old" state — leaving the terminal stuck in VMIN=0/ISIG-off
+    # as its "old" state — leaving the terminal stuck in VMIN=0
     # with broken Enter and garbled typing.
     _INTERRUPT_RESTORED.clear()
     _INTERRUPT_ARMED.set()
@@ -688,7 +688,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # We MUST wait for _INTERRUPT_RESTORED before returning — otherwise the
         # watcher's termios restore is asynchronous (it may still be in
         # select(0.1) when we return) and the chatbox can capture our raw-mode
-        # termios as its "old", leaving the terminal stuck in VMIN=0/ISIG-off.
+        # termios as its "old", leaving the terminal stuck in VMIN=0.
         # The watcher's inner select has a 0.1s timeout, so restore typically
         # completes in <0.1s; the 0.5s timeout is a safety net for the rare
         # case where the turn was too short for the watcher to even arm (in

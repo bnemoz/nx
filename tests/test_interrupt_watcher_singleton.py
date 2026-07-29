@@ -142,7 +142,7 @@ def test_restore_handshake_synchronous_disarm():
     synchronous: model_turn clears it before arming, the watcher sets it in
     its inner finally after restoring cooked mode, and model_turn waits for it
     after disarming. Without this, the chatbox can capture the watcher's
-    raw-mode termios (VMIN=0, ISIG-off) as its "old" state — which leaves
+    raw-mode termios (VMIN=0) as its "old" state — which leaves
     the terminal stuck in raw mode with broken Enter and garbled typing
     (the resize/termios-corruption bug).
     """
