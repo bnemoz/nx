@@ -7,18 +7,51 @@ from typing import Any, List, Tuple
 
 from ._env import _env_int
 
-TOOL_TAG_PATTERN = (
-    r"<tool_call\s*>\s*(\{.*?\})\s*"
-    r"(?:</tool_call\s*>|(?=<tool_call\s*>)|(?=\[nx_tool_call\])|$)")
-NX_TOOL_TAG_PATTERN = (
-    r"\[nx_tool_call\]\s*(\{.*?\})\s*"
-    r"(?:\[/nx_tool_call\]|(?=\[nx_tool_call\])|(?=<tool_call\s*>)|$)")
-TOOL_TAG = re.compile(TOOL_TAG_PATTERN, re.DOTALL)
-NX_TOOL_TAG = re.compile(NX_TOOL_TAG_PATTERN, re.DOTALL)
+TOOL_OPEN_TAG = re.compile(r"<tool_call\s*>\s*", re.DOTALL)
+NX_OPEN_TAG = re.compile(r"\[nx_tool_call\]\s*", re.DOTALL)
+TOOL_TAGS = (TOOL_OPEN_TAG, NX_OPEN_TAG)
+
+
+def _extract_json_object(text: str, start: int):
+    """Find the `{...}` object beginning at `start`, honoring JSON string/escape
+    rules so a literal `}` (or a tag-like substring) inside a string value
+    doesn't end the match early. Returns (raw_body, end_index) or None if no
+    balanced object is found (e.g. the model got cut off mid-call).
+
+    A naive non-greedy `\\{.*?\\}` regex stops at the first `}` followed by a
+    closing/opening tag, with no quote-awareness — if a string argument
+    contains a literal ``</tool_call>``-shaped example (plausible: this
+    project's own README documents that exact tag), the match truncates
+    mid-JSON-string and the real call fails to parse.
+    """
+    n = len(text)
+    while start < n and text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    i = start
+    while i < n:
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+        else:
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1], i + 1
+        i += 1
+    return None
 # <tool_call> is what SYSTEM now asks for (the convention most open-weight
 # models are actually fine-tuned on, e.g. Qwen/Hermes chat templates); keep
 # the old bracketed form recognized too for sessions/models already using it.
-TOOL_TAGS = (TOOL_TAG, NX_TOOL_TAG)
 TOOL_PROTOCOL_TAG_RE = re.compile(r"</?tool_call\b[^>]*>")
 TOOL_RESULT_PROTOCOL_NOTE = (
     "[nx note: escaped tool-call protocol delimiters from this tool result "
@@ -135,8 +168,12 @@ def parse_text_calls_with_errors(
         if _inside_code_fence(text, match.start()):
             pos = match.end()
             continue
+        extracted = _extract_json_object(text, match.end())
+        if extracted is None:
+            pos = match.end()
+            continue
+        raw_body, body_end = extracted
         found_tag = True
-        raw_body = match.group(1)
         obj = None
         parse_exc = None
         for candidate in repair_json_candidates(raw_body):
@@ -152,7 +189,7 @@ def parse_text_calls_with_errors(
                 calls.append((obj["name"], obj.get("arguments", {})))
             except KeyError:
                 errors.append(f"missing \"name\" field: {raw_body[:120]!r}")
-        pos = match.end()
+        pos = body_end
     return (calls, errors) if found_tag else ([], [])
 
 

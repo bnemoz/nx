@@ -467,7 +467,6 @@ MANUAL_RECOVERY_NUDGE = (
 
 # --- text-fallback parsing --------------------------------------------------
 from ._text_fallback import (
-    TOOL_TAG_PATTERN, NX_TOOL_TAG_PATTERN, TOOL_TAG, NX_TOOL_TAG,
     TOOL_TAGS, TOOL_PROTOCOL_TAG_RE, TOOL_RESULT_PROTOCOL_NOTE,
     parse_text_calls, parse_text_calls_with_errors,
     _escape_tool_protocol_delimiters, _sanitize_tool_result,
