@@ -52,7 +52,11 @@ class _FakeResp:
 
 
 class _FakeCompletions:
+    def __init__(self):
+        self.requests = []
+
     def create(self, **kwargs):
+        self.requests.append(kwargs)
         return _FakeResp("fake summary of the conversation")
 
 
@@ -96,6 +100,23 @@ result = m.compress(msgs_manual, auto=False)
 kept_n, summarized_n, _ = result
 assert kept_n == m.COMPRESS_KEEP, f"manual should keep COMPRESS_KEEP ({m.COMPRESS_KEEP}), got {kept_n}"
 print(f"  manual: kept {kept_n}, summarized {summarized_n} (from 60 body turns) → PASS")
+
+# A dangling tool result at the start of the requested tail cannot stay
+# verbatim, but it must be included in the summary rather than silently lost.
+msgs_dangling_tail = [
+    {"role": "system", "content": m.SYSTEM},
+    {"role": "user", "content": "older request"},
+    {"role": "assistant", "content": "older response"},
+    {"role": "tool", "tool_call_id": "call-1", "content": "critical tool result"},
+    {"role": "user", "content": "latest request"},
+]
+result = m.compress(msgs_dangling_tail)
+kept_n, summarized_n, _ = result
+summary_request = m.client.chat.completions.requests[-1]["messages"][0]["content"]
+assert "critical tool result" in summary_request, "dropped tail tool result must be summarized"
+assert kept_n == 1 and summarized_n == 3, (kept_n, summarized_n)
+assert "last 1 turns kept verbatim" in msgs_dangling_tail[1]["content"], msgs_dangling_tail[1]
+print("  dangling tail tool result is folded into summary → PASS")
 
 # Small conversation: auto keep (body//3) should not exceed body size → None
 msgs_small = [{"role": "system", "content": m.SYSTEM}] + \

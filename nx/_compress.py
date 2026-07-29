@@ -303,11 +303,15 @@ def compress(
     summarized_n = len(head)
 
     # The tail must start on a turn the chat template can render — see
-    # _drop_leading_dangling_tool_turns for why. Bump `summarized_n` by
-    # however many leading turns got dropped so the user-visible count stays
-    # honest about how many turns actually got folded into the summary.
-    tail, n_dropped = _drop_leading_dangling_tool_turns(tail)
-    summarized_n += n_dropped
+    # _drop_leading_dangling_tool_turns for why. Do not simply discard the
+    # leading turns it removes: they are real context, and calling them
+    # "summarized" without putting them in the summary prompt loses data.
+    # Move them into `head` so they are actually folded into the summary.
+    safe_tail, n_dropped = _drop_leading_dangling_tool_turns(tail)
+    if n_dropped:
+        head.extend(tail[:n_dropped])
+        summarized_n += n_dropped
+    tail = safe_tail
 
     # Render the head as plain text the model can summarize. Tool outputs are
     # the bulkiest part of a real session — include them but truncate each one
@@ -371,7 +375,7 @@ def compress(
         print(f"{C.ERROR}  ✗ compress returned empty summary — context unchanged{RESET}")
         return None
 
-    header = f"[Compressed context — {summarized_n} earlier turns summarized; last {keep} turns kept verbatim]"
+    header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
     new_mid = [{"role": "user", "content": f"{header}\n\n{summary}"}]
     messages[:] = ([sys_msg] if sys_msg else []) + new_mid + tail
     return len(tail), summarized_n, len(summary)
