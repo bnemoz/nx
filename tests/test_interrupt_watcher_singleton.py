@@ -16,6 +16,8 @@ import sys
 import builtins
 import tempfile
 import threading
+from contextlib import contextmanager
+import importlib
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
@@ -177,6 +179,35 @@ def test_restore_handshake_synchronous_disarm():
     assert not m._INTERRUPT_RESTORED.is_set(), "should still be clear (no watcher)"
 
     print("PASS — restore handshake makes disarm synchronous")
+
+
+def test_pid_poll_arms_watcher_and_observes_esc():
+    """PID polling must arm the parked watcher, not just inspect a dead event."""
+    jobs = importlib.import_module("nx._bash_jobs")
+    calls = []
+    old_watch = jobs._watch_for_interrupts
+    old_kill = jobs.os.kill
+
+    @contextmanager
+    def fake_watch():
+        calls.append("armed")
+        m._USER_INTERRUPTED.set()  # emulate a bare Esc while the poll is active
+        try:
+            yield
+        finally:
+            calls.append("disarmed")
+            m._USER_INTERRUPTED.clear()
+
+    jobs._watch_for_interrupts = fake_watch
+    jobs.os.kill = lambda _pid, _signal: None
+    try:
+        assert jobs._poll_pid(123, 1, check_esc=True) == "interrupted"
+    finally:
+        jobs._watch_for_interrupts = old_watch
+        jobs.os.kill = old_kill
+
+    assert calls == ["armed", "disarmed"]
+    assert not m._USER_INTERRUPTED.is_set(), "tool-wait Esc leaked into next turn"
 
 
 if __name__ == "__main__":

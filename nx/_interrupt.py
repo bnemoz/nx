@@ -1,9 +1,9 @@
 """Lets the user press Esc during model generation to stop the stream and drop
 back to the prompt. A SINGLE daemon thread, started once and parked between
 turns, watches stdin for bare Esc. The main loop checks _USER_INTERRUPTED
-between chunks and closes the stream on interrupt. Tools are NOT cancelled —
-run_bash etc. run to completion. (Hard-cancelling a tool mid-flight is a
-separate follow-up.)
+between chunks and closes the stream on interrupt. Tools are never killed;
+run_bash and wait_background arm the watcher while polling, so Esc ends only their wait;
+hard cancellation remains a separate follow-up.
 
 Esc-then-type redirect: once a bare Esc fires, the watcher doesn't just park —
 it keeps draining stdin (`_drain_redirect_text`) for a couple seconds so a user
@@ -36,7 +36,7 @@ Why a single persistent thread instead of spawn-per-turn:
 
 Four events:
   _INTERRUPT_ARMED    - "watcher should actively read stdin right now"
-                        main sets it to start a generation; clears it to park.
+                        main sets it for a generation or interruptible tool wait; clears it to park.
   _INTERRUPT_EXIT     - "watcher should die entirely" (set once at process exit)
   _USER_INTERRUPTED   - "the user actually pressed Esc" - only the watcher sets
                         this; main reads it after disarming. Separate from the
@@ -59,6 +59,7 @@ import sys
 import termios
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from . import _state as st
@@ -68,6 +69,10 @@ _INTERRUPT_EXIT = threading.Event()
 _USER_INTERRUPTED = threading.Event()
 _INTERRUPT_RESTORED = threading.Event()
 _INTERRUPT_RESTORED.set()  # initially: nothing to restore (OK to proceed)
+# Model-generation Esc supports an immediate typed redirect; tool-wait Esc does
+# not, so its watcher scope can park promptly before the next model turn.
+_INTERRUPT_CAPTURE_REDIRECT = threading.Event()
+_INTERRUPT_CAPTURE_REDIRECT.set()
 st._INTERRUPT_THREAD = None
 
 
@@ -147,9 +152,10 @@ def _interrupt_watcher() -> None:
                 # typing a redirect ("actually, do X instead") doesn't have
                 # those keystrokes silently discarded — capture them below
                 # instead of just discarding non-Esc bytes.
-                st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, new)
-                st._INTERRUPT_REDIRECT_SUBMITTED = st._INTERRUPT_REDIRECT_TEXT.endswith("\n")
-                st._INTERRUPT_REDIRECT_TEXT = st._INTERRUPT_REDIRECT_TEXT.rstrip("\n")
+                if _INTERRUPT_CAPTURE_REDIRECT.is_set():
+                    st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, new)
+                    st._INTERRUPT_REDIRECT_SUBMITTED = st._INTERRUPT_REDIRECT_TEXT.endswith("\n")
+                    st._INTERRUPT_REDIRECT_TEXT = st._INTERRUPT_REDIRECT_TEXT.rstrip("\n")
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -227,3 +233,29 @@ def _ensure_interrupt_watcher() -> None:
     st._INTERRUPT_THREAD = threading.Thread(
         target=_m._interrupt_watcher, daemon=True, name="nx-interrupt")
     st._INTERRUPT_THREAD.start()
+
+
+@contextmanager
+def _watch_for_interrupts():
+    """Arm the singleton watcher for an interruptible operation.
+
+    Model streaming and PID polling both need exclusive ownership of stdin
+    while Esc is meaningful. Keeping the arm/disarm and termios-restore
+    handshake here makes those windows identical, and guarantees the watcher
+    is parked again before the chatbox or another operation can read input.
+    """
+    _ensure_interrupt_watcher()
+    capture_redirect = _INTERRUPT_CAPTURE_REDIRECT.is_set()
+    _INTERRUPT_CAPTURE_REDIRECT.clear()
+    _USER_INTERRUPTED.clear()
+    _INTERRUPT_RESTORED.clear()
+    _INTERRUPT_ARMED.set()
+    try:
+        yield
+    finally:
+        _INTERRUPT_ARMED.clear()
+        _INTERRUPT_RESTORED.wait(timeout=0.5)
+        # Do not let an Esc from this operation interrupt a later model turn.
+        _USER_INTERRUPTED.clear()
+        if capture_redirect:
+            _INTERRUPT_CAPTURE_REDIRECT.set()

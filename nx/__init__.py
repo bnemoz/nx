@@ -264,7 +264,7 @@ from ._ansi import C
 # --- interrupt watcher ------------------------------------------------------
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_EXIT, _USER_INTERRUPTED, _INTERRUPT_RESTORED,
-    _interrupt_watcher, _ensure_interrupt_watcher,
+    _interrupt_watcher, _ensure_interrupt_watcher, _watch_for_interrupts,
 )
 
 

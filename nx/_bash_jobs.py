@@ -18,11 +18,12 @@ import secrets
 import shlex
 import subprocess
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from . import _state as st
 from ._env import _env_int
-from ._interrupt import _USER_INTERRUPTED
+from ._interrupt import _USER_INTERRUPTED, _watch_for_interrupts
 from ._logging import _log_event
 
 
@@ -225,26 +226,31 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False, log_path:
         pid_i = int(pid)
     except (TypeError, ValueError):
         return "exited"  # no valid pid → the command never started
-    last_tail = None
-    while time.time() < deadline:
-        try:
-            os.kill(pid_i, 0)
-        except ProcessLookupError:
-            return "exited"
-        except PermissionError:
-            pass  # process exists but owned by another uid — still alive
-        except OSError:
-            return "exited"  # unexpected (e.g. EINTR); bail to be safe
-        if check_esc and _USER_INTERRUPTED.is_set():
-            return "interrupted"
-        if log_path is not None:
-            tail = _tail_last_line(log_path)
-            if tail and tail != last_tail:
-                spinner = st._ACTIVE_SPINNER
-                if spinner is not None:
-                    spinner.label = f"running: {tail}"
-                last_tail = tail
-        time.sleep(0.1)
+    # model_turn disarms the watcher before dispatching a tool. Re-arm it for
+    # the actual polling window; otherwise this check could only observe a
+    # stale event and Esc could never interrupt run_bash/wait_background.
+    watch = _watch_for_interrupts() if check_esc else nullcontext()
+    with watch:
+        last_tail = None
+        while time.time() < deadline:
+            try:
+                os.kill(pid_i, 0)
+            except ProcessLookupError:
+                return "exited"
+            except PermissionError:
+                pass  # process exists but owned by another uid — still alive
+            except OSError:
+                return "exited"  # unexpected (e.g. EINTR); bail to be safe
+            if check_esc and _USER_INTERRUPTED.is_set():
+                return "interrupted"
+            if log_path is not None:
+                tail = _tail_last_line(log_path)
+                if tail and tail != last_tail:
+                    spinner = st._ACTIVE_SPINNER
+                    if spinner is not None:
+                        spinner.label = f"running: {tail}"
+                    last_tail = tail
+            time.sleep(0.1)
     return "timeout"
 
 
