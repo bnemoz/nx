@@ -164,3 +164,10 @@ _UNDO_STACK: list["Checkpoint"] = []
 # invalidated per-path on write_file/edit_file/multi_edit and cleared entirely
 # on run_bash (which can touch anything). See run_tool()'s docstring note.
 _TOOL_RESULT_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
+
+# --- todo list -----------------------------------------------------------------
+# Whole-list state for the todo_write tool (see _todo.py). Rewritten wholesale
+# on each call (no per-item id/merge logic — same convention as Claude Code's
+# own TodoWrite), persisted into the session JSON's "todos" key so /resume
+# restores it (see _repl_state.py's _save_current/_reload_metrics_totals).
+_TODOS: list[dict[str, str]] = []

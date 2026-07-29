@@ -74,6 +74,7 @@ def _save_current(state: _ReplState, meta: dict[str, Any] | None = None) -> None
     # nothing and a local session log is useful regardless of a push sink.
     if st._METRICS is not None:
         m.update(st._METRICS.as_meta())
+    m["todos"] = st._TODOS
     try:
         _write_session(state.session_id, state.messages, m)
     except OSError as e:
@@ -93,9 +94,11 @@ def _fresh_metrics(session_id: str) -> _Metrics:
 
 
 def _reload_metrics_totals(session_id: str) -> None:
+    saved = _load_session(session_id) or {}
+    if isinstance(saved.get("todos"), list):
+        st._TODOS = saved["todos"]
     if st._METRICS is None:
         return
-    saved = _load_session(session_id) or {}
     if isinstance(saved.get("input_tokens"), int):
         st._METRICS.input_tokens = int(saved.get("input_tokens") or 0)
         st._METRICS.output_tokens = int(saved.get("output_tokens") or 0)

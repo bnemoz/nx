@@ -24,6 +24,7 @@ from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit
 from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
+from ._todo import todo_write
 from ._tools import read_file, list_dir, search_files, git_status, git_diff
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
 
@@ -31,7 +32,7 @@ DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
     "list_dir": list_dir, "run_bash": run_bash, "wait_background": wait_background,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
-    "git_status": git_status, "git_diff": git_diff,
+    "git_status": git_status, "git_diff": git_diff, "todo_write": todo_write,
 }
 
 st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash call in this session actually backgrounds

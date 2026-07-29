@@ -178,6 +178,7 @@ original source, and replays a recap of the conversation. `nx sessions
 | `multi_edit`   | `path`, `edits`       | batch of `{old, new}`, one confirmation |
 | `run_bash`     | `command`             | requires confirmation; backgrounds long-running commands |
 | `wait_background` | `pid`, `log_path`, `timeout` | only offered after a `run_bash` call has backgrounded |
+| `todo_write`   | `todos`               | rewrites whole list `[{text, status}]`; no per-item id |
 
 ## Metrics
 

@@ -44,14 +44,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
 
 # Thresholds on the content token count (SYSTEM + TOOLS JSON + "hey").
-# With the 7-tool active schema (read_file, write_file, edit_file, list_dir,
-# run_bash, search_files, multi_edit — wait_background gated out until a command
-# backgrounds) the chars/3.5 content floor is ~1339; the README's figure adds
-# ~50 of server-side framing. The two new tools (search_files, multi_edit) are
-# heavier than the minimal ones, so the floor rose from the old ~625; the
-# thresholds track that, still flagging any further bloat.
-WARN_TOKENS = 1500  # soft: warn (don't fail) — check the README still holds
-FAIL_TOKENS = 1800   # hard: the floor has roughly grown again; README is fiction
+# With the active schema gated by _active_tools() (wait_background excluded
+# until a command backgrounds — currently read_file, write_file, edit_file,
+# list_dir, run_bash, search_files, git_status, git_diff, multi_edit,
+# sed_edit, todo_write) the chars/3.5 content floor is ~1877; the README's
+# figure adds ~50 of server-side framing. todo_write pushed the floor up from
+# ~1759; the thresholds track that, still flagging any further bloat.
+WARN_TOKENS = 1700  # soft: warn (don't fail) — check the README still holds
+FAIL_TOKENS = 2000   # hard: the floor has roughly grown again; README is fiction
 
 
 def _count_tokens(text):
