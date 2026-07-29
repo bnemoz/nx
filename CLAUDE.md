@@ -123,9 +123,9 @@ The package is organized into one module per concern; grep `^# ---` banners insi
    raw-terminal multi-line input box using hand-rolled ANSI escapes (`nx/_ansi.py`, no
    curses/prompt_toolkit — `rich` is used for output rendering, not input handling).
    `_interrupt_watcher()` (`nx/_interrupt.py`) runs on a background thread to catch Esc
-   during model generation; it's a *singleton* — see the changelog's "terminal breaks on
-   resize" entry for the termios-race history if you touch it, since it's easy to
-   reintroduce that class of bug.
+   during model generation; it is a *singleton*. Preserve its single-reader and
+   parked-watcher invariants, and keep `tests/test_interrupt_watcher_singleton.py` passing
+   when changing it.
 
 9. **Project instructions**: `_load_agents_md_note()` (`nx/_agents.py`) reads an
    `AGENTS.md` at the detected project root (same convention as CLAUDE.md itself) and
@@ -157,6 +157,5 @@ one module plus a touch point in `model_turn()` or `TOOLS`/`SYSTEM`.
   (no native tool-calling, no `usage` object, vLLM vs. llama.cpp sampler support) rather than
   assuming a fully-compliant OpenAI backend — see `NX_BACKEND=vllm` and the text-fallback
   tool-call parser as existing examples.
-- `changelog.md` documents notable fixes/features with root-cause detail (especially for
-  gnarly concurrency/terminal bugs) — check it before touching the interrupt watcher, stream
-  recovery, or autocompress logic, since past races are recorded there.
+- For concurrency- or terminal-sensitive changes, document the relevant invariants beside
+  the implementation and extend the focused regression tests.

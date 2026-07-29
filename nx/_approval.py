@@ -189,7 +189,7 @@ def _ask_approval(prompt: str) -> str:
                     # Shift+Tab: mirror the chatbox toggle so /yolo state
                     # actually flips (previously swallowed as a generic
                     # escape sequence, approving this one action without
-                    # ever setting YOLO — see changelog).
+                    # ever setting YOLO).
                     st.toggle_yolo()
                     sys.stdout.write(f"{DIM}yolo {'on' if st.YOLO else 'off'}; please press Y, n, or esc{RESET}\n")
                     sys.stdout.flush()

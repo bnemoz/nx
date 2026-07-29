@@ -4,11 +4,10 @@ Extracted out of _turn.py because model_turn() had accreted the chunk-by-chunk
 state machine (reasoning vs. content mode, leaked-special-token stripping,
 repeat-chunk collapse detection, TTFT/timings capture, tool-call-status
 spinner) directly inline, on top of everything else it does (stream open,
-tool dispatch, retry bookkeeping). That's exactly the shape of tangled mutable
-state the changelog's "terminal breaks on resize" entry warns about — pulling
-the chunk parser into its own object with named attributes (instead of 15+
-interacting locals + nonlocals) makes each piece independently readable and
-testable without touching the rest of the turn loop.
+tool dispatch, retry bookkeeping). Pulling the chunk parser into its own
+object with named attributes (instead of 15+ interacting locals + nonlocals)
+makes each piece independently readable and testable without touching the
+rest of the turn loop.
 """
 from __future__ import annotations
 

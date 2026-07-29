@@ -16,10 +16,9 @@ from typing import Literal
 def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
     """Put fd into raw (non-canonical, no-echo) mode for the duration of the
     block, restoring the original attributes on exit. Centralizes the
-    termios save/restore/flag-twiddle that used to be copy-pasted across
-    _chatbox.py's editor and _approval.py's Y/n/esc prompt — see
-    changelog's "terminal breaks on resize" entry for why duplicating this
-    is a liability."""
+    termios save/restore/flag-twiddle shared by _chatbox.py's editor and
+    _approval.py's Y/n/esc prompt, so their terminal-mode handling remains
+    consistent."""
     old = termios.tcgetattr(fd)
     new = old[:]
     new[3] &= ~(termios.ECHO | termios.ICANON)
