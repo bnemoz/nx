@@ -188,6 +188,8 @@ def _local_risk_hint_bash(command: str) -> tuple[str, str] | None:
     if cmd == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
                               for a in parts[1:]):
         return None  # find can destroy or run arbitrary commands with these
+    if cmd == "env" and any(not a.startswith("-") and "=" not in a for a in parts[1:]):
+        return None  # env <cmd> runs an arbitrary program, not read-only
     if cmd in _SAFE_BASH_COMMANDS:
         return ("low", f"read-only {cmd}")
     if cmd in _MEDIUM_BASH_COMMANDS:
