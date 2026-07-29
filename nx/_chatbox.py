@@ -219,9 +219,10 @@ def _str_slice_by_width(s: str, max_width: int) -> str:
 
 
 def _raw_read_key(fd: int) -> str:
+    """Read one decoded keypress, raising EOFError when stdin is closed."""
     b = os.read(fd, 1)
     if not b:
-        return ""
+        raise EOFError
     first = b[0]
     if first < 0x80:
         return b.decode("ascii")
@@ -236,7 +237,7 @@ def _raw_read_key(fd: int) -> str:
     for _ in range(need):
         extra = os.read(fd, 1)
         if not extra:
-            break
+            raise EOFError
         b += extra
     return b.decode("utf-8", "replace")
 
@@ -247,7 +248,10 @@ def _raw_read_available(fd: int, timeout: float = 0.02) -> str:
         ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
             break
-        raw += os.read(fd, 1)
+        chunk = os.read(fd, 1)
+        if not chunk:
+            raise EOFError
+        raw += chunk
         timeout = 0
     return raw.decode("utf-8", "replace")
 

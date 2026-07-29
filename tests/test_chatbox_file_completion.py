@@ -46,3 +46,24 @@ def test_completion_does_not_include_skipped_directories():
 def test_accepting_a_directory_keeps_the_mention_token_open():
     assert _chatbox._accept_file_completion("@sr", 3, 0, "src/") == ("@src/", 5)
     assert _chatbox._accept_file_completion("@fi", 3, 0, "file.py") == ("@file.py ", 9)
+
+
+def test_raw_readers_raise_eoferror_for_a_closed_input_fd():
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    try:
+        try:
+            _chatbox._raw_read_key(read_fd)
+        except EOFError:
+            pass
+        else:
+            raise AssertionError("_raw_read_key() did not raise EOFError")
+
+        try:
+            _chatbox._raw_read_available(read_fd)
+        except EOFError:
+            pass
+        else:
+            raise AssertionError("_raw_read_available() did not raise EOFError")
+    finally:
+        os.close(read_fd)
