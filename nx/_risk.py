@@ -115,7 +115,12 @@ _SHELL_METACHARACTERS_RE = re.compile(r"[;&|<>`$(){}\n*?~]")
 # git commit"). Same no-metacharacters/single-command constraint as the low
 # fast path above.
 _MEDIUM_BASH_COMMANDS = {"cp", "mv", "pytest"}
-_MEDIUM_GIT_SUBCOMMANDS = {"commit", "add", "checkout", "switch", "stash", "fetch", "pull", "merge"}
+_MEDIUM_GIT_SUBCOMMANDS = {"commit", "add", "stash", "fetch", "pull", "merge"}
+# checkout/switch are medium only when switching branches (no pathspec involved);
+# `git checkout -- <path>` / `git checkout .` / `git switch -- <path>` discard
+# uncommitted working-tree changes with no reflog entry to recover them, unlike
+# git commit (RISK_SYSTEM's own reversible example) — so those must reach "high".
+_CHECKOUT_SWITCH_SUBCOMMANDS = {"checkout", "switch"}
 
 # Commands/flag combos that are unambiguously RISK_SYSTEM's "high" bucket
 # regardless of arguments — destructive, hard to reverse, or system-level.
@@ -222,6 +227,8 @@ def _local_risk_hint_bash(command: str) -> tuple[str, str] | None:
             return None  # mutates refs/remote config (branch -f, remote set-url, ...) — let model judge
         if sub in _MEDIUM_GIT_SUBCOMMANDS:
             return ("medium", f"contained git {sub}")
+        if sub in _CHECKOUT_SWITCH_SUBCOMMANDS:
+            return None  # could be branch switch (medium) or pathspec discard (high); let model judge
         return None
     if cmd == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
                               for a in parts[1:]):
