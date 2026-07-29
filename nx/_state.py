@@ -23,10 +23,10 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import httpx
-
     from ._metrics import _Metrics
+    from ._openai_client import OpenAI
     from ._sources import Source
+    from ._undo import Checkpoint
 
 # --- sources / active model connection --------------------------------------
 SOURCES: dict[str, "Source"] = {}
@@ -36,7 +36,7 @@ ACTIVE: "Source | None" = None
 # `client` and `MODEL` mirror the active source; switch_source() reassigns
 # both. Every function that needs them does a call-time lookup (via this
 # module), so a mid-session swap is picked up instantly.
-client: "httpx.Client | None" = None
+client: "OpenAI | None" = None
 MODEL: str | None = None
 
 # Updated by model_turn() on every turn that reports a prompt-token count.
@@ -67,8 +67,8 @@ PROJECT_ROOT: str | None = None
 # pause/resume the spinner around approval prompts / risk-classifier calls.
 _ACTIVE_SPINNER: Any | None = None
 
-RISK_CONNECTION_RETRIES: int | None = None
-RISK_CONNECTION_RETRY_SECONDS: float | None = None
+RISK_CONNECTION_RETRIES: int = 3
+RISK_CONNECTION_RETRY_SECONDS: float = 1.0
 
 # --- interrupt watcher --------------------------------------------------------
 # (the Event objects themselves are created once in _interrupt.py; this
@@ -106,14 +106,14 @@ _PENDING_MULTI_EDIT_NOTICE: str | None = None
 # by the module that owns each setting (_turn.py, _compress.py) — this is
 # just the shared home so a cross-module `st.NAME = x` mutation (tests, or
 # /autocompress etc.) is visible everywhere.
-REASONING_ONLY_RETRY_LIMIT: int | None = None
-MALFORMED_STREAM_RETRY_LIMIT: int | None = None
-FORCED_FINAL_MAX_TOKENS: int | None = None
-EMPTY_TURN_RETRY_LIMIT: int | None = None
-REASONING_ONLY_CHAR_LIMIT: int | None = None
-RECOVERY_TEMPERATURE: float | None = None
-RECOVERY_TOP_P: float | None = None
-MAX_MODEL_TURNS: int | None = None
+REASONING_ONLY_RETRY_LIMIT: int = 3
+MALFORMED_STREAM_RETRY_LIMIT: int = 2
+FORCED_FINAL_MAX_TOKENS: int = 2048
+EMPTY_TURN_RETRY_LIMIT: int = 3
+REASONING_ONLY_CHAR_LIMIT: int = 36000
+RECOVERY_TEMPERATURE: float = 1.0
+RECOVERY_TOP_P: float = 0.95
+MAX_MODEL_TURNS: int = 200
 
 # --- reasoning display ---------------------------------------------------
 # Whether live reasoning_content is streamed to the terminal as it arrives.
@@ -125,9 +125,9 @@ REASONING_VISIBLE: bool = os.environ.get("NX_REASONING_VISIBLE", "1") not in ("0
 _LAST_REASONING: str = ""
 
 # --- auto context-compression -------------------------------------------------
-AUTOCOMPRESS_PERCENT: float | None = None
-AUTOCOMPRESS_DEFAULT: float | None = None
-COMPRESS_KEEP: int | None = None
+AUTOCOMPRESS_PERCENT: float = 85
+AUTOCOMPRESS_DEFAULT: float = 85
+COMPRESS_KEEP: int = 2
 
 # --- usage metrics -------------------------------------------------------------
 _METRICS: "_Metrics | None" = None  # set to a _Metrics() instance in _metrics.py
@@ -149,11 +149,11 @@ _NATIVE_TOOL_CALLS_CONFIRMED: bool = False
 # --- write/edit checkpoint stack (for /undo) -----------------------------------
 # Populated by run_tool() after a successful write_file/edit_file/multi_edit;
 # see _undo.py for the entry shape and undo_last()'s restore logic.
-_UNDO_STACK: list[dict[str, Any]] = []
+_UNDO_STACK: list["Checkpoint"] = []
 
 # --- read-only tool result cache ----------------------------------------------
 # Keyed by (tool name, json.dumps(sorted args)) -> tool result string. Populated
 # and consulted only by run_tool() for idempotent reads (read_file/list_dir);
 # invalidated per-path on write_file/edit_file/multi_edit and cleared entirely
 # on run_bash (which can touch anything). See run_tool()'s docstring note.
-_TOOL_RESULT_CACHE: dict[tuple[str, str], str] = {}
+_TOOL_RESULT_CACHE: dict[tuple[str, str], tuple[str, str]] = {}

@@ -11,7 +11,7 @@ import time
 try:
     import resource
 except ImportError:  # pragma: no cover - resource is POSIX-only
-    resource = None
+    resource = None  # ty: ignore[invalid-assignment]
 
 
 def _read_proc_stat_times() -> tuple[int, int]:

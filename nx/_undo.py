@@ -85,7 +85,7 @@ def undo_last() -> tuple[Optional[Checkpoint], str]:
         try:
             if snap["existed"]:
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(snap["content"])
+                    f.write(snap["content"] or "")
             elif os.path.exists(path):
                 os.remove(path)
             reverted.append(path)

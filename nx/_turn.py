@@ -176,7 +176,7 @@ def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
         st._LAST_PROMPT_TOKENS = usage.prompt_tokens
 
 
-def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float,
+def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
                          elapsed: float, text: str, tcs: dict, messages: Optional[list[Message]] = None) -> None:
     """Render the per-turn stats footer.
 
@@ -280,7 +280,7 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
     if len(jobs) < 2:
         return
 
-    def _run(job: tuple[str, dict, Any]) -> None:
+    def _run(job: tuple[str, dict, tuple[str, str]]) -> None:
         name, args, cache_key = job
         try:
             result = DISPATCH[name](**args)
@@ -323,6 +323,8 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         parsed_args.append(obj)
     if parse_error is not None:
         c, err = parse_error
+        if err is None:
+            err = json.JSONDecodeError("no candidates", "", 0)
         detail = _tool_args_parse_error(c, err, finish_reasons)
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:

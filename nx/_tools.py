@@ -177,8 +177,8 @@ def git_status(path: str = ".", **_: Any) -> str:
     just to earn a risk-classifier round-trip for a command that's always
     read-only anyway)."""
     out, err = _run_git(["status", "--short", "-b"], path)
-    if err:
-        return err
+    if err or out is None:
+        return err or "[clean working tree]"
     return out.strip() or "[clean working tree]"
 
 
@@ -198,6 +198,6 @@ def git_diff(path: str = ".", staged: bool = False, file: str | None = None, **_
     if file:
         args += ["--", str(file)]
     out, err = _run_git(args, path)
-    if err:
-        return err
+    if err or out is None:
+        return err or "[no changes]"
     return out.strip() or "[no changes]"

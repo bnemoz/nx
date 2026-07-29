@@ -23,7 +23,7 @@ def _resolve_mention(token: str, cwd: str, root: str | None) -> str | None:
     if not (os.path.isfile(resolved) or os.path.isdir(resolved)):
         return None
     home = os.path.realpath(os.path.expanduser("~"))
-    if not (_is_under_path(resolved, root) or _is_under_path(resolved, home)):
+    if not ((root is not None and _is_under_path(resolved, root)) or _is_under_path(resolved, home)):
         return None
     return resolved
 

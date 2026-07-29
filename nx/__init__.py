@@ -350,6 +350,8 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
     """
     if SESSION_DESC_REFRESH <= 0:
         return None
+    if st.client is None or st.MODEL is None:
+        return None
     # Count user turns (exclude synthetic runtime-note-only turns).
     user_turns = sum(
         1 for m in messages
@@ -1096,7 +1098,7 @@ DISPATCH = {
     "git_status": git_status, "git_diff": git_diff,
 }
 
-TOOLS = [
+TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total. Do NOT use this to hunt for one function/section in a file you haven't seen yet -- use search_files first to find it, then read_file only if you still need more surrounding context.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",

@@ -197,10 +197,11 @@ def open_stream(
     # this module — a lazy import here (instead of at module scope) avoids a
     # circular import between the two.
     from ._turn import _LoggingStream
+    assert st.client is not None and st.MODEL is not None
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens
-        request_opts = {}
+        request_opts: dict[str, Any] = {}
         if token_limit > 0:
             request_opts["max_tokens"] = token_limit
         if recovery_sampling:
@@ -281,6 +282,7 @@ def compress(
     it keeps roughly the last third of the conversation verbatim so
     in-progress work and recent tool results survive the fold.
     """
+    assert st.client is not None and st.MODEL is not None
     if keep is None:
         keep = st.COMPRESS_KEEP
     # Layout: [system?, ..., user, assistant, tool, ..., user, assistant(tool_calls)?, ...]

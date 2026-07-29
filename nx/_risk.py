@@ -202,7 +202,7 @@ def _classify_action_path(
     path: str, cwd: str | None = None, project_root: str | None = None
 ) -> dict[str, object]:
     cwd = os.path.realpath(cwd or os.getcwd())
-    project_root = os.path.realpath(project_root or st.PROJECT_ROOT)
+    project_root = os.path.realpath(project_root or st.PROJECT_ROOT or cwd)
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
         expanded = os.path.join(cwd, expanded)
@@ -232,7 +232,7 @@ def _risk_user_message(action: str) -> str:
     msg = {
         "action": action,
         "cwd": cwd,
-        "project_root": os.path.realpath(st.PROJECT_ROOT),
+        "project_root": os.path.realpath(st.PROJECT_ROOT or cwd),
         "primary_path": None,
         "path_scope": "unknown",
         "scope_guidance": (
@@ -251,6 +251,8 @@ def _assess_risk(action: str) -> tuple[str, str]:
     """Return (level, reason). level is one of LEVEL_ORDER; reason is a short
     string. On any failure (server down, bad JSON, unknown level) returns
     ("high", "<error>") so the caller falls through to the prompt path."""
+    if st.client is None or st.MODEL is None:
+        return ("high", "no active source; defaulting to high")
     payload = [
         {"role": "system", "content": RISK_SYSTEM},
         {"role": "user", "content": _risk_user_message(action)},

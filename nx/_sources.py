@@ -153,7 +153,7 @@ class Source:
         except Exception:
             advertised = None
         if advertised and advertised.strip().lower() not in self._GENERIC_MODEL_IDS:
-            return self._clean_model_id(advertised)
+            return self._clean_model_id(advertised) or advertised
         # The endpoint gave us nothing useful. Many local servers (llama.cpp's
         # llama-server) expose the actually-loaded model file at /props even
         # when /v1/models only advertises a generic id — recover the real name
@@ -167,7 +167,7 @@ class Source:
         any failure — never raises, never required, makes no assumption about
         what (if anything) consumes nx's session metrics."""
         try:
-            root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
+            root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/props", timeout=5) as r:
                 props = json.loads(r.read().decode("utf-8"))
         except Exception:
@@ -193,7 +193,7 @@ class Source:
         if self._tokenize_ok is False or not self._is_local():
             return None
         try:
-            root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
+            root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             req = urllib.request.Request(
                 root + "/tokenize",
                 data=json.dumps({"content": text}).encode("utf-8"),
@@ -341,7 +341,7 @@ class Source:
     def _ctx_from_props(self) -> int | None:
         """llama.cpp /props fallback: default_generation_settings.n_ctx."""
         try:
-            root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
+            root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/props", timeout=5) as r:
                 props = json.loads(r.read().decode("utf-8"))
         except Exception:
@@ -367,7 +367,7 @@ class Source:
         over-large max_tokens instead of returning a 400. Returns int or
         None."""
         try:
-            root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
+            root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/api/v0/models", timeout=5) as r:
                 data = json.loads(r.read().decode("utf-8")).get("data") or []
         except Exception:
@@ -644,7 +644,7 @@ def restore_source(source_name: str | None, model: str | None = None) -> bool:
         return False
     src = st.SOURCES[source_name]
     pin = model if model and model != src.model else None
-    if source_name == st.ACTIVE.name and st.MODEL == (pin or src.model):
+    if st.ACTIVE is not None and source_name == st.ACTIVE.name and st.MODEL == (pin or src.model):
         return True
     switch_source(source_name, model_override=pin)
     return True
@@ -694,5 +694,5 @@ def _provider_order(src: Source) -> list[str]:
     if not isinstance(prov, dict):
         return []
     order = prov.get("order")
-    return list(order) if isinstance(order, list) else []
+    return [str(x) for x in order] if isinstance(order, list) else []
 

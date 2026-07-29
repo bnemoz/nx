@@ -14,7 +14,7 @@ does `getattr`/`.get()`-style access on them, so exact typing isn't needed.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal, overload
 
 import httpx
 
@@ -105,6 +105,36 @@ class _ChatStream:
 class _Completions:
     def __init__(self, client: "OpenAI"):
         self._client = client
+
+    @overload
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        stream: Literal[False] = False,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        stream_options: dict[str, Any] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> _Obj: ...
+
+    @overload
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        stream: Literal[True],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        stream_options: dict[str, Any] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> _ChatStream: ...
 
     def create(
         self,

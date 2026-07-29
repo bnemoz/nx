@@ -510,8 +510,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                     if current_kind == "file" and current_matches:
                         chosen = current_matches[sel_idx][0]
                         line = buf[row]
-                        buf[row] = line[:current_at_start] + "@" + chosen + " " + line[col:]
-                        col = current_at_start + 1 + len(chosen) + 1
+                        buf[row] = line[:current_at_start or 0] + "@" + chosen + " " + line[col:]
+                        col = (current_at_start or 0) + 1 + len(chosen) + 1
                         render()
                         continue
                     if current_kind == "slash" and current_matches and len(buf) == 1 \
@@ -543,8 +543,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                     if current_matches and current_kind == "file":
                         chosen = current_matches[sel_idx][0]
                         line = buf[row]
-                        buf[row] = line[:current_at_start] + "@" + chosen + " " + line[col:]
-                        col = current_at_start + 1 + len(chosen) + 1
+                        buf[row] = line[:current_at_start or 0] + "@" + chosen + " " + line[col:]
+                        col = (current_at_start or 0) + 1 + len(chosen) + 1
                     elif current_kind == "arg" and current_matches:
                         cmd = buf[row].split(" ", 1)[0]
                         buf[row] = cmd + " " + current_matches[sel_idx][0]

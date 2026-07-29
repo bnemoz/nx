@@ -77,7 +77,7 @@ def _banner() -> str:
     """Banner shown at startup and after source/approval changes."""
     sep = f"{DIM} · {RESET}"
     parts = [f"{BOLD}nx{RESET}", f"{C.ACCENT}{st.MODEL}{RESET}"]
-    if len(st.SOURCES) > 1:
+    if len(st.SOURCES) > 1 and st.ACTIVE is not None:
         parts.append(f"{C.LABEL}{st.ACTIVE.name}{RESET}")
     if st.YOLO:
         parts.append(f"{C.SUCCESS}yolo{RESET}")
@@ -89,7 +89,8 @@ def _banner() -> str:
         parts.append(f"{C.WARNING}auto:medium{RESET}")
     else:
         parts.append(f"{DIM}auto:low{RESET}")
-    parts.append(f"{DIM}{st.client.base_url}{RESET}")
+    if st.client is not None:
+        parts.append(f"{DIM}{st.client.base_url}{RESET}")
     return sep.join(parts)
 
 
@@ -170,15 +171,17 @@ def _fresh_metrics(session_id: str) -> _Metrics:
 
 
 def _reload_metrics_totals(session_id: str) -> None:
+    if st._METRICS is None:
+        return
     saved = _load_session(session_id) or {}
     if isinstance(saved.get("input_tokens"), int):
-        st._METRICS.input_tokens = saved.get("input_tokens") or 0
-        st._METRICS.output_tokens = saved.get("output_tokens") or 0
-        st._METRICS.cache_read_tokens = saved.get("cache_read_tokens") or 0
-        st._METRICS.reasoning_tokens = saved.get("reasoning_tokens") or 0
-        st._METRICS.api_calls = saved.get("api_calls") or 0
+        st._METRICS.input_tokens = int(saved.get("input_tokens") or 0)
+        st._METRICS.output_tokens = int(saved.get("output_tokens") or 0)
+        st._METRICS.cache_read_tokens = int(saved.get("cache_read_tokens") or 0)
+        st._METRICS.reasoning_tokens = int(saved.get("reasoning_tokens") or 0)
+        st._METRICS.api_calls = int(saved.get("api_calls") or 0)
         if saved.get("started_at"):
-            st._METRICS.started_at = saved["started_at"]
+            st._METRICS.started_at = float(saved["started_at"])
 
 
 # --- slash-command handlers --------------------------------------------------
@@ -201,11 +204,12 @@ def _cmd_help(user: str, state: _ReplState) -> None:
 def _cmd_source(user: str, state: _ReplState) -> None:
     import nx as _m
     sp = user.split()
+    active_name = st.ACTIVE.name if st.ACTIVE is not None else None
     if len(sp) == 1:
         print(f"{DIM}  sources:{RESET}")
         for sname in st.SOURCE_ORDER:
             src = st.SOURCES[sname]
-            mark = f"{C.SUCCESS}★{RESET}" if sname == st.ACTIVE.name else f"{DIM} ·{RESET}"
+            mark = f"{C.SUCCESS}★{RESET}" if sname == active_name else f"{DIM} ·{RESET}"
             m = src.display_model()
             ctx = src._context_window
             if isinstance(ctx, int) and ctx > 0:
@@ -232,7 +236,7 @@ def _cmd_source(user: str, state: _ReplState) -> None:
         avail = ", ".join(st.SOURCE_ORDER)
         print(f"{C.ERROR}  ✗ unknown source {target!r} — available: {avail}{RESET}")
         return
-    if target == st.ACTIVE.name and not model_override:
+    if target == active_name and not model_override:
         print(f"{DIM}  already on {target}{RESET}")
         return
     switch_source(target, model_override=model_override)
@@ -323,6 +327,9 @@ def _cmd_provider(user: str, state: _ReplState) -> None:
     #   /provider Together,DeepInfra    ordered: try Together, then DeepInfra
     #   /provider off                   clear routing (let OpenRouter pick)
     #   /provider openrouter parasail   set routing on <source>, not active
+    if st.ACTIVE is None:
+        print(f"{C.ERROR}  ✗ no active source{RESET}")
+        return
     parts = user.split()
     if len(parts) == 1:
         # /provider with no args → show the active source's routing.
@@ -772,7 +779,8 @@ def _repl() -> None:
         # call every SESSION_DESC_REFRESH turns). Done after the save so the
         # turn's messages are already on disk; the description lands as a
         # second write. Failures are silent — the title is always present.
-        _maybe_refresh_description(state.session_id, state.messages)
+        if state.session_id is not None:
+            _maybe_refresh_description(state.session_id, state.messages)
         state.session_dirty = False
 
 
@@ -1016,17 +1024,18 @@ def _cli_tokens(args: list[str]) -> bool:
     if not any(a in ("--tokens", "--bench") for a in args):
         return False
     tools = _active_tools()
-    if st.ACTIVE is not None:
-        probe = st.ACTIVE.tokenize_count("hey")
+    active = st.ACTIVE
+    if active is not None:
+        probe = active.tokenize_count("hey")
     else:
         probe = None
-    if probe is not None:
+    if probe is not None and active is not None:
         def count(text):
-            return st.ACTIVE.tokenize_count(text)
-        method = f"server /tokenize ({st.ACTIVE.name})"
+            return active.tokenize_count(text)
+        method = f"server /tokenize ({active.name})"
     else:
         try:
-            import tiktoken
+            import tiktoken  # ty: ignore[unresolved-import]
             enc = tiktoken.get_encoding("cl100k_base")
 
             def count(text):
@@ -1226,6 +1235,9 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
     ``notes``, if provided, serves as guidance: "focus on the build system",
     "capture the API endpoint details", etc.
     """
+    if st.client is None or st.MODEL is None:
+        print(f"{C.ERROR}  ✗ no active source — memory not saved{RESET}")
+        return
     memories_dir = _memories_dir()
     os.makedirs(memories_dir, exist_ok=True)
 

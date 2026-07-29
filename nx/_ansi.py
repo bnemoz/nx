@@ -130,6 +130,22 @@ class _Colors:
     call time (not via plain name imports), so `set_theme()` mutating this
     single shared instance is immediately visible everywhere."""
 
+    CYAN: str
+    GREEN: str
+    YELLOW: str
+    RED: str
+    MAGENTA: str
+    GRAY: str
+    TEXT: str
+    REASONING_TEXT: str
+    STATUS_BAR: str
+    TOOL_OUTPUT: str
+    ACCENT: str
+    LABEL: str
+    SUCCESS: str
+    WARNING: str
+    ERROR: str
+
     def __init__(self, name: str) -> None:
         self.name = name
         self._apply(THEMES[name])
