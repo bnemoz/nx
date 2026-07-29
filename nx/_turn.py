@@ -119,36 +119,29 @@ _CTX_PROBE_STARTED = set()  # id(Source) currently being probed (avoid dupe thre
 
 def _ensure_ctx_probe(src: Any) -> None:
     """Start a background thread to resolve a Source's max context window if
-    it isn't already known and no probe is in flight for it. The result lands
-    in src._context_window; the footer picks it up on a later turn. Idempotent
-    via _CTX_PROBE_STARTED (cleared when the thread finishes).
+    it isn't already known, it has not already missed, and no probe is in
+    flight for it. The result lands in src._context_window; the footer picks
+    it up on a later turn. Idempotent via _CTX_PROBE_STARTED (cleared when the
+    thread finishes).
 
     A local server's metadata endpoints can 503 "Loading model" for tens of
     seconds at cold start (the weights are still mmapping) even while a chat
-    slot is already serving — so a single attempt often misses. The thread
-    retries with backoff until it resolves (or gives up after ~2 min), so the
-    suffix fills in the first turn AFTER the server is ready rather than
-    depending on the user to keep typing."""
+    slot is already serving. A retry must be explicitly requested after that
+    state changes: retrying automatically is unsafe because some servers
+    silently clamp the oversized chat probe and may generate until their
+    context limit instead of returning a 400."""
+    if getattr(src, "_context_window_probe_attempted", False):
+        return
     sid = id(src)
     if sid in _CTX_PROBE_STARTED:
         return
     _CTX_PROBE_STARTED.add(sid)
 
     def _work() -> None:
-        # Backoff schedule (seconds between attempts): a handful of quick
-        # tries for a fast local server, then wider spacing for a slow cold
-        # start. Total ~2 min of probing before giving up (the footer will
-        # re-arm on the next user turn anyway, so this is just a best effort
-        # to resolve the max before the user has to wait for another turn).
-        delays = [1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 30]
         try:
-            for delay in delays:
-                if isinstance(src._context_window, int) and src._context_window > 0:
-                    return  # resolved by another path (e.g. a /source switch)
-                src.resolve_context_window()
-                if isinstance(src._context_window, int) and src._context_window > 0:
-                    return
-                time.sleep(delay)
+            if isinstance(src._context_window, int) and src._context_window > 0:
+                return  # resolved by another path (e.g. a /source switch)
+            src.resolve_context_window()
         except Exception:
             pass  # never raise from a background probe
         finally:

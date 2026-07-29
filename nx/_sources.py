@@ -65,11 +65,14 @@ class Source:
             client_kwargs["default_headers"] = self.http_headers
         self.client = OpenAI(**client_kwargs)
         # Lazily-resolved max context window (in tokens) for the active model,
-        # or None when no probe could determine it. Cached after first success
-        # so the footer + /source list don't re-hit the network each turn.
+        # or None when no probe could determine it. Both a value and a miss are
+        # cached: an over-max_tokens probe can be *accepted* by servers which
+        # silently clamp it, and retrying that request can generate a very large
+        # response on every turn.
         # Call resolve_context_window(force=True) to re-probe (e.g. after a
         # /source <name> <model> override pins a different model id).
         self._context_window = None
+        self._context_window_probe_attempted = False
         # Whether this source's /tokenize endpoint has been confirmed working
         # (True), confirmed absent/broken (False), or not yet tried (None).
         self._tokenize_ok = None
@@ -265,32 +268,37 @@ class Source:
         will actually use. The result is keyed to that model id, so a
         /source <name> <other-model> override should call with force=True.
 
-        A single probe attempt can hit a transient error — most notably
-        llama.cpp's 503 "Loading model" while the weights are still being
-        mmapped, which blocks /v1/models AND /props even though a chat slot
-        may already be serving. So a failed attempt does NOT cache None;
-        the caller (footer/listing) re-arms the probe on a later turn until
-        it resolves. Use force=True to retry immediately (e.g. an explicit
-        /source switch the user is waiting on)."""
-        if not force and self._context_window is not None:
+        A failed attempt is also cached. In particular, LM Studio-like
+        backends can silently clamp the deliberately oversized completion
+        instead of returning the 400 this probe needs; repeatedly issuing that
+        request can hang or consume tokens indefinitely. Use force=True to
+        explicitly retry after a transient failure (for example, once a local
+        server has finished loading)."""
+        if not force and (self._context_window is not None or
+                          self._context_window_probe_attempted):
             return self._context_window
-        mid = model or self.model or self.resolve_model()
-        if self._is_local():
-            n = self._ctx_from_models(mid) or self._ctx_from_props() \
-                or self._ctx_from_lmstudio(mid)
-            if n is None:
+        try:
+            mid = model or self.model or self.resolve_model()
+            if self._is_local():
+                n = self._ctx_from_models(mid) or self._ctx_from_props() \
+                    or self._ctx_from_lmstudio(mid)
+                if n is None:
+                    n = self._ctx_from_overrun_probe(mid)
+            else:
+                # Remote: the over-max_tokens chat probe is cheap and universal;
+                # lead with it so the max resolves on the first turn instead of
+                # after a multi-second /v1/models round-trip that returns nothing.
                 n = self._ctx_from_overrun_probe(mid)
-        else:
-            # Remote: the over-max_tokens chat probe is cheap and universal;
-            # lead with it so the max resolves on the first turn instead of
-            # after a multi-second /v1/models round-trip that returns nothing.
-            n = self._ctx_from_overrun_probe(mid)
-            if n is None:
-                n = self._ctx_from_models(mid) or self._ctx_from_props()
-        if isinstance(n, int) and n > 0:
-            self._context_window = n
-        # NOTE: a miss does NOT set _context_window — stays None so the
-        # footer re-probes next turn (the server may have finished loading).
+                if n is None:
+                    n = self._ctx_from_models(mid) or self._ctx_from_props()
+            if isinstance(n, int) and n > 0:
+                self._context_window = n
+        except Exception:
+            pass  # context metadata is always best-effort
+        finally:
+            # Cache misses too; see the method docstring. force=True remains
+            # an explicit escape hatch for local-server cold starts.
+            self._context_window_probe_attempted = True
         return self._context_window
 
     def _ctx_from_models(self, mid: str | None) -> int | None:
@@ -630,6 +638,7 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     # multi-model host like Together) means the cached max-context may no longer
     # apply — drop it so the footer re-probes against the new model next turn.
     src._context_window = None
+    src._context_window_probe_attempted = False
     # Different endpoint/model may not confirm native tool-calling the same
     # way — let _grammar_extra_body() re-derive it from this source's actual
     # behavior instead of carrying over the previous source's confirmation.

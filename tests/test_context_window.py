@@ -11,6 +11,7 @@ deterministic. Covers:
   - caching: second call doesn't re-probe (force=True bypasses the cache)
   - cache invalidation: switch_source() clears the cached window
   - total miss: all probes fail → None, footer omits the suffix gracefully
+  - silent clamp: an accepted overrun request is negatively cached
 """
 import json
 import os
@@ -206,6 +207,30 @@ assert n is None, f"expected None on total miss, got {n}"
 print("  PASS\n")
 urllib.request.urlopen = orig_urlopen
 
+# --- Test 6b: silently-clamped probes are negatively cached -----------------
+print("TEST 6b: silently-clamped overrun probe is attempted only once")
+silent_probe_calls = [0]
+
+
+class _SilentClampChat(_FakeChatCompletions):
+    def create(self, **kwargs):
+        silent_probe_calls[0] += 1
+        return object()  # accepted request: no 400/context length to parse
+
+
+src = m.Source("silent-clamp", "https://clamping.example/v1", "sk-noop",
+               "test-model")
+src.client = _FakeClient(_FakeModelsPage([]),
+                         _FakeChat(_SilentClampChat()))
+n1 = src.resolve_context_window()
+n2 = src.resolve_context_window()
+print(f"  results: {n1}, {n2}; chat probes: {silent_probe_calls[0]}")
+assert n1 is None and n2 is None
+assert src._context_window_probe_attempted, "miss should be cached"
+assert silent_probe_calls[0] == 1, \
+    "a silently-clamped probe must not run again on later turns"
+print("  PASS\n")
+
 # --- Test 7: remote source leads with over-max_tokens probe (no /v1/models) --
 print("TEST 7: remote source tries over-max_tokens BEFORE /v1/models")
 # A remote host (Together et al.) returns an empty /v1/models and has no
@@ -271,10 +296,16 @@ import importlib
 importlib.reload(m)
 m.SOURCES["alpha"]._context_window = 999
 m.SOURCES["beta"]._context_window = 888
+m.SOURCES["alpha"]._context_window_probe_attempted = True
+m.SOURCES["beta"]._context_window_probe_attempted = True
 m.switch_source("alpha")
 assert m.SOURCES["alpha"]._context_window is None, "switch should clear alpha cache"
+assert not m.SOURCES["alpha"]._context_window_probe_attempted, \
+    "switch should clear alpha's negative cache"
 m.switch_source("beta")
 assert m.SOURCES["beta"]._context_window is None, "switch should clear beta cache"
+assert not m.SOURCES["beta"]._context_window_probe_attempted, \
+    "switch should clear beta's negative cache"
 print("  PASS\n")
 
 # --- Test 9: _ctx_field() — colored "cur/max ctx" footer field ----------------
