@@ -385,10 +385,12 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
 
     If a tag was present but every call in it failed to parse (bad JSON, no
     "name"), that used to fall straight through to being treated as the final
-    answer — the model's intent silently dropped. Instead, on the first such
-    failure, feed back a short correction (mirrors _assess_risk()'s retry loop
-    in nx/_risk.py) and return TURN_MALFORMED_CALL so the loop retries once
-    before giving up to the generic stall path.
+    answer — the model's intent silently dropped. On the first failure, feed
+    back a short correction (mirrors _assess_risk()'s retry loop in
+    nx/_risk.py) and return TURN_MALFORMED_CALL so the loop retries once. If
+    that retry also fails, discard the invalid output, leave a safe runtime
+    note in history, and end the turn visibly instead of replaying the broken
+    tag on every future turn.
     """
     calls, errors = parse_text_calls_with_errors(text)
     if not calls:
@@ -406,6 +408,16 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
                 "<tool_call>{\"name\": \"run_bash\", \"arguments\": {\"cmd\": \"ls -la\"}}</tool_call>]"
             )})
             return TURN_MALFORMED_CALL
+        if errors:
+            print(f"{C.ERROR}  ✗ MALFORMED TOOL CALL — correction retry also failed; "
+                  f"discarded invalid tool-call output and waiting for user input{RESET}")
+            print(f"{DIM}    {errors[0]}{RESET}")
+            # Do not retain `text`: it may be a truncated <tool_call> fragment
+            # and would be replayed as assistant context on every later turn.
+            messages.append({"role": "assistant", "content":
+                "[Runtime: Discarded an invalid tool call after a failed correction retry. "
+                "The requested tool action was not run.]"})
+            return TURN_DONE
         return None
     messages.append({"role": "assistant", "content": text})
     obs = []
@@ -913,5 +925,4 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                    empty_turn_count=empty_turn_cuts,
                    forced_final=True,
                    recovery_sampling=recovery_sampling)
-
 

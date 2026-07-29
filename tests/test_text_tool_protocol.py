@@ -107,13 +107,17 @@ def test_malformed_tool_call_triggers_one_corrective_retry():
     assert "did not parse" in messages[-1]["content"]
 
 
-def test_malformed_tool_call_gives_up_after_one_retry():
+def test_malformed_tool_call_gives_up_cleanly_after_one_retry(capsys):
     messages = [{"role": "system", "content": "sys"}]
     text = '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'
 
     status = m._handle_text_tool_calls(messages, text, malformed_call_count=1)
 
-    assert status is None  # falls through to being treated as a plain-text answer
+    assert status == m.TURN_DONE
+    assert "correction retry also failed" in capsys.readouterr().out
+    assert messages[-1]["role"] == "assistant"
+    assert "Discarded an invalid tool call" in messages[-1]["content"]
+    assert text not in messages[-1]["content"]
 
 
 def test_tool_result_sanitizer_escapes_legacy_tool_tags():
