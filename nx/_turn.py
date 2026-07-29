@@ -6,11 +6,12 @@ streaming parse, tool-call extraction (native or text-fallback via
 parse_text_calls()), reasoning-content handling, and all the stall/recovery
 guards live.
 """
+from __future__ import annotations
+
 import json
-import re
-import sys
 import threading
 import time
+from typing import Any, Callable, Optional
 
 from ._openai_client import APIConnectionError, APIError
 import httpx
@@ -49,10 +50,13 @@ import os
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
 
+Message = dict[str, Any]  # one entry in the OpenAI-style `messages` array
+
+
 class _LoggingStream:
     """Iterator wrapper that tees each SSE chunk to llamacpp.log before yielding.
     Uses model_dump so we capture the chunk's full structure (incl. reasoning_content)."""
-    def __init__(self, inner, log_file):
+    def __init__(self, inner: Any, log_file: Any) -> None:
         self._inner = inner
         self._log = log_file
 
@@ -65,7 +69,7 @@ class _LoggingStream:
                 pass  # never let logging break the stream
             yield chunk
 
-    def close(self):
+    def close(self) -> None:
         close = getattr(self._inner, "close", None)
         if close:
             try:
@@ -85,7 +89,7 @@ TURN_REDIRECT = "redirect"  # user typed+submitted a new instruction right after
 TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unparseable → one corrective retry
 
 
-def _ctx_field(prompt_n):
+def _ctx_field(prompt_n: int) -> str:
     """The colored `ctx` field for the stats footer: `<cur>/<max> ctx`.
     The max context window is cyan; the current context is colored by
     utilization — green under 30%, yellow under 60%, red at or above.
@@ -115,7 +119,7 @@ def _ctx_field(prompt_n):
 _CTX_PROBE_STARTED = set()  # id(Source) currently being probed (avoid dupe threads)
 
 
-def _ensure_ctx_probe(src):
+def _ensure_ctx_probe(src: Any) -> None:
     """Start a background thread to resolve a Source's max context window if
     it isn't already known and no probe is in flight for it. The result lands
     in src._context_window; the footer picks it up on a later turn. Idempotent
@@ -132,7 +136,7 @@ def _ensure_ctx_probe(src):
         return
     _CTX_PROBE_STARTED.add(sid)
 
-    def _work():
+    def _work() -> None:
         # Backoff schedule (seconds between attempts): a handful of quick
         # tries for a fast local server, then wider spacing for a slow cold
         # start. Total ~2 min of probing before giving up (the footer will
@@ -156,7 +160,7 @@ def _ensure_ctx_probe(src):
     t.start()
 
 
-def _capture_last_prompt_tokens(usage, timings):
+def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
     """Cache the just-seen prompt-token count in st._LAST_PROMPT_TOKENS.
 
     Split out of _print_stats_footer so it can run on EVERY settled stream —
@@ -174,7 +178,8 @@ def _capture_last_prompt_tokens(usage, timings):
         st._LAST_PROMPT_TOKENS = usage.prompt_tokens
 
 
-def _print_stats_footer(usage, timings, streamed_chars, t_first, elapsed, text, tcs, messages=None):
+def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float,
+                         elapsed: float, text: str, tcs: dict, messages: Optional[list[Message]] = None) -> None:
     """Render the per-turn stats footer.
 
     Prefers llama.cpp `timings` (real tok/s) when present; falls back to the
@@ -228,7 +233,7 @@ def _print_stats_footer(usage, timings, streamed_chars, t_first, elapsed, text, 
         print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}")
 
 
-def _handle_forced_final_tool_call(messages, tcs):
+def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
     """Under forced-final mode, extract the `final_answer` tool call (if any) the
     model emitted and render its answer as visible assistant text. Returns a
     TURN_* status to bubble up from model_turn."""
@@ -255,7 +260,7 @@ def _handle_forced_final_tool_call(messages, tcs):
     return TURN_DONE
 
 
-def _prefetch_cacheable_tools(ordered, parsed_args):
+def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> None:
     """Warm the read_file/list_dir cache concurrently for this turn's calls.
 
     run_tool() below still executes every call sequentially, in order, for
@@ -277,7 +282,7 @@ def _prefetch_cacheable_tools(ordered, parsed_args):
     if len(jobs) < 2:
         return
 
-    def _run(job):
+    def _run(job: tuple[str, dict, Any]) -> None:
         name, args, cache_key = job
         try:
             result = DISPATCH[name](**args)
@@ -290,8 +295,8 @@ def _prefetch_cacheable_tools(ordered, parsed_args):
         list(ex.map(_run, jobs))
 
 
-def _handle_native_tool_calls(messages, tcs, text, finish_reasons,
-                              malformed_stream_cut_count):
+def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, finish_reasons: Any,
+                              malformed_stream_cut_count: int) -> str:
     """Execute the native tool-calling path for one streamed turn.
 
     Parses each call's JSON args (retrying cleanly on malformed args rather
@@ -369,7 +374,7 @@ def _handle_native_tool_calls(messages, tcs, text, finish_reasons,
     return TURN_TOOL
 
 
-def _handle_text_tool_calls(messages, text, malformed_call_count=0):
+def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_count: int = 0) -> Optional[str]:
     """Execute the text-protocol fallback tool-calling path for one streamed turn.
 
     Parses <tool_call>... blocks (or legacy [nx_tool_call]...) from the model's text, records the
@@ -423,9 +428,9 @@ def _handle_text_tool_calls(messages, text, malformed_call_count=0):
     return TURN_TOOL
 
 
-def _handle_loop_cut(messages, forced_final, reasoning_loop_cut_count,
-                     leaked_token_run, repeat_chunk_run, reasoning_only_start,
-                     reasoning_only_chars, reasoning_parts):
+def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
+                     leaked_token_run: int, repeat_chunk_run: int, reasoning_only_start: Optional[float],
+                     reasoning_only_chars: int, reasoning_parts: list[str]) -> str:
     """Recover from a streamed turn that was cut mid-flight.
 
     Handles two cases that share the "cut" path:
@@ -558,9 +563,9 @@ def _handle_loop_cut(messages, forced_final, reasoning_loop_cut_count,
 
 
 # --- one model turn (streamed), returns TURN_* status -----------------------
-def model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
-               empty_turn_count=0, forced_final=False, recovery_sampling=False,
-               malformed_call_count=0):
+def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malformed_stream_cut_count: int = 0,
+               empty_turn_count: int = 0, forced_final: bool = False, recovery_sampling: bool = False,
+               malformed_call_count: int = 0) -> str:
     # Start the spinner BEFORE open_stream() so the HTTP-handshake + interrupt-
     # watcher-setup window (which can be tens of ms on a warm local server but
     # seconds on a cold/wake-from-sleep one) isn't a frozen green-text gap.
@@ -823,8 +828,8 @@ def model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=
 # Overridable via env var.  Set very high (e.g. 99999) to effectively disable.
 st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 200)
 
-def _run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
-                         on_step=None):
+def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
+                         on_step: Optional[Callable[[], None]] = None) -> None:
     steps = 0
     reasoning_loop_cuts = 0
     malformed_stream_cuts = 0

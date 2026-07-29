@@ -7,6 +7,8 @@ _assess_risk in __init__.py). Same model, tiny prompt, expects
 {"level": "low|medium|high", "reason": "<short>"}. Everything in this module
 is the part of that pipeline with no model/network/global-state dependency.
 """
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -27,7 +29,7 @@ from . import _state as st
 LEVEL_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
-def _detect_project_root(cwd=None):
+def _detect_project_root(cwd: str | None = None) -> str:
     """Return the git root for cwd when available, otherwise cwd itself."""
     cwd = os.path.realpath(cwd or os.getcwd())
     if shutil.which("git"):
@@ -43,14 +45,14 @@ def _detect_project_root(cwd=None):
     return cwd
 
 
-def _is_under_path(path, root):
+def _is_under_path(path: str, root: str) -> bool:
     try:
         return os.path.commonpath([path, root]) == root
     except (OSError, ValueError):
         return False
 
 
-def _extract_action_path(action):
+def _extract_action_path(action: str) -> str | None:
     """Pull the primary file path from Nx's short approval action string."""
     if not isinstance(action, str):
         return None
@@ -58,12 +60,10 @@ def _extract_action_path(action):
     if action.startswith("edit "):
         # edit_file -> "edit <path>"; multi_edit -> "edit <path> (N edits)".
         rest = action[len("edit "):].strip()
-        m = re.match(r"^(.+?)\s+\(\d+\s+edits\)$", rest)
-        if m:
+        if m := re.match(r"^(.+?)\s+\(\d+\s+edits\)$", rest):
             return m.group(1).strip() or None
         return rest or None
-    m = re.match(r"^write\s+(.+)\s+\(\d+\s+bytes\)$", action)
-    if m:
+    if m := re.match(r"^write\s+(.+)\s+\(\d+\s+bytes\)$", action):
         return m.group(1).strip() or None
     return None
 
@@ -124,7 +124,7 @@ _HIGH_RISK_GIT_PATTERNS = {
 }
 
 
-def _rm_is_recursive_force(parts):
+def _rm_is_recursive_force(parts: list[str]) -> bool:
     """True when `parts` (an `rm` invocation, argv already split) combines
     recursive and force flags in any order/grouping (-rf, -fr, -r -f, --recursive
     --force, etc.) — the case RISK_SYSTEM calls out by name as high."""
@@ -142,7 +142,7 @@ def _rm_is_recursive_force(parts):
     return recursive and force
 
 
-def _local_risk_hint(action):
+def _local_risk_hint(action: str) -> tuple[str, str] | None:
     """Return (level, reason) when `action` is unambiguously classifiable per
     RISK_SYSTEM's own bucket definitions, without a model round-trip. Returns
     None for anything ambiguous (including parse failures), so the caller
@@ -160,7 +160,7 @@ def _local_risk_hint(action):
     return None
 
 
-def _local_risk_hint_bash(command):
+def _local_risk_hint_bash(command: str) -> tuple[str, str] | None:
     if not command or _SHELL_METACHARACTERS_RE.search(command):
         return None
     try:
@@ -198,7 +198,9 @@ def _local_risk_hint_bash(command):
 st.PROJECT_ROOT = _detect_project_root()
 
 
-def _classify_action_path(path, cwd=None, project_root=None):
+def _classify_action_path(
+    path: str, cwd: str | None = None, project_root: str | None = None
+) -> dict[str, object]:
     cwd = os.path.realpath(cwd or os.getcwd())
     project_root = os.path.realpath(project_root or st.PROJECT_ROOT)
     expanded = os.path.expanduser(path)
@@ -225,7 +227,7 @@ def _classify_action_path(path, cwd=None, project_root=None):
     }
 
 
-def _risk_user_message(action):
+def _risk_user_message(action: str) -> str:
     cwd = os.path.realpath(os.getcwd())
     msg = {
         "action": action,
@@ -245,7 +247,7 @@ def _risk_user_message(action):
     return json.dumps(msg, sort_keys=True)
 
 
-def _assess_risk(action):
+def _assess_risk(action: str) -> tuple[str, str]:
     """Return (level, reason). level is one of LEVEL_ORDER; reason is a short
     string. On any failure (server down, bad JSON, unknown level) returns
     ("high", "<error>") so the caller falls through to the prompt path."""
@@ -287,8 +289,7 @@ def _assess_risk(action):
                 level = (obj.get("level") or "").strip().lower()
                 reason = (obj.get("reason") or "").strip()
             except (json.JSONDecodeError, AttributeError, TypeError):
-                m = re.search(r'\b(low|medium|high)\b', text, re.IGNORECASE)
-                if m:
+                if m := re.search(r'\b(low|medium|high)\b', text, re.IGNORECASE):
                     level = m.group(1).lower()
                 reason = text[:120]
             if level in LEVEL_ORDER:

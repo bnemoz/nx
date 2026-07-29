@@ -10,9 +10,12 @@ doing. Unlike manual /compress (which keeps only COMPRESS_KEEP=2 turns),
 auto-compress is conservative: it keeps roughly the last third of the
 conversation so in-progress work isn't disturbed.
 """
+from __future__ import annotations
+
 import json
 import re
 import time
+from typing import Any
 
 import httpx
 from ._openai_client import APIConnectionError
@@ -29,7 +32,7 @@ from . import TOOLS
 RUNTIME_NOTE_RE = re.compile(r"\n\n\[Runtime note: .*?\]\s*$", re.DOTALL)
 
 
-def _nudge_current_user_turn(messages, nudge):
+def _nudge_current_user_turn(messages: list[dict[str, Any]], nudge: str) -> None:
     note = f"[Runtime note: {nudge}]"
     for msg in reversed(messages):
         if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
@@ -40,7 +43,7 @@ def _nudge_current_user_turn(messages, nudge):
     messages.append({"role": "user", "content": note})
 
 
-def _flush_pending_background_notice(messages):
+def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     """Append BACKGROUND_GUIDANCE once, if run_tool() just saw the first
     backgrounded run_bash result this session. Appends a brand-new tail
     message (never rewrites an earlier one) so it can't invalidate a
@@ -53,7 +56,7 @@ def _flush_pending_background_notice(messages):
         st._PENDING_MULTI_EDIT_NOTICE = None
 
 
-def _last_is_dangling_tool(messages):
+def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:
     """True if the last message is a `tool` result with no assistant turn after it.
 
     This is the layout right after a tool ran and before the model follows up: an
@@ -120,7 +123,7 @@ NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
 
 
-def _grammar_extra_body(tools):
+def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     if not tools or st._NATIVE_TOOL_CALLS_CONFIRMED:
         return None
     # The startup capability probe (nx/_capability.py) takes precedence over
@@ -148,7 +151,7 @@ def _grammar_extra_body(tools):
     return _grammar_cache[key]
 
 
-def _recovery_sampling_opts():
+def _recovery_sampling_opts() -> dict[str, Any]:
     """Loop-breaking sampler for recovery retries (see RECOVERY_* constants).
 
     temperature/top_p are standard OpenAI params and go top-level. min_p,
@@ -183,8 +186,13 @@ def _recovery_sampling_opts():
     return opts
 
 
-def open_stream(messages, tools=TOOLS, tool_choice=None, max_tokens=None,
-                recovery_sampling=False):
+def open_stream(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] = TOOLS,
+    tool_choice: str | dict[str, Any] | None = None,
+    max_tokens: int | None = None,
+    recovery_sampling: bool = False,
+):
     """Open a streaming completion. Retries without tools= if the server rejects
     that param; returns None (after a friendly message) on connection/API failure."""
     # _LoggingStream lives in _turn.py, which itself imports open_stream from
@@ -257,7 +265,9 @@ def open_stream(messages, tools=TOOLS, tool_choice=None, max_tokens=None,
 st.COMPRESS_KEEP = 2  # how many recent turns to leave untouched
 
 
-def compress(messages, keep=None, auto=False):
+def compress(
+    messages: list[dict[str, Any]], keep: int | None = None, auto: bool = False
+) -> tuple[int, int, int] | None:
     """Ask the model to summarize everything except system + last `keep` turns.
 
     Mutates `messages` in place on success: replaces the middle slice with a
@@ -302,7 +312,7 @@ def compress(messages, keep=None, auto=False):
     # Render the head as plain text the model can summarize. Tool outputs are
     # the bulkiest part of a real session — include them but truncate each one
     # so a single huge read_file doesn't blow up the summary prompt itself.
-    def _render(msgs):
+    def _render(msgs: list[dict[str, Any]]) -> str:
         out = []
         for m in msgs:
             role = m.get("role", "?")
@@ -361,7 +371,7 @@ def compress(messages, keep=None, auto=False):
     return len(tail), summarized_n, len(summary)
 
 
-def _maybe_autocompress(messages, prompt_tokens):
+def _maybe_autocompress(messages: list[dict[str, Any]], prompt_tokens: int) -> bool:
     """Silently compress when context usage crosses the AUTOCOMPRESS_PERCENT
     threshold. Called after each settled model turn with the last turn's
     `prompt_tokens` (the size of the context the model just saw).

@@ -10,6 +10,8 @@ functions defined in *this* file — since the patch only ever lands on the
 top-level `nx` module's attribute, never on this submodule's own
 globals. See _turn.py / _compress.py for the same pattern.
 """
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -17,6 +19,7 @@ import shlex
 import signal
 import sys
 import time
+from typing import Any, Callable
 
 from ._openai_client import APIConnectionError
 
@@ -44,7 +47,7 @@ from . import (
 )
 
 
-_HELP_COMMANDS = [
+_HELP_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show this list of commands"),
     ("/quit, /exit", "save session (if dirty) and exit"),
     ("/source [name] [model]", "list or switch model source/backend"),
@@ -70,7 +73,7 @@ _HELP_COMMANDS = [
 
 
 # --- repl -------------------------------------------------------------------
-def _banner():
+def _banner() -> str:
     """Banner shown at startup and after source/approval changes."""
     sep = f"{DIM} · {RESET}"
     parts = [f"{BOLD}nx{RESET}", f"{C.ACCENT}{st.MODEL}{RESET}"]
@@ -98,14 +101,20 @@ class _ReplState:
     branches and others being separately-extracted `_cmd_*` functions."""
     __slots__ = ("messages", "session_id", "session_dirty", "history")
 
-    def __init__(self, messages, session_id, session_dirty, history):
+    def __init__(
+        self,
+        messages: list[dict[str, Any]],
+        session_id: str | None,
+        session_dirty: bool,
+        history: list[str],
+    ) -> None:
         self.messages = messages
         self.session_id = session_id
         self.session_dirty = session_dirty
         self.history = history
 
 
-def _save_current(state, meta=None):
+def _save_current(state: _ReplState, meta: dict[str, Any] | None = None) -> None:
     """Persist `state.messages` to the current session file.
 
     Title is auto-derived from the first user message (unless the user
@@ -116,11 +125,11 @@ def _save_current(state, meta=None):
         return
     m = dict(meta or {})
     if "title" not in m:
-        first_user = ""
-        for msg in state.messages:
-            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-                first_user = msg["content"]
-                break
+        first_user = next(
+            (msg["content"] for msg in state.messages
+             if msg.get("role") == "user" and isinstance(msg.get("content"), str)),
+            "",
+        )
         t = _safe_title(first_user)
         if t:
             m["title"] = t
@@ -153,14 +162,14 @@ def _save_current(state, meta=None):
         st._METRICS.flush()
 
 
-def _fresh_metrics(session_id):
+def _fresh_metrics(session_id: str) -> _Metrics:
     return _Metrics(
         session_id, model=st.MODEL,
         source=st.ACTIVE.name if st.ACTIVE else None,
         push_url=_env_metrics_url())
 
 
-def _reload_metrics_totals(session_id):
+def _reload_metrics_totals(session_id: str) -> None:
     saved = _load_session(session_id) or {}
     if isinstance(saved.get("input_tokens"), int):
         st._METRICS.input_tokens = saved.get("input_tokens") or 0
@@ -177,19 +186,19 @@ def _reload_metrics_totals(session_id):
 # loop, or None to continue it. Dispatched by first whitespace token via
 # _REPL_COMMANDS (built below, once all handlers are defined).
 
-def _cmd_quit(user, state):
+def _cmd_quit(user: str, state: _ReplState) -> str | None:
     if state.session_dirty:
         _save_current(state)
     return "break"
 
 
-def _cmd_help(user, state):
+def _cmd_help(user: str, state: _ReplState) -> None:
     print(f"{DIM}  commands:{RESET}")
     for cmd, desc in _HELP_COMMANDS:
         print(f"  {C.ACCENT}{cmd:<28}{RESET} {DIM}{desc}{RESET}")
 
 
-def _cmd_source(user, state):
+def _cmd_source(user: str, state: _ReplState) -> None:
     import nx as _m
     sp = user.split()
     if len(sp) == 1:
@@ -242,7 +251,7 @@ def _cmd_source(user, state):
         st._METRICS.source = target
 
 
-def _cmd_theme(user, state):
+def _cmd_theme(user: str, state: _ReplState) -> None:
     import nx as _m
     sp = user.split()
     if len(sp) == 1:
@@ -264,7 +273,7 @@ def _cmd_theme(user, state):
     print(_m._banner())
 
 
-def _cmd_reasoning(user, state):
+def _cmd_reasoning(user: str, state: _ReplState) -> None:
     sp = user.split()
     sub = sp[1].lower() if len(sp) > 1 else None
     if sub in ("on", "show", "expand"):
@@ -298,7 +307,7 @@ def _cmd_reasoning(user, state):
               f"use on, off, or last{RESET}")
 
 
-def _cmd_provider(user, state):
+def _cmd_provider(user: str, state: _ReplState) -> None:
     # /provider — control OpenRouter upstream-provider routing for the
     # active source. OpenRouter fronts many providers behind one model
     # id; routing picks which of them serves the request (different
@@ -347,7 +356,7 @@ def _cmd_provider(user, state):
     state.session_dirty = True  # routing change is worth persisting
 
 
-def _cmd_resources(user, state):
+def _cmd_resources(user: str, state: _ReplState) -> None:
     print(f"{DIM}  sampling…{RESET}")
     stats = process_stats()
     rss = stats["rss_mb"]
@@ -355,7 +364,7 @@ def _cmd_resources(user, state):
     print(f"{DIM}  pid {stats['pid']} · cpu {stats['cpu_percent']:.1f}% · rss {rss_s}{RESET}")
 
 
-def _cmd_bg(user, state):
+def _cmd_bg(user: str, state: _ReplState) -> None:
     parts = user.split()
     if len(parts) >= 2 and parts[1] == "kill":
         if len(parts) != 3:
@@ -386,7 +395,7 @@ def _cmd_bg(user, state):
     print(f"{DIM}  /bg kill <pid> to terminate a running job{RESET}")
 
 
-def _cmd_yolo(user, state):
+def _cmd_yolo(user: str, state: _ReplState) -> None:
     import nx as _m
     st.YOLO = not st.YOLO
     if st.YOLO:
@@ -397,7 +406,7 @@ def _cmd_yolo(user, state):
     print(_m._banner())
 
 
-def _cmd_approval(user, state):
+def _cmd_approval(user: str, state: _ReplState) -> None:
     import nx as _m
     parts = user.split()
     if len(parts) == 1:
@@ -419,7 +428,7 @@ def _cmd_approval(user, state):
         print(f"{C.WARNING}  unknown level {arg!r} — want all|low|medium|high|yolo{RESET}")
 
 
-def _cmd_reset(user, state):
+def _cmd_reset(user: str, state: _ReplState) -> None:
     sys.stdout.write("\033[2J\033[3J\033[H")
     sys.stdout.flush()
     state.messages = _initial_messages()
@@ -436,7 +445,7 @@ def _cmd_reset(user, state):
     print(f"{DIM}  new session {state.session_id}{RESET}")
 
 
-def _cmd_init(user, state):
+def _cmd_init(user: str, state: _ReplState) -> None:
     import nx as _m
     root = st.PROJECT_ROOT or os.getcwd()
     agents_path = os.path.join(root, "AGENTS.md")
@@ -466,7 +475,7 @@ def _cmd_init(user, state):
     _save_current(state)
 
 
-def _cmd_recover(user, state):
+def _cmd_recover(user: str, state: _ReplState) -> None:
     note = user.split(None, 1)[1].strip() if " " in user else ""
     content = f"[Runtime note: {MANUAL_RECOVERY_NUDGE}"
     if note:
@@ -479,7 +488,7 @@ def _cmd_recover(user, state):
     state.session_dirty = True
 
 
-def _cmd_undo(user, state):
+def _cmd_undo(user: str, state: _ReplState) -> None:
     import nx as _m
     if user in ("/undo --list", "/undo -l", "/undo list"):
         checkpoints = _m.list_checkpoints()
@@ -497,7 +506,7 @@ def _cmd_undo(user, state):
     print(f"{color}  ↳ {msg}{RESET}")
 
 
-def _cmd_compress(user, state):
+def _cmd_compress(user: str, state: _ReplState) -> None:
     import nx as _m
     # nothing to compress if we're under (system + KEEP) turns
     body_len = len(state.messages) - (1 if state.messages and state.messages[0].get("role") == "system" else 0)
@@ -522,7 +531,7 @@ def _cmd_compress(user, state):
     state.session_dirty = True
 
 
-def _cmd_autocompress(user, state):
+def _cmd_autocompress(user: str, state: _ReplState) -> None:
     arg = user[len("/autocompress"):].strip().lower()
     if not arg:
         if st.AUTOCOMPRESS_PERCENT <= 0:
@@ -554,11 +563,11 @@ def _cmd_autocompress(user, state):
           f"(auto-compress when context ≥ {val}% full){RESET}")
 
 
-def _cmd_sessions_handler(user, state):
+def _cmd_sessions_handler(user: str, state: _ReplState) -> None:
     _cmd_sessions(user, state.session_id)
 
 
-def _cmd_resume_handler(user, state):
+def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     new_sid = _cmd_resume(user, state.session_id)
     if not new_sid:
         return
@@ -576,7 +585,7 @@ def _cmd_resume_handler(user, state):
     _reload_metrics_totals(new_sid)
 
 
-def _cmd_save(user, state):
+def _cmd_save(user: str, state: _ReplState) -> None:
     title = user.split(None, 1)[1].strip() if " " in user else None
     _save_current(state, {"title": title} if title else {})
     state.session_dirty = False
@@ -584,16 +593,18 @@ def _cmd_save(user, state):
     print(f"{DIM}  ✓ saved session {state.session_id}{shown}{RESET}")
 
 
-def _cmd_memory_handler(user, state):
+def _cmd_memory_handler(user: str, state: _ReplState) -> None:
     _cmd_memory(state.messages, user)
 
 
-def _cmd_delete_handler(user, state):
+def _cmd_delete_handler(user: str, state: _ReplState) -> None:
     target = user.split(None, 1)[1].strip() if " " in user else None
     _cmd_delete(target, state.session_id)
 
 
-_REPL_COMMANDS = {
+CommandHandler = Callable[[str, _ReplState], "str | None"]
+
+_REPL_COMMANDS: dict[str, CommandHandler] = {
     "/quit": _cmd_quit,
     "/exit": _cmd_quit,
     "/help": _cmd_help,
@@ -623,7 +634,7 @@ _REPL_COMMANDS = {
 }
 
 
-def _repl():
+def _repl() -> None:
     """The interactive loop: banner, ctx-probe warm-up, session state
     resolution/resume, then the read → dispatch → run-turn → autosave cycle
     until /quit or EOF. Slash commands are dispatched via `_REPL_COMMANDS`."""
@@ -766,7 +777,7 @@ def _repl():
 
 
 
-def _session_id_from_args():
+def _session_id_from_args() -> str | None:
     """Resolve a starting session id from CLI flags: --resume/-r and --session.
 
     `--resume` with no following target resumes the most recent session
@@ -799,7 +810,7 @@ def _session_id_from_args():
     return out
 
 
-def _session_messages(session_id):
+def _session_messages(session_id: str) -> list[dict[str, Any]]:
     """Load just the messages list for a session, with the live SYSTEM prepended."""
     data = _load_session(session_id) or {}
     msgs = [m for m in data.get("messages", []) if m.get("role") != "system"]
@@ -807,7 +818,7 @@ def _session_messages(session_id):
     return msgs
 
 
-def _fmt_when(ts):
+def _fmt_when(ts: float | None) -> str:
     """Compact relative timestamp for the session list."""
     if not ts:
         return "?"
@@ -823,7 +834,7 @@ def _fmt_when(ts):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
-def _print_transcript(messages, max_chars=120):
+def _print_transcript(messages: list[dict[str, Any]], max_chars: int = 120) -> int:
     """Render a session's message history as a one-line-per-message recap.
 
     Used on resume so the user immediately sees what the conversation was
@@ -844,7 +855,9 @@ def _print_transcript(messages, max_chars=120):
     return printed
 
 
-def _session_list_page_options(args, default_limit=SESSION_LIST_DEFAULT_LIMIT):
+def _session_list_page_options(
+    args: list[str], default_limit: int = SESSION_LIST_DEFAULT_LIMIT,
+) -> tuple[str | None, int, int, list[str]]:
     """Parse paging flags and leave everything else as the search query."""
     page = 1
     limit = default_limit
@@ -897,7 +910,9 @@ def _session_list_page_options(args, default_limit=SESSION_LIST_DEFAULT_LIMIT):
     return query, page, limit, warnings
 
 
-def _print_session_list(sessions, start_index=1, current_id=None):
+def _print_session_list(
+    sessions: list[dict[str, Any]], start_index: int = 1, current_id: str | None = None,
+) -> None:
     for offset, s in enumerate(sessions):
         i = start_index + offset
         title = s["title"] or "(empty)"
@@ -928,12 +943,12 @@ def _print_session_list(sessions, start_index=1, current_id=None):
             print(f"       {DIM}{label}: {detail}{RESET}")
 
 
-def _session_next_hint(command, page, limit, query=None):
+def _session_next_hint(command: str, page: int, limit: int, query: str | None = None) -> str:
     quoted_query = f" {shlex.quote(query)}" if query else ""
     return f"{command}{quoted_query} --page {page + 1} --limit {limit}"
 
 
-def _display_path(path):
+def _display_path(path: str | None) -> str | None:
     if not path:
         return None
     path = os.path.expanduser(str(path))
@@ -945,7 +960,7 @@ def _display_path(path):
     return path
 
 
-def _cli_sessions(args):
+def _cli_sessions(args: list[str]) -> bool:
     """`nx sessions [query]` — list saved sessions and exit (no REPL).
 
     With no query: prints the first page of recent sessions. With a query:
@@ -990,7 +1005,7 @@ def _cli_sessions(args):
     return True
 
 
-def _cli_tokens(args):
+def _cli_tokens(args: list[str]) -> bool:
     """`nx --tokens` / `nx --bench` — print the exact prompt-token
     floor (SYSTEM + the active TOOLS schema + a 1-token "hey") for the active
     backend/model, then exit. Turns the README's "~625 tokens on a bare hey"
@@ -1033,7 +1048,7 @@ def _cli_tokens(args):
     return True
 
 
-def _cmd_sessions(user, current_id):
+def _cmd_sessions(user: str, current_id: str | None) -> None:
     """Handle /sessions [n] — list recent sessions, or show one in detail."""
     parts = user.split()
     args = parts[1:]
@@ -1090,7 +1105,7 @@ def _cmd_sessions(user, current_id):
     _print_transcript(msgs)
 
 
-def _cmd_resume(user, current_id):
+def _cmd_resume(user: str, current_id: str | None) -> str | None:
     """Handle /resume [target] — pick a session to resume. Returns the new id
     or None if nothing changed."""
     parts = user.split(None, 1)
@@ -1139,7 +1154,7 @@ def _cmd_resume(user, current_id):
     return sid
 
 
-def _cmd_delete(target, current_id):
+def _cmd_delete(target: str | None, current_id: str | None) -> None:
     """Handle /delete [target] — remove a session file."""
     if not target:
         print(f"{C.WARNING}  usage: /delete <n|id|prefix>  (use /sessions to list){RESET}")
@@ -1158,7 +1173,7 @@ def _cmd_delete(target, current_id):
         print(f"{C.WARNING}  ✗ couldn't delete session {sid}{RESET}")
 
 
-def _cmd_memory(messages, user_input):
+def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     """Handle /memory save|remember|list  — manual memories.
 
     /memory save [focus...]      — distill session into a memory (optional focus
@@ -1190,7 +1205,7 @@ def _cmd_memory(messages, user_input):
     print(f"{DIM}    /memory list               list all memories{RESET}")
 
 
-def _slugify(text, maxlen=60):
+def _slugify(text: str, maxlen: int = 60) -> str:
     """Turn a title into a filesystem-safe slug."""
     s = text.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
@@ -1200,7 +1215,7 @@ def _slugify(text, maxlen=60):
     return s or "untitled"
 
 
-def _cmd_memory_save(messages, notes=None):
+def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -> None:
     """Save a memory to ~/.nx/memories/<slug>.md.
 
     The model always distills the session into a markdown memory note.
@@ -1279,7 +1294,7 @@ def _cmd_memory_save(messages, notes=None):
         print(f"{C.ERROR}  ✗ couldn't write memory: {e}{RESET}")
 
 
-def _cmd_memory_remember(query):
+def _cmd_memory_remember(query: str) -> None:
     """Keyword-search through saved memories."""
     memories_dir = _memories_dir()
     if not os.path.isdir(memories_dir):
@@ -1336,7 +1351,7 @@ def _cmd_memory_remember(query):
             shown += 1
 
 
-def _cmd_memory_list():
+def _cmd_memory_list() -> None:
     """List all saved memories with titles and dates."""
     memories_dir = _memories_dir()
     if not os.path.isdir(memories_dir):
@@ -1372,7 +1387,7 @@ def _cmd_memory_list():
         print(f"  {C.SUCCESS}{i:>2}.{RESET} {title}  {DIM}({date}){RESET}")
 
 
-def _render_transcript_for_memory(messages):
+def _render_transcript_for_memory(messages: list[dict[str, Any]]) -> str:
     """Render session messages into a compact text transcript for the model.
 
     Skips the system prompt, truncates long tool outputs, and shows tool calls.

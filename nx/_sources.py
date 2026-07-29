@@ -12,11 +12,14 @@ from the legacy NX_BASE_URL / NX_API_KEY / NX_MODEL vars
 (same defaults as before, so existing setups keep working).
 Switch at runtime with /source.
 """
+from __future__ import annotations
+
 import json
 import os
 import re
 import sys
 import urllib.request
+from typing import Any
 
 from ._openai_client import OpenAI
 
@@ -39,8 +42,9 @@ from . import _state as st
 # Switch at runtime with /source.
 
 class Source:
-    def __init__(self, name, base_url, api_key, model=None, extra_body=None,
-                 http_headers=None):
+    def __init__(self, name: str, base_url: str | None, api_key: str | None,
+                 model: str | None = None, extra_body: dict[str, Any] | None = None,
+                 http_headers: dict[str, str] | None = None):
         self.name = name
         self.base_url = base_url
         if base_url and not re.search(r"/v\d+/?$", base_url):
@@ -56,7 +60,7 @@ class Source:
         # app name) to identify the calling app in their dashboard. Ignored by
         # non-consumers (llama.cpp, Together, …) so it's safe to always pass.
         self.http_headers = http_headers or None
-        client_kwargs = {"base_url": base_url, "api_key": self.api_key}
+        client_kwargs: dict[str, Any] = {"base_url": base_url, "api_key": self.api_key}
         if self.http_headers:
             client_kwargs["default_headers"] = self.http_headers
         self.client = OpenAI(**client_kwargs)
@@ -90,7 +94,7 @@ class Source:
         # string) or the /provider slash command (ephemeral, per-session).
         self.extra_body = extra_body or None
 
-    def extra_request_kwargs(self):
+    def extra_request_kwargs(self) -> dict[str, Any]:
         """extra_body kwarg to merge into every chat.completions.create(), or
         {} when none is configured. Non-consumers ignore unknown body keys, so
         this is a no-op for backends that don't understand it (llama.cpp,
@@ -106,7 +110,7 @@ class Source:
     _GENERIC_MODEL_IDS = {"local-model", "model", "auto", "unknown", "gpt-3.5-turbo"}
 
     @staticmethod
-    def _clean_model_id(advertised):
+    def _clean_model_id(advertised: str | None) -> str | None:
         """Shorten a server-advertised model id into a concise display name.
 
         Only touches local-server ids that look like file paths (llama.cpp,
@@ -140,7 +144,7 @@ class Source:
                 break
         return name
 
-    def resolve_model(self):
+    def resolve_model(self) -> str:
         if self.model:
             return self.model
         advertised = None
@@ -157,7 +161,7 @@ class Source:
         probed = self._probe_loaded_model()
         return probed or advertised or "local-model"
 
-    def _probe_loaded_model(self):
+    def _probe_loaded_model(self) -> str | None:
         """Best-effort GET <server>/props for the loaded model path/alias.
         llama.cpp serves /props at the root (not under /v1). Returns None on
         any failure — never raises, never required, makes no assumption about
@@ -175,10 +179,10 @@ class Source:
                 return val.strip()
         return None
 
-    def display_model(self):
+    def display_model(self) -> str:
         return self.model or "auto"
 
-    def tokenize_count(self, text):
+    def tokenize_count(self, text: str) -> int | None:
         """Best-effort exact token count via a local server's /tokenize
         endpoint (llama.cpp convention: POST {"content": text} -> {"tokens":
         [...]}"). Only attempted for local/LAN sources — remote aggregators
@@ -214,7 +218,7 @@ class Source:
     # one-token prompt so the server tells us N without us ever generating.
     _CTX_LIMIT_RE = re.compile(r"maximum context length is (\d+) tokens", re.IGNORECASE)
 
-    def _is_local(self):
+    def _is_local(self) -> bool:
         """True if this source points at a host on the local machine or LAN
         (llama.cpp, Ollama, etc.) rather than a remote API (Together, Z.ai,
         OpenAI, …). Local servers expose /v1/models meta and /props cheaply
@@ -235,7 +239,7 @@ class Source:
             return True
         return False
 
-    def resolve_context_window(self, model=None, force=False):
+    def resolve_context_window(self, model: str | None = None, force: bool = False) -> int | None:
         """Best-effort max context window (tokens) for `model` on this source.
 
         Returns the cached value if present (unless force=True), else probes
@@ -289,7 +293,7 @@ class Source:
         # footer re-probes next turn (the server may have finished loading).
         return self._context_window
 
-    def _ctx_from_models(self, mid):
+    def _ctx_from_models(self, mid: str | None) -> int | None:
         """Pull n_ctx / context_length from GET /v1/models. llama.cpp stashes
         it under data[0].meta.n_ctx; some generic hosts expose context_length
         as a top-level model field. Returns int or None."""
@@ -334,7 +338,7 @@ class Source:
                 return v
         return None
 
-    def _ctx_from_props(self):
+    def _ctx_from_props(self) -> int | None:
         """llama.cpp /props fallback: default_generation_settings.n_ctx."""
         try:
             root = re.sub(r"/v\d+/?$", "", self.base_url.rstrip("/"))
@@ -355,7 +359,7 @@ class Source:
                 return v
         return None
 
-    def _ctx_from_lmstudio(self, mid):
+    def _ctx_from_lmstudio(self, mid: str | None) -> int | None:
         """LM Studio's native GET /api/v0/models exposes loaded_context_length
         (the context the model is actually running with) per entry — unlike
         the OpenAI-compat /v1/models, which omits any length field, and unlike
@@ -384,7 +388,7 @@ class Source:
         v = pick.get("loaded_context_length") or pick.get("max_context_length")
         return v if isinstance(v, int) and v > 0 else None
 
-    def _ctx_from_overrun_probe(self, mid):
+    def _ctx_from_overrun_probe(self, mid: str | None) -> int | None:
         """Send a chat completion with max_tokens far beyond any real context
         and a 1-token prompt; parse the 400's "maximum context length is N
         tokens" message. Works for Together and any host mirroring OpenAI's
@@ -407,20 +411,19 @@ class Source:
                 # Together nests it under body["message"]["message"]; OpenAI
                 # under body["error"]["message"]. Flatten to a string search.
                 msg = json.dumps(body) + " " + msg
-            m = self._CTX_LIMIT_RE.search(msg)
-            if m:
+            if m := self._CTX_LIMIT_RE.search(msg):
                 return int(m.group(1))
         return None
 
 
-def _resolve_api_key(val):
+def _resolve_api_key(val: str | None) -> str | None:
     """$name → look up env var (populated from ~/.env if present); else literal."""
     if val and val.startswith("$"):
         return os.environ.get(val[1:], "")
     return val
 
 
-def _parse_extra_body(raw):
+def _parse_extra_body(raw: str | None) -> dict[str, Any] | None:
     """Parse a NX_SOURCE_<NAME>_EXTRA_BODY env value into a dict, or None.
 
     Accepts a JSON object string and merges it into every chat request as the
@@ -452,7 +455,8 @@ def _parse_extra_body(raw):
     return None
 
 
-def _build_http_headers(app_name=None, app_url=None):
+def _build_http_headers(app_name: str | None = None,
+                         app_url: str | None = None) -> dict[str, str] | None:
     """Build default HTTP headers for API requests, for aggregators like
     OpenRouter which read HTTP-Referer (your site URL) and X-Title (your app
     name) to identify the calling app in their dashboard.
@@ -469,7 +473,7 @@ def _build_http_headers(app_name=None, app_url=None):
     return headers or None
 
 
-def _discover_sources():
+def _discover_sources() -> None:
     """Build st.SOURCES + st.SOURCE_ORDER from NX_SOURCE_* env vars, falling
     back to a single 'local' source from the legacy NX_* vars."""
     names = []
@@ -572,8 +576,11 @@ def _discover_sources():
     )
 
 
-def _register_builtin(name, base_url, api_key, model=None, extra_body=None,
-                       http_headers=None, require_key=True):
+def _register_builtin(name: str, base_url: str, api_key: str | None,
+                       model: str | None = None,
+                       extra_body: dict[str, Any] | None = None,
+                       http_headers: dict[str, str] | None = None,
+                       require_key: bool = True) -> None:
     """Register a built-in convenience source (local/together/openrouter) into
     st.SOURCES/st.SOURCE_ORDER, unless the user already defined one of that
     name via NX_SOURCE_<NAME>_* (an explicit config always wins) or, for
@@ -590,7 +597,7 @@ def _register_builtin(name, base_url, api_key, model=None, extra_body=None,
     st.SOURCE_ORDER.append(name)
 
 
-def switch_source(name, model_override=None):
+def switch_source(name: str, model_override: str | None = None) -> bool:
     """Swap the active source. Reassigns st.client + st.MODEL globals. Returns True
     on success, False (with a message) if the name is unknown.
 
@@ -626,7 +633,7 @@ def switch_source(name, model_override=None):
     return True
 
 
-def restore_source(source_name, model=None):
+def restore_source(source_name: str | None, model: str | None = None) -> bool:
     """Best-effort restore of the source (and optional model) a session was
     started on, used when resuming. Switches source if it's configured and
     differs from the active one; if `model` is set and not equal to the
@@ -643,7 +650,8 @@ def restore_source(source_name, model=None):
     return True
 
 
-def _set_provider_order(src, order, allow_fallbacks=None):
+def _set_provider_order(src: Source, order: list[str],
+                         allow_fallbacks: bool | None = None) -> None:
     """Set the OpenRouter `provider.order` routing for `src` in place.
 
     `order` is a list of provider names (e.g. ["parasail/fp8", "Together"]); a
@@ -676,7 +684,7 @@ def _set_provider_order(src, order, allow_fallbacks=None):
         src.extra_body = None
 
 
-def _provider_order(src):
+def _provider_order(src: Source) -> list[str]:
     """The current `provider.order` list on `src`, or [] when unset. Read-only
     accessor for the /provider listing; never raises."""
     body = src.extra_body if isinstance(src.extra_body, dict) else None

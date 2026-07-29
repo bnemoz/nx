@@ -14,6 +14,8 @@ framed, multi-line editor:
     nx/_mentions.py when the message is submitted
 Falls back to plain `input()` when stdin/stdout is not a TTY.
 """
+from __future__ import annotations
+
 import os
 import select
 import shutil
@@ -25,7 +27,7 @@ from . import _state as st
 from ._ansi import DIM, RESET, C, THEMES, raw_mode
 
 # (command, description) — kept in sync with the README "Commands" table.
-SLASH_COMMANDS = [
+SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "list all slash commands"),
     ("/init", "generate/update AGENTS.md for this project"),
     ("/source", "list sources, switch to one, or override its model"),
@@ -57,7 +59,7 @@ SLASH_COMMANDS = [
 # Valid keyword arguments for slash commands that take an enum-like first
 # argument -- surfaced as a dropdown once the user types "/cmd " (mirrors the
 # command autocomplete above, kept in sync with the handlers in _repl.py).
-SLASH_ARG_OPTIONS = {
+SLASH_ARG_OPTIONS: dict[str, list[str]] = {
     "/theme": sorted(THEMES),
     "/reasoning": ["on", "off", "last"],
     "/approval": ["all", "low", "medium", "high", "yolo"],
@@ -65,7 +67,7 @@ SLASH_ARG_OPTIONS = {
 }
 
 
-def _fuzzy_score(query, text):
+def _fuzzy_score(query: str, text: str) -> float | None:
     """Subsequence match of `query` in `text`; None if not a subsequence,
     else a score rewarding contiguous runs and an early start."""
     qi = 0
@@ -84,7 +86,7 @@ def _fuzzy_score(query, text):
     return score - (first or 0) * 0.1
 
 
-def _match_slash_commands(prefix):
+def _match_slash_commands(prefix: str) -> list[tuple[str, str]]:
     """`prefix` includes the leading '/'. Returns (cmd, desc) pairs, best match first."""
     q = prefix[1:].lower()
     if not q:
@@ -102,7 +104,7 @@ def _match_slash_commands(prefix):
     return [(c, d) for _, c, d in scored]
 
 
-def _match_slash_args(cmd, prefix):
+def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
     """Fuzzy-match `prefix` (no leading '/') against `cmd`'s keyword options."""
     opts = SLASH_ARG_OPTIONS.get(cmd)
     if not opts:
@@ -127,33 +129,31 @@ def _match_slash_args(cmd, prefix):
 # for '@file' completion. Not refreshed mid-session (files added after the
 # chatbox first renders won't show up) -- a cheap tradeoff for a suggestion
 # list, not a source of truth for what gets read.
-_FILE_INDEX = None
+_FILE_INDEX: list[str] | None = None
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
               ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+_FILE_INDEX_CAP = 5000
 
 
-def _build_file_index():
+def _build_file_index() -> list[str]:
     global _FILE_INDEX
     from ._risk import _detect_project_root
     root = _detect_project_root()
-    files = []
+    files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-        for dn in dirnames:
-            files.append(os.path.relpath(os.path.join(dirpath, dn), root) + "/")
-            if len(files) >= 5000:
-                _FILE_INDEX = files
-                return files
-        for fn in filenames:
-            files.append(os.path.relpath(os.path.join(dirpath, fn), root))
-            if len(files) >= 5000:
+        names = [(dn, True) for dn in dirnames] + [(fn, False) for fn in filenames]
+        for name, is_dir in names:
+            rel = os.path.relpath(os.path.join(dirpath, name), root)
+            files.append(rel + "/" if is_dir else rel)
+            if len(files) >= _FILE_INDEX_CAP:
                 _FILE_INDEX = files
                 return files
     _FILE_INDEX = files
     return files
 
 
-def _match_file_paths(prefix):
+def _match_file_paths(prefix: str) -> list[str]:
     """`prefix` excludes the leading '@'. Returns matching relative paths, best first."""
     files = _FILE_INDEX if _FILE_INDEX is not None else _build_file_index()
     q = prefix.lower()
@@ -168,7 +168,7 @@ def _match_file_paths(prefix):
     return [f for _, f in scored[:8]]
 
 
-def _at_token_at_cursor(line, col):
+def _at_token_at_cursor(line: str, col: int) -> tuple[int, str] | None:
     """If the cursor sits inside/at the end of an '@token' word, return
     (start_col, token_without_at); else None. Only triggers when the '@'
     starts the word (so "user@example.com" mid-word doesn't match)."""
@@ -179,26 +179,21 @@ def _at_token_at_cursor(line, col):
         return i, line[i + 1:col]
     return None
 
-def _chatbox_fallback(prompt):
+def _chatbox_fallback(prompt: str) -> str:
     """Plain `input()` fallback used when raw terminal mode isn't usable. Single-line only;
     newlines must be typed as the literal `\\n` (rare in practice)."""
-    try:
-        return input(prompt)
-    except (EOFError, KeyboardInterrupt):
-        raise
+    return input(prompt)
 
 
-def _char_width(ch):
-    if unicodedata.east_asian_width(ch) in ('W', 'F'):
-        return 2
-    return 1
+def _char_width(ch: str) -> int:
+    return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
 
 
-def _str_width(s):
+def _str_width(s: str) -> int:
     return sum(_char_width(c) for c in s)
 
 
-def _str_slice_by_width(s, max_width):
+def _str_slice_by_width(s: str, max_width: int) -> str:
     """Return the longest prefix of s that fits within max_width display columns."""
     w = 0
     for i, ch in enumerate(s):
@@ -209,7 +204,7 @@ def _str_slice_by_width(s, max_width):
     return s
 
 
-def _raw_read_key(fd):
+def _raw_read_key(fd: int) -> str:
     b = os.read(fd, 1)
     if not b:
         return ""
@@ -232,7 +227,7 @@ def _raw_read_key(fd):
     return b.decode("utf-8", "replace")
 
 
-def _raw_read_available(fd, timeout=0.02):
+def _raw_read_available(fd: int, timeout: float = 0.02) -> str:
     raw = bytearray()
     while True:
         ready, _, _ = select.select([fd], [], [], timeout)
@@ -243,7 +238,7 @@ def _raw_read_available(fd, timeout=0.02):
     return raw.decode("utf-8", "replace")
 
 
-def _chatbox_raw(initial="", history=None):
+def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
     """Normal-scrollback multi-line editor.
 
     This does not enter the alternate screen. The prompt, streamed model output,
@@ -258,21 +253,21 @@ def _chatbox_raw(initial="", history=None):
     h_idx = len(history)
     rendered_lines = 0
     cursor_line = 0
-    current_matches = []
-    current_kind = None
-    current_at_start = None
+    current_matches: list[tuple[str, str]] = []
+    current_kind: str | None = None
+    current_at_start: int | None = None
     sel_idx = 0
 
-    def move_up(n):
+    def move_up(n: int) -> str:
         return f"\x1b[{n}A" if n > 0 else ""
 
-    def move_down(n):
+    def move_down(n: int) -> str:
         return f"\x1b[{n}B" if n > 0 else ""
 
-    def move_right(n):
+    def move_right(n: int) -> str:
         return f"\x1b[{n}C" if n > 0 else ""
 
-    def build_visual(inner_w):
+    def build_visual(inner_w: int):
         visual = []
         for bi, line in enumerate(buf):
             if not line:
@@ -287,7 +282,7 @@ def _chatbox_raw(initial="", history=None):
                 visual.append((bi, len(line), ""))
         return visual
 
-    def render():
+    def render() -> None:
         nonlocal rendered_lines, cursor_line, current_matches, current_kind, current_at_start, sel_idx
         width = shutil.get_terminal_size((80, 24)).columns
         box_w = max(20, width - 2)
@@ -367,12 +362,12 @@ def _chatbox_raw(initial="", history=None):
         rendered_lines = len(lines)
         cursor_line = cur_vrow + 1
 
-    def finish():
+    def finish() -> None:
         sys.stdout.write("\r" + move_down((rendered_lines - 1) - cursor_line) + "\n")
         sys.stdout.write("\x1b[?25h\x1b[?2004l")
         sys.stdout.flush()
 
-    def insert_text(s):
+    def insert_text(s: str) -> None:
         nonlocal row, col
         if not s:
             return
@@ -389,7 +384,7 @@ def _chatbox_raw(initial="", history=None):
         row += len(new_lines)
         col = len(parts[-1])
 
-    def backspace():
+    def backspace() -> None:
         nonlocal row, col
         if col > 0:
             buf[row] = buf[row][:col - 1] + buf[row][col:]
@@ -401,7 +396,7 @@ def _chatbox_raw(initial="", history=None):
             del buf[row]
             row -= 1
 
-    def delete_forward():
+    def delete_forward() -> None:
         line = buf[row]
         if col < len(line):
             buf[row] = line[:col] + line[col + 1:]
@@ -409,13 +404,13 @@ def _chatbox_raw(initial="", history=None):
             buf[row] = line + buf[row + 1]
             del buf[row + 1]
 
-    def load_from_history(hist_text):
+    def load_from_history(hist_text: str) -> None:
         nonlocal row, col
         buf[:] = hist_text.split("\n") if hist_text else [""]
         row = len(buf) - 1
         col = len(buf[-1])
 
-    def word_right():
+    def word_right() -> None:
         nonlocal row, col
         line = buf[row]
         if col >= len(line):
@@ -428,7 +423,7 @@ def _chatbox_raw(initial="", history=None):
         while col < len(line) and not line[col].isspace():
             col += 1
 
-    def word_left():
+    def word_left() -> None:
         nonlocal row, col
         if col == 0:
             if row > 0:
@@ -441,7 +436,7 @@ def _chatbox_raw(initial="", history=None):
         while col > 0 and not line[col - 1].isspace():
             col -= 1
 
-    def handle_escape(seq):
+    def handle_escape(seq: str) -> None:
         nonlocal row, col, h_idx, sel_idx
         if seq.startswith("[200~"):
             paste = seq[5:]
@@ -565,7 +560,7 @@ def _chatbox_raw(initial="", history=None):
             sys.stdout.flush()
 
 
-def read_multiline(initial="", history=None):
+def read_multiline(initial: str = "", history: list[str] | None = None) -> str:
     """Public entry point. Returns the entered text, or '' on empty submit.
     Raises EOFError / KeyboardInterrupt to match `input()`'s contract."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():

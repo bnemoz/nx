@@ -48,6 +48,8 @@ Env:   NX_APPROVAL=<all|low|medium|high|yolo>  (persistent default approval mode
        OPENROUTER_API_KEY  (auto-registers a built-in `openrouter` source; default model z-ai/glm-5.2,
             routed to parasail/fp8 — override with /provider or NX_SOURCE_OPENROUTER_EXTRA_BODY)
 """
+from __future__ import annotations
+
 import atexit
 import glob
 import json
@@ -68,6 +70,7 @@ import time
 import types as _types
 import urllib.error
 import urllib.request
+from typing import Any
 
 import httpx
 from ._openai_client import OpenAI, APIConnectionError, APIError
@@ -122,7 +125,7 @@ SESSION_LIST_DEFAULT_LIMIT = 10
 SESSION_LIST_MAX_LIMIT = 100
 
 
-def _sessions_dir():
+def _sessions_dir() -> str:
     """Where session files live. Honors NX_SESSIONS_DIR, then NX_HOME/sessions."""
     return os.path.expanduser(
         os.environ.get("NX_SESSIONS_DIR",
@@ -130,7 +133,7 @@ def _sessions_dir():
     )
 
 
-def _memories_dir():
+def _memories_dir() -> str:
     """Where memory files live. Always under SESSION_HOME/memories."""
     return os.path.join(SESSION_HOME, "memories")
 
@@ -142,15 +145,15 @@ from ._sessions_io import (
 )
 
 
-def _session_path(session_id):
+def _session_path(session_id: str) -> str:
     return os.path.join(_sessions_dir(), f"{session_id}.json")
 
 
-def _index_path():
+def _index_path() -> str:
     return os.path.join(_sessions_dir(), ".index.json")
 
 
-def _load_index():
+def _load_index() -> dict[str, Any]:
     """The sidecar listing index: {session_id: summary dict}. Missing or
     corrupt just returns {}, so callers degrade to a full per-file parse —
     same as before this index existed."""
@@ -162,7 +165,7 @@ def _load_index():
         return {}
 
 
-def _write_index(idx):
+def _write_index(idx: dict[str, Any]) -> None:
     path = _index_path()
     tmp = path + ".tmp"
     try:
@@ -173,7 +176,7 @@ def _write_index(idx):
         pass  # best-effort — a stale/missing index just falls back to full parses
 
 
-def _update_index(session_id, data):
+def _update_index(session_id: str, data: dict[str, Any]) -> None:
     """Refresh this session's entry in the sidecar listing index so
     `nx sessions [query]` can list/search without json.load-ing every
     full transcript on disk (some can be large — tool outputs, diffs, …).
@@ -184,7 +187,7 @@ def _update_index(session_id, data):
     _write_index(idx)
 
 
-def _write_session(session_id, messages, meta=None):
+def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None) -> None:
     """Persist `messages` to the session file. Creates the dir if needed.
 
     Writes atomically (temp file + rename) so a crash mid-write can't
@@ -228,7 +231,7 @@ def _write_session(session_id, messages, meta=None):
     _update_index(session_id, data)
 
 
-def _load_session(session_id):
+def _load_session(session_id: str) -> dict[str, Any] | None:
     """Read a session file. Returns the dict (id, messages, meta…) or None."""
     path = _session_path(session_id)
     try:
@@ -242,7 +245,7 @@ def _load_session(session_id):
     return None
 
 
-def _session_files_newest():
+def _session_files_newest() -> list[str]:
     """Return session JSON filenames newest-first using filesystem mtimes.
 
     Listing many sessions should not require parsing every old transcript.
@@ -269,7 +272,7 @@ def _session_files_newest():
     return [name for _, name in files]
 
 
-def _session_summary_from_file(fname, idx=None):
+def _session_summary_from_file(fname: str, idx: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Return the listing summary for one session file. When `idx` (the
     sidecar index — see _load_index) already has an entry for this session,
     return that directly instead of json.load-ing the full transcript;
@@ -293,7 +296,7 @@ def _session_summary_from_file(fname, idx=None):
     return _summarize_session_data(data.get("id") or sid, data)
 
 
-def _list_sessions(limit=20, offset=0, query=None):
+def _list_sessions(limit: int | None = 20, offset: int = 0, query: str | None = None) -> list[dict[str, Any]]:
     """Return sessions newest-first as dicts: id, title, description, preview, n.
 
     `preview` is the first ~60 chars of the first user message; `description`
@@ -320,7 +323,7 @@ def _list_sessions(limit=20, offset=0, query=None):
     return out[offset:end]
 
 
-def _delete_session(session_id):
+def _delete_session(session_id: str) -> bool:
     """Remove a session file. Returns True if something was deleted."""
     path = _session_path(session_id)
     try:
@@ -344,7 +347,7 @@ def _delete_session(session_id):
 _DESC_REFRESH_DEFAULT = 6
 
 
-def _maybe_refresh_description(session_id, messages):
+def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) -> str | None:
     """Ask the model for a one-line session description, if enough turns have
     passed since the last refresh.
 
@@ -375,8 +378,8 @@ def _maybe_refresh_description(session_id, messages):
         return None
     # Build a compact transcript for the summarizer — truncate tool outputs
     # and skip the system prompt to keep the call cheap.
-    def _trim(msgs, per_msg=500, cap=20):
-        out = []
+    def _trim(msgs: list[dict[str, Any]], per_msg: int = 500, cap: int = 20) -> str:
+        out: list[str] = []
         for m in msgs:
             if m.get("role") == "system":
                 continue
@@ -416,7 +419,7 @@ def _maybe_refresh_description(session_id, messages):
     return desc
 
 
-def _resolve_session(target, sessions=None):
+def _resolve_session(target: str | None, sessions: list[dict[str, Any]] | None = None) -> str | None:
     """Resolve a user-typed target to a session id.
 
     Accepts: a full id, a numeric index into the recent-sessions list,
@@ -581,7 +584,7 @@ from ._tools import (
 )
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, undo_last, list_checkpoints
 
-def write_file(path, content, **_):
+def write_file(path: str, content: str, **_: Any) -> str:
     try:
         with open(path) as f:
             before = f.read()
@@ -594,7 +597,7 @@ def write_file(path, content, **_):
     return f"wrote {len(content)} bytes to {path}"
 
 
-def edit_file(path, old, new, **_):
+def edit_file(path: str, old: str, new: str, **_: Any) -> str:
     with open(path) as f:
         src = f.read()
     if src.count(old) != 1:
@@ -618,7 +621,7 @@ def edit_file(path, old, new, **_):
     return f"edited {path}\n{_diff_hunk(src, new_src)}"
 
 
-def multi_edit(path, edits, **_):
+def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     """Apply multiple exact find-and-replace edits to one file atomically:
     either every edit lands or none do (a failed match rolls back the whole
     batch — the file is only written after all edits match). Each edit is an
@@ -659,7 +662,7 @@ def multi_edit(path, edits, **_):
     return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}"
 
 
-def sed_edit(pattern, replacement, path, count=0, flags="", **_):
+def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: str = "", **_: Any) -> str:
     """Regex find-and-replace (Python `re` syntax) over one file or a glob of
     files (e.g. "src/**/*.py", recursive `**` supported). `flags` is a string
     of single-letter re flags: i=IGNORECASE, m=MULTILINE, s=DOTALL. `count`
@@ -710,7 +713,7 @@ def sed_edit(pattern, replacement, path, count=0, flags="", **_):
             + "\n" + hunks)
 
 
-def _run_bash(command):
+def _run_bash(command: str) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
     The command is started with ``setsid`` so it runs in a **new session / new
@@ -755,7 +758,7 @@ def _run_bash(command):
     return pid, log_path
 
 
-def list_bg_jobs():
+def list_bg_jobs() -> list[dict[str, Any]]:
     """Scan ``bg-logs/bg-pid-*.map`` files and return a dashboard-ready list.
 
     Each entry: {"pid", "alive", "command", "started", "log_path", "tail"}.
@@ -796,7 +799,7 @@ def list_bg_jobs():
     return jobs
 
 
-def _delete_old_bg_logs(max_logs=50, max_age_days=7):
+def _delete_old_bg_logs(max_logs: int = 50, max_age_days: int = 7) -> None:
     """Trim background logs so they don't pile up forever.
 
     Also removes stale ``bg-pid-*.map`` files whose target log no longer exists.
@@ -851,7 +854,7 @@ def _delete_old_bg_logs(max_logs=50, max_age_days=7):
         pass
 
 
-def _tail_last_line(log_path, maxlen=70):
+def _tail_last_line(log_path: str, maxlen: int = 70) -> str:
     """Return the last non-empty line of *log_path*, trimmed to *maxlen* chars.
 
     Reads only the trailing chunk of the file (no full-file read), so this is
@@ -872,7 +875,7 @@ def _tail_last_line(log_path, maxlen=70):
     return ""
 
 
-def _poll_pid(pid, timeout, check_esc=False, log_path=None):
+def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False, log_path: str | None = None) -> str:
     """Poll *pid* up to *timeout* seconds.
 
     Returns:
@@ -927,7 +930,7 @@ def _poll_pid(pid, timeout, check_esc=False, log_path=None):
     return "timeout"
 
 
-def _read_log(log_path):
+def _read_log(log_path: str) -> tuple[str, int | None]:
     """Read *log_path*, parse the trailing ``[exit: N]`` marker, return (content, exit_code)."""
     try:
         with open(log_path, "rb") as f:
@@ -944,7 +947,7 @@ def _read_log(log_path):
     return out, exit_code
 
 
-def _infer_timeout_from_sleep(command, default):
+def _infer_timeout_from_sleep(command: str, default: int) -> int:
     """If *command* contains ``sleep N`` (with N in seconds), return a poll
     timeout that's ``max(N) + 10``, so the command finishes synchronously
     without the model having to remember ``timeout=N``.
@@ -955,7 +958,6 @@ def _infer_timeout_from_sleep(command, default):
     it gets backgrounded after ~3 s just like anything else.  By recognising
     the sleep we make the "obvious" pattern work again.
     """
-    import re
     max_sleep = 0
     for m in re.finditer(r'(?:^|[;&|]\s*)sleep\s+(\d+)', command):
         n = int(m.group(1))
@@ -966,7 +968,7 @@ def _infer_timeout_from_sleep(command, default):
     return default
 
 
-def run_bash(command, timeout=None, **_):
+def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     """Run a shell command.
 
     Commands always run via nohup — they never block the agent loop.
@@ -1014,7 +1016,7 @@ def run_bash(command, timeout=None, **_):
     return _finish_bg_job(log_path)
 
 
-def _finish_bg_job(log_path):
+def _finish_bg_job(log_path: str) -> str:
     """Read+format the output of a finished background job, deleting its log."""
     time.sleep(0.2)  # brief settle so the log is flushed
     out, exit_code = _read_log(log_path)
@@ -1027,7 +1029,7 @@ def _finish_bg_job(log_path):
     return f"[exited]\n{out}"
 
 
-def wait_background(pid, log_path=None, timeout=0, **_):
+def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 0, **_: Any) -> str:
     """Wait for a backgrounded command (started by ``run_bash``) to finish.
 
     Polls *pid* until it exits (default: wait indefinitely).  When the command
@@ -1067,7 +1069,7 @@ def wait_background(pid, log_path=None, timeout=0, **_):
     return _finish_bg_job(log_path)
 
 
-def _find_bg_log_for_pid(pid):
+def _find_bg_log_for_pid(pid: int | str) -> str | None:
     """Look up the log path for a background PID via the pid→log map files
     written by ``_run_bash``.  Returns the log path, or None if not found."""
     pid = str(pid)
@@ -1144,7 +1146,7 @@ st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed
 _MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires
 
 
-def _active_tools():
+def _active_tools() -> list[dict[str, Any]]:
     """The tool schema list to send this turn. wait_background is included
     only once run_bash has actually backgrounded this session — see run_tool()."""
     tools = TOOLS
@@ -1153,7 +1155,7 @@ def _active_tools():
     return tools
 
 
-def _messages_show_prior_backgrounding(messages):
+def _messages_show_prior_backgrounding(messages: list[dict[str, Any]]) -> bool:
     """True if a loaded transcript already contains a backgrounded run_bash
     result, so resuming a session doesn't lose wait_background access it
     already had (see call sites in main())."""
@@ -1165,7 +1167,7 @@ def _messages_show_prior_backgrounding(messages):
     return False
 
 
-def _messages_show_prior_multi_edit_nudge(messages):
+def _messages_show_prior_multi_edit_nudge(messages: list[dict[str, Any]]) -> bool:
     """True if a loaded transcript already used multi_edit, or made ≥2
     edit_file calls, so resuming doesn't re-fire a nudge run_tool() would
     already have sent by now (see call sites in _repl.py)."""
@@ -1219,7 +1221,7 @@ Shell cmds run detached (setsid); they never block you.
 from ._agents import _load_agents_md_note
 
 
-def _initial_messages():
+def _initial_messages() -> list[dict[str, Any]]:
     """Fresh-session message list: SYSTEM, plus a one-time AGENTS.md note
     (project-root convention, same idea as CLAUDE.md) if one exists. Kept out
     of SYSTEM itself so the per-turn token floor doesn't grow with project
@@ -1407,11 +1409,11 @@ from ._text_fallback import (
 _CACHEABLE_READ_TOOLS = ("read_file", "list_dir")
 
 
-def _tool_cache_key(name, args):
+def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
     return (name, json.dumps(args, sort_keys=True))
 
 
-def _invalidate_tool_cache_path(path):
+def _invalidate_tool_cache_path(path: str | None) -> None:
     if not path:
         return
     try:
@@ -1423,7 +1425,7 @@ def _invalidate_tool_cache_path(path):
             del st._TOOL_RESULT_CACHE[key]
 
 
-def run_tool(name, args):
+def run_tool(name: str, args: dict[str, Any]) -> str:
     fn = DISPATCH.get(name)
     if not fn:
         return f"ERROR: unknown tool {name}"
@@ -1497,7 +1499,7 @@ def run_tool(name, args):
     return result
 
 
-def _tool_args_parse_error(c, err, finish_reasons=None):
+def _tool_args_parse_error(c: dict[str, Any], err: json.JSONDecodeError, finish_reasons: list[str] | None = None) -> str:
     name = c.get("name") or "tool"
     args_text = c.get("args") or ""
     detail = f"{name} arguments are not valid JSON"
@@ -1563,20 +1565,20 @@ _COLOR_NAMES = {"CYAN", "GREEN", "YELLOW", "RED", "MAGENTA", "GRAY"}
 
 
 class _StateProxyModule(_types.ModuleType):
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         if name in _STATE_NAMES:
             return getattr(st, name)
         if name in _COLOR_NAMES:
             return getattr(C, name)
         raise AttributeError(name)
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         if name in _STATE_NAMES:
             setattr(st, name, value)
         else:
             super().__setattr__(name, value)
 
-    def __dir__(self):
+    def __dir__(self) -> list[str]:
         return sorted(set(super().__dir__()) | _STATE_NAMES)
 
 

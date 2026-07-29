@@ -10,9 +10,13 @@ the chunk parser into its own object with named attributes (instead of 15+
 interacting locals + nonlocals) makes each piece independently readable and
 testable without touching the rest of the turn loop.
 """
+from __future__ import annotations
+
 import sys
 import time
+from typing import Any
 
+from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 
@@ -26,7 +30,7 @@ from . import _state as st
 from . import REASONING_ONLY_TIME_LIMIT
 
 
-def _fmt_think_duration(elapsed):
+def _fmt_think_duration(elapsed: float) -> str:
     """ms below 1s, seconds below 1min, else 'Xmin Ys'."""
     if elapsed < 1:
         return f"{elapsed * 1000:.0f}ms"
@@ -48,7 +52,7 @@ def _fmt_think_duration(elapsed):
 _TEXT_TOOL_TAG_OPENERS = ("<tool_call>", "[nx_tool_call]")
 
 
-def _first_tool_tag_index(text):
+def _first_tool_tag_index(text: str) -> int | None:
     idx = None
     for opener in _TEXT_TOOL_TAG_OPENERS:
         i = text.find(opener)
@@ -57,7 +61,7 @@ def _first_tool_tag_index(text):
     return idx
 
 
-def _tool_call_progress(tcs):
+def _tool_call_progress(tcs: dict[int, dict[str, Any]]) -> str:
     parts = []
     for i in sorted(tcs):
         c = tcs[i]
@@ -78,32 +82,32 @@ class StreamParser:
     out of the actual SSE iterator, since only it holds that handle.
     """
 
-    def __init__(self, say_console, t0):
+    def __init__(self, say_console: Console, t0: float) -> None:
         self._say_console = say_console
         self._t0 = t0
-        self.content = []
-        self.tcs = {}
-        self.mode = None  # None | "think" | "say"
-        self.say_live = None
-        self.reasoning_parts = []
+        self.content: list[str] = []
+        self.tcs: dict[int, dict[str, Any]] = {}
+        self.mode: str | None = None  # None | "think" | "say"
+        self.say_live: Live | None = None
+        self.reasoning_parts: list[str] = []
         self.timings = None
         self.usage = None
         self.streamed_chars = 0
-        self.t_first = None
+        self.t_first: float | None = None
         self.loop_cut = False
         self.reasoning_only_chars = 0
-        self.reasoning_only_start = None
-        self.finish_reasons = []
+        self.reasoning_only_start: float | None = None
+        self.finish_reasons: list[str] = []
         self.leaked_token_run = 0
         self.repeat_chunk_run = 0
-        self.last_chunk = None
+        self.last_chunk: str | None = None
         self.tool_status_active = False
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
-        self.think_start = None
+        self.think_start: float | None = None
 
     # --- tool-call status line (throttled) ---------------------------------
-    def show_tool_status(self, force=False):
+    def show_tool_status(self, force: bool = False) -> None:
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
@@ -113,13 +117,13 @@ class StreamParser:
         self.tool_status_active = True
         self.last_tool_status = now
 
-    def clear_tool_status(self):
+    def clear_tool_status(self) -> None:
         if self.tool_status_active:
             sys.stdout.write(CLEAR_LINE)
             sys.stdout.flush()
             self.tool_status_active = False
 
-    def close_think_block(self):
+    def close_think_block(self) -> None:
         """Print the reasoning-block closer + elapsed duration. Call once
         when leaving "think" mode, however that happens (content, tool
         call, stream end, or error) — no-op if not currently in think mode."""
@@ -135,7 +139,7 @@ class StreamParser:
         self.think_start = None
 
     # --- per-chunk entry point ----------------------------------------------
-    def process(self, chunk):
+    def process(self, chunk: Any) -> bool:
         """Consume one SSE chunk. Returns True if the stream should be cut
         (self.loop_cut is also set in that case)."""
         if chunk.usage:
@@ -146,18 +150,14 @@ class StreamParser:
         if choice.finish_reason:
             self.finish_reasons.append(str(choice.finish_reason))
         d = choice.delta
-        if self.t_first is None:
-            rc_peek = (getattr(d, "reasoning_content", None) or
-                       (getattr(d, "model_extra", None) or {}).get("reasoning_content") or
-                       (getattr(d, "model_extra", None) or {}).get("reasoning"))
-            if d.content or d.tool_calls or rc_peek:
-                self.t_first = time.time() - self._t0
+        d_extra = getattr(d, "model_extra", None) or {}
+        rc = (getattr(d, "reasoning_content", None) or
+              d_extra.get("reasoning_content") or d_extra.get("reasoning"))
+        if self.t_first is None and (d.content or d.tool_calls or rc):
+            self.t_first = time.time() - self._t0
         extra = getattr(chunk, "model_extra", None) or {}
         if "timings" in extra:
             self.timings = extra["timings"]
-        rc = (getattr(d, "reasoning_content", None) or
-              (d.model_extra or {}).get("reasoning_content") or
-              (d.model_extra or {}).get("reasoning"))
         if rc and self._handle_reasoning(rc):
             return True
         if d.content and self._handle_content(d.content):
@@ -166,7 +166,7 @@ class StreamParser:
             self._handle_tool_call_delta(tc)
         return False
 
-    def _handle_reasoning(self, rc):
+    def _handle_reasoning(self, rc: str) -> bool:
         """Returns True if the stream should be cut (collapse detected)."""
         if self.mode != "think":
             self.think_start = time.time()
@@ -214,7 +214,7 @@ class StreamParser:
             return True
         return False
 
-    def _handle_content(self, raw_chunk):
+    def _handle_content(self, raw_chunk: str) -> bool:
         """Returns True if the stream should be cut (collapse detected)."""
         self.clear_tool_status()
         self.close_think_block()
@@ -287,7 +287,7 @@ class StreamParser:
             return True
         return False
 
-    def _handle_tool_call_delta(self, tc):
+    def _handle_tool_call_delta(self, tc: Any) -> None:
         if self.mode == "think":
             self.close_think_block()
             self.mode = None
@@ -306,7 +306,7 @@ class StreamParser:
             self.streamed_chars += len(tc.function.arguments)
         self.show_tool_status()
 
-    def finish(self):
+    def finish(self) -> None:
         """Close out any open reasoning/say block. Call once the loop ends
         for any reason (normal end, interrupt, error) before reading back
         mode/say_live elsewhere."""
