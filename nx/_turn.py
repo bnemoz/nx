@@ -23,7 +23,7 @@ from ._approval import _EscToChat
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED, _ensure_interrupt_watcher,
 )
-from ._metrics import _abbr, _normalize_usage
+from ._metrics import _abbr, _record_usage
 from ._special_tokens import (
     LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT, _strip_leaked_tokens,
 )
@@ -182,17 +182,10 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
 
     Prefers llama.cpp `timings` (real tok/s) when present; falls back to the
     standard streaming `usage` object (OpenAI/Z.ai); then to a char-based
-    estimate; then to wall-clock only. Also feeds the metrics aggregator.
+    estimate; then to wall-clock only.
     Prompt-token caching itself lives in _capture_last_prompt_tokens(), called
     separately so it also runs on turns that never reach this footer.
     """
-    if st._METRICS is not None:
-        fallback_prompt_chars = 0
-        if not usage and not (timings and timings.get("predicted_n")) and messages:
-            fallback_prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
-        st._METRICS.add(_normalize_usage(
-            usage, timings, fallback_chars=streamed_chars,
-            fallback_prompt_chars=fallback_prompt_chars))
     if timings and timings.get("predicted_n"):
         prompt_n = timings.get("prompt_n", 0)
         gen_n = timings["predicted_n"]
@@ -696,6 +689,14 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         _INTERRUPT_ARMED.clear()
         _INTERRUPT_RESTORED.wait(timeout=0.5)
         _USER_INTERRUPTED.clear()
+    # Account before every post-stream early return (stream error, user
+    # interrupt, collapse/reasoning stall). The previous footer-owned hook
+    # silently skipped all of those completed API calls.
+    _record_usage(
+        parser.usage, parser.timings,
+        fallback_chars=parser.streamed_chars + sum(len(part) for part in parser.reasoning_parts),
+        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in messages),
+    )
     if stream_error is not None:
         if parser.mode in ("think", "say"):
             print()

@@ -353,7 +353,7 @@ from ._env import _env_int, _env_float
 
 # --- usage metrics (default off) --------------------------------------------
 from ._metrics import (
-    _normalize_usage, _Metrics, _env_metrics_url, _abbr, _precise_abbr,
+    _normalize_usage, _record_usage, _Metrics, _env_metrics_url, _abbr, _precise_abbr,
 )
 
 st.REASONING_ONLY_CHAR_LIMIT = _env_int("NX_REASONING_ONLY_CHARS", 36000)

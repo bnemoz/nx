@@ -23,7 +23,7 @@ from ._ansi import DIM, RESET, C
 from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
 from ._sessions_io import _prune_empty_assistant_messages, _drop_leading_dangling_tool_turns
-from ._metrics import _abbr
+from ._metrics import _abbr, _record_usage
 from ._grammar import build_tool_call_grammar
 from . import _state as st
 from . import TOOLS
@@ -359,6 +359,12 @@ def compress(
     except Exception as e:
         print(f"{C.ERROR}  ✗ compress failed: {type(e).__name__}: {e}{RESET}")
         return None
+
+    _record_usage(
+        getattr(resp, "usage", None),
+        fallback_chars=len(resp.choices[0].message.content or ""),
+        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+    )
 
     summary = (resp.choices[0].message.content or "").strip()
     if not summary:

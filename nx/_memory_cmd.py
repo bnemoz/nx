@@ -13,6 +13,7 @@ from typing import Any
 
 from ._ansi import DIM, RESET, C
 from ._logging import _log_event
+from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
 from ._sessions_io import _flatten_message_text
 from . import _state as st
@@ -52,7 +53,14 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
 
 
 def _cmd_memory_handler(user: str, state: Any) -> None:
+    api_calls_before = st._METRICS.api_calls if st._METRICS is not None else 0
     _cmd_memory(state.messages, user)
+    # `/memory save` is a model call but doesn't alter the conversation.
+    # Persist its updated totals immediately instead of waiting for a later
+    # conversational turn (or /quit) to happen to save the session.
+    if st._METRICS is not None and st._METRICS.api_calls != api_calls_before:
+        from ._repl_state import _save_current
+        _save_current(state)
 
 
 def _slugify(text: str, maxlen: int = 60) -> str:
@@ -118,6 +126,12 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
     except Exception as e:
         print(f"{C.ERROR}  ✗ memory save failed: {type(e).__name__}: {e}{RESET}")
         return
+
+    _record_usage(
+        getattr(resp, "usage", None),
+        fallback_chars=len(resp.choices[0].message.content or ""),
+        fallback_prompt_chars=len(prompt),
+    )
 
     body = (resp.choices[0].message.content or "").strip()
     if not body:

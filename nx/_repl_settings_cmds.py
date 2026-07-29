@@ -404,6 +404,9 @@ def _cmd_compress(user: str, state: _ReplState) -> None:
     print(f"{DIM}  └ compressed {summarized_n} turns → 1 summary "
           f"({summary_chars} chars), kept last {kept_n} verbatim{RESET}")
     state.session_dirty = True
+    # Compression itself is a model call; save now so its usage is visible in
+    # the session JSON even before another conversational turn or /quit.
+    _save_current(state)
 
 
 def _cmd_autocompress(user: str, state: _ReplState) -> None:

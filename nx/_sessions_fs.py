@@ -24,6 +24,7 @@ from typing import Any
 
 from . import _state as st
 from ._logging import _log_event
+from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
 from ._sessions_io import (
     _flatten_message_text, _safe_title, _prune_empty_assistant_messages,
@@ -304,6 +305,11 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
         return None  # server down — leave existing description as-is
     except Exception:
         return None
+    _record_usage(
+        getattr(resp, "usage", None),
+        fallback_chars=len(resp.choices[0].message.content or ""),
+        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+    )
     desc = (resp.choices[0].message.content or "").strip().splitlines()
     desc = desc[0].strip() if desc else ""
     if not desc:
@@ -311,8 +317,12 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
     desc = _safe_title(desc, maxlen=70) or desc[:70]
     # Persist the description + the turn count it was generated at so we know
     # when to refresh next. Merge into existing meta (don't clobber messages).
-    _write_session(session_id, messages, {"description": desc,
-                                          "desc_turns": user_turns})
+    meta = {"description": desc, "desc_turns": user_turns}
+    if st._METRICS is not None:
+        meta.update(st._METRICS.as_meta())
+    _write_session(session_id, messages, meta)
+    if st._METRICS is not None:
+        st._METRICS.flush()
     return desc
 
 

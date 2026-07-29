@@ -104,6 +104,26 @@ def _normalize_usage(
     }
 
 
+def _record_usage(
+    usage: Any,
+    timings: Any = None,
+    fallback_chars: int = 0,
+    fallback_prompt_chars: int = 0,
+) -> None:
+    """Add one completed API call to the active session's totals.
+
+    Keep this separate from presentation code: streams can end through a
+    recovery/error path that intentionally skips the stats footer, and a few
+    inexpensive maintenance calls are non-streaming altogether.
+    """
+    if st._METRICS is not None:
+        st._METRICS.add(_normalize_usage(
+            usage, timings,
+            fallback_chars=fallback_chars,
+            fallback_prompt_chars=fallback_prompt_chars,
+        ))
+
+
 class _Metrics:
     """Cumulative token usage for the current session, plus an optional push.
 
