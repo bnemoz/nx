@@ -102,7 +102,12 @@ _SAFE_BASH_COMMANDS = {
     "printenv", "diff", "tree", "basename", "dirname", "realpath", "du",
     "df", "env", "true", "false", "mkdir", "touch",
 }
-_SAFE_GIT_SUBCOMMANDS = {"status", "diff", "log", "branch", "show", "remote", "tag", "blame"}
+_SAFE_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "tag", "blame"}
+# branch/remote are only read-only in their listing form (no args, or flags like
+# -a/-v/-vv/-r/list/show/get-url); any other invocation mutates refs or remote
+# config (branch -f, branch <name>, remote add/set-url/remove/rename) and must
+# not get a blanket "low" verdict.
+_SAFE_GIT_BRANCH_REMOTE_ARGS = {"-a", "-v", "-vv", "-r", "-l", "--list", "list", "show", "get-url", "-v"}
 _SHELL_METACHARACTERS_RE = re.compile(r"[;&|<>`$(){}\n*?~]")
 
 # Contained-but-not-reversible bash commands, matching RISK_SYSTEM's own
@@ -210,6 +215,11 @@ def _local_risk_hint_bash(command: str) -> tuple[str, str] | None:
             return ("high", f"destructive git {sub}")
         if sub in _SAFE_GIT_SUBCOMMANDS:
             return ("low", f"read-only git {sub}")
+        if sub in ("branch", "remote"):
+            rest = parts[2:]
+            if not rest or all(a in _SAFE_GIT_BRANCH_REMOTE_ARGS for a in rest):
+                return ("low", f"read-only git {sub}")
+            return None  # mutates refs/remote config (branch -f, remote set-url, ...) — let model judge
         if sub in _MEDIUM_GIT_SUBCOMMANDS:
             return ("medium", f"contained git {sub}")
         return None
