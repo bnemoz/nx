@@ -47,8 +47,9 @@ def _run_bash(command: str) -> tuple[str, str]:
     wrapper script is needed — avoids a race where the launcher starts after
     the temp file is already deleted.
 
-    Stores a ``bg-pid-{pid}.map`` file (JSON ``{"log_path": "…"}``) so
-    ``wait_background`` can locate logs by PID later.
+    Stores a ``bg-pid-{pid}.map`` file so ``wait_background`` can locate logs
+    by PID later. On Linux the map also records the process start time, which
+    distinguishes the launched process from a later process that reuses its PID.
     """
     _delete_old_bg_logs()
     bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
@@ -71,10 +72,39 @@ def _run_bash(command: str) -> tuple[str, str]:
         map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
         with open(map_path, "w") as f:
             json.dump({"log_path": log_path, "command": command,
-                       "started": time.time()}, f)
+                       "started": time.time(),
+                       "pid_start_time": _pid_start_time(pid)}, f)
     except OSError:
         pass
     return pid, log_path
+
+
+def _pid_start_time(pid: int | str) -> str | None:
+    """Return Linux's immutable process start-time tick for *pid*, if known."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as f:
+            stat = f.read()
+        # ``comm`` (field 2) can contain spaces and parentheses; split after
+        # its final closing parenthesis before indexing fields 3 onward.
+        fields = stat.rsplit(") ", 1)[1].split()
+        return fields[19]  # field 22 (starttime), after fields 1 and 2
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_is_alive(pid: int, expected_start_time: str | None = None) -> bool:
+    """Return whether *pid* is alive and, when known, is the original job."""
+    if expected_start_time is not None:
+        current_start_time = _pid_start_time(pid)
+        if current_start_time is not None and current_start_time != expected_start_time:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True  # exists but owned by another uid
+    except (ProcessLookupError, OSError):
+        return False
 
 
 def list_bg_jobs() -> list[dict[str, Any]]:
@@ -99,12 +129,9 @@ def list_bg_jobs() -> list[dict[str, Any]]:
         pid = name[len("bg-pid-"):-len(".map")]
         try:
             pid_i = int(pid)
-            os.kill(pid_i, 0)
-            alive = True
-        except ProcessLookupError:
-            alive = False
-        except (PermissionError, ValueError):
-            alive = True  # exists but not ours, or bad pid — assume alive
+            alive = _pid_is_alive(pid_i, data.get("pid_start_time"))
+        except ValueError:
+            alive = True  # bad pid — retain the historical dashboard behavior
         log_path = data.get("log_path", "")
         jobs.append({
             "pid": pid,
@@ -194,7 +221,8 @@ def _tail_last_line(log_path: str, maxlen: int = 70) -> str:
     return ""
 
 
-def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False, log_path: str | None = None) -> str:
+def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
+              log_path: str | None = None, expected_start_time: str | None = None) -> str:
     """Poll *pid* up to *timeout* seconds.
 
     Returns:
@@ -209,6 +237,9 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False, log_path:
     ``FileNotFoundError`` — the agent could run no shell commands at all.
     ``os.kill`` talks to the kernel directly, so it works in any
     environment with a POSIX layer, no external binary required.
+    When a job map provides ``expected_start_time``, Linux also compares
+    ``/proc/<pid>/stat`` before signal-0 so a reused PID is treated as exited.
+
 
     Signal-0 semantics:
       • returns normally    → process exists and is signalable → alive
@@ -233,14 +264,8 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False, log_path:
     with watch:
         last_tail = None
         while time.time() < deadline:
-            try:
-                os.kill(pid_i, 0)
-            except ProcessLookupError:
+            if not _pid_is_alive(pid_i, expected_start_time):
                 return "exited"
-            except PermissionError:
-                pass  # process exists but owned by another uid — still alive
-            except OSError:
-                return "exited"  # unexpected (e.g. EINTR); bail to be safe
             if check_esc and _USER_INTERRUPTED.is_set():
                 return "interrupted"
             if log_path is not None:
@@ -326,7 +351,8 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     if timeout <= 0:
         timeout = 999999999  # ∞ — wait indefinitely
     pid, log_path = _run_bash(command)
-    status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path)
+    status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
+                       expected_start_time=_find_bg_start_time_for_pid(pid))
     if status == "interrupted":
         _log_event("tool", f"run_bash interrupted by user while polling (pid {pid})")
         return (f"[background] PID {pid} | log: {log_path}\n"
@@ -383,7 +409,8 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
             return (f"[error] No background log found for PID {pid}. "
                     "The log may have been cleaned up already.")
     timeout_s = 999999999 if timeout <= 0 else timeout
-    status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path)
+    status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path,
+                       expected_start_time=_find_bg_start_time_for_pid(pid))
     if status == "interrupted":
         return (f"[interrupted] PID {pid} still running. "
                 f"Check later with read_file('{os.path.abspath(log_path)}')")
@@ -391,6 +418,16 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
         return (f"[timeout after {timeout}s] PID {pid} still running. "
                 f"Check output so far with read_file('{os.path.abspath(log_path)}')")
     return _finish_bg_job(log_path)
+
+
+def _find_bg_start_time_for_pid(pid: int | str) -> str | None:
+    """Return the recorded process identity for a background PID, if any."""
+    map_path = os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")
+    try:
+        with open(map_path) as f:
+            return json.load(f).get("pid_start_time")
+    except (OSError, IOError, json.JSONDecodeError):
+        return None
 
 
 def _find_bg_log_for_pid(pid: int | str) -> str | None:

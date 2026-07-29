@@ -210,6 +210,21 @@ def test_pid_poll_arms_watcher_and_observes_esc():
     assert not m._USER_INTERRUPTED.is_set(), "tool-wait Esc leaked into next turn"
 
 
+def test_pid_poll_treats_a_reused_pid_as_exited():
+    """A live unrelated process with the same PID must not extend the wait."""
+    jobs = importlib.import_module("nx._bash_jobs")
+    old_start_time = jobs._pid_start_time
+    old_kill = jobs.os.kill
+    jobs._pid_start_time = lambda _pid: "new-process"
+    jobs.os.kill = lambda _pid, _signal: (_ for _ in ()).throw(
+        AssertionError("signal-0 must not run for a mismatched process identity"))
+    try:
+        assert jobs._poll_pid(123, 1, expected_start_time="old-process") == "exited"
+    finally:
+        jobs._pid_start_time = old_start_time
+        jobs.os.kill = old_kill
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
