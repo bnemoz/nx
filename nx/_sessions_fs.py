@@ -51,7 +51,10 @@ def _memories_dir() -> str:
 
 
 def _session_path(session_id: str) -> str:
-    return os.path.join(_sessions_dir(), f"{session_id}.json")
+    safe = os.path.basename(session_id)
+    if not safe or safe in (".", "..") or safe != session_id:
+        raise ValueError(f"invalid session id: {session_id!r}")
+    return os.path.join(_sessions_dir(), f"{safe}.json")
 
 
 def _index_path() -> str:

@@ -18,6 +18,7 @@ globals. See _turn.py / _compress.py for the same pattern.
 """
 from __future__ import annotations
 
+import os
 import sys
 from typing import Callable
 
@@ -276,7 +277,12 @@ def _session_id_from_args() -> str | None:
                 i += 1
             continue
         if a == "--session" and i + 1 < len(args):
-            out = args[i + 1]
+            candidate = args[i + 1]
+            safe = os.path.basename(candidate)
+            if not safe or safe in (".", "..") or safe != candidate:
+                print(f"error: invalid --session id {candidate!r}", file=sys.stderr)
+                sys.exit(1)
+            out = candidate
             i += 2
             continue
         i += 1
