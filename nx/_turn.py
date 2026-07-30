@@ -457,6 +457,22 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     return TURN_TOOL
 
 
+def _strip_unterminated_tool_call(text: str) -> str:
+    """Drop a trailing in-progress <tool_call>/[nx_tool_call] fragment.
+
+    Reasoning captured mid-stream can end right in the middle of a tool-call
+    block the model was drafting. Left in place, that fragment gets replayed
+    as assistant context on every later turn, priming the model to keep
+    emitting the same truncated JSON — the reasoning-stall analogue of the
+    guard already applied to the text-fallback malformed-call path.
+    """
+    for open_tag, close_tag in (("<tool_call>", "</tool_call>"), ("[nx_tool_call]", "[/nx_tool_call]")):
+        idx = text.rfind(open_tag)
+        if idx != -1 and close_tag not in text[idx:]:
+            text = text[:idx]
+    return text
+
+
 def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
                      leaked_token_run: int, repeat_chunk_run: int, reasoning_only_start: Optional[float],
                      reasoning_only_chars: int, reasoning_parts: list[str]) -> str:
@@ -537,7 +553,7 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     # a 46K-char spiral doesn't blow up context) and add the nudge as a NEW
     # user message.  The model sees: [task] → [my reasoning] → [now act]
     # and can pick up where it left off instead of starting from scratch.
-    reasoning_text = "".join(reasoning_parts)
+    reasoning_text = _strip_unterminated_tool_call("".join(reasoning_parts))
     if REASONING_CAPTURE_CHARS > 0 and reasoning_text.strip():
         cap = REASONING_CAPTURE_CHARS
         if len(reasoning_text) > cap:
