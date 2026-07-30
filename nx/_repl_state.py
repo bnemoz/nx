@@ -37,12 +37,18 @@ class _ReplState:
         self.history = history
 
 
-def _save_current(state: _ReplState, meta: dict[str, Any] | None = None) -> None:
+def _save_current(
+    state: _ReplState, meta: dict[str, Any] | None = None, update_index: bool = True,
+) -> None:
     """Persist `state.messages` to the current session file.
 
     Title is auto-derived from the first user message (unless the user
     has set one explicitly with /save <title>). Source and cwd are
     recorded so a resume can re-select the right endpoint.
+
+    `update_index=False` (see `_write_session`) skips refreshing the
+    sidecar listing index — pass this for mid-turn autosaves, since the
+    per-turn save that follows will refresh it anyway.
     """
     if state.session_id is None:
         return
@@ -76,7 +82,7 @@ def _save_current(state: _ReplState, meta: dict[str, Any] | None = None) -> None
         m.update(st._METRICS.as_meta())
     m["todos"] = st._TODOS
     try:
-        _write_session(state.session_id, state.messages, m)
+        _write_session(state.session_id, state.messages, m, update_index=update_index)
     except OSError as e:
         print(f"{C.ERROR}  ✗ couldn't save session: {type(e).__name__}: {e}{RESET}")
     # Fire-and-forget push to the optional metrics endpoint. Only does

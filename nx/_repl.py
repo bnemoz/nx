@@ -231,7 +231,10 @@ def _repl() -> None:
         print()  # breathing room before the spinner/text starts
         state.messages.append({"role": "user", "content": expand_at_mentions(user)})
         try:
-            _run_model_turn_loop(state.messages, on_step=lambda meta=None: _save_current(state, meta))
+            _run_model_turn_loop(
+                state.messages,
+                on_step=lambda meta=None: _save_current(state, meta, update_index=False),
+            )
         except KeyboardInterrupt:
             print(f"{DIM}  ^C interrupted{RESET}")
             state.session_dirty = True

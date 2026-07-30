@@ -349,7 +349,10 @@ def _cmd_init(user: str, state: _ReplState) -> None:
     )
     state.messages.append({"role": "user", "content": prompt})
     print()
-    _run_model_turn_loop(state.messages, on_step=lambda meta=None: _save_current(state, meta))
+    _run_model_turn_loop(
+        state.messages,
+        on_step=lambda meta=None: _save_current(state, meta, update_index=False),
+    )
     state.session_dirty = True
     _save_current(state)
 

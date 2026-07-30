@@ -168,12 +168,21 @@ def _merge_session_messages(
     return head + tail
 
 
-def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None) -> None:
+def _write_session(
+    session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None,
+    update_index: bool = True,
+) -> None:
     """Persist `messages` to the session file. Creates the dir if needed.
 
     Writes atomically (temp file + rename) so a crash mid-write can't
     corrupt the existing session. `meta` (title, source, cwd, …) is
     merged into the stored metadata.
+
+    `update_index=False` skips the sidecar-index refresh: that's a
+    read-modify-write of every session's summary behind one lock shared
+    with every other nx process, so mid-turn autosaves (one per tool-call
+    step, purely for crash recovery) should skip it and let the one
+    per-turn save that follows refresh the index instead.
     """
     d = _sessions_dir()
     os.makedirs(d, exist_ok=True, mode=0o700)
@@ -217,7 +226,8 @@ def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[s
             os.utime(path, (data["updated_at"], data["updated_at"]))
         except (OSError, TypeError, ValueError):
             pass
-        _update_index(session_id, data)
+        if update_index:
+            _update_index(session_id, data)
 
 def _load_session(session_id: str) -> dict[str, Any] | None:
     """Read a session file. Returns the dict (id, messages, meta…) or None."""
