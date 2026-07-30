@@ -4,6 +4,7 @@ instead of being exported in every terminal."""
 from __future__ import annotations
 
 import os
+import sys
 
 
 def _env_file_path() -> str:
@@ -48,7 +49,14 @@ def _load_env_file() -> None:
             k = k[len("export "):].strip()
         if not k or k in os.environ:
             continue
-        os.environ[k] = _parse_env_value(v)
+        resolved = _parse_env_value(v)
+        if "KEY" in k and resolved and (resolved[0] in ("'", '"') or resolved[-1] in ("'", '"')):
+            print(
+                f"nx: warning: {k} in {_env_file_path()} still has a "
+                f"leading/trailing quote after parsing (unterminated quoted value?)",
+                file=sys.stderr,
+            )
+        os.environ[k] = resolved
 
 
 def _matches_key(line: str, name: str) -> bool:

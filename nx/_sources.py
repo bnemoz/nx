@@ -173,6 +173,9 @@ class Source:
             root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/props", timeout=5) as r:
                 props = json.loads(r.read().decode("utf-8"))
+        except TimeoutError:
+            print(f"nx: warning: /props model-name probe on {self.name} timed out", file=sys.stderr)
+            return None
         except Exception:
             return None
         for key in ("model_alias", "model_path", "model"):
@@ -355,6 +358,9 @@ class Source:
             root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/props", timeout=5) as r:
                 props = json.loads(r.read().decode("utf-8"))
+        except TimeoutError:
+            print(f"nx: warning: /props ctx-window probe on {self.name} timed out", file=sys.stderr)
+            return None
         except Exception:
             return None
         dgs = props.get("default_generation_settings")

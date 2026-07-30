@@ -264,7 +264,12 @@ def _watch_for_interrupts():
         _INTERRUPT_ARMED.clear()
         # _drain_redirect_text's own deadline is 2.0s; wait past it so we never
         # proceed while the watcher still holds raw termios mid-drain.
-        _INTERRUPT_RESTORED.wait(timeout=2.5)
+        if not _INTERRUPT_RESTORED.wait(timeout=2.5):
+            print(
+                "nx: warning: interrupt watcher did not confirm termios "
+                "restore within 2.5s; terminal state may be stale",
+                file=sys.stderr,
+            )
         # Do not let an Esc from this operation interrupt a later model turn.
         _USER_INTERRUPTED.clear()
         if capture_redirect:
