@@ -250,6 +250,12 @@ for _i, _arg in enumerate(sys.argv):
         _PROMPT_FILE = sys.argv[_i + 1]
         break
 
+# `--json`: one-shot mode emits a single machine-readable JSON summary (final
+# answer, status, token totals, ordered tool-call trace) to stdout instead of
+# the normal streamed chat output — for benchmark harnesses that need to score
+# a run programmatically rather than scrape terminal text.
+_JSON_OUTPUT = "--json" in sys.argv
+
 # --- base-level traffic log -------------------------------------------------
 from ._logging import LOG_PATH, LOG_MAX_BYTES, _AsyncLogWriter, _llog, _log_event
 

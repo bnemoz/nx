@@ -9,13 +9,16 @@ compression, the REPL loop itself) already has a stable home, so this is
 """
 from __future__ import annotations
 
+import json
 import sys
+import time
 from pathlib import Path
 
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
-from . import _PROMPT_FILE, _initial_messages
+from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl, _cli_sessions, _cli_tokens
+from ._repl_state import _fresh_metrics
 
 _HELP_TEXT = """\
 usage: nx [flags]
@@ -30,6 +33,8 @@ flags:
   --session <id>                  start a fresh run attached to a specific session id
   --prompt-file <path> / -f <path>
                                    headless one-shot mode; "-" reads stdin
+  --json                          (with --prompt-file) emit a JSON result summary
+                                   on stdout instead of streamed chat output
   --tokens / --bench               print the exact prompt-token floor and exit
   -h, --help                      show this help and exit
   --version                       show the version and exit
@@ -87,17 +92,66 @@ def _run_one_shot() -> bool:
     # Warm the context-window probe in the background (same as the REPL).
     _ensure_ctx_probe(st.ACTIVE)
 
+    # Benchmark harnesses want token accounting too — the REPL sets this up
+    # in _repl(), which one-shot mode skips entirely.
+    st._METRICS = _fresh_metrics(session_id="one-shot")
+
     # --- run the turn ----------------------------------------------------------
     messages = _initial_messages() + [{"role": "user", "content": instruction}]
+    start_idx = len(messages)
+    real_stdout = sys.stdout
+    if _JSON_OUTPUT:
+        # Streamed chat output still goes through bare print() deep in the
+        # turn loop; redirect it to stderr so stdout carries only the final
+        # JSON summary a harness can parse.
+        sys.stdout = sys.stderr
+    started = time.time()
     try:
-        _run_model_turn_loop(messages, on_step=None)
+        summary = _run_model_turn_loop(messages, on_step=None)
     except KeyboardInterrupt:
+        sys.stdout = real_stdout
         sys.stderr.write("\n[nx] interrupted\n")
         sys.exit(130)
     except Exception as e:
+        sys.stdout = real_stdout
         sys.stderr.write(f"\n[nx] error: {type(e).__name__}: {e}\n")
         sys.exit(1)
+    finally:
+        sys.stdout = real_stdout
+
+    if _JSON_OUTPUT:
+        real_stdout.write(json.dumps(_one_shot_result(
+            messages, start_idx, summary, time.time() - started)) + "\n")
     sys.exit(0)
+
+
+def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: float) -> dict:
+    """Build the --json result payload from the messages this run appended
+    (everything from start_idx on) plus the turn-loop's status summary."""
+    trace = []
+    final_answer = None
+    for m in messages[start_idx:]:
+        role = m.get("role")
+        if role == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                fn = tc.get("function", {})
+                trace.append({"tool": fn.get("name"), "args": fn.get("arguments")})
+            if m.get("content") and not m.get("tool_calls"):
+                final_answer = m["content"]
+        elif role == "tool" and trace:
+            trace[-1]["result"] = m.get("content")
+    m = st._METRICS
+    tokens = ({"input": m.input_tokens, "output": m.output_tokens,
+               "cache_read": m.cache_read_tokens, "reasoning": m.reasoning_tokens,
+               "api_calls": m.api_calls} if m is not None else None)
+    return {
+        "final_answer": final_answer,
+        "status": summary.get("status") if summary else "error",
+        "turns": summary.get("turns") if summary else 0,
+        "elapsed_seconds": round(elapsed, 2),
+        "tokens": tokens,
+        "tool_calls": trace,
+    }
 
 
 def main() -> None:

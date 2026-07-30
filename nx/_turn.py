@@ -886,7 +886,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 200)
 
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
-                         on_step: Optional[Callable[[], None]] = None) -> None:
+                         on_step: Optional[Callable[[], None]] = None) -> dict:
+    """Runs model_turn() to completion (or MAX_MODEL_TURNS). Returns a summary
+    dict {"status": "done"|"esc"|"cap", "turns": int} — interactive callers
+    ignore it, but headless one-shot mode (nx/_cli.py) uses it to report
+    whether the model actually finished vs. hit the turn cap."""
     steps = 0
     reasoning_loop_cuts = 0
     malformed_stream_cuts = 0
@@ -907,9 +911,9 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
-            break
+            return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
-            break  # user pressed Esc at an approval → drop to chat input
+            return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input
         if status == TURN_REDIRECT:
             # Esc-then-type: the user already supplied their next instruction
             # (appended to `messages` by model_turn()) — loop straight into
@@ -966,8 +970,13 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     if steps >= st.MAX_MODEL_TURNS and not force_final:
         print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({st.MAX_MODEL_TURNS}) — "
               f"forcing a final answer from current state{RESET}")
-        _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
+        final_status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                    empty_turn_count=empty_turn_cuts,
                    forced_final=True,
                    recovery_sampling=recovery_sampling)
+        if on_step is not None:
+            on_step()
+        if final_status == TURN_DONE:
+            return {"status": "cap", "turns": steps + 1}
+    return {"status": "cap", "turns": steps}
 
