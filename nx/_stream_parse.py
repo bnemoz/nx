@@ -85,6 +85,7 @@ class StreamParser:
         self._say_console = say_console
         self._t0 = t0
         self.content: list[str] = []
+        self._content_str = ""
         self.tcs: dict[int, dict[str, Any]] = {}
         self.mode: str | None = None  # None | "think" | "say"
         self.say_live: Live | None = None
@@ -104,6 +105,7 @@ class StreamParser:
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
         self.think_start: float | None = None
+        self.last_say_render = 0.0
 
     # --- tool-call status line (throttled) ---------------------------------
     def show_tool_status(self, force: bool = False) -> None:
@@ -115,6 +117,15 @@ class StreamParser:
         sys.stdout.flush()
         self.tool_status_active = True
         self.last_tool_status = now
+
+    def stop_say_live(self) -> None:
+        """Force a final render of any pending content, then stop/clear the
+        live panel. Must be used instead of a bare `say_live.stop()` whenever
+        content may have arrived since the last throttled render."""
+        if self.say_live is not None:
+            self.say_live.update(Markdown(strip_ansi_for_display(self._content_str)))
+            self.say_live.stop()
+            self.say_live = None
 
     def clear_tool_status(self) -> None:
         if self.tool_status_active:
@@ -236,16 +247,20 @@ class StreamParser:
             self.repeat_chunk_run = 0
         if chunk:
             self.content.append(chunk)
+            self._content_str += chunk
             self.streamed_chars += len(chunk)
             if not self.in_text_tool_tag:
-                full = "".join(self.content)
+                full = self._content_str
                 tag_idx = _first_tool_tag_index(full)
                 if tag_idx is None:
                     if self.say_live is None:
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
-                    self.say_live.update(Markdown(strip_ansi_for_display(full)))
+                    now = time.time()
+                    if now - self.last_say_render >= 0.05:
+                        self.say_live.update(Markdown(strip_ansi_for_display(full)))
+                        self.last_say_render = now
                 else:
                     # Tag opened mid-stream: commit whatever prose came
                     # before it, close the live panel, and fall through to
@@ -293,9 +308,7 @@ class StreamParser:
             self.close_think_block()
             self.mode = None
         elif self.mode == "say":
-            if self.say_live is not None:
-                self.say_live.stop()
-                self.say_live = None
+            self.stop_say_live()
             self.mode = None
         s = self.tcs.setdefault(tc.index, {"id": "", "name": "", "args": ""})
         if tc.id:

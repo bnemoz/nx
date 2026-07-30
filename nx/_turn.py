@@ -689,9 +689,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # Safety net: interrupted/errored/collapsed breaks may leave the Live
         # display still open (the mode-transition sites above only stop it on
         # the normal tool-call/end-of-reasoning paths).
-        if parser.say_live is not None:
-            parser.say_live.stop()
-            parser.say_live = None
+        parser.stop_say_live()
         # Disarm the watcher: it stops reading stdin, restores termios in its
         # own inner finally, and parks on _INTERRUPT_ARMED until next turn.
         # We MUST wait for _INTERRUPT_RESTORED before returning — otherwise the
