@@ -16,6 +16,7 @@ import sys
 import builtins
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 import importlib
 
@@ -274,6 +275,50 @@ def test_watch_for_interrupts_waits_past_slow_drain():
         m._USER_INTERRUPTED.clear()
         m._INTERRUPT_RESTORED.set()
     print("PASS — disarm wait outlasts a slow (0.8s) drain, not truncated at 0.5s")
+
+
+def test_drain_redirect_text_survives_armed_clearing_immediately():
+    """Regression: main clears _INTERRUPT_ARMED the instant it notices the
+    interrupt (far before the 2s drain deadline). _drain_redirect_text must
+    keep reading anyway — it used to gate its loop on _INTERRUPT_ARMED too,
+    so clearing ARMED (the normal, expected thing main does) killed the drain
+    almost immediately and silently dropped the user's typed redirect.
+
+    Exercises the real function (not a simulated stand-in) over a real pipe.
+    """
+    from nx import _interrupt as interrupt_mod
+
+    r, w = os.pipe()
+    try:
+        m._INTERRUPT_ARMED.set()
+
+        def clear_armed_soon():
+            time.sleep(0.05)
+            m._INTERRUPT_ARMED.clear()  # mimics main noticing the interrupt fast
+
+        def type_slowly():
+            for ch in "do X instead":
+                time.sleep(0.05)
+                os.write(w, ch.encode())
+            time.sleep(0.05)
+            os.write(w, b"\n")
+
+        t1 = threading.Thread(target=clear_armed_soon)
+        t2 = threading.Thread(target=type_slowly)
+        t1.start()
+        t2.start()
+        result = interrupt_mod._drain_redirect_text(r, None)
+        t1.join()
+        t2.join()
+        assert result == "do X instead\n", (
+            f"drain returned {result!r} — ARMED clearing mid-drain truncated "
+            "the redirect capture"
+        )
+    finally:
+        os.close(r)
+        os.close(w)
+        m._INTERRUPT_ARMED.clear()
+    print("PASS — drain keeps capturing after ARMED clears, stops only on its own deadline")
 
 
 if __name__ == "__main__":

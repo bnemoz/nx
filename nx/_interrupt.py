@@ -185,7 +185,12 @@ def _drain_redirect_text(fd: int, raw_termios: list[Any]) -> str:
     """
     buf: list[str] = []
     deadline = time.time() + 2.0  # generous — covers stream-close + tool teardown
-    while _INTERRUPT_ARMED.is_set() and time.time() < deadline:
+    # Deliberately NOT gated on _INTERRUPT_ARMED: main clears that the instant
+    # it notices the interrupt (next chunk / stream-close), which is almost
+    # immediately — long before this deadline. Gating on it here used to
+    # collapse the 2s typing window down to near-zero, silently dropping
+    # whatever the user typed. Only the deadline or process exit should stop us.
+    while not _INTERRUPT_EXIT.is_set() and time.time() < deadline:
         r, _, _ = select.select([fd], [], [], 0.05)
         if not r:
             continue
