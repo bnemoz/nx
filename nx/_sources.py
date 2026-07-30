@@ -254,14 +254,13 @@ class Source:
             (sub-ms LAN) and llama.cpp stashes n_ctx in data[0].meta, so they
             win on the first try.
 
-          • Remote (Together, Z.ai, OpenAI, …) — over-max_tokens chat probe
-            FIRST (one cheap request, ~0.1s, works for any OpenAI-compat
-            host that mirrors the "maximum context length is N tokens" 400),
-            then /v1/models as a fallback. Remote /v1/models often returns an
-            empty list or lacks context_length, and the TLS round-trip alone
-            costs 2-3s — leading with it added multi-second latency to the
-            background probe, so the first turn's footer rendered before the
-            max resolved. The chat probe resolves in well under a second.
+          • Remote (Together, Z.ai, OpenAI, …) — /v1/models FIRST, then the
+            over-max_tokens chat probe as a fallback. The chat probe is cheap
+            and universal but some backends clamp-and-generate instead of
+            rejecting with a 400, which would bill real tokens and add
+            latency on every newly-activated paid endpoint; /v1/models never
+            risks that, so it leads even though it costs a multi-second
+            TLS round-trip and often returns nothing.
 
         `model` defaults to the source's configured model, falling back to a
         live resolve_model() so an auto source is probed against the model it
@@ -285,12 +284,16 @@ class Source:
                 if n is None:
                     n = self._ctx_from_overrun_probe(mid)
             else:
-                # Remote: the over-max_tokens chat probe is cheap and universal;
-                # lead with it so the max resolves on the first turn instead of
-                # after a multi-second /v1/models round-trip that returns nothing.
-                n = self._ctx_from_overrun_probe(mid)
+                # Remote: try /v1/models first. It costs a multi-second
+                # round-trip but never risks real tokens/billing; the
+                # over-max_tokens chat probe is cheap and universal but some
+                # backends clamp-and-generate instead of rejecting with 400,
+                # which would otherwise bill/incur latency on every
+                # newly-activated paid endpoint. Only fall back to it if the
+                # model metadata doesn't expose a context length.
+                n = self._ctx_from_models(mid) or self._ctx_from_props()
                 if n is None:
-                    n = self._ctx_from_models(mid) or self._ctx_from_props()
+                    n = self._ctx_from_overrun_probe(mid)
             if isinstance(n, int) and n > 0:
                 self._context_window = n
         except Exception:
