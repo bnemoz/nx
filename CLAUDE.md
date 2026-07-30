@@ -88,8 +88,9 @@ The package is organized into one module per concern; grep `^# ---` banners insi
 
 3. **Tools**: read-only tool bodies (`read_file`, `list_dir`, `search_files`) live in
    `nx/_tools.py`; the state-touching ones (`write_file`, `edit_file`, `multi_edit`,
-   `run_bash`, `wait_background`) stay in `nx/__init__.py` since they call `_confirm()`
-   and touch session/background-process globals. All are dispatched through `run_tool()`.
+   `sed_edit`) live in `nx/_edit_tools.py`, and `run_bash`/`wait_background` live in
+   `nx/_bash_jobs.py` — all call `_confirm()`/`_ask_approval()` and touch session/
+   background-process globals. All are dispatched through `run_tool()`.
    `run_bash` always launches detached (`setsid`) and polls briefly before backgrounding —
    see the `SYSTEM` prompt string in `nx/__init__.py` for the exact background/foreground
    contract given to the model; keep that docstring and the tool's actual behavior in sync

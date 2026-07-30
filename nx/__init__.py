@@ -50,17 +50,9 @@ Env:   NX_APPROVAL=<all|low|medium|high|yolo>  (persistent default approval mode
 """
 from __future__ import annotations
 
-import glob
-import json
 import os
-import re
-import secrets
-import shlex
-import subprocess
 import sys
-import time
 import types as _types
-import urllib.error
 from typing import Any
 
 from ._openai_client import APIConnectionError, APIError
@@ -287,7 +279,7 @@ from ._bash_jobs import (
 )
 
 TOOLS: list[dict[str, Any]] = [
-    {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total. Do NOT use this to hunt for one function/section in a file you haven't seen yet -- use search_files first to find it, then read_file only if you still need more surrounding context.",
+    {"type": "function", "function": {"name": "read_file", "description": "Read file, cat -n style (1-based). Windowed: offset/limit (default 400 lines); header shows range+total.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
@@ -305,7 +297,7 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "description": "list of {old, new} objects, e.g. [{\"old\": \"a\", \"new\": \"b\"}] -- an actual JSON array, not a string", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
     {"type": "function", "function": {"name": "sed_edit", "description": "Regex find/replace (Python re) over file or glob (e.g. \"src/**/*.py\"). Only use when the change actually needs regex/glob (e.g. a pattern across many files) -- for literal text in one known file, use edit_file/multi_edit instead, they need no escaping. flags: i/m/s chars = IGNORECASE/MULTILINE/DOTALL. count caps replacements/file (0=unlimited). One approval for all matched files.",
         "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "replacement": {"type": "string"}, "path": {"type": "string"}, "count": {"type": "integer", "description": "max replacements per file (default 0 = unlimited)"}, "flags": {"type": "string", "description": "i/m/s = IGNORECASE/MULTILINE/DOTALL (default \"\" = none)"}}, "required": ["pattern", "replacement", "path"]}}},
-    {"type": "function", "function": {"name": "run_bash", "description": "Shell cmd, detached (setsid), non-blocking. Quick (~3s poll) returns output directly; long ones background -> PID+log path, check via read_file(log_path). Never use `sleep N` as chain trick (whole cmd backgrounds). timeout=N only if cmd KNOWN to finish in ~Ns (e.g. timeout=35 for `sleep 30`); leading `sleep N` auto-extends poll to N+10s. Logs at ~/.nx/bg-logs/, auto-cleaned (~50 files/7d).",
+    {"type": "function", "function": {"name": "run_bash", "description": "Shell cmd, detached (setsid), non-blocking (see backgrounding behavior above). Never use `sleep N` as chain trick (whole cmd backgrounds). timeout=N only if cmd KNOWN to finish in ~Ns (e.g. timeout=35 for `sleep 30`); leading `sleep N` auto-extends poll to N+10s. Logs at ~/.nx/bg-logs/, auto-cleaned (~50 files/7d).",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "sync wait secs (default unset=~3s poll; 0=wait indefinitely)"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "todo_write", "description": "Replace whole todo list. Track multi-step tasks.",
         "parameters": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"enum": ["pending", "in_progress", "done"]}}}}}, "required": ["todos"]}}},
