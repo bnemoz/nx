@@ -189,7 +189,11 @@ for _i, _arg in enumerate(sys.argv):
 _start = _start or os.environ.get("NX_ACTIVE") or (st.SOURCE_ORDER[0] if st.SOURCE_ORDER else None)
 if not _start or _start not in st.SOURCES:
     _start = st.SOURCE_ORDER[0] if st.SOURCE_ORDER else None
-if _start:
+# --help/--version/-h exit before any source is ever used (see
+# _cli_help_or_version in _cli.py) — skip switch_source()'s network calls
+# (resolve_model()'s /v1/models round-trip, capability probe) so `nx --help`
+# against an unreachable host stays instant instead of blocking ~10-15s.
+if _start and not ({"-h", "--help", "--version"} & set(sys.argv[1:])):
     switch_source(_start)
 
 # --- approval gating --------------------------------------------------------
