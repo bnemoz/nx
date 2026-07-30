@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 from . import _state as st
-from ._ansi import DIM, RESET, C, LifeSpinner
+from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit
@@ -212,7 +212,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         hidden = len(preview_lines) - 8
         preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
     for line in preview_lines:
-        print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{line}{RESET}")
+        print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(args.get("path", ".")))

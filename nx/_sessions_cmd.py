@@ -19,7 +19,7 @@ import shlex
 import time
 from typing import Any
 
-from ._ansi import DIM, BOLD, RESET, C
+from ._ansi import DIM, BOLD, RESET, C, strip_ansi_for_display
 from ._sessions_io import _flatten_message_text, _short_id
 from ._sources import restore_source, _set_provider_order
 from . import _state as st
@@ -69,7 +69,7 @@ def _print_transcript(messages: list[dict[str, Any]], max_chars: int = 120) -> i
         role = m.get("role", "?")
         if role == "system":
             continue
-        content = _flatten_message_text(m, per_msg=max_chars)
+        content = strip_ansi_for_display(_flatten_message_text(m, per_msg=max_chars))
         color = {"user": C.ACCENT, "assistant": C.TEXT, "tool": DIM}.get(role, "")
         print(f"  {color}{role:>9}{RESET}  {content}")
         printed += 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import os
 import random
+import re
 import sys
 import termios
 import threading
@@ -44,6 +45,30 @@ DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 CLEAR_LINE = "\033[2K\r"   # erase entire line, return cursor to col 0
 HIDE_CURSOR = "\033[?25l"
 SHOW_CURSOR = "\033[?25h"
+
+# Strips CSI (\033[...<final byte>), OSC (\033]...BEL or \033\\), and other C0
+# control chars (except \t/\n) before untrusted content (tool output, resumed
+# transcripts, streamed model text) hits the real terminal. This is a
+# display-only boundary — the model-facing copy of the same text is left
+# untouched (see _sanitize_tool_result's separate, size-focused contract).
+_CSI_RE = re.compile(r"\033\[[0-?]*[ -/]*[@-~]")
+_OSC_RE = re.compile(r"\033\](?:[^\033\a]|\033(?!\\))*(?:\a|\033\\)?")
+_OTHER_ESC_RE = re.compile(r"\033[@-Z\\-_]")
+_C0_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_ansi_for_display(text: str) -> str:
+    """Strip terminal control sequences from `text` before it's printed.
+
+    Untrusted bytes (file/command output, resumed session transcripts, the
+    model's own streamed text) can otherwise smuggle an OSC-52 clipboard
+    write, a cursor-hide, or other terminal escape into the real terminal.
+    SGR color codes (\\033[...m) written by nx itself are applied *after*
+    this strip, so nx's own coloring is unaffected."""
+    text = _OSC_RE.sub("", text)
+    text = _CSI_RE.sub("", text)
+    text = _OTHER_ESC_RE.sub("", text)
+    return _C0_RE.sub("", text)
 
 # Five hex values per theme: cyan/green/yellow/red/magenta, plus "gray" —
 # used for reasoning-block text, where plain SGR-2 dim or ANSI bright-black

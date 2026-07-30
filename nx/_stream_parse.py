@@ -19,7 +19,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 
-from ._ansi import DIM, CLEAR_LINE, C, RESET
+from ._ansi import DIM, CLEAR_LINE, C, RESET, strip_ansi_for_display
 from ._special_tokens import (
     _LEAKED_SPECIAL_TOKEN_RE, LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT,
     _strip_leaked_tokens,
@@ -243,7 +243,7 @@ class StreamParser:
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
-                    self.say_live.update(Markdown(full))
+                    self.say_live.update(Markdown(strip_ansi_for_display(full)))
                 else:
                     # Tag opened mid-stream: commit whatever prose came
                     # before it, close the live panel, and fall through to
@@ -267,7 +267,7 @@ class StreamParser:
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
                     if self.say_live is not None:
-                        self.say_live.update(Markdown(prefix))
+                        self.say_live.update(Markdown(strip_ansi_for_display(prefix)))
                         self.say_live.stop()
                         self.say_live = None
                     self.in_text_tool_tag = True

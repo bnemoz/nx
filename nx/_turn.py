@@ -17,7 +17,7 @@ from ._openai_client import APIConnectionError, APIError
 import httpx
 from rich.console import Console
 from ._ansi import (
-    DIM, RESET, LifeSpinner, C,
+    DIM, RESET, LifeSpinner, C, strip_ansi_for_display,
 )
 from ._approval import _EscToChat
 from ._interrupt import (
@@ -232,7 +232,7 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
         answer = str(args.get("answer") or "").strip()
         status = str(args.get("status") or "answered").strip()
         if answer:
-            print(f"{C.TEXT}{answer}{RESET}")
+            print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
             messages.append({"role": "assistant", "content": answer})
             return TURN_DONE
         print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
