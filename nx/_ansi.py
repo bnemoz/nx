@@ -24,6 +24,7 @@ def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
     old = termios.tcgetattr(fd)
     new = old[:]
     new[3] &= ~(termios.ECHO | termios.ICANON)
+    new[0] &= ~termios.IXON
     if icrnl:
         new[0] &= ~termios.ICRNL
     new[6][termios.VMIN] = 1
