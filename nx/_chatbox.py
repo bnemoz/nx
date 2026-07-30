@@ -328,7 +328,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         top_fill = max(0, box_w - 11 - _str_width(hints))
         if not truncated:
             mode_color = C.SUCCESS if st.YOLO else C.WARNING
-            hints = hints[:-len(mode)] + f"{mode_color}{mode}{DIM}"
+            hints = hints[:-len(mode)] + f"{mode_color}{mode}{RESET}{DIM}"
         stats = f"{len(buf)} line{'s' if len(buf) != 1 else ''} · {sum(len(line) for line in buf)} chars"
         max_stats = max(0, box_w - 6)
         if _str_width(stats) > max_stats:
@@ -336,7 +336,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         bot_fill = max(0, box_w - 4 - _str_width(stats))
 
         lines = [
-            f"{DIM}╭─ {RESET}{C.ACCENT}you{RESET}{DIM} · {hints} {'─' * top_fill}╮{RESET}",
+            f"{DIM}╭─ {RESET}{C.ACCENT}you{RESET}{DIM} · {hints}{DIM} {'─' * top_fill}╮{RESET}",
             *[f"{DIM}│{RESET}{seg}{' ' * (inner_w - _str_width(seg))}{DIM}│{RESET}" for _, _, seg in visual],
             f"{DIM}╰─ {stats}{' ' * bot_fill}╯{RESET}",
         ]
