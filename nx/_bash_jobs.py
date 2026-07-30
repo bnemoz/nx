@@ -396,18 +396,21 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
     pid : int or str
         The PID returned by the prior ``run_bash`` call.
     log_path : str, optional
-        The log path from the background message.  If omitted the tool scans
-        ``~/.nx/bg-logs/`` for a log whose PID matches.
+        Ignored; kept for backward compatibility with older tool-call args.
+        The log path is always resolved server-side from *pid* via the
+        pid->log map written by ``run_bash``.
     timeout : int
         Max seconds to wait (default 0 = wait indefinitely until the command
         finishes or Esc is pressed).
     """
     pid = int(pid)
+    # Never trust a caller-supplied log_path: always resolve it ourselves from
+    # the pid->log map written by _run_bash, so a model-supplied path/pid pair
+    # can't be used to read arbitrary files outside the run_bash pipeline.
+    log_path = _find_bg_log_for_pid(pid)
     if not log_path:
-        log_path = _find_bg_log_for_pid(pid)
-        if not log_path:
-            return (f"[error] No background log found for PID {pid}. "
-                    "The log may have been cleaned up already.")
+        return (f"[error] No background log found for PID {pid}. "
+                "The log may have been cleaned up already.")
     timeout_s = 999999999 if timeout <= 0 else timeout
     status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path,
                        expected_start_time=_find_bg_start_time_for_pid(pid))
