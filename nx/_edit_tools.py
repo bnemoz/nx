@@ -73,9 +73,13 @@ def write_file(path: str, content: str, **_: Any) -> str:
     return f"wrote {len(content)} bytes to {path}"
 
 
-def edit_file(path: str, old: str, new: str, **_: Any) -> str:
+def edit_file(path: str, old: str, new: str, replace_all: bool = False, **_: Any) -> str:
+    """Replace `old` with `new` in `path`. By default `old` must match exactly
+    once (ambiguous matches error rather than guessing). Pass replace_all=True
+    to replace every occurrence instead — e.g. renaming a variable throughout
+    a file — without needing multi_edit for a single literal string."""
     src, src_mtime = _read_with_mtime(path)
-    if src.count(old) != 1:
+    if not replace_all and src.count(old) != 1:
         # The model may have pasted read_file's numbered output into `old`.
         # Only as a fallback (exact match already failed), retry with the
         # numbering stripped — and strip `new` the same way so we never write
@@ -84,12 +88,16 @@ def edit_file(path: str, old: str, new: str, **_: Any) -> str:
         stripped_old = _strip_line_numbers(old)
         if stripped_old != old and src.count(stripped_old) == 1:
             old, new = stripped_old, _strip_line_numbers(new)
-    if src.count(old) != 1:
-        return f"ERROR: `old` matched {src.count(old)} times (need exactly 1)"
-    new_src = src.replace(old, new)
+    count = src.count(old)
+    if count == 0:
+        return "ERROR: `old` matched 0 times (need at least 1)"
+    if not replace_all and count != 1:
+        return f"ERROR: `old` matched {count} times (need exactly 1, or pass replace_all=True)"
+    new_src = src.replace(old, new) if replace_all else src.replace(old, new, 1)
     if new_src == src:
         return f"ERROR: no change to {path} (`old` and `new` are identical)"
-    if not _confirm(f"edit {path}", preview=_diff_preview(src, new_src)):
+    action = f"edit {path}" + (f" ({count} occurrences)" if replace_all and count > 1 else "")
+    if not _confirm(action, preview=_diff_preview(src, new_src)):
         return "DENIED by user"
     try:
         now_mtime = os.stat(path).st_mtime

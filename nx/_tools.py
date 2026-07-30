@@ -72,7 +72,22 @@ def _strip_line_numbers(text: str) -> str:
     return text
 
 
-def list_dir(path: str = ".", **_: Any) -> str:
+def list_dir(path: str = ".", pattern: str | None = None, **_: Any) -> str:
+    """List a directory. Without `pattern`: flat, alphabetical (like `ls`).
+    With `pattern` (e.g. "**/*.py", "src/**/*.ts"): recursive glob search
+    rooted at `path`, results sorted newest-modified first — mirrors Claude
+    Code's Glob tool, for "find files matching X" instead of "what's in this
+    one directory."""
+    if pattern:
+        import glob as _glob
+        try:
+            matches = _glob.glob(os.path.join(path, pattern), recursive=True)
+        except (OSError, ValueError) as e:
+            return f"ERROR: {type(e).__name__}: {e}"
+        if not matches:
+            return f"[no files matching {pattern!r} under {path}]"
+        matches.sort(key=lambda p: -(os.path.getmtime(p) if os.path.exists(p) else 0))
+        return "\n".join(matches)
     try:
         return "\n".join(sorted(os.listdir(path)))
     except OSError as e:
@@ -85,6 +100,8 @@ def search_files(
     glob: str | None = None,
     max_results: int = 100,
     context: int = 0,
+    ignore_case: bool = False,
+    output_mode: str = "content",
     **_: Any,
 ) -> str:
     """Search file contents for a regex `pattern` and return `path:line:match`
@@ -106,6 +123,9 @@ def search_files(
       glob: optional include filter, e.g. "*.py" (rg `-g` / grep `--include`).
       max_results: cap on matches returned (default 100; <=0 -> 1000).
       context: lines of context before/after each match (rg/grep `-C`).
+      ignore_case: case-insensitive match (rg/grep `-i`).
+      output_mode: "content" (default, path:line:match), "files_with_matches"
+        (just matching file paths, one per line), or "count" (path:count).
     """
     if not pattern or not str(pattern).strip():
         return "ERROR: `pattern` is empty"
@@ -119,18 +139,37 @@ def search_files(
         context = max(0, int(context))
     except (TypeError, ValueError):
         context = 0
-    if shutil.which("rg"):
-        cmd = ["rg", "-n", "--no-heading", "--color=never", "-e", str(pattern)]
-        if context:
-            cmd += ["-C", str(context)]
+    if output_mode not in ("content", "files_with_matches", "count"):
+        output_mode = "content"
+    use_rg = bool(shutil.which("rg"))
+    if use_rg:
+        cmd = ["rg", "--no-heading", "--color=never", "-e", str(pattern)]
+        if output_mode == "files_with_matches":
+            cmd += ["-l"]
+        elif output_mode == "count":
+            cmd += ["-c"]
+        else:
+            cmd += ["-n"]
+            if context:
+                cmd += ["-C", str(context)]
+        if ignore_case:
+            cmd += ["-i"]
         if glob:
             cmd += ["-g", str(glob)]
         cmd += ["--", str(path)]
     else:
-        cmd = ["grep", "-rn", "-E", "--color=never", "--exclude-dir=.git",
+        cmd = ["grep", "-rE", "--color=never", "--exclude-dir=.git",
                "-e", str(pattern)]
-        if context:
-            cmd += ["-C", str(context)]
+        if output_mode == "files_with_matches":
+            cmd += ["-l"]
+        elif output_mode == "count":
+            cmd += ["-c"]
+        else:
+            cmd += ["-n"]
+            if context:
+                cmd += ["-C", str(context)]
+        if ignore_case:
+            cmd += ["-i"]
         if glob:
             cmd += ["--include=" + str(glob)]
         cmd += ["--", str(path)]
@@ -148,6 +187,10 @@ def search_files(
     if err and not proc.stdout:
         return f"ERROR: {err.splitlines()[-1] if err else 'search failed'}"
     lines = proc.stdout.splitlines()
+    if output_mode == "count":
+        # grep -rc emits "path:0" for non-matching files; rg -c omits them.
+        # Normalize so both backends only report files with hits.
+        lines = [ln for ln in lines if not ln.endswith(":0")]
     if not lines:
         return f"[no matches for {pattern!r} under {path}]"
     shown = "\n".join(lines[:max_results])
