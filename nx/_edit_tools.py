@@ -142,7 +142,7 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     if not changes:
         return f"no matches for pattern in {len(files)} file(s)"
     total = sum(n for _, _, _, n in changes)
-    action = f"sed_edit {len(changes)} file(s), {total} replacement(s)"
+    action = f"sed_edit {len(changes)} file(s), {total} replacement(s): " + ", ".join(f for f, _, _, _ in changes)
     if not _confirm(action, preview="\n".join(previews)):
         return "DENIED by user"
     _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n in changes])
