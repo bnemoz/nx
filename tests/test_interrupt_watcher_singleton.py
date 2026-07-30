@@ -225,6 +225,57 @@ def test_pid_poll_treats_a_reused_pid_as_exited():
         jobs.os.kill = old_kill
 
 
+def test_watch_for_interrupts_waits_past_slow_drain():
+    """_watch_for_interrupts' disarm wait must outlast _drain_redirect_text's
+    2.0s deadline, not just the old 0.5s.
+
+    Regression for the timing bug: the real watcher can be inside
+    _drain_redirect_text (up to 2.0s) when the main thread disarms. The old
+    0.5s timeout on _INTERRUPT_RESTORED.wait() let the main thread proceed
+    — believing termios was restored — while a slow-but-legit drain (e.g. a
+    user still typing a redirect at the 0.6s mark) was still running in raw
+    mode. Simulate a watcher whose drain/restore takes 0.8s (comfortably
+    past the old 0.5s bound, comfortably under the new one) and assert the
+    context manager does not return until the watcher actually restores.
+    """
+    import time as _time
+
+    m._INTERRUPT_ARMED.clear()
+    m._INTERRUPT_RESTORED.set()
+    m._USER_INTERRUPTED.clear()
+
+    drain_seconds = 0.8
+    restored_at = []
+
+    def slow_watcher():
+        # Mirrors the real watcher: waits to be armed, then simulates a slow
+        # _drain_redirect_text before restoring termios and signaling.
+        m._INTERRUPT_ARMED.wait(1.0)
+        _time.sleep(drain_seconds)
+        restored_at.append(_time.monotonic())
+        m._INTERRUPT_RESTORED.set()
+
+    thread = threading.Thread(target=slow_watcher, daemon=True)
+    thread.start()
+    try:
+        t0 = _time.monotonic()
+        with m._watch_for_interrupts():
+            pass  # main disarms immediately on context exit, like a short turn
+        elapsed = _time.monotonic() - t0
+        assert restored_at, "watcher never finished its simulated slow drain"
+        assert elapsed >= drain_seconds - 0.05, (
+            f"context manager returned after {elapsed:.2f}s, before the "
+            f"{drain_seconds}s drain finished — old 0.5s bound regressed"
+        )
+        assert m._INTERRUPT_RESTORED.is_set()
+    finally:
+        thread.join(timeout=2.0)
+        m._INTERRUPT_ARMED.clear()
+        m._USER_INTERRUPTED.clear()
+        m._INTERRUPT_RESTORED.set()
+    print("PASS — disarm wait outlasts a slow (0.8s) drain, not truncated at 0.5s")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
