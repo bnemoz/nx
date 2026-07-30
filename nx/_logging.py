@@ -18,10 +18,13 @@ import threading
 import time
 from typing import Any
 
+from . import _state as st
 from ._env import _env_int
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "llamacpp.log")
-os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+# Under NX_HOME (same convention as sessions), not the installed package dir —
+# a system-wide/read-only install must not crash on import, and the log holds
+# full unredacted request/response bodies that shouldn't be world-readable.
+LOG_PATH = os.path.join(st.SESSION_HOME, "logs", "llamacpp.log")
 LOG_MAX_BYTES = _env_int("NX_LOG_MAX_BYTES", 10000000)
 
 
@@ -48,19 +51,32 @@ class _AsyncLogWriter:
         lines that were still in flight on the writer thread."""
         self._queue.join()
 
+    def _open(self):
+        """Lazy, fail-soft: a read-only/system-wide install must not crash
+        the writer thread (or, transitively, `import nx`) just because the
+        log directory can't be created."""
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True, mode=0o700)
+            fd = os.open(self._path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            return os.fdopen(fd, "a", buffering=1)
+        except OSError:
+            return None
+
     def _run(self) -> None:
-        f = open(self._path, "a", buffering=1)
+        f = self._open()
         try:
             while True:
                 line = self._queue.get()
                 try:
+                    if f is None:
+                        continue
                     if self._max_bytes > 0 and f.tell() >= self._max_bytes:
                         f.close()
                         try:
                             os.replace(self._path, self._path + ".1")
                         except OSError:
                             pass
-                        f = open(self._path, "a", buffering=1)
+                        f = self._open()
                     f.write(line)
                 except OSError:
                     pass
@@ -68,7 +84,8 @@ class _AsyncLogWriter:
                     self._queue.task_done()
         finally:
             try:
-                f.close()
+                if f is not None:
+                    f.close()
             except OSError:
                 pass
 

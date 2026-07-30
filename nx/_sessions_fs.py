@@ -61,6 +61,15 @@ def _index_path() -> str:
     return os.path.join(_sessions_dir(), ".index.json")
 
 
+def _open_private(path: str, flags: int = os.O_CREAT | os.O_WRONLY | os.O_TRUNC):
+    """Open ``path`` for writing so only the owner can read it (0600),
+    regardless of the process umask. Sessions/logs hold tool output and
+    command results that may include secrets — world-readable files leak
+    them to any other local user on a shared host."""
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
 @contextmanager
 def _exclusive_file_lock(path: str):
     """Hold an advisory interprocess lock associated with ``path``.
@@ -69,12 +78,16 @@ def _exclusive_file_lock(path: str):
     replacement. The separate lock file keeps the lock valid while the JSON
     file itself is replaced; the OS releases it if the process exits.
     """
-    with open(path + ".lock", "a+", encoding="utf-8") as lock:
+    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    lock = os.fdopen(fd, "a+", encoding="utf-8")
+    try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock.close()
 
 
 def _load_index() -> dict[str, Any]:
@@ -93,7 +106,7 @@ def _write_index(idx: dict[str, Any]) -> None:
     path = _index_path()
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _open_private(tmp) as f:
             json.dump(idx, f, ensure_ascii=False)
         os.replace(tmp, path)
     except OSError:
@@ -147,7 +160,8 @@ def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[s
     merged into the stored metadata.
     """
     d = _sessions_dir()
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
     _prune_empty_assistant_messages(messages)
     path = _session_path(session_id)
     # The lock spans reading the current revision through replacing it. A
@@ -180,7 +194,7 @@ def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[s
                 if v is not None:
                     data[k] = v
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _open_private(tmp) as f:
             json.dump(data, f, ensure_ascii=False)
         os.replace(tmp, path)
         try:
