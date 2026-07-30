@@ -225,8 +225,10 @@ def _load_session(session_id: str) -> dict[str, Any] | None:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict) and "messages" in data:
-            _prune_empty_assistant_messages(data.get("messages"))
+        if isinstance(data, dict) and isinstance(data.get("messages"), list):
+            if not all(isinstance(m, dict) for m in data["messages"]):
+                return None
+            _prune_empty_assistant_messages(data["messages"])
             return data
     except (OSError, IOError, json.JSONDecodeError):
         pass
