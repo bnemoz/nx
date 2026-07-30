@@ -31,6 +31,7 @@ from ._openai_client import APIConnectionError
 from ._sessions_io import (
     _flatten_message_text, _safe_title, _prune_empty_assistant_messages,
     _short_id, _summarize_session_data, _session_matches_query,
+    _drop_leading_dangling_tool_turns,
 )
 
 SESSION_LIST_DEFAULT_LIMIT = 10
@@ -144,12 +145,27 @@ def _merge_session_messages(
     if len(incoming) <= len(existing) and incoming == existing[:len(incoming)]:
         return existing
 
+    # True fork (not a prefix relationship): the two suffixes diverge from a
+    # shared point onward. Splicing them back-to-back can land an assistant
+    # tool_calls turn from `existing` right before an unrelated turn from
+    # `incoming`'s branch — the matching tool result lived only on the
+    # discarded branch, so the join point is invalid. Drop a dangling
+    # trailing assistant(tool_calls) turn off `existing` before joining, and
+    # any dangling leading tool/tool_calls turn off the incoming suffix.
+    head = existing
+    if head and head[-1].get("role") == "assistant" and head[-1].get("tool_calls"):
+        ids = {tc["id"] for tc in head[-1]["tool_calls"]}
+        seen = {m.get("tool_call_id") for m in head if m.get("role") == "tool"}
+        if ids - seen:
+            head = head[:-1]
+
     prefix_len = 0
     for saved, proposed in zip(existing, incoming):
         if saved != proposed:
             break
         prefix_len += 1
-    return existing + incoming[prefix_len:]
+    tail, _ = _drop_leading_dangling_tool_turns(incoming[prefix_len:])
+    return head + tail
 
 
 def _write_session(session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None) -> None:
