@@ -5,7 +5,8 @@ framed, multi-line editor:
     a trailing newline at the end of paste is stripped so pasting never
     accidentally submits
   - Up/Down navigate history, Left/Right move within the current line,
-    Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels
+    Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
+    Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -319,11 +320,15 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · shift+tab {mode}"
+        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · shift+tab {mode}"
         max_hints = max(0, box_w - 11)
-        if _str_width(hints) > max_hints:
+        truncated = _str_width(hints) > max_hints
+        if truncated:
             hints = _str_slice_by_width(hints, max_hints - 1) + "…" if max_hints > 1 else "…"
         top_fill = max(0, box_w - 11 - _str_width(hints))
+        if not truncated:
+            mode_color = C.SUCCESS if st.YOLO else C.WARNING
+            hints = hints[:-len(mode)] + f"{mode_color}{mode}{DIM}"
         stats = f"{len(buf)} line{'s' if len(buf) != 1 else ''} · {sum(len(line) for line in buf)} chars"
         max_stats = max(0, box_w - 6)
         if _str_width(stats) > max_stats:
@@ -553,6 +558,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                 elif c == "\x04":
                     if not any(buf):
                         raise EOFError
+                elif c == "\x0c":
+                    finish()
+                    return "/clear"
+                elif c == "\x11":
+                    finish()
+                    return "/exit"
                 elif c in ("\x7f", "\x08"):
                     backspace()
                 elif c == "\x15":
