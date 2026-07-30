@@ -230,7 +230,10 @@ def _repl() -> None:
             state.history.append(user)
         print()  # breathing room before the spinner/text starts
         state.messages.append({"role": "user", "content": expand_at_mentions(user)})
-        _run_model_turn_loop(state.messages, on_step=lambda meta=None: _save_current(state, meta))
+        try:
+            _run_model_turn_loop(state.messages, on_step=lambda meta=None: _save_current(state, meta))
+        except Exception as e:
+            print(f"{DIM}  turn failed: {e}{RESET}")
         # Auto-save after the turn settles (whether it ended cleanly, hit the
         # step cap, or was escaped). This is the Hermes pattern: persist every
         # turn so a crash / accidental close never loses work.

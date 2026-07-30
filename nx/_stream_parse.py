@@ -149,6 +149,8 @@ class StreamParser:
         if choice.finish_reason:
             self.finish_reasons.append(str(choice.finish_reason))
         d = choice.delta
+        if d is None:
+            return False
         d_extra = getattr(d, "model_extra", None) or {}
         rc = (getattr(d, "reasoning_content", None) or
               d_extra.get("reasoning_content") or d_extra.get("reasoning"))
