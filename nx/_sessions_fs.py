@@ -58,8 +58,22 @@ def _session_path(session_id: str) -> str:
     return os.path.join(_sessions_dir(), f"{safe}.json")
 
 
-def _index_path() -> str:
-    return os.path.join(_sessions_dir(), ".index.json")
+def _index_dir() -> str:
+    """Sharded sidecar index: one small JSON file per session under here,
+    instead of one big .index.json every save has to read-modify-write.
+
+    A single shared index file means every session save contends for the
+    same lock and rewrites every other session's summary too — cost scales
+    with total session count, not just this session's size. Sharding makes
+    a save touch only this session's own shard file: no shared lock, and
+    the write cost is O(1) in the number of other sessions.
+    """
+    return os.path.join(_sessions_dir(), ".index")
+
+
+def _index_entry_path(session_id: str) -> str:
+    safe = os.path.basename(session_id)
+    return os.path.join(_index_dir(), f"{safe}.json")
 
 
 def _open_private(path: str, flags: int = os.O_CREAT | os.O_WRONLY | os.O_TRUNC):
@@ -92,26 +106,54 @@ def _exclusive_file_lock(path: str):
 
 
 def _load_index() -> dict[str, Any]:
-    """The sidecar listing index: {session_id: summary dict}. Missing or
-    corrupt just returns {}, so callers degrade to a full per-file parse —
-    same as before this index existed."""
+    """The sidecar listing index: {session_id: summary dict}, assembled by
+    reading every per-session shard under _index_dir(). A missing directory
+    or an individually corrupt shard just degrades that entry (or the whole
+    index, if the dir is gone) to a full per-file parse — same as before
+    this index existed."""
+    out: dict[str, Any] = {}
     try:
-        with open(_index_path(), encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, IOError, json.JSONDecodeError):
+        with os.scandir(_index_dir()) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    with open(entry.path, encoding="utf-8") as f:
+                        data = json.load(f)
+                except (OSError, IOError, json.JSONDecodeError):
+                    continue  # this session's shard is corrupt — fall back for it only
+                if isinstance(data, dict):
+                    out[entry.name[:-len(".json")]] = data
+    except OSError:
         return {}
+    return out
+
+
+def _write_index_entry(session_id: str, summary: dict[str, Any]) -> None:
+    d = _index_dir()
+    try:
+        os.makedirs(d, exist_ok=True, mode=0o700)
+    except OSError:
+        return
+    path = _index_entry_path(session_id)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with _open_private(tmp) as f:
+            json.dump(summary, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass  # best-effort — a stale/missing shard just falls back to a full parse
 
 
 def _write_index(idx: dict[str, Any]) -> None:
-    path = _index_path()
-    tmp = path + ".tmp"
-    try:
-        with _open_private(tmp) as f:
-            json.dump(idx, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError:
-        pass  # best-effort — a stale/missing index just falls back to full parses
+    """Rewrite every per-session shard from a full {id: summary} dict.
+
+    Only used where callers still think in terms of one big index (tests,
+    reconstruction after loss); normal per-save updates go through
+    _update_index, which touches just the one shard that changed.
+    """
+    for session_id, summary in idx.items():
+        _write_index_entry(session_id, summary)
 
 
 def _update_index(session_id: str, data: dict[str, Any]) -> None:
@@ -119,13 +161,15 @@ def _update_index(session_id: str, data: dict[str, Any]) -> None:
     `nx sessions [query]` can list/search without json.load-ing every
     full transcript on disk (some can be large — tool outputs, diffs, …).
     Called from _write_session on every save, so the index stays at least
-    as fresh as the file it mirrors."""
-    # Different session writers also share this read-modify-write sidecar.
-    # Protect it separately, since their per-session locks are distinct.
-    with _exclusive_file_lock(_index_path()):
-        idx = _load_index()
-        idx[session_id] = _summarize_session_data(session_id, data)
-        _write_index(idx)
+    as fresh as the file it mirrors.
+
+    Writes only this session's own shard file — no shared lock and no
+    read-modify-write of every other session's summary. Safe without an
+    extra lock because _write_session already holds this session_id's own
+    file lock for the duration of this call, and no other session_id can
+    write this shard file.
+    """
+    _write_index_entry(session_id, _summarize_session_data(session_id, data))
 
 
 def _merge_session_messages(
@@ -257,7 +301,7 @@ def _session_files_newest() -> list[str]:
     try:
         with os.scandir(d) as entries:
             for entry in entries:
-                # ".json" but excludes the sidecar index (a dotfile, .index.json)
+                # ".json" but excludes the sidecar index dir (dotfile, .index/)
                 if not entry.name.endswith(".json") or entry.name.startswith("."):
                     continue
                 try:
@@ -333,9 +377,10 @@ def _delete_session(session_id: str) -> bool:
         os.remove(path)
     except OSError:
         return False
-    idx = _load_index()
-    if idx.pop(session_id, None) is not None:
-        _write_index(idx)
+    try:
+        os.remove(_index_entry_path(session_id))
+    except OSError:
+        pass
     return True
 
 

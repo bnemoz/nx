@@ -128,7 +128,7 @@ from ._sessions_io import (
 )
 from ._sessions_fs import (
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT,
-    _sessions_dir, _memories_dir, _session_path, _index_path,
+    _sessions_dir, _memories_dir, _session_path, _index_dir, _index_entry_path,
     _load_index, _write_index, _update_index, _write_session, _load_session,
     _session_files_newest, _session_summary_from_file, _list_sessions,
     _delete_session, _maybe_refresh_description, _resolve_session,

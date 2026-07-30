@@ -4,6 +4,7 @@
 sessions without json.load-ing every full transcript on disk.
 """
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,7 +30,11 @@ def _clear_test_sessions_dir():
     d = _use_test_sessions_dir()
     assert os.path.basename(d).startswith("nx-session-index-"), d
     for f in os.listdir(d):
-        os.remove(os.path.join(d, f))
+        p = os.path.join(d, f)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+        else:
+            os.remove(p)
     return d
 
 
@@ -48,12 +53,12 @@ def test_write_session_populates_index_entry():
     assert idx[sid]["n"] == 1
 
 
-def test_index_file_is_excluded_from_session_listing():
+def test_index_dir_is_excluded_from_session_listing():
     _clear_test_sessions_dir()
     m._write_session("20250101-120000-idx002", [_msg("user", "hi")])
     files = m._session_files_newest()
     assert all(not f.startswith(".") for f in files)
-    assert ".index.json" not in files
+    assert ".index" not in files
 
 
 def test_list_sessions_uses_index_even_if_file_is_corrupted():
@@ -103,26 +108,26 @@ def test_delete_session_removes_index_entry():
     assert sid not in m._load_index()
 
 
-def test_missing_index_file_degrades_gracefully():
+def test_missing_index_dir_degrades_gracefully():
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx006"
     m._write_session(sid, [_msg("user", "still works")], {"title": "no-index"})
-    os.remove(m._index_path())
+    shutil.rmtree(m._index_dir())
 
     sessions = m._list_sessions()
     match = [s for s in sessions if s["id"] == sid]
     assert len(match) == 1
     assert match[0]["title"] == "no-index"
-    # a fresh index should now exist again after the next write
+    # a fresh shard should now exist again after the next write
     m._write_session(sid, [_msg("user", "still works")], {"title": "no-index"})
-    assert os.path.exists(m._index_path())
+    assert os.path.exists(m._index_entry_path(sid))
 
 
-def test_corrupt_index_file_degrades_gracefully():
+def test_corrupt_index_shard_degrades_gracefully():
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx007"
     m._write_session(sid, [_msg("user", "resilient")], {"title": "resilient-title"})
-    with open(m._index_path(), "w", encoding="utf-8") as f:
+    with open(m._index_entry_path(sid), "w", encoding="utf-8") as f:
         f.write("not json")
 
     sessions = m._list_sessions()
