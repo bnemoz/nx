@@ -21,18 +21,19 @@ from . import _state as st
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
-from ._edit_tools import write_file, edit_file, multi_edit, sed_edit
+from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch
 from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write
-from ._tools import read_file, list_dir, search_files, git_status, git_diff
+from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
 
 DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
     "list_dir": list_dir, "run_bash": run_bash, "wait_background": wait_background,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
-    "git_status": git_status, "git_diff": git_diff, "todo_write": todo_write,
+    "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
+    "todo_write": todo_write, "apply_patch": apply_patch,
 }
 
 st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash call in this session actually backgrounds
@@ -143,7 +144,7 @@ MULTI_EDIT_GUIDANCE = (
     "instead of several, and applies atomically.]"
 )
 
-_CACHEABLE_READ_TOOLS = ("read_file", "list_dir")
+_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log")
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -215,7 +216,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
-        st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(args.get("path", ".")))
+        cache_path = args.get("path", ".")
+        if isinstance(cache_path, list):
+            cache_path = cache_path[0] if cache_path else "."
+        st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(cache_path))
     elif name in ("write_file", "edit_file", "multi_edit") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
         if result != "DENIED by user":

@@ -16,12 +16,19 @@ from typing import Any
 from ._env import _env_int
 
 
-def read_file(path: str, offset: int = 1, limit: int | None = None, **_: Any) -> str:
+def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, **_: Any) -> str:
     """Read a file as numbered lines (1-based, `cat -n` style: right-aligned
     line number, a tab, then the line). Large files return only a window — pass
     offset (start line) and limit (max lines) to page through the rest. A header
     announces the visible range + total line count so the model can ask for more
-    instead of being head/tail-capped by _sanitize_tool_result."""
+    instead of being head/tail-capped by _sanitize_tool_result.
+
+    path may also be a list of paths; each is read with the same offset/limit
+    and the results are concatenated under a "==> path <==" header per file."""
+    if isinstance(path, list):
+        return "\n".join(
+            f"==> {p} <==\n{read_file(p, offset=offset, limit=limit)}" for p in path
+        )
     try:
         with open(path) as f:
             lines = f.readlines()
@@ -95,7 +102,7 @@ def list_dir(path: str = ".", pattern: str | None = None, **_: Any) -> str:
 
 
 def search_files(
-    pattern: str,
+    pattern: str | list[str],
     path: str = ".",
     glob: str | None = None,
     max_results: int = 100,
@@ -118,7 +125,7 @@ def search_files(
     full read_file of a large file just to see what's around a match.
 
     Args:
-      pattern: regex (not a glob).
+      pattern: regex (not a glob); pass a list to OR multiple patterns in one search.
       path: file or directory to search under (default ".").
       glob: optional include filter, e.g. "*.py" (rg `-g` / grep `--include`).
       max_results: cap on matches returned (default 100; <=0 -> 1000).
@@ -127,7 +134,9 @@ def search_files(
       output_mode: "content" (default, path:line:match), "files_with_matches"
         (just matching file paths, one per line), or "count" (path:count).
     """
-    if not pattern or not str(pattern).strip():
+    patterns = pattern if isinstance(pattern, list) else [pattern]
+    patterns = [str(p) for p in patterns if p and str(p).strip()]
+    if not patterns:
         return "ERROR: `pattern` is empty"
     try:
         max_results = int(max_results)
@@ -142,8 +151,9 @@ def search_files(
     if output_mode not in ("content", "files_with_matches", "count"):
         output_mode = "content"
     use_rg = bool(shutil.which("rg"))
+    pattern_flags = [f for p in patterns for f in ("-e", p)]
     if use_rg:
-        cmd = ["rg", "--no-heading", "--color=never", "-e", str(pattern)]
+        cmd = ["rg", "--no-heading", "--color=never", *pattern_flags]
         if output_mode == "files_with_matches":
             cmd += ["-l"]
         elif output_mode == "count":
@@ -159,7 +169,7 @@ def search_files(
         cmd += ["--", str(path)]
     else:
         cmd = ["grep", "-rE", "--color=never", "--exclude-dir=.git",
-               "-e", str(pattern)]
+               *pattern_flags]
         if output_mode == "files_with_matches":
             cmd += ["-l"]
         elif output_mode == "count":
@@ -192,7 +202,7 @@ def search_files(
         # Normalize so both backends only report files with hits.
         lines = [ln for ln in lines if not ln.endswith(":0")]
     if not lines:
-        return f"[no matches for {pattern!r} under {path}]"
+        return f"[no matches for {patterns!r} under {path}]"
     shown = "\n".join(lines[:max_results])
     if len(lines) > max_results:
         shown += f"\n... [{len(lines) - max_results} more matches; raise max_results to see more]"
@@ -245,3 +255,22 @@ def git_diff(path: str = ".", staged: bool = False, file: str | None = None, **_
     if err or out is None:
         return err or "[no changes]"
     return out.strip() or "[no changes]"
+
+
+def git_log(path: str = ".", max_count: int = 20, file: str | None = None, **_: Any) -> str:
+    """`git log --oneline` (one commit per line: short hash + subject),
+    read-only -- see `git_status` docstring for why this is a native tool
+    rather than `run_bash("git log")`.
+
+    Args:
+      path: repo/directory to run inside (default ".").
+      max_count: cap on commits returned (default 20).
+      file: optional path to restrict history to a single file.
+    """
+    args = ["log", "--oneline", f"-{max(1, int(max_count))}"]
+    if file:
+        args += ["--", str(file)]
+    out, err = _run_git(args, path)
+    if err or out is None:
+        return err or "[no commits]"
+    return out.strip() or "[no commits]"

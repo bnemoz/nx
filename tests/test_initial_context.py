@@ -46,12 +46,13 @@ import nx as m  # noqa: E402
 # Thresholds on the content token count (SYSTEM + TOOLS JSON + "hey").
 # With the active schema gated by _active_tools() (wait_background excluded
 # until a command backgrounds — currently read_file, write_file, edit_file,
-# list_dir, run_bash, search_files, git_status, git_diff, multi_edit,
-# sed_edit, todo_write) the chars/3.5 content floor is ~1877; the README's
-# figure adds ~50 of server-side framing. todo_write pushed the floor up from
-# ~1759; the thresholds track that, still flagging any further bloat.
-WARN_TOKENS = 1700  # soft: warn (don't fail) — check the README still holds
-FAIL_TOKENS = 2000   # hard: the floor has roughly grown again; README is fiction
+# list_dir, run_bash, search_files, git_status, git_diff, git_log, multi_edit,
+# sed_edit, apply_patch, todo_write) the chars/3.5 content floor is ~2263; the
+# README's figure adds ~50 of server-side framing. git_log + apply_patch (two
+# new tools) plus read_file/search_files list-argument params pushed the
+# floor up from ~1990; the thresholds track that, still flagging further bloat.
+WARN_TOKENS = 2100  # soft: warn (don't fail) — check the README still holds
+FAIL_TOKENS = 2500   # hard: the floor has roughly grown again; README is fiction
 
 
 def _count_tokens(text):

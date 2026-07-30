@@ -14,13 +14,15 @@ from __future__ import annotations
 import glob
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from typing import Any
 
 from ._ansi import DIM, RESET
 from ._approval import _diff_preview, _diff_hunk
 from ._tools import _strip_line_numbers
-from ._undo import push_checkpoint as _undo_push
+from ._undo import push_checkpoint as _undo_push, snapshot as _undo_snapshot
 
 
 def _confirm(action: str, preview: str | None = None) -> bool:
@@ -154,12 +156,30 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}"
 
 
+# Extensions never worth opening as text; skipped before the read/decode
+# attempt so a broad glob (e.g. "**/*") doesn't burn time round-tripping
+# through UnicodeDecodeError on every image/archive/compiled artifact.
+_BINARY_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".exe", ".o", ".a",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".mp3", ".mp4", ".mov", ".avi", ".wav", ".flac",
+    ".db", ".sqlite", ".sqlite3",
+})
+
+# Diff previews beyond this many files are elided to a summary line so a
+# broad glob match doesn't blow up the approval prompt.
+_MAX_PREVIEW_FILES = 12
+
+
 def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: str = "", **_: Any) -> str:
     """Regex find-and-replace (Python `re` syntax) over one file or a glob of
     files (e.g. "src/**/*.py", recursive `**` supported). `flags` is a string
     of single-letter re flags: i=IGNORECASE, m=MULTILINE, s=DOTALL. `count`
-    caps replacements per file (0 = unlimited). One approval covers every
-    matched file, with a combined diff preview.
+    caps replacements *per file* (not a total across matched files; 0 =
+    unlimited). One approval covers every matched file, with a combined diff
+    preview (truncated past the first few files).
     """
     try:
         reflags = 0
@@ -169,36 +189,120 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     except re.error as e:
         return f"ERROR: invalid regex: {e}"
     files = sorted(glob.glob(path, recursive=True)) if glob.has_magic(path) else [path]
-    files = [f for f in files if os.path.isfile(f)]
+    files = [f for f in files if os.path.isfile(f) and os.path.splitext(f)[1].lower() not in _BINARY_EXTS]
     if not files:
         return f"ERROR: no files matched {path}"
+    # replacement is always literal text, never a backreference template:
+    # escape backslashes so `\1`, `\U`, a Windows path, etc. don't get
+    # interpreted as re.subn's replacement-string syntax.
+    literal_replacement = replacement.replace("\\", "\\\\")
     changes = []
     previews = []
+    unreadable = []
     for f in files:
-        with open(f) as fh:
-            src = fh.read()
-        # replacement is always literal text, never a backreference template:
-        # escape backslashes so `\1`, `\U`, a Windows path, etc. don't get
-        # interpreted as re.subn's replacement-string syntax.
-        literal_replacement = replacement.replace("\\", "\\\\")
+        try:
+            src, mtime = _read_with_mtime(f)
+        except (OSError, UnicodeDecodeError) as e:
+            unreadable.append(f"{f}: {e}")
+            continue
         new_src, n = rx.subn(literal_replacement, src, count=count or 0)
         if n == 0:
             continue
         diff = _diff_preview(src, new_src)
-        if diff:
+        if diff and len(changes) < _MAX_PREVIEW_FILES:
             previews.append(f"{DIM}--- {f} ---{RESET}\n{diff}")
-        changes.append((f, src, new_src, n))
+        changes.append((f, src, new_src, n, mtime))
     if not changes:
-        return f"no matches for pattern in {len(files)} file(s)"
-    total = sum(n for _, _, _, n in changes)
-    action = f"sed_edit {len(changes)} file(s), {total} replacement(s): " + ", ".join(f for f, _, _, _ in changes)
+        prefix = f"no matches for pattern in {len(files)} file(s)"
+        return prefix + ("\nskipped (unreadable): " + ", ".join(unreadable) if unreadable else "")
+    if len(changes) > _MAX_PREVIEW_FILES:
+        previews.append(f"{DIM}... and {len(changes) - _MAX_PREVIEW_FILES} more file(s) not shown{RESET}")
+    total = sum(n for _, _, _, n, _ in changes)
+    action = f"sed_edit {len(changes)} file(s), {total} replacement(s): " + ", ".join(f for f, _, _, _, _ in changes)
     if not _confirm(action, preview="\n".join(previews)):
         return "DENIED by user"
-    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n in changes])
-    for f, _src, new_src, _n in changes:
+    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n, _mtime in changes])
+    stale = []
+    for f, _src, _new_src, _n, mtime in changes:
+        try:
+            now_mtime = os.stat(f).st_mtime
+        except OSError:
+            now_mtime = None
+        if now_mtime != mtime:
+            stale.append(f)
+    if stale:
+        return ("ERROR: " + ", ".join(stale) + " changed on disk while awaiting approval; "
+                "re-read and retry (no files were modified)")
+    for f, _src, new_src, _n, _mtime in changes:
         _atomic_write(f, new_src)
     hunks = "\n".join(
-        f"--- {f} ---\n{_diff_hunk(src, new_src)}" for f, src, new_src, _n in changes)
+        f"--- {f} ---\n{_diff_hunk(src, new_src)}" for f, src, new_src, _n, _mtime in changes)
     return (f"edited {len(changes)} file(s), {total} replacement(s): "
-            + ", ".join(f"{f} ({n})" for f, _, _, n in changes)
+            + ", ".join(f"{f} ({n})" for f, _, _, n, _mtime in changes)
             + "\n" + hunks)
+
+
+def _patch_affected_files(diff_text: str) -> list[str]:
+    files = []
+    for line in diff_text.splitlines():
+        m = re.match(r"^\+\+\+ (?:b/)?(\S+)", line)
+        if m and m.group(1) != "/dev/null" and m.group(1) not in files:
+            files.append(m.group(1))
+    return files
+
+
+def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
+    """Apply a unified diff (`diff -u`, `git diff`, or a hand-written patch) to
+    every file it touches, atomically, in one call -- for a multi-file
+    restructuring that's awkward to express as several multi_edit/sed_edit
+    calls. Prefers `git apply`, falls back to the POSIX `patch` command if git
+    is missing or the target isn't a git repo. Dry-run checked before the
+    approval prompt so a patch that can't apply cleanly never gets a partial
+    write.
+
+    Args:
+      diff: unified diff text (must have `--- a/x` / `+++ b/x` file headers).
+      path: directory the patch paths are relative to (default ".").
+    """
+    if not diff or not diff.strip():
+        return "ERROR: `diff` is empty"
+    files = _patch_affected_files(diff)
+    if not files:
+        return "ERROR: no `--- a/x` / `+++ b/x` file headers found in diff"
+    has_git = bool(shutil.which("git"))
+    has_patch = bool(shutil.which("patch"))
+    if not has_git and not has_patch:
+        return "ERROR: neither `git` nor `patch` found on PATH"
+    text = diff if diff.endswith("\n") else diff + "\n"
+    fd, tmp_path = tempfile.mkstemp(prefix=".nx-patch-", suffix=".diff")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        backend = "git" if has_git else "patch"
+        if backend == "git":
+            check = subprocess.run(["git", "apply", "--check", tmp_path],
+                                    cwd=path, capture_output=True, text=True)
+            if check.returncode != 0 and has_patch:
+                backend = "patch"
+        if backend == "patch":
+            check = subprocess.run(["patch", "--dry-run", "-p1", "-i", tmp_path],
+                                    cwd=path, capture_output=True, text=True)
+        if check.returncode != 0:
+            return f"ERROR: patch does not apply cleanly: {(check.stderr or check.stdout).strip()}"
+        preview = diff if len(diff) < 4000 else diff[:4000] + "\n... [truncated]"
+        if not _confirm(f"apply_patch: {len(files)} file(s): {', '.join(files)}", preview=preview):
+            return "DENIED by user"
+        befores = [_undo_snapshot(os.path.join(path, f)) for f in files]
+        if backend == "git":
+            result = subprocess.run(["git", "apply", tmp_path], cwd=path, capture_output=True, text=True)
+        else:
+            result = subprocess.run(["patch", "-p1", "-i", tmp_path], cwd=path, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"ERROR: patch application failed: {(result.stderr or result.stdout).strip()}"
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    _undo_push("apply_patch", befores)
+    return f"applied patch ({backend}) to {len(files)} file(s): {', '.join(files)}"
