@@ -30,6 +30,7 @@ from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
+from ._todo import render_todos
 
 
 _HELP_COMMANDS: list[tuple[str, str]] = [
@@ -54,6 +55,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/save [title]", "persist current session, optionally with a title"),
     ("/memory [...]", "memory-related subcommands"),
     ("/delete [target]", "delete a session"),
+    ("/todo", "show the model's current todo_write list"),
 ]
 
 
@@ -446,3 +448,21 @@ def _cmd_autocompress(user: str, state: _ReplState) -> None:
     st.AUTOCOMPRESS_PERCENT = val
     print(f"{DIM}  auto-compress: {val}% "
           f"(auto-compress when context ≥ {val}% full){RESET}")
+
+
+def _cmd_todo(user: str, state: _ReplState) -> None:
+    """Show the model's current todo_write list.
+
+    The list lives in ``st._TODOS`` and is rewritten wholesale by each
+    ``todo_write`` tool call (see _todo.py); it is persisted into the session
+    JSON so ``/resume`` restores it. ``/todo`` is read-only — it just renders
+    the current list, the same way ``render_todos`` does for the tool result.
+    """
+    if not st._TODOS:
+        print(f"{DIM}  (todo list empty){RESET}")
+        return
+    print(f"{DIM}  ── todos ──{RESET}")
+    for line in render_todos().splitlines():
+        print(f"  {line}")
+    print(f"{DIM}  ──────────{RESET}")
+

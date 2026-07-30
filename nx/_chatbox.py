@@ -42,6 +42,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/save", "save the current session (optional custom title)"),
     ("/memory", "manage persistent memory"),
     ("/delete", "delete a saved session"),
+    ("/todo", "show the model's current todo_write list"),
     ("/compress", "summarize older turns into one, keep last 2 verbatim"),
     ("/compact", "alias for /compress"),
     ("/autocompress", "show or set the auto-compress threshold"),

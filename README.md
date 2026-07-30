@@ -139,6 +139,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/undo`             | revert the last write/edit (LIFO)                       |
 | `/recover [note]`   | force a checkpoint after a bad stream                    |
 | `/reset`            | start a fresh session                                    |
+| `/todo`             | show the model's current `todo_write` list               |
 
 ## Approval modes
 
