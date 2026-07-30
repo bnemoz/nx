@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Semver Policy
+
+From now on we follow semver; bump version numbers as changes are made.
+
 ## What this is
 
 `nx` is a lightweight coding agent CLI, packaged under `nx/` (entry point
