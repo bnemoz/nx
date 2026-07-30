@@ -244,6 +244,29 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
     return TURN_DONE
 
 
+def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[str, dict]]) -> str:
+    """Text-fallback counterpart to _handle_forced_final_tool_call(): under forced-final
+    mode a text-protocol model can still emit <tool_call> blocks, so corral it into
+    final_answer-only here instead of letting _handle_text_tool_calls execute arbitrary
+    tools (which would defeat the stall-recovery safety valve for non-native backends)."""
+    for n, a in calls:
+        if n != "final_answer":
+            continue
+        answer = str(a.get("answer") or "").strip()
+        status = str(a.get("status") or "answered").strip()
+        if answer:
+            print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
+            messages.append({"role": "assistant", "content": answer})
+            return TURN_DONE
+        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
+              f"returning to chat input{RESET}")
+        return TURN_DONE
+    names = ", ".join(n or "tool" for n, _ in calls)
+    print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
+          f"returning to chat input{RESET}")
+    return TURN_DONE
+
+
 def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> None:
     """Warm the read_file/list_dir cache concurrently for this turn's calls.
 
@@ -780,9 +803,14 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         return _handle_native_tool_calls(messages, parser.tcs, text, parser.finish_reasons,
                                          malformed_stream_cut_count)
 
-    status = _handle_text_tool_calls(messages, text, malformed_call_count)  # text-fallback path
-    if status is not None:
-        return status
+    if forced_final:
+        calls, _errors = parse_text_calls_with_errors(text)
+        if calls:
+            return _handle_forced_final_text_calls(messages, calls)
+    else:
+        status = _handle_text_tool_calls(messages, text, malformed_call_count)  # text-fallback path
+        if status is not None:
+            return status
 
     if forced_final and text.strip() and "length" in parser.finish_reasons:
         print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
