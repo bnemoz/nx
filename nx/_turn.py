@@ -129,7 +129,11 @@ def _ensure_ctx_probe(src: Any) -> None:
     slot is already serving. A retry must be explicitly requested after that
     state changes: retrying automatically is unsafe because some servers
     silently clamp the oversized chat probe and may generate until their
-    context limit instead of returning a 400."""
+    context limit instead of returning a 400.
+
+    Shares _capability.STARTUP_PROBE_LOCK with the capability probe so the two
+    background probes don't both queue a request against a single-slot local
+    server ahead of the user's actual first prompt."""
     if getattr(src, "_context_window_probe_attempted", False):
         return
     sid = id(src)
@@ -141,7 +145,11 @@ def _ensure_ctx_probe(src: Any) -> None:
         try:
             if isinstance(src._context_window, int) and src._context_window > 0:
                 return  # resolved by another path (e.g. a /source switch)
-            src.resolve_context_window()
+            from ._capability import STARTUP_PROBE_LOCK
+            with STARTUP_PROBE_LOCK:
+                if isinstance(src._context_window, int) and src._context_window > 0:
+                    return
+                src.resolve_context_window()
         except Exception:
             pass  # never raise from a background probe
         finally:

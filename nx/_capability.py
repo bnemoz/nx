@@ -140,6 +140,15 @@ def probe_capability(src: "Source", mid: str) -> str:
 
 _PROBE_STARTED: set[int] = set()  # id(Source) currently being probed (avoid dupe threads)
 
+# Shared with _turn.py's context-window probe: a local, single-slot inference
+# server serializes requests FIFO, so firing the capability probe and the
+# ctx-window probe as two independent concurrent threads means both requests
+# can land in the server's queue ahead of the user's actual first prompt,
+# needlessly delaying the real response behind two throwaway probe calls.
+# Serializing the two background probes on this lock caps that to one probe
+# request in flight at a time instead of two.
+STARTUP_PROBE_LOCK = threading.Lock()
+
 
 def ensure_capability_probe(src: "Source | None") -> None:
     """Start a background thread to classify `src`'s tool-calling protocol if
@@ -159,8 +168,11 @@ def ensure_capability_probe(src: "Source | None") -> None:
         try:
             if src._capability is not None:
                 return  # resolved by another path (e.g. a /source switch)
-            mid = src.model or src.resolve_model()
-            src._capability = probe_capability(src, mid)
+            with STARTUP_PROBE_LOCK:
+                if src._capability is not None:
+                    return
+                mid = src.model or src.resolve_model()
+                src._capability = probe_capability(src, mid)
         except Exception:
             pass  # never raise from a background probe; stays None, re-armed later
         finally:
