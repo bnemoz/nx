@@ -18,8 +18,11 @@ def _parse_env_value(value: str) -> str:
     supporting the usual ``KEY=value # explanation`` form.
     """
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
+    if value and value[0] in ("'", '"'):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end != -1:
+            return value[1:end]
     comment_at = next(
         (i for i, char in enumerate(value)
          if char == "#" and i > 0 and value[i - 1].isspace()),
