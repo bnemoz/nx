@@ -5,6 +5,7 @@ import contextlib
 import os
 import random
 import re
+import signal
 import sys
 import termios
 import threading
@@ -27,6 +28,18 @@ def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
         new[0] &= ~termios.ICRNL
     new[6][termios.VMIN] = 1
     new[6][termios.VTIME] = 0
+
+    def _on_sigterm(signum, frame):
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except Exception:
+            pass
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    prev_handler = signal.getsignal(signal.SIGTERM)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _on_sigterm)
     termios.tcsetattr(fd, termios.TCSADRAIN, new)
     try:
         yield old
@@ -35,6 +48,8 @@ def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
         except Exception:
             pass
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, prev_handler)
 
 def _rgb(hex_color: str) -> str:
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
