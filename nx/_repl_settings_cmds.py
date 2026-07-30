@@ -246,6 +246,10 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
             print(f"{C.WARNING}  usage: /bg kill <pid>{RESET}")
             return
         target_pid = parts[2]
+        known_pids = {j["pid"] for j in list_bg_jobs()}
+        if target_pid not in known_pids:
+            print(f"{C.WARNING}  {target_pid} is not a tracked background job (see /bg){RESET}")
+            return
         try:
             os.kill(int(target_pid), signal.SIGTERM)
             print(f"{DIM}  ↳ sent SIGTERM to {target_pid}{RESET}")

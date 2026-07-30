@@ -185,16 +185,13 @@ def _ask_approval(prompt: str) -> str:
                         rest += os.read(fd, 1).decode("utf-8", "replace")
                     except OSError:
                         break
-                if rest in ("[Z", "[1;2Z"):
-                    # Shift+Tab: mirror the chatbox toggle so /yolo state
-                    # actually flips (previously swallowed as a generic
-                    # escape sequence, approving this one action without
-                    # ever setting YOLO).
-                    st.toggle_yolo()
-                    sys.stdout.write(f"{DIM}yolo {'on' if st.YOLO else 'off'}; please press Y, n, or esc{RESET}\n")
-                    sys.stdout.flush()
-                    return _ask_approval(prompt)
-                # Any other non-bare-Esc sequence is discarded and reprompted.
+                # Shift+Tab (and any other non-bare-Esc sequence) is discarded
+                # and reprompted here rather than toggling YOLO: this prompt
+                # is mid-approval for one specific action, and a stray
+                # Shift+Tab (e.g. muscle memory from the chatbox editor)
+                # must never silently flip a global trust setting as a
+                # side effect of answering a Y/n question. Use /yolo or the
+                # chatbox toggle outside of an approval prompt instead.
                 sys.stdout.write(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}\n")
                 sys.stdout.flush()
                 return _ask_approval(prompt)

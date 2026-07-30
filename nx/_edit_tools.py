@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import tempfile
 from typing import Any
 
 from ._ansi import DIM, RESET
@@ -27,22 +28,53 @@ def _confirm(action: str, preview: str | None = None) -> bool:
     return _m._confirm(action, preview=preview)
 
 
+def _atomic_write(path: str, content: str) -> None:
+    """Write *content* to *path* without ever leaving a truncated file on
+    disk: write to a sibling temp file first, then rename over the target.
+    `os.replace` is atomic on POSIX, so a crash mid-write leaves either the
+    old file or the new one, never a half-written one."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=d, prefix=".nx-tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _read_with_mtime(path: str) -> tuple[str, float | None]:
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        mtime = None
+    with open(path) as f:
+        return f.read(), mtime
+
+
 def write_file(path: str, content: str, **_: Any) -> str:
     try:
-        with open(path) as f:
-            before = f.read()
+        before, before_mtime = _read_with_mtime(path)
     except (FileNotFoundError, IsADirectoryError):
-        before = ""
+        before, before_mtime = "", None
     if not _confirm(f"write {path} ({len(content)} bytes)", preview=_diff_preview(before, content)):
         return "DENIED by user"
-    with open(path, "w") as f:
-        f.write(content)
+    try:
+        after_mtime = os.stat(path).st_mtime
+    except OSError:
+        after_mtime = None
+    if after_mtime != before_mtime:
+        return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
+    _atomic_write(path, content)
     return f"wrote {len(content)} bytes to {path}"
 
 
 def edit_file(path: str, old: str, new: str, **_: Any) -> str:
-    with open(path) as f:
-        src = f.read()
+    src, src_mtime = _read_with_mtime(path)
     if src.count(old) != 1:
         # The model may have pasted read_file's numbered output into `old`.
         # Only as a fallback (exact match already failed), retry with the
@@ -59,8 +91,13 @@ def edit_file(path: str, old: str, new: str, **_: Any) -> str:
         return f"ERROR: no change to {path} (`old` and `new` are identical)"
     if not _confirm(f"edit {path}", preview=_diff_preview(src, new_src)):
         return "DENIED by user"
-    with open(path, "w") as f:
-        f.write(new_src)
+    try:
+        now_mtime = os.stat(path).st_mtime
+    except OSError:
+        now_mtime = None
+    if now_mtime != src_mtime:
+        return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
+    _atomic_write(path, new_src)
     return f"edited {path}\n{_diff_hunk(src, new_src)}"
 
 
@@ -74,8 +111,7 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     automatically, like `edit_file`. One approval covers the whole batch — a
     five-line refactor becomes one tool call, not five.
     """
-    with open(path) as f:
-        src = f.read()
+    src, src_mtime = _read_with_mtime(path)
     if not isinstance(edits, list) or not edits:
         return "ERROR: `edits` must be a non-empty list of {old, new} objects"
     work = src
@@ -100,8 +136,13 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
         return f"no change to {path} (edits were no-ops)"
     if not _confirm(f"edit {path} ({len(edits)} edits)", preview=_diff_preview(src, work)):
         return "DENIED by user"
-    with open(path, "w") as f:
-        f.write(work)
+    try:
+        now_mtime = os.stat(path).st_mtime
+    except OSError:
+        now_mtime = None
+    if now_mtime != src_mtime:
+        return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
+    _atomic_write(path, work)
     return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}"
 
 
@@ -147,8 +188,7 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
         return "DENIED by user"
     _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n in changes])
     for f, _src, new_src, _n in changes:
-        with open(f, "w") as fh:
-            fh.write(new_src)
+        _atomic_write(f, new_src)
     hunks = "\n".join(
         f"--- {f} ---\n{_diff_hunk(src, new_src)}" for f, src, new_src, _n in changes)
     return (f"edited {len(changes)} file(s), {total} replacement(s): "
