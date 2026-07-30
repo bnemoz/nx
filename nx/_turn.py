@@ -676,11 +676,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # select(0.1) when we return) and the chatbox can capture our raw-mode
         # termios as its "old", leaving the terminal stuck in VMIN=0.
         # The watcher's inner select has a 0.1s timeout, so restore typically
-        # completes in <0.1s; the 0.5s timeout is a safety net for the rare
-        # case where the turn was too short for the watcher to even arm (in
-        # which case termios was never changed and there's nothing to restore).
+        # completes in <0.1s. But if a bare Esc just fired, the watcher is
+        # inside _drain_redirect_text, which has its own 2.0s deadline — wait
+        # past that (not just 0.5s) so we never proceed while it still holds
+        # raw termios mid-drain.
         _INTERRUPT_ARMED.clear()
-        _INTERRUPT_RESTORED.wait(timeout=0.5)
+        _INTERRUPT_RESTORED.wait(timeout=2.5)
         _USER_INTERRUPTED.clear()
     # Account before every post-stream early return (stream error, user
     # interrupt, collapse/reasoning stall). The previous footer-owned hook

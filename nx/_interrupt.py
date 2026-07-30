@@ -257,7 +257,9 @@ def _watch_for_interrupts():
         yield
     finally:
         _INTERRUPT_ARMED.clear()
-        _INTERRUPT_RESTORED.wait(timeout=0.5)
+        # _drain_redirect_text's own deadline is 2.0s; wait past it so we never
+        # proceed while the watcher still holds raw termios mid-drain.
+        _INTERRUPT_RESTORED.wait(timeout=2.5)
         # Do not let an Esc from this operation interrupt a later model turn.
         _USER_INTERRUPTED.clear()
         if capture_redirect:
