@@ -232,6 +232,10 @@ def _repl() -> None:
         state.messages.append({"role": "user", "content": expand_at_mentions(user)})
         try:
             _run_model_turn_loop(state.messages, on_step=lambda meta=None: _save_current(state, meta))
+        except KeyboardInterrupt:
+            print(f"{DIM}  ^C interrupted{RESET}")
+            state.session_dirty = True
+            _save_current(state)
         except Exception as e:
             print(f"{DIM}  turn failed: {e}{RESET}")
         # Auto-save after the turn settles (whether it ended cleanly, hit the
