@@ -70,6 +70,31 @@ def test_in_project_write_or_edit_is_medium_locally():
     assert level == "medium", (level, reason)
 
 
+def test_non_git_project_root_falls_through_instead_of_medium():
+    # Outside a git repo, PROJECT_ROOT is just cwd (e.g. $HOME) -- the
+    # in_project "medium" shortcut must not fire, since that would
+    # auto-approve writes to ~/.ssh, ~/.bashrc, etc. under --approval medium.
+    old_root, old_is_git = m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT
+    try:
+        m.st.PROJECT_ROOT = _tmp
+        m.st.PROJECT_ROOT_IS_GIT = False
+        assert m._local_risk_hint(f"write {os.path.join(_tmp, 'foo.py')} (10 bytes)") is None
+    finally:
+        m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT = old_root, old_is_git
+
+
+def test_home_dotdir_falls_through_even_under_real_git_root():
+    old_root, old_is_git = m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT
+    try:
+        m.st.PROJECT_ROOT = os.path.expanduser("~")
+        m.st.PROJECT_ROOT_IS_GIT = True
+        assert m._local_risk_hint(
+            f"write {os.path.join(os.path.expanduser('~'), '.ssh', 'authorized_keys')} (10 bytes)"
+        ) is None
+    finally:
+        m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT = old_root, old_is_git
+
+
 def test_non_run_actions_fall_through():
     assert m._local_risk_hint("compress 5 older turns (keep last 2)") is None
     assert m._local_risk_hint(f"write {os.path.join(_tmp, 'outside.py')} (10 bytes)") is None

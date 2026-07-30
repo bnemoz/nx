@@ -30,7 +30,11 @@ LEVEL_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 def _detect_project_root(cwd: str | None = None) -> str:
-    """Return the git root for cwd when available, otherwise cwd itself."""
+    """Return the git root for cwd when available, otherwise cwd itself.
+
+    Also records whether a real git root was found in
+    st.PROJECT_ROOT_IS_GIT, since _local_risk_hint()'s "in_project ⇒ medium"
+    shortcut must not fire on the cwd fallback (e.g. running from $HOME)."""
     cwd = os.path.realpath(cwd or os.getcwd())
     if shutil.which("git"):
         try:
@@ -39,9 +43,11 @@ def _detect_project_root(cwd: str | None = None) -> str:
                 capture_output=True, text=True, timeout=2)
             root = r.stdout.strip()
             if r.returncode == 0 and root:
+                st.PROJECT_ROOT_IS_GIT = True
                 return os.path.realpath(root)
         except (OSError, subprocess.SubprocessError):
             pass
+    st.PROJECT_ROOT_IS_GIT = False
     return cwd
 
 
@@ -189,12 +195,13 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
         return None
     info = _classify_action_path(path)
     scope = info.get("path_scope")
-    if scope == "in_project":
+    if scope == "in_project" and st.PROJECT_ROOT_IS_GIT and not info["path_touches_home_dotdir"]:
         if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT):
             return ("high", "writes a self-executing hook/CI/build file")
         return ("medium", "writes a file inside the project")
-    # Outside-project writes need judgment calls the model is better placed
-    # to make (dotfiles vs. a legitimate sibling project) — fall through.
+    # Not a real git project root (cwd fallback, e.g. running from $HOME),
+    # or path touches a home dotdir (~/.ssh, ~/.aws, ...): judgment call the
+    # model is better placed to make — fall through instead of auto-medium.
     return None
 
 

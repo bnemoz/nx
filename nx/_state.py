@@ -70,6 +70,12 @@ def toggle_yolo() -> bool:
 # startup by _detect_project_root() in _risk.py / _approval.py.
 PROJECT_ROOT: str | None = None
 
+# True only when PROJECT_ROOT came from an actual `git rev-parse
+# --show-toplevel` hit, not the cwd fallback. Gates the "in_project ⇒
+# medium" fast path in _local_risk_hint(): outside a git repo, PROJECT_ROOT
+# is just cwd (often $HOME), so that shortcut must not apply.
+PROJECT_ROOT_IS_GIT: bool = False
+
 # Set by run_tool() while a tool body is executing; read by _confirm() to
 # pause/resume the spinner around approval prompts / risk-classifier calls.
 _ACTIVE_SPINNER: Any | None = None
