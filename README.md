@@ -29,8 +29,17 @@ later. `/help` lists all slash commands.
 Install it as a `nx` command on your `$PATH`:
 
 ```bash
+uv tool install git+https://github.com/nmishra93/nx.git
+```
+
+Developing in a checkout? Make edits apply immediately with an editable install:
+
+```bash
+git clone https://github.com/nmishra93/nx.git && cd nx
 uv tool install -e .        # editable: edits in this checkout apply immediately
 ```
+
+Either way, `uv tool upgrade nx` pulls the latest later on.
 
 ### Add endpoint
 
