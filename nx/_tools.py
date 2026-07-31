@@ -30,10 +30,12 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
             f"==> {p} <==\n{read_file(p, offset=offset, limit=limit)}" for p in path
         )
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             lines = f.readlines()
     except OSError as e:
         return f"ERROR: {type(e).__name__}: {e}"
+    except UnicodeDecodeError:
+        return f"ERROR: {path} is not a valid UTF-8 text file (binary or wrong encoding)"
     total = len(lines)
     try:
         start = max(1, int(offset)) - 1

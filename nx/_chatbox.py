@@ -146,16 +146,60 @@ def _file_entries(root: str, directory: str) -> list[str]:
     return result
 
 
-def _match_file_paths(prefix: str) -> list[str]:
-    """Complete the typed directory, without building a capped tree-wide cache.
+_TREE_SCAN_CAP = 20000  # total entries visited per tree-wide fuzzy search
 
-    Once a user has typed ``@a/b/``, only ``a/b`` is read. This keeps each
-    lookup small, reflects files created during the session, and works at any
-    depth instead of silently omitting paths after an arbitrary index limit.
+
+def _walk_tree(root: str) -> list[str]:
+    """Recursively list every visible file/dir under root (relative paths,
+    dirs suffixed with '/'), skipping _SKIP_DIRS and dotfiles. Bounded by
+    _TREE_SCAN_CAP total entries -- since callers score+sort everything found
+    before truncating to a display count, that cap never silently favors
+    shallow paths over deep ones, only whichever subtrees are large enough
+    together to exceed a generous overall budget.
+    """
+    result = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _SKIP_DIRS]
+        for name in dirnames:
+            result.append(os.path.relpath(os.path.join(dirpath, name), root) + "/")
+        for name in filenames:
+            if name.startswith("."):
+                continue
+            result.append(os.path.relpath(os.path.join(dirpath, name), root))
+        if len(result) >= _TREE_SCAN_CAP:
+            break
+    return result
+
+
+def _match_file_paths(prefix: str) -> list[str]:
+    """Complete a typed path, or fuzzy-find by name across the whole tree.
+
+    If the prefix has no '/' yet, search recursively (basename-first, so
+    "campaign_report" finds src/analysis/campaign_report.py) instead of only
+    listing the project root -- this is what lets the user type a filename
+    without first spelling out its directory. Once a '/' is present, fall
+    back to listing just that one directory's immediate children, which
+    stays cheap and reflects files created mid-session.
     """
     from ._risk import _detect_project_root
 
     root = os.path.realpath(_detect_project_root())
+    q = prefix.lower()
+
+    if "/" not in prefix:
+        candidates = _walk_tree(root)
+        scored = []
+        for f in candidates:
+            base = f.rstrip("/").rsplit("/", 1)[-1].lower()
+            s = _fuzzy_score(q, base) if q else 0
+            if q and s is None:
+                s = _fuzzy_score(q, f.lower())
+            if s is None:
+                continue
+            scored.append((s, f))
+        scored.sort(key=lambda t: -t[0])
+        return [f for _, f in scored[:8]]
+
     parent_part, _ = os.path.split(prefix)
     directory = os.path.realpath(os.path.join(root, parent_part))
     try:
@@ -165,7 +209,6 @@ def _match_file_paths(prefix: str) -> list[str]:
         return []
 
     files = _file_entries(root, directory)
-    q = prefix.lower()
     if not q:
         return files[:8]
     scored = []
