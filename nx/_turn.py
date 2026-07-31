@@ -731,6 +731,10 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         _INTERRUPT_ARMED.clear()
         _INTERRUPT_RESTORED.wait(timeout=2.5)
         _USER_INTERRUPTED.clear()
+    dropped_lines = getattr(stream, "dropped_lines", 0)
+    if dropped_lines:
+        print(f"{C.WARNING}  ⚠ {dropped_lines} malformed SSE frame(s) dropped mid-stream — "
+              f"any tool call in this turn may have truncated arguments{RESET}")
     # Account before every post-stream early return (stream error, user
     # interrupt, collapse/reasoning stall). The previous footer-owned hook
     # silently skipped all of those completed API calls.

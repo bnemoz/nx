@@ -84,6 +84,7 @@ class _ChatStream:
     that `_LoggingStream`/`open_stream()` callers rely on."""
     def __init__(self, resp: httpx.Response):
         self._resp = resp
+        self.dropped_lines = 0
 
     def __iter__(self) -> Iterator[_Obj]:
         for line in self._resp.iter_lines():
@@ -95,6 +96,10 @@ class _ChatStream:
             try:
                 obj = json.loads(data)
             except json.JSONDecodeError:
+                # A malformed SSE frame here can silently drop a tool-call
+                # argument delta, later surfacing as a bogus "malformed tool
+                # call" JSON error once the truncated buffer is parsed.
+                self.dropped_lines += 1
                 continue
             yield _Obj(obj)
 
