@@ -106,6 +106,76 @@ def _escape_bare_control_chars(raw: str) -> str:
     return "".join(out)
 
 
+TOOL_CLOSE_TAG = re.compile(r"</tool_call\s*>", re.DOTALL)
+NX_CLOSE_TAG = re.compile(r"\[/nx_tool_call\]", re.DOTALL)
+TOOL_CLOSE_TAGS = (TOOL_CLOSE_TAG, NX_CLOSE_TAG)
+
+XML_NAME_RE = re.compile(r"<name>(.*?)</name>", re.DOTALL)
+XML_ARGUMENTS_RE = re.compile(r"<arguments\s*>(.*?)</arguments\s*>", re.DOTALL)
+XML_ARG_RE = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
+XML_BARE_NAME_RE = re.compile(r"^\s*(\w+)")
+# GLM's own chat template writes tool calls as `name<arg_key>k</arg_key>
+# <arg_value>v</arg_value>...` inside the <tool_call> tag -- no <name>/
+# <arguments> wrapper at all, just the bare name then repeated key/value
+# pairs. Recognize this alongside our own <name>/<arguments> convention
+# rather than demanding the model conform to one specific dialect.
+XML_ARG_KV_RE = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
+
+_XML_ENTITIES = {
+    "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&amp;": "&",
+}
+
+
+def _xml_unescape(raw: str) -> str:
+    for entity, char in _XML_ENTITIES.items():
+        raw = raw.replace(entity, char)
+    return raw
+
+
+def _parse_xml_arg_value(raw: str) -> Any:
+    """A bare XML tag body has no type info -- try JSON first (covers numbers,
+    booleans, and models that still emit a list/object for a single arg),
+    falling back to the unescaped text itself."""
+    stripped = raw.strip()
+    try:
+        return json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return _xml_unescape(stripped)
+
+
+def _parse_xml_tool_call(body: str):
+    """Parse a `<tool_call>`/`[nx_tool_call]` body in either of two dialects:
+
+    - ours: `<name>...</name><arguments><k>v</k>...</arguments>`
+    - GLM's own chat-template convention: a bare name followed by repeated
+      `<arg_key>k</arg_key><arg_value>v</arg_value>` pairs, no wrapper tags.
+
+    Returns (name, arguments dict), or None if no name can be found at all
+    (caller reports a "missing name" error the same way the JSON path does).
+    """
+    name_m = XML_NAME_RE.search(body)
+    arguments: dict = {}
+    if name_m:
+        name = name_m.group(1).strip()
+        args_m = XML_ARGUMENTS_RE.search(body)
+        if args_m:
+            for arg_m in XML_ARG_RE.finditer(args_m.group(1)):
+                arguments[arg_m.group(1)] = _parse_xml_arg_value(arg_m.group(2))
+        return name, arguments
+    bare_m = XML_BARE_NAME_RE.match(body)
+    if not bare_m:
+        return None
+    name = bare_m.group(1).strip()
+    for kv_m in XML_ARG_KV_RE.finditer(body):
+        arguments[kv_m.group(1).strip()] = _parse_xml_arg_value(kv_m.group(2))
+    return name, arguments
+
+
+def _find_close_tag(text: str, start: int):
+    matches = (m for m in (tag.search(text, start) for tag in TOOL_CLOSE_TAGS) if m)
+    return min(matches, key=lambda m: m.start(), default=None)
+
+
 TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
 
@@ -168,27 +238,45 @@ def parse_text_calls_with_errors(
         if _inside_code_fence(text, match.start()):
             pos = match.end()
             continue
-        extracted = _extract_json_object(text, match.end())
-        if extracted is None:
+        rest = text[match.end():].lstrip()
+        if rest.startswith("{"):
+            # Legacy JSON-in-tag body (still recognized for older sessions/
+            # sources that already learned this convention).
+            extracted = _extract_json_object(text, match.end())
+            if extracted is None:
+                pos = match.end()
+                continue
+            raw_body, body_end = extracted
+            found_tag = True
+            obj = None
+            parse_exc = None
+            for candidate in repair_json_candidates(raw_body):
+                try:
+                    obj = json.loads(candidate)
+                    break
+                except json.JSONDecodeError as e:
+                    parse_exc = e
+            if obj is None:
+                errors.append(f"invalid JSON ({parse_exc}): {raw_body[:120]!r}")
+            else:
+                try:
+                    calls.append((obj["name"], obj.get("arguments", {})))
+                except KeyError:
+                    errors.append(f"missing \"name\" field: {raw_body[:120]!r}")
+            pos = body_end
+            continue
+        close_match = _find_close_tag(text, match.end())
+        if close_match is None:
             pos = match.end()
             continue
-        raw_body, body_end = extracted
+        raw_body = text[match.end():close_match.start()]
+        body_end = close_match.end()
         found_tag = True
-        obj = None
-        parse_exc = None
-        for candidate in repair_json_candidates(raw_body):
-            try:
-                obj = json.loads(candidate)
-                break
-            except json.JSONDecodeError as e:
-                parse_exc = e
-        if obj is None:
-            errors.append(f"invalid JSON ({parse_exc}): {raw_body[:120]!r}")
+        parsed = _parse_xml_tool_call(raw_body)
+        if parsed is None:
+            errors.append(f"missing <name> tag: {raw_body[:120]!r}")
         else:
-            try:
-                calls.append((obj["name"], obj.get("arguments", {})))
-            except KeyError:
-                errors.append(f"missing \"name\" field: {raw_body[:120]!r}")
+            calls.append(parsed)
         pos = body_end
     return (calls, errors) if found_tag else ([], [])
 

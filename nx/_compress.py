@@ -118,6 +118,19 @@ RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", 
 # verdict (CAPABILITY_NATIVE/GRAMMAR/TEXT) decides whether the grammar gets
 # attached, regardless of this env var — see _grammar_extra_body() below.
 NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not in ("", "0")
+
+# Native tool_calls (server-side JSON-args generation) is off by default: it
+# bypasses our own text-protocol tag parsing entirely, and several servers/
+# models (e.g. glm) advertise structured tool_calls support but routinely
+# emit malformed JSON in the `arguments` field with no repair path available
+# to us (unlike our own <tool_call> tag body, which we parse ourselves and
+# can patch up). Default posture is tool_choice="none" on normal turns (see
+# open_stream): tools= is still sent so the schema renders into the prompt,
+# but the server can't hand back native tool_calls, so the model is left
+# with the plain-text <tool_call> protocol (_text_fallback.py) described in
+# SYSTEM. Opt back into native tool_calls with NX_NATIVE_TOOLS=1 for servers
+# known to emit well-formed arguments.
+NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0")
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
 
 
@@ -198,6 +211,18 @@ def open_stream(
     # circular import between the two.
     from ._turn import _LoggingStream
     assert st.client is not None and st.MODEL is not None
+    if tool_choice is None and tools and not NX_NATIVE_TOOLS:
+        # Default posture (see NX_NATIVE_TOOLS above): keep tools= so the
+        # schema still renders into the prompt (that's the model's only
+        # source of tool names/params — dropping tools= entirely blinds it,
+        # it's not redundant with SYSTEM's one-line example), but set
+        # tool_choice="none" so the server can't hand back a native
+        # tool_calls object. That leaves the text-protocol <tool_call> tag
+        # (which we parse and can repair ourselves) as the only way for the
+        # model to actually invoke a tool. A caller that forces tool_choice
+        # (e.g. the forced-final-answer path) already opted into native for
+        # that one call, so it's left untouched.
+        tool_choice = "none"
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens

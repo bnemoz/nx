@@ -349,7 +349,7 @@ read_file is for reading a file you already need in full, never for finding
 a thing inside one.
 
 No native tool calls? Emit text-protocol call exactly:
-<tool_call>{"name": "read_file", "arguments": {"path": "foo.py"}}</tool_call>
+<tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>
 Prefer the tag alone; wait for Observation. Tool-call examples in prose/code-block only (not standalone). Task done -> reply plain prose.
 
 Shell cmds run detached (setsid); they never block you.
