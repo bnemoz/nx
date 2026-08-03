@@ -23,6 +23,7 @@ import shutil
 import sys
 import termios
 import unicodedata
+from typing import Callable
 
 from . import _state as st
 from ._ansi import DIM, RESET, C, THEMES, raw_mode
@@ -61,11 +62,14 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 # Valid keyword arguments for slash commands that take an enum-like first
 # argument -- surfaced as a dropdown once the user types "/cmd " (mirrors the
 # command autocomplete above, kept in sync with the handlers in _repl.py).
-SLASH_ARG_OPTIONS: dict[str, list[str]] = {
+# A value may be a static list, or a zero-arg callable for options that can
+# only be known at runtime (e.g. "/source"'s configured source names).
+SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/theme": sorted(THEMES),
     "/reasoning": ["on", "off", "last"],
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
+    "/source": lambda: list(st.SOURCE_ORDER),
 }
 
 
@@ -106,14 +110,11 @@ def _match_slash_commands(prefix: str) -> list[tuple[str, str]]:
     return [(c, d) for _, c, d in scored]
 
 
-def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
-    """Fuzzy-match `prefix` (no leading '/') against `cmd`'s keyword options."""
-    opts = SLASH_ARG_OPTIONS.get(cmd)
-    if not opts:
-        return []
+def _fuzzy_filter(opts: list[str], prefix: str) -> list[str]:
+    """Fuzzy-match `prefix` against `opts`, best match first."""
     q = prefix.lower()
     if not q:
-        return [(o, "") for o in opts]
+        return list(opts)
     scored = []
     for o in opts:
         name = o.lower()
@@ -124,7 +125,32 @@ def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
         if s is not None:
             scored.append((s, o))
     scored.sort(key=lambda t: -t[0])
-    return [(o, "") for _, o in scored]
+    return [o for _, o in scored]
+
+
+def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
+    """Fuzzy-match `prefix` (no leading '/') against `cmd`'s keyword options."""
+    opts = SLASH_ARG_OPTIONS.get(cmd)
+    if not opts:
+        return []
+    if callable(opts):
+        opts = opts()
+    return [(o, "") for o in _fuzzy_filter(opts, prefix)]
+
+
+def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:
+    """Fuzzy-match `prefix` against the model ids `src_name` advertises via
+    GET /models (cached on the Source after the first fetch -- see
+    Source.list_model_ids). Always leads with a "" sentinel (rendered as
+    "(default)") so a bare Enter on this dropdown submits the plain
+    `/source <name>` switch instead of forcing a model pick."""
+    src = st.SOURCES.get(src_name)
+    if src is None:
+        return [("", "")]
+    ids = src.list_model_ids()
+    matches = [("", "")] if not prefix else []
+    matches += [(m, "") for m in _fuzzy_filter(ids, prefix)]
+    return matches
 
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -395,6 +421,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             cmd, rest = buf[0].split(" ", 1)
             matches = _match_slash_args(cmd, rest)[:6]
             kind = "arg"
+        elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
+            _cmd, src_name, rest = buf[0].split(" ", 2)
+            matches = _match_source_model(src_name, rest)[:6]
+            kind = "arg2"
         else:
             at_tok = _at_token_at_cursor(buf[row], col)
             if at_tok is not None:
@@ -409,7 +439,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         current_kind = kind
         current_at_start = at_start
         for i, (cmd, desc) in enumerate(matches):
-            label = f"@{cmd}" if kind == "file" else cmd
+            if kind == "file":
+                label = f"@{cmd}"
+            elif kind == "arg2" and cmd == "":
+                label = "(default)"
+            else:
+                label = cmd
             text = f"{C.ACCENT}{label}{RESET}{DIM}  {desc}{RESET}" if desc else f"{C.ACCENT}{label}{RESET}"
             pad_w = box_w - 2 - _str_width(f"{label}  {desc}" if desc else label)
             marker = "› " if i == sel_idx else "  "
@@ -592,6 +627,26 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                             col = len(buf[row])
                             render()
                             continue
+                        if cmd == "/source":
+                            # /source has a second (model) level -- don't
+                            # submit on an exact source-name match, advance
+                            # to the model dropdown instead.
+                            buf[row] = new_line + " "
+                            col = len(buf[row])
+                            render()
+                            continue
+                    if current_kind == "arg2" and current_matches:
+                        cmd, src_name = buf[row].split(" ", 2)[:2]
+                        chosen = current_matches[sel_idx][0]
+                        if chosen == "":
+                            buf[row] = f"{cmd} {src_name}"
+                        else:
+                            new_line = f"{cmd} {src_name} {chosen}"
+                            if new_line != buf[row]:
+                                buf[row] = new_line
+                                col = len(buf[row])
+                                render()
+                                continue
                     finish()
                     return "\n".join(buf)
                 elif c == "\n":

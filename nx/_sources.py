@@ -76,6 +76,10 @@ class Source:
         # Whether this source's /tokenize endpoint has been confirmed working
         # (True), confirmed absent/broken (False), or not yet tried (None).
         self._tokenize_ok = None
+        # Model ids advertised by GET /models, cached after the first fetch
+        # (None = not yet tried) so the /source arg-completion dropdown in
+        # _chatbox.py doesn't hit the network on every keystroke.
+        self._model_ids: list[str] | None = None
         # Tool-calling protocol this source's model actually uses, one of
         # _capability.CAPABILITY_NATIVE / _GRAMMAR / _TEXT, or None before the
         # startup probe (nx/_capability.py: ensure_capability_probe()) lands.
@@ -306,6 +310,21 @@ class Source:
             # an explicit escape hatch for local-server cold starts.
             self._context_window_probe_attempted = True
         return self._context_window
+
+    def list_model_ids(self, force: bool = False) -> list[str]:
+        """Model ids advertised by this source's GET /models, cached after
+        the first successful fetch. Best-effort: network/parse failures
+        return [] (and aren't cached, so a later retry can succeed once the
+        server's up). Used by the /source arg-completion dropdown."""
+        if self._model_ids is not None and not force:
+            return self._model_ids
+        try:
+            data = self.client.models.list(timeout=3).data
+            ids = sorted(m.id for m in data if getattr(m, "id", None))
+        except Exception:
+            return []
+        self._model_ids = ids
+        return ids
 
     def _ctx_from_models(self, mid: str | None) -> int | None:
         """Pull n_ctx / context_length from GET /v1/models. llama.cpp stashes
