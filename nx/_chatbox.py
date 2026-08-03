@@ -176,24 +176,37 @@ _TREE_SCAN_CAP = 20000  # total entries visited per tree-wide fuzzy search
 
 
 def _walk_tree(root: str) -> list[str]:
-    """Recursively list every visible file/dir under root (relative paths,
-    dirs suffixed with '/'), skipping _SKIP_DIRS and dotfiles. Bounded by
-    _TREE_SCAN_CAP total entries -- since callers score+sort everything found
-    before truncating to a display count, that cap never silently favors
-    shallow paths over deep ones, only whichever subtrees are large enough
-    together to exceed a generous overall budget.
+    """List every visible file/dir under root (relative paths, dirs suffixed
+    with '/'), skipping _SKIP_DIRS and dotfiles. Bounded by _TREE_SCAN_CAP
+    total entries. Traversal is breadth-first across directories (queue of
+    pending dirs, all of one depth before descending further) rather than
+    os.walk's depth-first order -- a single huge nested subtree (e.g. a big
+    data/predictions folder) would otherwise exhaust the cap before sibling
+    directories are visited at all, hiding real matches elsewhere in the tree.
     """
-    result = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _SKIP_DIRS]
-        for name in dirnames:
-            result.append(os.path.relpath(os.path.join(dirpath, name), root) + "/")
-        for name in filenames:
-            if name.startswith("."):
+    result: list[str] = []
+    pending = [root]
+    while pending and len(result) < _TREE_SCAN_CAP:
+        next_pending = []
+        for directory in pending:
+            try:
+                entries = sorted(os.scandir(directory), key=lambda e: e.name)
+            except OSError:
                 continue
-            result.append(os.path.relpath(os.path.join(dirpath, name), root))
-        if len(result) >= _TREE_SCAN_CAP:
-            break
+            for entry in entries:
+                if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
+                    continue
+                rel = os.path.relpath(entry.path, root)
+                if entry.is_dir(follow_symlinks=False):
+                    result.append(rel + "/")
+                    next_pending.append(entry.path)
+                else:
+                    result.append(rel)
+                if len(result) >= _TREE_SCAN_CAP:
+                    break
+            if len(result) >= _TREE_SCAN_CAP:
+                break
+        pending = next_pending
     return result
 
 
