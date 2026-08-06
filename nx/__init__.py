@@ -356,7 +356,8 @@ Shell cmds run detached (setsid); they never block you.
 - Finishes quickly -> output returned directly.
 - Takes long -> backgrounds; you get PID + log path, check via read_file(log_path).
 
-3+ step task -> todo_write, one in_progress at a time."""
+3-4+ step task -> call todo_write FIRST, before any other tool (one
+in_progress at a time). Re-issue todo_write as the work or its scope grows."""
 
 from ._env import _env_int, _env_float
 
