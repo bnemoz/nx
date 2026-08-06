@@ -185,13 +185,24 @@ def _ask_approval(prompt: str) -> str:
                         rest += os.read(fd, 1).decode("utf-8", "replace")
                     except OSError:
                         break
-                # Shift+Tab (and any other non-bare-Esc sequence) is discarded
-                # and reprompted here rather than toggling YOLO: this prompt
-                # is mid-approval for one specific action, and a stray
-                # Shift+Tab (e.g. muscle memory from the chatbox editor)
-                # must never silently flip a global trust setting as a
-                # side effect of answering a Y/n question. Use /yolo or the
-                # chatbox toggle outside of an approval prompt instead.
+                # Shift+Tab toggles YOLO here too — mirroring the chatbox
+                # editor so a user who started in manual mode can switch to
+                # auto-approve mid-turn, right at the approval prompt,
+                # instead of being stuck in manual mode until the turn ends
+                # and the chatbox comes back. A visible confirmation is
+                # printed (never a silent flip) and the SAME action is
+                # re-prompted: the toggle changes future approvals, not this
+                # one, so a stray muscle-memory Shift+Tab can't sneak a
+                # high-risk action through as a side effect.
+                if rest in ("[Z", "[1;2Z"):
+                    st.toggle_yolo()
+                    on = "ON" if st.YOLO else "OFF"
+                    sys.stdout.write(
+                        f"{DIM}\n  yolo {on}  approval={_approval_display()}{RESET}\n")
+                    sys.stdout.flush()
+                    return _ask_approval(prompt)
+                # Any other non-bare-Esc sequence (arrow keys, Home/End,
+                # bracketed paste, …) is meaningless at a Y/n/esc prompt.
                 sys.stdout.write(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}\n")
                 sys.stdout.flush()
                 return _ask_approval(prompt)
