@@ -878,6 +878,22 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
             return TURN_FORCE_FINAL
         return TURN_DONE
+
+    # Text-only reply right after a reasoning-stall nudge explicitly asked the
+    # model to emit a tool call ("write_file"/"run_bash" ... "now"). A plain
+    # restatement of intent ("Now I'll implement...") with no tool call means
+    # the nudge didn't take — treating this as TURN_DONE drops the user to the
+    # prompt mid-task, requiring a manual "go ahead" to get the model to
+    # actually act. Nudge again instead of accepting it as a final answer.
+    if (not forced_final and reasoning_loop_cut_count > 0
+            and reasoning_loop_cut_count < max(0, st.REASONING_ONLY_RETRY_LIMIT)):
+        print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
+              f"intent but made no tool call; nudging to act "
+              f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
+        messages.append({"role": "assistant", "content": text})
+        _nudge_current_user_turn(messages, REASONING_STALL_NUDGE)
+        return TURN_STALL
+
     messages.append({"role": "assistant", "content": text})
     return TURN_DONE
 
