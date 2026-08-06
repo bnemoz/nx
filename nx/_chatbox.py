@@ -6,7 +6,8 @@ framed, multi-line editor:
     accidentally submits
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
-    Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit
+    Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
+    F1 for /help
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -551,7 +552,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         while col > 0 and not line[col - 1].isspace():
             col -= 1
 
-    def handle_escape(seq: str) -> None:
+    def handle_escape(seq: str) -> str | None:
         nonlocal row, col, h_idx, sel_idx
         if seq.startswith("[200~"):
             paste = seq[5:]
@@ -611,6 +612,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         if seq in ("[Z", "[1;2Z"):
             st.toggle_yolo()
             return
+        if seq in ("OP", "[11~"):
+            return "/help"
 
     with raw_mode(fd, icrnl=True):
         sys.stdout.write("\x1b[?25h\x1b[?2004h\n")
@@ -620,7 +623,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             while True:
                 c = _raw_read_key(fd)
                 if c == "\x1b":
-                    handle_escape(_raw_read_available(fd))
+                    esc = handle_escape(_raw_read_available(fd))
+                    if esc is not None:
+                        finish()
+                        return esc
                 elif c == "\r":
                     if current_kind == "file" and current_matches:
                         chosen = current_matches[sel_idx][0]

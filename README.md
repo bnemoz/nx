@@ -177,6 +177,11 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/reset`            | start a fresh session                                    |
 | `/todo`             | show the model's current `todo_write` list               |
 
+### Keyboard shortcuts
+
+In the REPL input box, **F1** opens `/help`, **Ctrl+L** runs `/clear`, and
+**Ctrl+Q** runs `/exit` (so you don't have to type the full command).
+
 ## Approval modes
 
 Every write/edit/bash call is risk-classified (`low`/`medium`/`high`) by a
