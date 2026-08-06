@@ -86,42 +86,51 @@ def strip_ansi_for_display(text: str) -> str:
     text = _OTHER_ESC_RE.sub("", text)
     return _C0_RE.sub("", text)
 
-# Five hex values per theme: cyan/green/yellow/red/magenta, plus "gray" —
-# used for reasoning-block text, where plain SGR-2 dim or ANSI bright-black
-# (90) is unreadable on many terminals, so it needs its own legible-but-muted
-# hue per theme rather than a fixed gray.
+# Eight hex values per theme: cyan/green/yellow/red/magenta, plus "gray",
+# "blue", and "orange". blue backs the ACCENT role (borders, model name, the
+# chatbox prompt) so it no longer collides with STATUS_BAR's cyan; orange backs
+# LABEL (source/session badges) so it no longer collides with TOOL_OUTPUT's
+# magenta. "gray" is used for reasoning-block text, where plain SGR-2 dim or
+# ANSI bright-black (90) is unreadable on many terminals, so it needs its own
+# legible-but-muted hue per theme rather than a fixed gray.
 THEMES: dict[str, dict[str, str]] = {
     "mocha": {   # Catppuccin Mocha (default) — dark
         "cyan": "89dceb", "green": "a6e3a1", "yellow": "f9e2af",
         "red": "f38ba8", "magenta": "cba6f7", "gray": "7f849c",
+        "blue": "89b4fa", "orange": "fab387",
     },
     "latte": {   # Catppuccin Latte — light
         "cyan": "04a5e5", "green": "40a02b", "yellow": "df8e1d",
         "red": "d20f39", "magenta": "8839ef", "gray": "6c6f85",
+        "blue": "1e66f5", "orange": "fe640b",
     },
     "dracula": {
         "cyan": "8be9fd", "green": "50fa7b", "yellow": "f1fa8c",
         "red": "ff5555", "magenta": "bd93f9", "gray": "6272a4",
+        "blue": "7aa6da", "orange": "ffb86c",
     },
     "nord": {
         "cyan": "88c0d0", "green": "a3be8c", "yellow": "ebcb8b",
         "red": "bf616a", "magenta": "b48ead", "gray": "4c566a",
+        "blue": "81a1c1", "orange": "d08770",
     },
     "gruvbox": {   # Gruvbox dark
         "cyan": "8ec07c", "green": "b8bb26", "yellow": "fabd2f",
         "red": "fb4934", "magenta": "d3869b", "gray": "928374",
+        "blue": "83a598", "orange": "fe8019",
     },
     "vaporwave": {   # neon pastel — fluorescent but soft
         "cyan": "5ffbf1", "green": "8aff80", "yellow": "fdfd96",
         "red": "ff6ec7", "magenta": "d183ff", "gray": "9a86b3",
+        "blue": "7aa2f7", "orange": "ff9e64",
     },
 }
 DEFAULT_THEME = "mocha"
-_PALETTE_KEYS: tuple[str, ...] = ("cyan", "green", "yellow", "red", "magenta", "gray")
+_PALETTE_KEYS: tuple[str, ...] = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")
 
-# Semantic roles used across the codebase, each backed by one of the six
+# Semantic roles used across the codebase, each backed by one of the eight
 # palette hues above by default. Centralizing the role→hue mapping here means
-# a new theme only has to supply the six palette hexes (above) — it never
+# a new theme only has to supply the eight palette hexes (above) — it never
 # needs to know about roles. Each role can also be overridden independently
 # via `NX_<ROLE>_COLOR` (see _parse_color_override), e.g. NX_TEXT_COLOR=green,
 # NX_STATUS_BAR_COLOR=ffaa00, NX_REASONING_TEXT_COLOR=gray.
@@ -130,8 +139,8 @@ ROLE_DEFAULTS: dict[str, str] = {
     "REASONING_TEXT": "gray",  # reasoning/thinking block text
     "STATUS_BAR": "cyan",      # per-turn stats footer (tok/s, ctx, ttft, wall)
     "TOOL_OUTPUT": "magenta",  # tool/bash result body lines
-    "ACCENT": "cyan",          # borders, model name, chatbox prompt
-    "LABEL": "magenta",        # source name / session id badges
+    "ACCENT": "blue",          # borders, model name, chatbox prompt
+    "LABEL": "orange",         # source name / session id badges
     "SUCCESS": "green",        # yolo/auto-approve/allow indicators
     "WARNING": "yellow",       # medium-risk / approval-prompt / recoverable-cut notices
     "ERROR": "red",            # hard failures
@@ -176,6 +185,8 @@ class _Colors:
     RED: str
     MAGENTA: str
     GRAY: str
+    BLUE: str
+    ORANGE: str
     TEXT: str
     REASONING_TEXT: str
     STATUS_BAR: str
@@ -197,6 +208,8 @@ class _Colors:
         self.RED = _rgb(hexes["red"])
         self.MAGENTA = _rgb(hexes["magenta"])
         self.GRAY = _rgb(hexes["gray"])
+        self.BLUE = _rgb(hexes["blue"])
+        self.ORANGE = _rgb(hexes["orange"])
         for role, palette_key in ROLE_DEFAULTS.items():
             override = _ROLE_OVERRIDES.get(role)
             if override is None:
@@ -227,9 +240,9 @@ def set_theme(name: str) -> bool:
 
 
 def swatch(theme_name: str) -> str:
-    """Return a one-line rendered sample of `theme_name`'s colors (cyan/green/yellow/red/magenta/gray)."""
+    """Return a one-line rendered sample of `theme_name`'s palette (the eight hue slots)."""
     hexes = THEMES[theme_name]
-    order = ("cyan", "green", "yellow", "red", "magenta", "gray")
+    order = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")
     return " ".join(f"{_rgb(hexes[k])}██{RESET}" for k in order)
 
 

@@ -540,7 +540,7 @@ from ._cli import _run_one_shot, main
 # (used throughout the test suite) and any submodule's `st.ACTIVE = x` always
 # see the same value — see _state.py's docstring for why this is needed once
 # the code that mutates these globals lives in more than one module.
-_COLOR_NAMES = {"CYAN", "GREEN", "YELLOW", "RED", "MAGENTA", "GRAY"}
+_COLOR_NAMES = {"CYAN", "GREEN", "YELLOW", "RED", "MAGENTA", "GRAY", "BLUE", "ORANGE"}
 
 
 class _StateProxyModule(_types.ModuleType):

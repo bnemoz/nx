@@ -115,10 +115,37 @@ turns fold into a summary automatically — see `/autocompress`.
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
 | `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
+| `NX_<ROLE>_COLOR` | override one of nine semantic roles (see below) |
 
 `nx --help` covers flags; the source (grep `_env_int`/`_env_float` calls in
 `nx/`) has the full env var list — dozens more knobs tune recovery samplers,
 stall detection, undo depth, etc., all with sane defaults.
+
+### Themes
+
+Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
+`magenta`, `gray`, `blue`, and `orange` — that nine semantic roles draw from:
+
+| role | default hue | what it colors |
+| --- | --- | --- |
+| `TEXT` | green | the model's final answer text |
+| `REASONING_TEXT` | gray | reasoning/thinking block text |
+| `STATUS_BAR` | cyan | per-turn stats footer (tok/s, ctx, ttft, wall) |
+| `TOOL_OUTPUT` | magenta | tool/bash result body lines |
+| `ACCENT` | blue | borders, model name, chatbox prompt |
+| `LABEL` | orange | source name / session id badges |
+| `SUCCESS` | green | yolo/auto-approve/allow indicators |
+| `WARNING` | yellow | medium-risk / approval-prompt / recoverable-cut notices |
+| `ERROR` | red | hard failures |
+
+`/theme` switches themes live and saves `NX_THEME` to `~/.env`. Any single
+role can be repinned independently of the theme with
+`NX_<ROLE>_COLOR=<hue|hex>` — the value is either a palette key (one of the
+eight hues above, resolved against the *active* theme so it tracks
+`/theme` switches) or a literal 6-digit hex (theme-independent). For example,
+`NX_ACCENT_COLOR=magenta` makes borders/prompt magenta in every theme, while
+`NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
+theme. Invalid values are ignored with a warning.
 
 Servers without native tool-calling fall back to a `<tool_call>{...}
 </tool_call>` text protocol, parsed out of the assistant's reply — small
