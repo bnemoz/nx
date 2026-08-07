@@ -163,7 +163,7 @@ Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
 | `TOOL_OUTPUT` | magenta | tool/bash result body lines |
 | `ACCENT` | blue | borders, model name, chatbox prompt |
 | `LABEL` | orange | source name / session id badges |
-| `TODO` | orange | the model's `todo_write` task list |
+| `TODO` | orange | `todo_write` list items — **pending** items; **done** items use `SUCCESS` (green), **in_progress** items use `WARNING` (yellow) |
 | `SUCCESS` | green | yolo/auto-approve/allow indicators |
 | `WARNING` | yellow | medium-risk / approval-prompt / recoverable-cut notices |
 | `ERROR` | red | hard failures |

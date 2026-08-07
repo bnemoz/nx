@@ -30,7 +30,7 @@ from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
-from ._todo import render_todos
+from ._todo import render_todos_display
 
 
 _HELP_COMMANDS: list[tuple[str, str]] = [
@@ -451,18 +451,20 @@ def _cmd_autocompress(user: str, state: _ReplState) -> None:
 
 
 def _cmd_todo(user: str, state: _ReplState) -> None:
-    """Show the model's current todo_write list.
+    """Show the model's current todo_write list, colored by status.
 
     The list lives in ``st._TODOS`` and is rewritten wholesale by each
     ``todo_write`` tool call (see _todo.py); it is persisted into the session
-    JSON so ``/resume`` restores it. ``/todo`` is read-only — it just renders
-    the current list, the same way ``render_todos`` does for the tool result.
+    JSON so ``/resume`` restores it. ``/todo`` is read-only — it renders the
+    current list with per-status colors via render_todos_display, the same
+    coloring the todo_write tool output gets on screen (done=green,
+    in_progress=yellow, pending=orange).
     """
     if not st._TODOS:
         print(f"{DIM}  (todo list empty){RESET}")
         return
     print(f"{DIM}  ── todos ──{RESET}")
-    for line in render_todos().splitlines():
+    for line in render_todos_display().splitlines():
         print(f"  {line}")
     print(f"{DIM}  ──────────{RESET}")
 

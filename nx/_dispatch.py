@@ -24,7 +24,7 @@ from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch
 from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
-from ._todo import todo_write
+from ._todo import todo_write, render_todos_display
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
 
@@ -212,11 +212,19 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if len(preview_lines) > 8:
         hidden = len(preview_lines) - 8
         preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
-    # todo_write gets a distinct color so the model's task list stands apart
-    # from ordinary tool/bash output — see the TODO role in _ansi.py.
-    body_color = C.TODO if name == "todo_write" else C.TOOL_OUTPUT
-    for line in preview_lines:
-        print(f"{C.ACCENT}  │ {RESET}{body_color}{strip_ansi_for_display(line)}{RESET}")
+    # todo_write colors each item by status itself (render_todos_display:
+    # done=green, in_progress=yellow, pending=orange) and sanitizes the item
+    # text, so it goes to the screen verbatim inside the box — not the generic
+    # strip + uniform-recolor path used for other tool/bash output.
+    if name == "todo_write":
+        disp = render_todos_display().splitlines()
+        if len(disp) > 8:
+            disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
+        for line in disp:
+            print(f"{C.ACCENT}  │ {RESET}{line}{RESET}")
+    else:
+        for line in preview_lines:
+            print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         cache_path = args.get("path", ".")
