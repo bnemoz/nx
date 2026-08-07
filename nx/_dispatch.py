@@ -213,7 +213,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         hidden = len(preview_lines) - 8
         preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
     # Stash the sanitized result of the most recent tool call regardless of
-    # visibility, so /tools last can replay it after the fact even when the
+    # visibility, so /tooloutput last can replay it after the fact even when the
     # result body was collapsed live (mirrors _LAST_REASONING for reasoning).
     st._LAST_TOOL_NAME = name
     st._LAST_TOOL_OUTPUT = result
@@ -233,7 +233,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     else:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
-        print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tools to expand){RESET}")
+        print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         cache_path = args.get("path", ".")

@@ -1,6 +1,6 @@
 """Slash-command handlers for REPL settings/session-context toggles that
 don't touch the saved-session list: `/source`, `/theme`, `/reasoning`,
-`/tools`, `/provider`, `/resources`, `/bg`, `/yolo`, `/approval`, `/reset`,
+`/tools` (legacy alias of `/tooloutput`), `/provider`, `/resources`, `/bg`, `/yolo`, `/approval`, `/reset`,
 `/help`, `/init`, `/recover`, `/undo`, `/compress`, `/autocompress`.
 
 Each handler takes (user_input, state) and returns "break" to end the REPL
@@ -39,7 +39,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/source [name] [model]", "list or switch model source/backend"),
     ("/theme [name]", "list or switch color theme"),
     ("/reasoning [on|off|show|hide|last]", "toggle/show reasoning-content visibility"),
-    ("/tools [on|off|show|hide|last]", "toggle/show tool-call result visibility"),
+    ("/tooloutput [on|off|show|hide|last]", "toggle/show tool-call result visibility"),
     ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>]", "list/kill background bash jobs"),
@@ -182,7 +182,7 @@ def _cmd_reasoning(user: str, state: _ReplState) -> None:
               f"use on, off, or last{RESET}")
 
 
-def _cmd_tools(user: str, state: _ReplState) -> None:
+def _cmd_tooloutput(user: str, state: _ReplState) -> None:
     sp = user.split()
     sub = sp[1].lower() if len(sp) > 1 else None
     if sub in ("on", "show", "expand"):
@@ -208,10 +208,10 @@ def _cmd_tools(user: str, state: _ReplState) -> None:
     elif sub is None:
         state_str = "visible" if st.TOOL_OUTPUT_VISIBLE else "collapsed"
         print(f"{DIM}  tool output: {state_str}{RESET}")
-        print(f"{DIM}  /tools on|off · /tools last (show most recent, "
+        print(f"{DIM}  /tooloutput on|off · /tooloutput last (show most recent, "
               f"even if collapsed){RESET}")
     else:
-        print(f"{C.ERROR}  ✗ unknown /tools arg {sub!r} — "
+        print(f"{C.ERROR}  ✗ unknown /tooloutput arg {sub!r} — "
               f"use on, off, or last{RESET}")
 
 

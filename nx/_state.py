@@ -140,10 +140,10 @@ _LAST_REASONING: str = ""
 # --- tool-call output display --------------------------------------------
 # Whether each tool call's result preview is rendered to the terminal (the
 # box header + args lines always show, so you still see *what* was called;
-# only the result body is hidden). Toggled by /tools (persisted to ~/.env as
-# NX_TOOL_OUTPUT_VISIBLE, same mechanism as /reasoning). todo_write always
+# only the result body is hidden). Toggled by /tooloutput (the /tools command is
+# kept as a legacy alias) — persisted to ~/.env as NX_TOOL_OUTPUT_VISIBLE, same
 # renders its colored list regardless of this flag. The last tool's sanitized
-# result is captured into _LAST_TOOL_OUTPUT so /tools last can replay it even
+# result is captured into _LAST_TOOL_OUTPUT so /tooloutput last can replay it even
 # while collapsed.
 TOOL_OUTPUT_VISIBLE: bool = os.environ.get("NX_TOOL_OUTPUT_VISIBLE", "1") not in ("0", "false", "off")
 _LAST_TOOL_NAME: str = ""

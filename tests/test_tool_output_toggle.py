@@ -1,9 +1,11 @@
-"""Tests for the `/tools` toggle and its effect on run_tool() rendering.
+"""Tests for the `/tooloutput` toggle and its effect on run_tool() rendering.
 
-Mirrors the `/reasoning` on|off|last design: `/tools` flips `TOOL_OUTPUT_VISIBLE`
-(persisted to ~/.env as NX_TOOL_OUTPUT_VISIBLE), and run_tool() hides the tool
-result body when collapsed while still printing the box header/args lines.
-`todo_write` always renders its colored list regardless of the flag.
+Mirrors the `/reasoning` on|off|last design: `/tooloutput` flips
+`TOOL_OUTPUT_VISIBLE` (persisted to ~/.env as NX_TOOL_OUTPUT_VISIBLE), and
+run_tool() hides the tool result body when collapsed while still printing the
+box header/args lines. `/tools` is kept as a misleading-name legacy alias that
+routes to the same handler. `todo_write` always renders its colored list
+regardless of the flag.
 
 Run offline — no model endpoint is contacted. run_tool() is exercised directly
 with a stubbed dispatch entry so we assert on the captured stdout.
@@ -78,45 +80,67 @@ def test_env_off_collapses():
     assert m.st.TOOL_OUTPUT_VISIBLE is False
 
 
-def test_cmd_tools_on_off_last(tmp_path, monkeypatch):
+def test_cmd_tooloutput_on_off_last(tmp_path, monkeypatch):
     m = reload_nx()
     env_path = tmp_path / "nx.env"
     monkeypatch.setenv("NX_ENV_FILE", str(env_path))
 
     from nx._repl_state import _ReplState
-    from nx._repl_settings_cmds import _cmd_tools
+    from nx._repl_settings_cmds import _cmd_tooloutput
     state = _ReplState([], "s", False, [])
 
-    # /tools off → collapsed, persisted to the env file
+    # /tooloutput off → collapsed, persisted to the env file
     with capture_stdout() as out:
-        _cmd_tools("/tools off", state)
+        _cmd_tooloutput("/tooloutput off", state)
     assert m.st.TOOL_OUTPUT_VISIBLE is False
     assert os.environ["NX_TOOL_OUTPUT_VISIBLE"] == "0"
     assert "NX_TOOL_OUTPUT_VISIBLE=0" in env_path.read_text()
     assert "collapsed" in out.getvalue()
     assert m.st._LAST_TOOL_OUTPUT == ""  # nothing captured yet
 
-    # /tools on → visible again, persisted
+    # /tooloutput on → visible again, persisted
     with capture_stdout() as out:
-        _cmd_tools("/tools on", state)
+        _cmd_tooloutput("/tooloutput on", state)
     assert m.st.TOOL_OUTPUT_VISIBLE is True
     assert os.environ["NX_TOOL_OUTPUT_VISIBLE"] == "1"
     assert "visible" in out.getvalue()
 
-    # bare /tools → reports current state without changing it
+    # bare /tooloutput → reports current state without changing it
     with capture_stdout() as out:
-        _cmd_tools("/tools", state)
+        _cmd_tooloutput("/tooloutput", state)
     assert "visible" in out.getvalue()
 
-    # /tools last with no captured output → friendly empty message
+    # /tooloutput last with no captured output → friendly empty message
     with capture_stdout() as out:
-        _cmd_tools("/tools last", state)
+        _cmd_tooloutput("/tooloutput last", state)
     assert "no tool output captured yet" in out.getvalue()
 
     # unknown arg → error message
     with capture_stdout() as out:
-        _cmd_tools("/tools bogus", state)
-    assert "unknown /tools arg" in out.getvalue()
+        _cmd_tooloutput("/tooloutput bogus", state)
+    assert "unknown /tooloutput arg" in out.getvalue()
+
+
+def test_tools_legacy_alias_still_dispatches():
+    """`/tools` is a misleading name, kept only as a backward-compat alias —
+    it must route to the same handler as `/tooloutput`."""
+    reload_nx()
+    from nx._repl import _REPL_COMMANDS
+    assert "/tooloutput" in _REPL_COMMANDS
+    assert "/tools" in _REPL_COMMANDS
+    assert _REPL_COMMANDS["/tools"] is _REPL_COMMANDS["/tooloutput"]
+
+
+def test_tools_legacy_alias_changing_state(tmp_path, monkeypatch):
+    """The alias must actually flip the flag, not just be registered."""
+    m = reload_nx()
+    monkeypatch.setenv("NX_ENV_FILE", str(tmp_path / "nx.env"))
+    from nx._repl_state import _ReplState
+    from nx._repl_settings_cmds import _cmd_tooloutput
+    state = _ReplState([], "s", False, [])
+    with capture_stdout():
+        _cmd_tooloutput("/tools off", state)  # alias used to invoke the handler
+    assert m.st.TOOL_OUTPUT_VISIBLE is False
 
 
 def test_run_tool_renders_body_when_visible(monkeypatch):
