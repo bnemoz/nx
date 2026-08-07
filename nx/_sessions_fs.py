@@ -47,8 +47,17 @@ def _sessions_dir() -> str:
 
 
 def _memories_dir() -> str:
-    """Where memory files live. Always under SESSION_HOME/memories."""
+    """Where global memory files live. Always under SESSION_HOME/memories."""
     return os.path.join(st.SESSION_HOME, "memories")
+
+
+def _project_memories_dir(project_root: str | os.PathLike[str] | None) -> str | None:
+    """Where project-scoped memory files live: <project_root>/.nx/memories/.
+    Returns None when there is no project root (bare cwd / outside a repo)
+    so callers can degrade to global-only instead of inventing a path."""
+    if not project_root:
+        return None
+    return os.path.join(str(project_root), ".nx", "memories")
 
 
 def _session_path(session_id: str) -> str:

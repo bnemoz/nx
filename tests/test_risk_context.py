@@ -49,3 +49,36 @@ def test_downloads_file_outside_project_is_outside(monkeypatch, tmp_path):
     assert payload["primary_path"] == os.path.realpath(target)
     assert payload["path_scope"] == "outside_project"
     assert payload["path_in_downloads"] is True
+
+
+def test_write_memory_action_path_is_extracted(monkeypatch, tmp_path):
+    # memory_write's approval action is "write memory <path> (N bytes)" — the
+    # risk classifier must extract the path (not swallow it as "unknown") so
+    # the path_scope is computed and a project memory isn't mis-rated high.
+    project = tmp_path / "repo"
+    project.mkdir()
+    target = project / ".nx" / "memories" / "20260807-120000_build.md"
+    monkeypatch.setattr(m, "PROJECT_ROOT", os.path.realpath(project))
+
+    payload = json.loads(
+        m._risk_user_message(f"write memory {target} (73 bytes)")
+    )
+
+    assert payload["primary_path"] == os.path.realpath(target)
+    assert payload["path_scope"] == "in_project"
+
+
+def test_write_memory_global_action_path_is_outside_project(monkeypatch, tmp_path):
+    project = tmp_path / "repo"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    global_mem = home / ".nx" / "memories" / "20260807-120000_tip.md"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(m, "PROJECT_ROOT", os.path.realpath(project))
+
+    payload = json.loads(
+        m._risk_user_message(f"write memory {global_mem} (42 bytes)")
+    )
+
+    assert payload["path_scope"] == "outside_project"

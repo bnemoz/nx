@@ -58,7 +58,10 @@ CLAUDE.md. Beyond the schema itself:
 
 - Tool body: read-only tools go in `nx/_tools.py`; state-touching tools
   (anything calling `_confirm()` or touching session/background-process
-  globals) go in `nx/__init__.py`.
+  globals) go in a focused submodule (e.g. `nx/_edit_tools.py` for the
+  write/edit tools, `nx/_memory_cmd.py` for the memory tools), not loose in
+  `__init__.py` — the same "prefer a new `nx/_feature.py` over growing
+  `__init__.py`" rule from AGENTS.md.
 - Dispatch: wire it into `run_tool()`.
 - Risk classification: if the tool can write or execute, confirm
   `_assess_risk()` (`nx/_risk.py`) handles it sensibly — don't assume a new

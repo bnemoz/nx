@@ -120,7 +120,7 @@ from ._sessions_io import (
 )
 from ._sessions_fs import (
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT,
-    _sessions_dir, _memories_dir, _session_path, _index_dir, _index_entry_path,
+    _sessions_dir, _memories_dir, _project_memories_dir, _session_path, _index_dir, _index_entry_path,
     _load_index, _write_index, _update_index, _write_session, _load_session,
     _session_files_newest, _session_summary_from_file, _list_sessions,
     _delete_session, _maybe_refresh_description, _resolve_session,
@@ -311,6 +311,10 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "sync wait secs (default unset=~3s poll; 0=wait indefinitely)"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "todo_write", "description": "Replace whole todo list. Track multi-step tasks.",
         "parameters": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"enum": ["pending", "in_progress", "done"]}}}}}, "required": ["todos"]}}},
+    {"type": "function", "function": {"name": "memory_write", "description": "Save a durable memory note for recall in future sessions via memory_search. scope=project (default; falls back to global with no project root) or global. Requires approval.",
+        "parameters": {"type": "object", "properties": {"title": {"type": "string", "description": "short topic title"}, "body": {"type": "string", "description": "markdown: facts, paths, commands, why-it-works reasoning"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project = this repo; global = cross-project"}}, "required": ["title", "body"]}}},
+    {"type": "function", "function": {"name": "memory_search", "description": "Keyword-search saved memories (project+global), return title+snippet per match, newest first. Read-only. Empty query lists newest titles.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search terms; empty = list newest"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) searches both; global only global"}}, "required": ["query"]}}},
 ]
 
 # Only offered once a run_bash call has actually backgrounded this session
@@ -357,7 +361,12 @@ Shell cmds run detached (setsid); they never block you.
 - Takes long -> backgrounds; you get PID + log path, check via read_file(log_path).
 
 3-4+ step task -> call todo_write FIRST, before any other tool (one
-in_progress at a time). Re-issue todo_write as the work or its scope grows."""
+in_progress at a time). Re-issue todo_write as the work or its scope grows.
+
+Memory: call memory_search before re-deriving something you may have
+already learned; call memory_write to persist a durable learning worth
+recalling in future sessions (scope=project for this repo, global for
+cross-project)."""
 
 from ._env import _env_int, _env_float
 
@@ -527,7 +536,7 @@ from ._repl import (
     _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
     _cmd_sessions, _cmd_resume, _cmd_delete, _cmd_memory, _slugify,
     _cmd_memory_save, _cmd_memory_remember, _cmd_memory_list,
-    _render_transcript_for_memory,
+    _render_transcript_for_memory, memory_write, memory_search, _load_memory_note,
 )
 
 

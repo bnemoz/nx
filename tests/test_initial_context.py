@@ -47,12 +47,15 @@ import nx as m  # noqa: E402
 # With the active schema gated by _active_tools() (wait_background excluded
 # until a command backgrounds — currently read_file, write_file, edit_file,
 # list_dir, run_bash, search_files, git_status, git_diff, git_log, multi_edit,
-# sed_edit, apply_patch, todo_write) the chars/3.5 content floor is ~2263; the
-# README's figure adds ~50 of server-side framing. git_log + apply_patch (two
-# new tools) plus read_file/search_files list-argument params pushed the
-# floor up from ~1990; the thresholds track that, still flagging further bloat.
-WARN_TOKENS = 2100  # soft: warn (don't fail) — check the README still holds
-FAIL_TOKENS = 2500   # hard: the floor has roughly grown again; README is fiction
+# sed_edit, apply_patch, todo_write, memory_write, memory_search) the
+# chars/3.5 content floor is ~2677; the README's figure adds ~50 of
+# server-side framing. git_log + apply_patch (two new tools) plus
+# read_file/search_files list-argument params pushed the floor up from
+# ~1990; memory_write + memory_search (model-driven memory, two more tools)
+# plus the SYSTEM memory line raised it again from ~2263; the thresholds
+# track that, still flagging further bloat.
+WARN_TOKENS = 2500  # soft: warn (don't fail) — check the README still holds
+FAIL_TOKENS = 2900  # hard: the floor has roughly grown again; README is fiction
 
 
 def _count_tokens(text):
@@ -114,7 +117,7 @@ def test_initial_context_floor():
     if total >= WARN_TOKENS:
         warnings.warn(
             f"initial context content is {total} tokens (>= {WARN_TOKENS}). "
-            f"The README claims ~625; a sixth tool or fatter descriptions "
+            f"Check the README still holds; a new tool or fatter descriptions "
             f"may have pushed the floor up. {breakdown}",
             stacklevel=2,
         )

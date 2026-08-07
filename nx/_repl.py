@@ -46,6 +46,7 @@ from ._sessions_cmd import (
 from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
     _cmd_memory_remember, _cmd_memory_list, _render_transcript_for_memory,
+    memory_write, memory_search, _load_memory_note,
 )
 from ._repl_settings_cmds import (
     _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,

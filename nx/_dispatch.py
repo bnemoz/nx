@@ -22,6 +22,7 @@ from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch
+from ._memory_cmd import memory_write, memory_search, _load_memory_note
 from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
@@ -34,6 +35,7 @@ DISPATCH = {
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
     "todo_write": todo_write, "apply_patch": apply_patch,
+    "memory_write": memory_write, "memory_search": memory_search,
 }
 
 st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash call in this session actually backgrounds
@@ -95,6 +97,13 @@ def _initial_messages() -> list[dict[str, Any]]:
     note = _load_agents_md_note(getattr(st, "PROJECT_ROOT", None))
     if note is not None:
         messages.append(note)
+    # Memory-awareness note: titles only (capped) so the model knows what's
+    # already remembered without paying for the bodies — see _memory_cmd.py.
+    # Paid once per fresh session, not folded into SYSTEM so the per-turn
+    # token floor stays flat when no memories exist (see test_initial_context).
+    mem_note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
+    if mem_note is not None:
+        messages.append(mem_note)
     return messages
 
 
@@ -144,7 +153,7 @@ MULTI_EDIT_GUIDANCE = (
     "instead of several, and applies atomically.]"
 )
 
-_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log")
+_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search")
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -247,6 +256,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     elif name == "run_bash":
         # bash can touch any path; cheaper to drop the whole cache than to parse the command.
         st._TOOL_RESULT_CACHE.clear()
+    elif name == "memory_write" and not result.startswith("ERROR") and result != "DENIED by user":
+        # A new memory invalidates any cached memory_search index/snippets.
+        for k in [k for k in st._TOOL_RESULT_CACHE if k[0] == "memory_search"]:
+            del st._TOOL_RESULT_CACHE[k]
     if name == "run_bash" and result.startswith("[background]") and not st._SESSION_HAS_BACKGROUNDED:
         st._SESSION_HAS_BACKGROUNDED = True
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE

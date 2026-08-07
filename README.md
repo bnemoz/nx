@@ -307,11 +307,34 @@ go through the approval gate above.
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands |
 | `wait_background` | `pid`, `log_path?`, `timeout?` | only offered after a `run_bash` call has backgrounded |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
+| `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
+| `memory_search` | `query`, `scope?` | keyword-search saved memories; read-only |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
 or any `run_bash`. `wait_background` is omitted from the tool schemas sent to
 the model until a `run_bash` has actually backgrounded, so a session where
 nothing ever backgrounds doesn't pay tokens for a tool it will never call.
+
+## Memory
+
+The model can save durable memory notes itself — no manual `/memory save`
+needed. Two tools drive it: `memory_search` (recall prior learnings before
+re-deriving them) and `memory_write` (persist a new one). At session start a
+short note listing already-saved titles is appended to context so the model
+knows what's remembered.
+
+Memories live in two scopes:
+
+- **project** — `<project_root>/.nx/memories/` (the default; specific to this
+  repo, so a memory about one project doesn't clutter another). With no
+  project root (bare cwd / outside a repo) project scope falls back to global.
+- **global** — `~/.nx/memories/` (cross-project: conventions, tool quirks,
+  general learnings).
+
+Each memory is a markdown file (`<timestamp>_<slug>.md`) starting with a
+`# Title`. `memory_write` goes through the approval gate like `write_file`;
+`memory_search` is read-only. The manual `/memory save|remember|list` slash
+commands remain for distilling a whole session at once.
 
 ## Metrics
 

@@ -69,6 +69,8 @@ def _extract_action_path(action: str) -> str | None:
         if m := re.match(r"^(.+?)\s+\(\d+\s+edits\)$", rest):
             return m.group(1).strip() or None
         return rest or None
+    if m := re.match(r"^write memory\s+(.+)\s+\(\d+\s+bytes\)$", action):
+        return m.group(1).strip() or None
     if m := re.match(r"^write\s+(.+)\s+\(\d+\s+bytes\)$", action):
         return m.group(1).strip() or None
     return None
