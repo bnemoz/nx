@@ -134,7 +134,7 @@ MAX_MODEL_TURNS: int = 200
 # mechanism as /theme); the full text of the most recent turn's reasoning
 # is always captured into _LAST_REASONING regardless, so /reasoning show
 # works even right after switching into collapsed mode.
-REASONING_VISIBLE: bool = os.environ.get("NX_REASONING_VISIBLE", "1") not in ("0", "false", "off")
+REASONING_VISIBLE: bool = os.environ.get("NX_REASONING_VISIBLE", "0") not in ("0", "false", "off")
 _LAST_REASONING: str = ""
 
 # --- tool-call output display --------------------------------------------
@@ -145,7 +145,7 @@ _LAST_REASONING: str = ""
 # renders its colored list regardless of this flag. The last tool's sanitized
 # result is captured into _LAST_TOOL_OUTPUT so /tooloutput last can replay it even
 # while collapsed.
-TOOL_OUTPUT_VISIBLE: bool = os.environ.get("NX_TOOL_OUTPUT_VISIBLE", "1") not in ("0", "false", "off")
+TOOL_OUTPUT_VISIBLE: bool = os.environ.get("NX_TOOL_OUTPUT_VISIBLE", "0") not in ("0", "false", "off")
 _LAST_TOOL_NAME: str = ""
 _LAST_TOOL_OUTPUT: str = ""
 

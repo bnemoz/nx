@@ -60,19 +60,19 @@ def capture_stdout():
         builtins.print = real
 
 
-def test_default_visible():
+def test_default_collapsed():
     m = reload_nx()
+    assert m.st.TOOL_OUTPUT_VISIBLE is False
+
+
+def test_env_one_expands():
+    m = reload_nx(env={"NX_TOOL_OUTPUT_VISIBLE": "1"})
     assert m.st.TOOL_OUTPUT_VISIBLE is True
 
 
-def test_env_zero_collapses():
-    m = reload_nx(env={"NX_TOOL_OUTPUT_VISIBLE": "0"})
-    assert m.st.TOOL_OUTPUT_VISIBLE is False
-
-
-def test_env_false_collapses():
-    m = reload_nx(env={"NX_TOOL_OUTPUT_VISIBLE": "false"})
-    assert m.st.TOOL_OUTPUT_VISIBLE is False
+def test_env_on_expands():
+    m = reload_nx(env={"NX_TOOL_OUTPUT_VISIBLE": "on"})
+    assert m.st.TOOL_OUTPUT_VISIBLE is True
 
 
 def test_env_off_collapses():
