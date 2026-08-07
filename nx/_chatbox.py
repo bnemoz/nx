@@ -51,6 +51,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/autocompress", "show or set the auto-compress threshold"),
     ("/recover", "force a low-temp visible checkpoint after a bad stream"),
     ("/reasoning", "on|off|last — toggle or show reasoning trace"),
+    ("/tools", "on|off|last — toggle or show tool-call result"),
     ("/undo", "revert the last write_file/edit_file/multi_edit"),
     ("/reset", "clear conversation, start a fresh session"),
     ("/clear", "alias for /reset"),
@@ -68,6 +69,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/theme": sorted(THEMES),
     "/reasoning": ["on", "off", "last"],
+    "/tools": ["on", "off", "last"],
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
     "/source": lambda: list(st.SOURCE_ORDER),

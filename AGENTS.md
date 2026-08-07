@@ -4,6 +4,10 @@
 
 `nx/` contains the Python package for the `nx` coding-agent CLI. Keep concerns in focused private modules (for example, `_turn.py`, `_sources.py`, and `_chatbox.py`) and expose/wire them through `nx/__init__.py` only as needed. `tests/` contains one test file per behavior area. `README.md` is the user-facing reference; `CONTRIBUTING.md` documents required touch points for slash commands, tools, and environment variables. `sources.example.env` provides safe configuration examples.
 
+## Semver Policy
+
+From now on we follow semver; bump version numbers as changes are made.
+
 ## Build, Test, and Development Commands
 
 Use `uv` for local development:

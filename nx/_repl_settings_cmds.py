@@ -1,7 +1,7 @@
 """Slash-command handlers for REPL settings/session-context toggles that
 don't touch the saved-session list: `/source`, `/theme`, `/reasoning`,
-`/provider`, `/resources`, `/bg`, `/yolo`, `/approval`, `/reset`, `/help`,
-`/init`, `/recover`, `/undo`, `/compress`, `/autocompress`.
+`/tools`, `/provider`, `/resources`, `/bg`, `/yolo`, `/approval`, `/reset`,
+`/help`, `/init`, `/recover`, `/undo`, `/compress`, `/autocompress`.
 
 Each handler takes (user_input, state) and returns "break" to end the REPL
 loop, or None to continue it — dispatched from `_REPL_COMMANDS` in
@@ -39,6 +39,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/source [name] [model]", "list or switch model source/backend"),
     ("/theme [name]", "list or switch color theme"),
     ("/reasoning [on|off|show|hide|last]", "toggle/show reasoning-content visibility"),
+    ("/tools [on|off|show|hide|last]", "toggle/show tool-call result visibility"),
     ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>]", "list/kill background bash jobs"),
@@ -178,6 +179,39 @@ def _cmd_reasoning(user: str, state: _ReplState) -> None:
               f"even if collapsed){RESET}")
     else:
         print(f"{C.ERROR}  ✗ unknown /reasoning arg {sub!r} — "
+              f"use on, off, or last{RESET}")
+
+
+def _cmd_tools(user: str, state: _ReplState) -> None:
+    sp = user.split()
+    sub = sp[1].lower() if len(sp) > 1 else None
+    if sub in ("on", "show", "expand"):
+        st.TOOL_OUTPUT_VISIBLE = True
+        _set_env_var("NX_TOOL_OUTPUT_VISIBLE", "1")
+        os.environ["NX_TOOL_OUTPUT_VISIBLE"] = "1"
+        print(f"{BOLD}{C.WARNING}  → tool output: visible{RESET} {DIM}(saved to ~/.env){RESET}")
+        if sub == "show" and st._LAST_TOOL_OUTPUT:
+            print(f"{C.ACCENT}  ┌─ {st._LAST_TOOL_NAME}{RESET}")
+            print(f"{C.ACCENT}  └─{RESET} {C.TOOL_OUTPUT}{st._LAST_TOOL_OUTPUT}{RESET}")
+    elif sub in ("off", "hide", "collapse"):
+        st.TOOL_OUTPUT_VISIBLE = False
+        _set_env_var("NX_TOOL_OUTPUT_VISIBLE", "0")
+        os.environ["NX_TOOL_OUTPUT_VISIBLE"] = "0"
+        print(f"{BOLD}{C.WARNING}  → tool output: collapsed{RESET} {DIM}(saved to ~/.env){RESET}")
+    elif sub in ("last",):
+        if st._LAST_TOOL_OUTPUT:
+            print(f"{C.ACCENT}  ┌─ {st._LAST_TOOL_NAME}{RESET}")
+            print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{st._LAST_TOOL_OUTPUT}{RESET}")
+            print(f"{C.ACCENT}  └─{RESET}")
+        else:
+            print(f"{DIM}  no tool output captured yet{RESET}")
+    elif sub is None:
+        state_str = "visible" if st.TOOL_OUTPUT_VISIBLE else "collapsed"
+        print(f"{DIM}  tool output: {state_str}{RESET}")
+        print(f"{DIM}  /tools on|off · /tools last (show most recent, "
+              f"even if collapsed){RESET}")
+    else:
+        print(f"{C.ERROR}  ✗ unknown /tools arg {sub!r} — "
               f"use on, off, or last{RESET}")
 
 

@@ -136,6 +136,7 @@ sessions and exits without entering the REPL.
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `1`; `0` collapses it — toggle live with `/reasoning`) |
+| `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `1`; `0` collapses it — toggle live with `/tools`; `todo_write` always renders) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -222,6 +223,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/approval [level]` | show or set risk threshold (all/low/medium/high/yolo) |
 | `/theme [name]` | list color themes, or switch to one |
 | `/reasoning on\|off\|last` | toggle or show the reasoning trace |
+| `/tools on\|off\|last` | toggle or show tool-call result visibility (todo_write always renders) |
 | `/sessions [n]` / `/resume [target]` | list or resume a past session |
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |

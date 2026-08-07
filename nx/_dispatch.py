@@ -212,6 +212,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if len(preview_lines) > 8:
         hidden = len(preview_lines) - 8
         preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+    # Stash the sanitized result of the most recent tool call regardless of
+    # visibility, so /tools last can replay it after the fact even when the
+    # result body was collapsed live (mirrors _LAST_REASONING for reasoning).
+    st._LAST_TOOL_NAME = name
+    st._LAST_TOOL_OUTPUT = result
     # todo_write colors each item by status itself (render_todos_display:
     # done=green, in_progress=yellow, pending=orange) and sanitizes the item
     # text, so it goes to the screen verbatim inside the box — not the generic
@@ -222,9 +227,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
         for line in disp:
             print(f"{C.ACCENT}  │ {RESET}{line}{RESET}")
-    else:
+    elif st.TOOL_OUTPUT_VISIBLE:
         for line in preview_lines:
             print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+    else:
+        # Collapsed: the header/args lines already named the call; only the
+        # result body is hidden. Keep the box closed with a one-line hint.
+        print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tools to expand){RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         cache_path = args.get("path", ".")
