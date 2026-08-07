@@ -62,6 +62,7 @@ def test_role_defaults_map_remapped_hues():
     # regardless of any NX_*_COLOR overrides captured at import time.
     assert _ansi.ROLE_DEFAULTS["ACCENT"] == "blue"  # was cyan (== STATUS_BAR)
     assert _ansi.ROLE_DEFAULTS["LABEL"] == "orange"  # was magenta (== TOOL_OUTPUT)
+    assert _ansi.ROLE_DEFAULTS["TODO"] == "orange"  # todo_write output, distinct from TOOL_OUTPUT
     # STATUS_BAR and TOOL_OUTPUT keep their original hues:
     assert _ansi.ROLE_DEFAULTS["STATUS_BAR"] == "cyan"
     assert _ansi.ROLE_DEFAULTS["TOOL_OUTPUT"] == "magenta"
@@ -100,12 +101,15 @@ def test_role_remap_gives_each_role_a_distinct_default_hue():
         "TOOL_OUTPUT",
         "ACCENT",
         "LABEL",
+        "TODO",
         "SUCCESS",
         "WARNING",
         "ERROR",
     ]
     seen = {getattr(m.C, r) for r in roles}
-    # 9 roles, but TEXT==SUCCESS (both green) is intentional → 8 distinct.
+    # 10 roles, but two collisions are intentional — TEXT==SUCCESS (both green)
+    # and LABEL==TODO (both orange, so the model's task list shares the orange
+    # hue used for badges) — leaving 8 distinct.
     assert len(seen) == 8, f"expected 8 distinct role escapes, got {len(seen)}"
 
 

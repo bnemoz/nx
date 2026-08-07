@@ -141,6 +141,7 @@ ROLE_DEFAULTS: dict[str, str] = {
     "TOOL_OUTPUT": "magenta",  # tool/bash result body lines
     "ACCENT": "blue",          # borders, model name, chatbox prompt
     "LABEL": "orange",         # source name / session id badges
+    "TODO": "orange",          # todo_write tool output (distinct from TOOL_OUTPUT)
     "SUCCESS": "green",        # yolo/auto-approve/allow indicators
     "WARNING": "yellow",       # medium-risk / approval-prompt / recoverable-cut notices
     "ERROR": "red",            # hard failures
@@ -193,6 +194,7 @@ class _Colors:
     TOOL_OUTPUT: str
     ACCENT: str
     LABEL: str
+    TODO: str
     SUCCESS: str
     WARNING: str
     ERROR: str

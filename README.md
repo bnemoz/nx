@@ -144,7 +144,7 @@ sessions and exits without entering the REPL.
 | `NX_BACKEND` | `vllm` to disable llama.cpp-only recovery samplers (min_p / repeat_penalty / DRY) that vLLM rejects |
 | `NX_NATIVE_TOOLS` | opt into server-side native `tool_calls` (default off — text-protocol fallback is parsed and repaired client-side) |
 | `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
-| `NX_<ROLE>_COLOR` | override one of nine semantic roles (see below) |
+| `NX_<ROLE>_COLOR` | override one of ten semantic roles (see below) |
 
 `nx --help` covers flags; the source (grep `_env_int`/`_env_float` calls in
 `nx/`) has the full env var list — dozens more knobs tune recovery samplers,
@@ -153,7 +153,7 @@ stall detection, undo depth, log size, etc., all with sane defaults.
 ### Themes
 
 Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
-`magenta`, `gray`, `blue`, and `orange` — that nine semantic roles draw from:
+`magenta`, `gray`, `blue`, and `orange` — that ten semantic roles draw from:
 
 | role | default hue | what it colors |
 | --- | --- | --- |
@@ -163,6 +163,7 @@ Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
 | `TOOL_OUTPUT` | magenta | tool/bash result body lines |
 | `ACCENT` | blue | borders, model name, chatbox prompt |
 | `LABEL` | orange | source name / session id badges |
+| `TODO` | orange | the model's `todo_write` task list |
 | `SUCCESS` | green | yolo/auto-approve/allow indicators |
 | `WARNING` | yellow | medium-risk / approval-prompt / recoverable-cut notices |
 | `ERROR` | red | hard failures |

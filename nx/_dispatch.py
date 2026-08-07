@@ -212,8 +212,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if len(preview_lines) > 8:
         hidden = len(preview_lines) - 8
         preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+    # todo_write gets a distinct color so the model's task list stands apart
+    # from ordinary tool/bash output — see the TODO role in _ansi.py.
+    body_color = C.TODO if name == "todo_write" else C.TOOL_OUTPUT
     for line in preview_lines:
-        print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+        print(f"{C.ACCENT}  │ {RESET}{body_color}{strip_ansi_for_display(line)}{RESET}")
     print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         cache_path = args.get("path", ".")
