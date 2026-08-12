@@ -1,56 +1,15 @@
 """ANSI color/cursor constants and the terminal waiting animation (LifeSpinner)."""
 from __future__ import annotations
 
-import contextlib
 import os
 import random
 import re
-import signal
 import sys
-import termios
 import threading
 import time
-from collections.abc import Iterator
 from typing import Literal
 
-
-@contextlib.contextmanager
-def raw_mode(fd: int, *, icrnl: bool = False) -> Iterator[list]:
-    """Put fd into raw (non-canonical, no-echo) mode for the duration of the
-    block, restoring the original attributes on exit. Centralizes the
-    termios save/restore/flag-twiddle shared by _chatbox.py's editor and
-    _approval.py's Y/n/esc prompt, so their terminal-mode handling remains
-    consistent."""
-    old = termios.tcgetattr(fd)
-    new = old[:]
-    new[3] &= ~(termios.ECHO | termios.ICANON)
-    new[0] &= ~termios.IXON
-    if icrnl:
-        new[0] &= ~termios.ICRNL
-    new[6][termios.VMIN] = 1
-    new[6][termios.VTIME] = 0
-
-    def _on_sigterm(signum, frame):
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        except Exception:
-            pass
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        os.kill(os.getpid(), signal.SIGTERM)
-
-    prev_handler = signal.getsignal(signal.SIGTERM)
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _on_sigterm)
-    termios.tcsetattr(fd, termios.TCSADRAIN, new)
-    try:
-        yield old
-    finally:
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        except Exception:
-            pass
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGTERM, prev_handler)
+from ._tty import raw_mode  # noqa: F401  re-exported for back-compat (callers do `from ._ansi import raw_mode`)
 
 def _rgb(hex_color: str) -> str:
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))

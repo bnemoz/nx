@@ -19,15 +19,14 @@ Falls back to plain `input()` when stdin/stdout is not a TTY.
 from __future__ import annotations
 
 import os
-import select
 import shutil
 import sys
-import termios
 import unicodedata
 from typing import Callable
 
 from . import _state as st
 from ._ansi import DIM, RESET, C, THEMES, raw_mode
+from ._tty import read_byte, wait_ready
 
 # (command, description) — kept in sync with the README "Commands" table.
 SLASH_COMMANDS: list[tuple[str, str]] = [
@@ -309,7 +308,7 @@ def _str_slice_by_width(s: str, max_width: int) -> str:
 
 def _raw_read_key(fd: int) -> str:
     """Read one decoded keypress, raising EOFError when stdin is closed."""
-    b = os.read(fd, 1)
+    b = read_byte(fd)
     if not b:
         raise EOFError
     first = b[0]
@@ -324,7 +323,7 @@ def _raw_read_key(fd: int) -> str:
     else:
         need = 3
     for _ in range(need):
-        extra = os.read(fd, 1)
+        extra = read_byte(fd)
         if not extra:
             raise EOFError
         b += extra
@@ -334,10 +333,9 @@ def _raw_read_key(fd: int) -> str:
 def _raw_read_available(fd: int, timeout: float = 0.02) -> str:
     raw = bytearray()
     while True:
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
+        if not wait_ready(fd, timeout):
             break
-        chunk = os.read(fd, 1)
+        chunk = read_byte(fd)
         if not chunk:
             raise EOFError
         raw += chunk
@@ -721,5 +719,5 @@ def read_multiline(initial: str = "", history: list[str] | None = None) -> str:
         return _chatbox_raw(initial, history)
     except (EOFError, KeyboardInterrupt):
         raise
-    except (OSError, termios.error):
+    except OSError:
         return _chatbox_fallback(f"{C.ACCENT}you ›{RESET} ")

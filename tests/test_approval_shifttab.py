@@ -12,7 +12,7 @@ confirmation and a re-prompt of the SAME action (the toggle affects
 future approvals, not the one being decided).
 
 No real TTY is needed: the approval prompt's raw-mode branch is driven by
-monkeypatching os.read (scripted keystroke bytes), select.select (so the
+monkeypatching read_byte (scripted keystroke bytes), wait_ready (so the
 escape-sequence drain sees the trailing bytes of the current burst, then
 goes empty — exactly like a real terminal where the rest of an escape
 sequence is already in the kernel buffer but the user's NEXT keypress
@@ -49,19 +49,19 @@ def _drive_approval(bursts: list[list[bytes]]):
     `bursts` is a list of byte-bursts, each one a sequence of bytes that
     arrive atomically (an escape sequence like Shift+Tab, or a single
     keypress like Enter/'n'). Inside _ask_approval the escape-sequence
-    drain polls select for more bytes; bytes within the *current* burst
-    are readable, then select returns empty when the burst is exhausted —
+    drain polls wait_ready for more bytes; bytes within the *current* burst
+    are readable, then wait_ready returns False when the burst is exhausted —
     mirroring a real terminal where the trailing bytes of an escape
     sequence are already queued but the user's next keypress hasn't
     happened yet. The next burst only becomes readable once a fresh
-    os.read starts it (i.e. after the prompt re-renders).
+    read_byte starts it (i.e. after the prompt re-renders).
 
     Returns (result, printed_text).
     """
     apmod = sys.modules["nx._approval"]
     saved = {
-        "read": apmod.os.read,
-        "select": apmod.select.select,
+        "read_byte": apmod.read_byte,
+        "wait_ready": apmod.wait_ready,
         "raw_mode": apmod.raw_mode,
         "stdin": apmod.sys.stdin,
         "stdout": apmod.sys.stdout,
@@ -70,7 +70,7 @@ def _drive_approval(bursts: list[list[bytes]]):
     printed: list[str] = []
     state = {"gi": 0, "pos": 0}
 
-    def fake_read(fd, n):
+    def fake_read_byte(fd):
         gi, pos = state["gi"], state["pos"]
         if gi >= len(bursts):
             raise AssertionError(f"_ask_approval read past all scripted bursts (gi={gi})")
@@ -86,12 +86,10 @@ def _drive_approval(bursts: list[list[bytes]]):
         state["pos"] = pos + 1
         return b
 
-    def fake_select(r, w, x, timeout):
+    def fake_wait_ready(fd, timeout):
         # readable iff the current burst still has unconsumed bytes
         gi, pos = state["gi"], state["pos"]
-        if gi < len(bursts) and pos < len(bursts[gi]):
-            return r, [], []
-        return [], [], []
+        return gi < len(bursts) and pos < len(bursts[gi])
 
     @contextmanager
     def fake_raw_mode(fd, **kw):
@@ -111,8 +109,8 @@ def _drive_approval(bursts: list[list[bytes]]):
         def flush(self):
             pass
 
-    apmod.os.read = fake_read
-    apmod.select.select = fake_select
+    apmod.read_byte = fake_read_byte
+    apmod.wait_ready = fake_wait_ready
     apmod.raw_mode = fake_raw_mode
     apmod.sys.stdin = FakeStdin()
     apmod.sys.stdout = FakeStdout()
@@ -121,8 +119,8 @@ def _drive_approval(bursts: list[list[bytes]]):
         result = apmod._ask_approval("allow write foo.py? [Y/n/esc] ")
         return result, "".join(printed)
     finally:
-        apmod.os.read = saved["read"]
-        apmod.select.select = saved["select"]
+        apmod.read_byte = saved["read_byte"]
+        apmod.wait_ready = saved["wait_ready"]
         apmod.raw_mode = saved["raw_mode"]
         apmod.sys.stdin = saved["stdin"]
         apmod.sys.stdout = saved["stdout"]

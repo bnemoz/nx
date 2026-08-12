@@ -15,13 +15,12 @@ _EscToChat control-flow exception that lets the user bail out of an
 approval prompt back to the chat input.
 """
 import difflib
-import os
 import re
-import select
 import sys
 from typing import Optional
 
 from ._ansi import DIM, RESET, C, raw_mode
+from ._tty import read_byte, wait_ready
 from ._risk import _local_risk_hint, LEVEL_ORDER
 from . import _state as st
 
@@ -167,22 +166,21 @@ def _ask_approval(prompt: str) -> str:
     with raw_mode(fd):
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        c = os.read(fd, 1).decode("utf-8", "replace")
+        c = read_byte(fd).decode("utf-8", "replace")
         if c == "\x1b":
             # Could be bare Esc OR the lead byte of an escape sequence
             # (arrow keys, Home/End, Shift+Tab, bracketed paste, …). Wait
             # briefly; if no more bytes arrive, it's a bare Esc.
-            r, _, _ = select.select([fd], [], [], 0.05)
+            r = wait_ready(fd, 0.05)
             if r:
                 rest = ""
                 # Drain the rest of the sequence (bounded, so a runaway
                 # paste can't hang us).
                 for _ in range(8):
-                    r, _, _ = select.select([fd], [], [], 0.02)
-                    if not r:
+                    if not wait_ready(fd, 0.02):
                         break
                     try:
-                        rest += os.read(fd, 1).decode("utf-8", "replace")
+                        rest += read_byte(fd).decode("utf-8", "replace")
                     except OSError:
                         break
                 # Shift+Tab toggles YOLO here too — mirroring the chatbox

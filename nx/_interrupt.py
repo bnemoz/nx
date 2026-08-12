@@ -41,28 +41,28 @@ Four events:
   _USER_INTERRUPTED   - "the user actually pressed Esc" - only the watcher sets
                         this; main reads it after disarming. Separate from the
                         arm flag so disarming to park != "you pressed Esc".
-  _INTERRUPT_RESTORED - "watcher has restored termios to cooked mode" - the
-                        watcher sets this in its inner finally after tcsetattr.
+  _INTERRUPT_RESTORED - "watcher has restored input mode to cooked mode" - the
+                        watcher sets this in its inner finally after restoring.
                         main clears it before arming and waits on it after
                         disarming so the chatbox never captures the watcher's
-                        raw-mode termios as its "old" state. Without this
+                        raw-mode input mode as its "old" state. Without this
                         handshake the disarm is asynchronous (the watcher may
-                        still be in select(0.1) when the chatbox runs) and the
+                        still be mid-poll when the chatbox runs) and the
                         chatbox can inherit VMIN=0, breaking Enter
                         and leaving the terminal stuck in raw mode.
 """
 from __future__ import annotations
 
-import os
-import select
 import sys
-import termios
 import threading
 import time
 from contextlib import contextmanager
 from typing import Any
 
 from . import _state as st
+from ._tty import (
+    apply_interrupt_mode, capture_input_mode, read_byte, restore_input_mode, wait_ready,
+)
 
 _INTERRUPT_ARMED = threading.Event()
 _INTERRUPT_EXIT = threading.Event()
@@ -83,8 +83,8 @@ def _interrupt_watcher() -> None:
     leaving ISIG enabled, so Ctrl+C still kills the process. A bare Esc (not
     the start of an arrow-key / bracketed-paste / etc. CSI sequence) sets
     _USER_INTERRUPTED. When disarmed (between turns, while the chatbox owns
-    stdin) we restore termios and park on _INTERRUPT_ARMED — doing NOTHING with
-    stdin, so the chatbox / approval prompt get every keystroke.
+    stdin) we restore the input mode and park on _INTERRUPT_ARMED — doing
+    NOTHING with stdin, so the chatbox / approval prompt get every keystroke.
 
     Single-reader invariant: this is the only thread that ever calls os.read on
     stdin, and only while armed. Parked = hands off stdin entirely. That's what
@@ -94,20 +94,13 @@ def _interrupt_watcher() -> None:
         fd = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
         return  # stdin has no fileno (pytest capture, redirect, etc.)
-    if not os.isatty(fd):
+    # Snapshot the cooked input mode once (a POSIX termios attr list or a
+    # Windows console-mode token, opaque to this module). None => no
+    # controlling terminal (pytest capture, redirect) => the watcher can't
+    # run, matching the old early-return.
+    old = capture_input_mode(fd)
+    if old is None:
         return
-    try:
-        old: list[Any] = termios.tcgetattr(fd)
-    except Exception:
-        return
-    new: list[Any] = old[:]
-    # Keep ISIG enabled: clearing it turns Ctrl+C into an ordinary \x03 byte,
-    # which this Esc-only watcher would discard instead of letting the tty
-    # generate SIGINT.
-    new[3] &= ~(termios.ECHO | termios.ICANON)
-    new[0] &= ~termios.ICRNL
-    new[6][termios.VMIN] = 0
-    new[6][termios.VTIME] = 0
     last_fire = 0.0
     while not _INTERRUPT_EXIT.is_set():
         # Park until a generation arms us. While parked we touch stdin NOT AT
@@ -116,18 +109,20 @@ def _interrupt_watcher() -> None:
         if not _INTERRUPT_ARMED.is_set() or _INTERRUPT_EXIT.is_set():
             continue
         # We're armed: take stdin into raw mode for the duration of generation.
+        # ISIG (POSIX) / ENABLE_PROCESSED_INPUT (Windows) stays ON so Ctrl+C
+        # still generates SIGINT instead of arriving as a byte this Esc-only
+        # watcher would discard.
         try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, new)
+            apply_interrupt_mode(fd, old)
         except Exception:
             _INTERRUPT_RESTORED.set()  # never armed — nothing to restore
             return
         try:
             while _INTERRUPT_ARMED.is_set() and not _INTERRUPT_EXIT.is_set():
-                r, _, _ = select.select([fd], [], [], 0.1)
-                if not r:
+                if not wait_ready(fd, 0.1):
                     continue
                 try:
-                    c = os.read(fd, 1)
+                    c = read_byte(fd)
                 except OSError:
                     _INTERRUPT_RESTORED.set()  # dying — unblock main's wait
                     return
@@ -136,10 +131,9 @@ def _interrupt_watcher() -> None:
                 # Could be bare Esc OR the lead byte of an escape sequence
                 # (arrow keys, Home/End, bracketed paste, etc.). Wait up to 50ms
                 # for more bytes; if none arrive, it's a bare Esc.
-                r2, _, _ = select.select([fd], [], [], 0.05)
-                if r2:
+                if wait_ready(fd, 0.05):
                     try:
-                        os.read(fd, 1)  # swallow the rest of the sequence
+                        read_byte(fd)  # swallow the rest of the sequence
                     except OSError:
                         pass
                     continue
@@ -156,32 +150,31 @@ def _interrupt_watcher() -> None:
                 # those keystrokes silently discarded — capture them below
                 # instead of just discarding non-Esc bytes.
                 if _INTERRUPT_CAPTURE_REDIRECT.is_set():
-                    st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, new)
+                    st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, old)
                     st._INTERRUPT_REDIRECT_SUBMITTED = st._INTERRUPT_REDIRECT_TEXT.endswith("\n")
                     st._INTERRUPT_REDIRECT_TEXT = st._INTERRUPT_REDIRECT_TEXT.rstrip("\n")
         finally:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            except Exception:
-                pass
-            # Signal main that termios has been restored to cooked mode.
-            # main waits on this after clearing _INTERRUPT_ARMED so the chatbox
-            # never captures our raw-mode termios as its "old" state.
+            restore_input_mode(fd, old)
+            # Signal main that input mode has been restored to cooked. main
+            # waits on this after clearing _INTERRUPT_ARMED so the chatbox
+            # never captures our raw-mode attrs as its "old" state.
             _INTERRUPT_RESTORED.set()
 
 
-def _drain_redirect_text(fd: int, raw_termios: list[Any]) -> str:
+def _drain_redirect_text(fd: int, old_mode: Any) -> str:
     """After a bare Esc fires, keep reading stdin (still in raw mode) for a
     short grace window so a user typing a redirect right away isn't cut off
     mid-word. Returns the typed text, ending in "\n" if Enter was pressed
     before the window closed (a full line, ready to inject immediately) or
-    without it if the window simply ran out (a partial line, used as a
-    prefill for the next chatbox prompt instead).
+    without it if the window simply ran out (a partial line, used as a prefill
+    for the next chatbox prompt instead).
 
     Deliberately dumb: no arrow-key/history support, backspace only. This is
     a stopgap capture buffer for the handoff window, not a second input
     widget — full editing happens in the chatbox once the redirect is either
-    injected or handed over as a prefill.
+    injected or handed over as a prefill. `old_mode` (the captured input
+    mode) is accepted for call-site symmetry but unused — the drain assumes
+    the caller already put the fd into raw mode and only reads bytes.
     """
     buf: list[str] = []
     deadline = time.time() + 2.0  # generous — covers stream-close + tool teardown
@@ -191,11 +184,10 @@ def _drain_redirect_text(fd: int, raw_termios: list[Any]) -> str:
     # collapse the 2s typing window down to near-zero, silently dropping
     # whatever the user typed. Only the deadline or process exit should stop us.
     while not _INTERRUPT_EXIT.is_set() and time.time() < deadline:
-        r, _, _ = select.select([fd], [], [], 0.05)
-        if not r:
+        if not wait_ready(fd, 0.05):
             continue
         try:
-            c = os.read(fd, 1)
+            c = read_byte(fd)
         except OSError:
             break
         if c in (b"\r", b"\n"):
@@ -248,7 +240,7 @@ def _watch_for_interrupts():
     """Arm the singleton watcher for an interruptible operation.
 
     Model streaming and PID polling both need exclusive ownership of stdin
-    while Esc is meaningful. Keeping the arm/disarm and termios-restore
+    while Esc is meaningful. Keeping the arm/disarm and input-mode-restore
     handshake here makes those windows identical, and guarantees the watcher
     is parked again before the chatbox or another operation can read input.
     """
@@ -263,10 +255,10 @@ def _watch_for_interrupts():
     finally:
         _INTERRUPT_ARMED.clear()
         # _drain_redirect_text's own deadline is 2.0s; wait past it so we never
-        # proceed while the watcher still holds raw termios mid-drain.
+        # proceed while the watcher still holds raw input mode mid-drain.
         if not _INTERRUPT_RESTORED.wait(timeout=2.5):
             print(
-                "nx: warning: interrupt watcher did not confirm termios "
+                "nx: warning: interrupt watcher did not confirm input-mode "
                 "restore within 2.5s; terminal state may be stale",
                 file=sys.stderr,
             )
