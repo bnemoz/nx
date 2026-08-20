@@ -519,6 +519,102 @@ def test_repl_recover_command_forces_visible_checkpoint():
     print("PASS — /recover forces a low-temp visible checkpoint")
 
 
+# ---------------------------------------------------------------------------
+# 9. Text-only after stall nudge: real-work summary is accepted, not re-nudged
+# ---------------------------------------------------------------------------
+def test_text_only_after_stall_accepts_final_summary_after_toolwork():
+    # Regression for a too-aggressive "TEXT-ONLY AFTER STALL NUDGE". Once a
+    # reasoning-stall nudge has fired, the stall counter is kept across later
+    # tool calls (it does not reset — see _run_model_turn_loop). So after the
+    # model DOES act (a tool call lands, leaving a `tool` result as the last
+    # message) and then returns a text-only final summary, the old guard saw
+    # reasoning_loop_cut_count > 0 and nudged anyway — rejecting a correct
+    # finished answer and wasting turns. The last-message-is-tool-result check
+    # must suppress the nudge here: the summary is a real final answer.
+    saved_open_stream = m.open_stream
+    saved_watcher = m._interrupt_watcher
+    saved_spinner = m.LifeSpinner
+    saved_retries = m.REASONING_ONLY_RETRY_LIMIT
+    m._interrupt_watcher = lambda: None
+    m.REASONING_ONLY_RETRY_LIMIT = 3
+    m.LifeSpinner = type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+    builtins.print = lambda *a, **k: None
+    # A text-only reply (content, no tool calls): the model finished and is
+    # summarizing completed work.
+    chunks = [_FakeChunk(_FakeDelta(content="All done — the fix is in."), finish_reason="stop")]
+    m.open_stream = lambda messages, **kw: iter(chunks)
+    try:
+        messages = [{"role": "system", "content": m.SYSTEM},
+                    {"role": "user", "content": "answer me"},
+                    # A stall nudge fired earlier in the conversation ...
+                    {"role": "assistant", "content": "[stalled reasoning]"},
+                    {"role": "user", "content": "[Runtime note: nudge to act]"},
+                    # ... the model then acted (tool call) ...
+                    {"role": "assistant", "content": ""},
+                    {"role": "tool", "content": "result of the action"}]
+        # reasoning_loop_cut_count=1 > 0 (a stall already happened), under the
+        # limit of 3 — exactly the condition that used to spuriously nudge.
+        status = m.model_turn(messages, reasoning_loop_cut_count=1)
+        assert status == m.TURN_DONE, f"expected TURN_DONE, got {status!r}"
+        # No second nudge appended: the last message stays the tool result,
+        # and the model's summary is preserved as the assistant turn.
+        assert messages[-1] == {"role": "assistant", "content": "All done — the fix is in."}
+    finally:
+        m.open_stream = saved_open_stream
+        m._interrupt_watcher = saved_watcher
+        m.LifeSpinner = saved_spinner
+        m.REASONING_ONLY_RETRY_LIMIT = saved_retries
+        builtins.print = _REAL_PRINT
+    print("PASS — text-only summary after toolwork accepted, not re-nudged")
+
+
+def test_text_only_after_stall_nudges_when_nudge_is_last_message():
+    # The legitimate case the guard was written for: the model stalls, gets
+    # nudged, and replies with a plain restatement of intent ("Now I'll
+    # implement...") and STILL no tool call. The last message IS the nudge
+    # (a user/runtime-note), so the guard must still fire and re-nudge.
+    saved_open_stream = m.open_stream
+    saved_watcher = m._interrupt_watcher
+    saved_spinner = m.LifeSpinner
+    saved_retries = m.REASONING_ONLY_RETRY_LIMIT
+    m._interrupt_watcher = lambda: None
+    m.REASONING_ONLY_RETRY_LIMIT = 3
+    m.LifeSpinner = type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+    builtins.print = lambda *a, **k: None
+    chunks = [_FakeChunk(_FakeDelta(content="Now I'll write the file next."), finish_reason="stop")]
+    m.open_stream = lambda messages, **kw: iter(chunks)
+    try:
+        messages = [{"role": "system", "content": m.SYSTEM},
+                    {"role": "user", "content": "answer me"},
+                    {"role": "assistant", "content": "[stalled reasoning]"},
+                    {"role": "user", "content": "[Runtime note: nudge to act]"}]
+        status = m.model_turn(messages, reasoning_loop_cut_count=1)
+        assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
+        # The intent text is preserved as the assistant turn (now last), and
+        # _nudge_current_user_turn rewrites the prior user message with a fresh
+        # re-nudge (it edits in place rather than appending a new message).
+        assert messages[-1] == {"role": "assistant", "content": "Now I'll write the file next."}
+        assert messages[-2]["role"] == "user"
+        assert "Runtime note" in messages[-2]["content"]
+    finally:
+        m.open_stream = saved_open_stream
+        m._interrupt_watcher = saved_watcher
+        m.LifeSpinner = saved_spinner
+        m.REASONING_ONLY_RETRY_LIMIT = saved_retries
+        builtins.print = _REAL_PRINT
+    print("PASS — text-only intent after nudge (no tool) still re-nudged")
+
+
 if __name__ == "__main__":
     test_confirm_esc_raises()
     test_confirm_y_n()
@@ -531,4 +627,6 @@ if __name__ == "__main__":
     test_forced_final_length_marks_partial_answer()
     test_reasoning_only_empty_completion_forces_final_without_empty_assistant()
     test_repl_recover_command_forces_visible_checkpoint()
+    test_text_only_after_stall_accepts_final_summary_after_toolwork()
+    test_text_only_after_stall_nudges_when_nudge_is_last_message()
     print("\nALL ESC-APPROVAL TESTS PASSED")

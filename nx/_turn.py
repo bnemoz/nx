@@ -908,8 +908,18 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # the nudge didn't take — treating this as TURN_DONE drops the user to the
     # prompt mid-task, requiring a manual "go ahead" to get the model to
     # actually act. Nudge again instead of accepting it as a final answer.
+    #
+    # BUT only when the stall nudge is actually the last thing the model saw.
+    # If the model DID act in between — ran a tool, so the last message is a
+    # `tool` result — this text-only turn is its legitimate final summary of
+    # completed work, not a stalled restatement of intent. Nudging there
+    # rejects a correct finished answer and wastes turns re-prompting a model
+    # that already did the task. The counter (reasoning_loop_cut_count) does
+    # not reset on a tool call (see _run_model_turn_loop), so it alone can't
+    # tell the two cases apart; the message layout can.
     if (not forced_final and reasoning_loop_cut_count > 0
-            and reasoning_loop_cut_count < max(0, st.REASONING_ONLY_RETRY_LIMIT)):
+            and reasoning_loop_cut_count < max(0, st.REASONING_ONLY_RETRY_LIMIT)
+            and not _last_is_dangling_tool(messages)):
         print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
               f"intent but made no tool call; nudging to act "
               f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
