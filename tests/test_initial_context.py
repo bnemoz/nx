@@ -48,12 +48,13 @@ import nx as m  # noqa: E402
 # until a command backgrounds — currently read_file, write_file, edit_file,
 # list_dir, run_bash, search_files, git_status, git_diff, git_log, multi_edit,
 # sed_edit, apply_patch, todo_write, memory_write, memory_search) the
-# chars/3.5 content floor is ~2677; the README's figure adds ~50 of
+# chars/3.5 content floor is ~2492; the README's figure adds ~50 of
 # server-side framing. git_log + apply_patch (two new tools) plus
 # read_file/search_files list-argument params pushed the floor up from
 # ~1990; memory_write + memory_search (model-driven memory, two more tools)
-# plus the SYSTEM memory line raised it again from ~2263; the thresholds
-# track that, still flagging further bloat.
+# plus the SYSTEM memory line raised it again from ~2263; a 0.3.1 pass that
+# trimmed verbose tool descriptions brought it back under 2500; the
+# thresholds track that, still flagging further bloat.
 WARN_TOKENS = 2500  # soft: warn (don't fail) — check the README still holds
 FAIL_TOKENS = 2900  # hard: the floor has roughly grown again; README is fiction
 
