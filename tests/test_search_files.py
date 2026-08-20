@@ -115,6 +115,27 @@ def test_nonexistent_dir_surfaces_error():
     assert out.startswith("ERROR") or out.startswith("[no matches")
 
 
+def test_grep_fallback_excludes_vendored_dirs():
+    """The grep fallback must skip vendored/cache dirs (rg does this via
+    .gitignore). Regression: without --exclude-dir=.venv it would scan the
+    whole virtualenv on every call — the dominant cost of search_files."""
+    import shutil
+    if shutil.which("rg"):
+        return  # rg honors .gitignore already; nothing to assert here
+    root = os.path.join(_tmp, "venvtree")
+    os.makedirs(os.path.join(root, ".venv"), exist_ok=True)
+    os.makedirs(os.path.join(root, "src"), exist_ok=True)
+    needle = "zzz_unique_vendored_needle"
+    with open(os.path.join(root, ".venv", "dep.py"), "w") as f:
+        f.write(f"# {needle}\n")
+    with open(os.path.join(root, "src", "app.py"), "w") as f:
+        f.write(f"# {needle}\n")
+    out = m.search_files(needle, path=root)
+    assert needle in out
+    assert ".venv" not in out, "grep fallback must not descend into .venv/"
+    assert os.path.join(root, "src", "app.py") in out
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

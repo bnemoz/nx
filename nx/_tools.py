@@ -154,6 +154,17 @@ def search_files(
         output_mode = "content"
     use_rg = bool(shutil.which("rg"))
     pattern_flags = [f for p in patterns for f in ("-e", p)]
+    # Directories ripgrep skips by default (it honors .gitignore, which lists
+    # .venv/, node_modules/, __pycache__/, build/, dist/, etc.). The grep
+    # fallback does NOT read .gitignore, so without these --exclude-dir flags
+    # it recursively scans the whole virtualenv on every call — the dominant
+    # cost of search_files when rg isn't installed. The list mirrors what rg
+    # ignores out of the box; NX_SEARCH_EXCLUDE_DIRS overrides it.
+    exclude_dirs = [d.strip() for d in os.environ.get(
+        "NX_SEARCH_EXCLUDE_DIRS",
+        ".git .hg .svn .venv venv env node_modules __pycache__ .mypy_cache "
+        ".pytest_cache .ruff_cache .tox dist build .eggs",
+    ).split() if d.strip()]
     if use_rg:
         cmd = ["rg", "--no-heading", "--color=never", *pattern_flags]
         if output_mode == "files_with_matches":
@@ -170,7 +181,8 @@ def search_files(
             cmd += ["-g", str(glob)]
         cmd += ["--", str(path)]
     else:
-        cmd = ["grep", "-rE", "--color=never", "--exclude-dir=.git",
+        cmd = ["grep", "-rE", "--color=never",
+               *[f"--exclude-dir={d}" for d in exclude_dirs],
                *pattern_flags]
         if output_mode == "files_with_matches":
             cmd += ["-l"]
