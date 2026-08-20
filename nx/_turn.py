@@ -478,7 +478,8 @@ def _strip_unterminated_tool_call(text: str) -> str:
 
 def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
                      leaked_token_run: int, repeat_chunk_run: int, reasoning_only_start: Optional[float],
-                     reasoning_only_chars: int, reasoning_parts: list[str]) -> str:
+                     reasoning_only_chars: int, reasoning_parts: list[str],
+                     malformed_stream_cut_count: int = 0) -> str:
     """Recover from a streamed turn that was cut mid-flight.
 
     Handles two cases that share the "cut" path:
@@ -500,17 +501,38 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     if is_leak_collapse and not forced_final:
         collapse_type = ("special-token collapse" if leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
                          else "repetition collapse")
+        retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
+        if malformed_stream_cut_count >= retry_limit:
+            print(f"{C.ERROR}  ✗ {collapse_type} after "
+                  f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+            return TURN_DONE
         print(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
-              f"output and nudging clean recovery{RESET}")
+              f"output and nudging clean recovery "
+              f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         # Do NOT feed the degenerated reasoning/content back — it's spam
         # that would reinforce the collapse on the next turn.  Nudge fresh.
-        _nudge_current_user_turn(messages,
-            "Your previous output degenerated into a repetition collapse "
-            "(repeated special tokens or identical chunks). This is a known "
-            "failure mode — discard that output entirely. Re-orient: state "
-            "what you were trying to do in one sentence, then emit the next "
-            "concrete tool call (write_file, run_bash, or edit_file). Do not "
-            "continue the previous stream. Start fresh.")
+        # Once we've collapsed more than once on the same turn, the repeat is
+        # itself evidence the task-as-attempted is too big for the model to
+        # commit to in one shot — push it toward a smaller, incremental step
+        # instead of repeating the same "rewrite the whole thing" nudge.
+        if malformed_stream_cut_count > 0:
+            nudge = (
+                "Your previous output degenerated into a repetition collapse "
+                "again. Repeated collapses on the same task usually mean the "
+                "planned action is too large to commit to in one shot (e.g. a "
+                "full-file rewrite with many interleaved pieces to track). "
+                "Break it down: pick the SMALLEST next concrete edit (a single "
+                "edit_file/multi_edit hunk, not a full rewrite), and emit only "
+                "that tool call now — no restated plan, no prose.")
+        else:
+            nudge = (
+                "Your previous output degenerated into a repetition collapse "
+                "(repeated special tokens or identical chunks). This is a known "
+                "failure mode — discard that output entirely. Re-orient: state "
+                "what you were trying to do in one sentence, then emit the next "
+                "concrete tool call (write_file, run_bash, or edit_file). Do not "
+                "continue the previous stream. Start fresh.")
+        _nudge_current_user_turn(messages, nudge)
         return TURN_STREAM_CUT
     retry_limit = max(0, st.REASONING_ONLY_RETRY_LIMIT)
     cut_count = reasoning_loop_cut_count
@@ -815,7 +837,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         return _handle_loop_cut(
             messages, forced_final, reasoning_loop_cut_count,
             parser.leaked_token_run, parser.repeat_chunk_run, parser.reasoning_only_start,
-            parser.reasoning_only_chars, parser.reasoning_parts)
+            parser.reasoning_only_chars, parser.reasoning_parts,
+            malformed_stream_cut_count)
 
     # stats footer — prefer llama.cpp timings if present; otherwise fall back
     # to the standard streaming `usage` object (OpenAI, Z.ai, etc.); otherwise
