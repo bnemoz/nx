@@ -24,6 +24,7 @@ from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch
 from ._memory_cmd import memory_write, memory_search, _load_memory_note
 from ._metrics import _abbr
+from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
@@ -104,6 +105,13 @@ def _initial_messages() -> list[dict[str, Any]]:
     mem_note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
     if mem_note is not None:
         messages.append(mem_note)
+    # Orientation note: the real cwd (SYSTEM only says "cwd = user's current
+    # directory" without the actual path) plus a pointer at the approval-free
+    # read-only tools. Paid once per fresh session, not folded into SYSTEM so
+    # the per-turn token floor stays flat. Suppressed by NX_ORIENTATION=0.
+    orient_note = _load_orientation_note()
+    if orient_note is not None:
+        messages.append(orient_note)
     return messages
 
 
