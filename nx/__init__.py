@@ -125,6 +125,10 @@ from ._sessions_fs import (
     _session_files_newest, _session_summary_from_file, _list_sessions,
     _delete_session, _maybe_refresh_description, _resolve_session,
 )
+from ._input_history import (
+    _load_input_history, _record_input, INPUT_HISTORY_LINES_DEFAULT,
+    INPUT_HISTORY_ENTRY_CHARS,
+)
 
 # After this many user turns, nx asks the model for a short (≤70 char)
 # description of the whole conversation so far and stores it in the session
@@ -422,6 +426,12 @@ DESC_SYSTEM = (
     "current task, key files, or goal. No preamble, no quotes, no trailing "
     "punctuation. Write in the same language as the conversation."
 )
+# Global cross-run input recall (Up/Down at the prompt): how many past
+# submissions ~/.nx/input_history.json holds. 0 disables recall entirely.
+# Resolved here (not in _input_history.py) because _env_int() is defined
+# below this point; _input_history reads it lazily via `import nx as _m`.
+HISTORY_LINES = _env_int("NX_HISTORY_LINES", INPUT_HISTORY_LINES_DEFAULT)
+
 st.REASONING_ONLY_RETRY_LIMIT = _env_int("NX_REASONING_ONLY_RETRIES", 3)
 st.MALFORMED_STREAM_RETRY_LIMIT = _env_int("NX_MALFORMED_STREAM_RETRIES", 2)
 st.FORCED_FINAL_MAX_TOKENS = _env_int("NX_FORCED_FINAL_MAX_TOKENS", 2048)

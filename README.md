@@ -154,6 +154,7 @@ sessions and exits without entering the REPL.
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
 | `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
+| `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -272,7 +273,9 @@ In the REPL input box:
 - **Enter** submits; **Shift+Enter** (or **Ctrl+J**) inserts a newline.
 - **Up/Down** navigate history; **Left/Right** move within a line;
   **Home/End** jump to line start/end; **Ctrl+U** clears the line;
-  **Ctrl+C** cancels.
+  **Ctrl+C** cancels. History persists across runs (last `NX_HISTORY_LINES`
+  submissions, no slash commands) — Up on a fresh `nx` reaches earlier
+  runs' prompts.
 - **Shift+Tab** toggles YOLO mode (mirrors `/yolo`), shown live in the box
   border — also works at an approval prompt.
 - **Tab** accepts the highlighted completion.

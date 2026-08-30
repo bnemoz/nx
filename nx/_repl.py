@@ -26,6 +26,7 @@ from ._ansi import DIM, BOLD, RESET, C
 from ._mentions import expand_at_mentions
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from ._compress import _maybe_autocompress
+from ._input_history import _load_input_history, _record_input
 from . import _state as st
 from . import (
     SYSTEM, _initial_messages,
@@ -131,7 +132,10 @@ def _repl() -> None:
     if st.ACTIVE is not None:
         _ensure_ctx_probe(st.ACTIVE)
     messages = _initial_messages()
-    history = []  # past user submissions, newest last; Up/Down navigates
+    # Past user submissions, newest last; Up/Down navigates. Loaded from the
+    # global recall file (~/.nx/input_history.json) so Up reaches prior runs'
+    # prompts too — not just this session's.
+    history = _load_input_history()
 
     # --- session state ------------------------------------------------------
     # Every nx run has a session id. If the user passed --resume / -r
@@ -228,10 +232,10 @@ def _repl() -> None:
             if handler(user, state) == "break":
                 break
             continue
-        # record for history (skip duplicates of the very last entry so
-        # Up doesn't immediately re-show what was just submitted)
-        if not state.history or state.history[-1] != user:
-            state.history.append(user)
+        # Record for recall (skips slash commands and repeats of the very
+        # last entry) and persist it so a future run's Up reaches this
+        # prompt too — see _input_history.py.
+        _record_input(user, state.history)
         print()  # breathing room before the spinner/text starts
         state.messages.append({"role": "user", "content": expand_at_mentions(user)})
         try:
