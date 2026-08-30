@@ -545,8 +545,20 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         loop_detail = (
             f"{_abbr(reasoning_only_chars)} reasoning chars without content/tool calls")
     if forced_final:
-        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
-              f"returning to chat input{RESET}")
+        # tool_choice=required still didn't produce a tool call or content —
+        # some backends (reasoning models with a "thinking" phase) can burn
+        # the whole forced-final budget on reasoning and stop without ever
+        # emitting the required call. Dying here with nothing shown is worse
+        # than showing the model's own reasoning as a best-effort answer —
+        # surface it instead of leaving the user with an empty turn.
+        salvaged = _strip_unterminated_tool_call("".join(reasoning_parts)).strip()
+        if salvaged:
+            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
+                  f"showing captured reasoning as a best-effort answer{RESET}")
+            _say_console.print(salvaged)
+        else:
+            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
+                  f"returning to chat input{RESET}")
         return TURN_DONE
     if cut_count >= retry_limit:
         if retry_limit == 0:
@@ -566,9 +578,13 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
         cut_msg = (f"{reasoning_secs:.0f}s of reasoning with no "
                    f"answer/tool call (limit {REASONING_ONLY_TIME_LIMIT}s)")
-    else:
+    elif st.REASONING_ONLY_CHAR_LIMIT > 0 and \
+            reasoning_only_chars >= st.REASONING_ONLY_CHAR_LIMIT:
         cut_msg = (f"{_abbr(reasoning_only_chars)} reasoning chars with no "
                    f"answer/tool call (limit {_abbr(st.REASONING_ONLY_CHAR_LIMIT)})")
+    else:
+        cut_msg = (f"{_abbr(reasoning_only_chars)} reasoning chars with no "
+                   f"answer/tool call (stream ended empty)")
 
     # --- Feed captured reasoning back so the model can *continue* -----
     # The old behavior discarded reasoning_content entirely and appended a
