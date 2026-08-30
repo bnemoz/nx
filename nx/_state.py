@@ -137,6 +137,17 @@ MAX_MODEL_TURNS: int = 200
 REASONING_VISIBLE: bool = os.environ.get("NX_REASONING_VISIBLE", "0") not in ("0", "false", "off")
 _LAST_REASONING: str = ""
 
+# --- thinking-separation auto-config ---------------------------------------
+# Some servers (glm-5.3-flash via vLLM proxies) run a hybrid reasoning model
+# with thinking ON but never surfaced as `reasoning_content` — the private
+# reasoning streams as plain `content`, running straight into the visible
+# answer with no separator. nx/_thinking.py probes the server at startup /
+# on a source switch for a `chat_template_kwargs`-style body field that makes
+# it separate them, then attaches that field to every request. "off" disables
+# the probe and the attach entirely (server's stock behavior, merged or not).
+_mode = os.environ.get("NX_THINKING", "auto").strip().lower()
+THINKING_MODE: str = "off" if _mode in ("off", "0", "false", "no") else "auto"
+
 # --- tool-call output display --------------------------------------------
 # Whether each tool call's result preview is rendered to the terminal (the
 # box header + args lines always show, so you still see *what* was called;

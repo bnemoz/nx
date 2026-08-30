@@ -80,6 +80,14 @@ class Source:
         # (None = not yet tried) so the /source arg-completion dropdown in
         # _chatbox.py doesn't hit the network on every keystroke.
         self._model_ids: list[str] | None = None
+        # Per-model "make this server separate its reasoning" body kwargs, as
+        # probed by nx/_thinking.py (see ensure_thinking_probe). Maps model id
+        # → the extra_body dict that flips the template's thinking toggle on
+        # servers that would otherwise stream reasoning merged into `content`
+        # (glm-5.3-flash via vLLM), or → None once probed and nothing helps.
+        # Model-keyed (NOT reset on switch) so each /source <name> <model>
+        # override keeps its own answer without re-probing.
+        self._thinking_kwargs: dict[str, dict[str, Any] | None] = {}
         # Tool-calling protocol this source's model actually uses, one of
         # _capability.CAPABILITY_NATIVE / _GRAMMAR / _TEXT, or None before the
         # startup probe (nx/_capability.py: ensure_capability_probe()) lands.
@@ -106,9 +114,26 @@ class Source:
         {} when none is configured. Non-consumers ignore unknown body keys, so
         this is a no-op for backends that don't understand it (llama.cpp,
         Together, …)."""
-        if not self.extra_body:
+        body: dict[str, Any] = {}
+        if self.extra_body:
+            # Deep copy (not the shallow dict-update) so the thinking merge
+            # below can never mutate a configured EXTRA_BODY's nested dicts in
+            # place — src.extra_body must stay exactly what the user set.
+            body.update(json.loads(json.dumps(self.extra_body)))
+        # Auto-probed thinking separation (nx/_thinking.py): merge (don't
+        # overwrite) so a source's own configured EXTRA_BODY survives alongside
+        # it — same precedence rule the grammar attach in open_stream() uses.
+        from ._thinking import thinking_kwargs
+        tk = thinking_kwargs(self, st.MODEL) if st.MODEL else None
+        if tk:
+            for k, v in tk.items():
+                if isinstance(v, dict) and isinstance(body.get(k), dict):
+                    body[k].update(v)
+                else:
+                    body[k] = v
+        if not body:
             return {}
-        return {"extra_body": dict(self.extra_body)}
+        return {"extra_body": body}
 
     # Server-advertised ids that carry no real identity — when /v1/models
     # returns one of these (bare llama.cpp with no --alias, or a generic
@@ -679,6 +704,12 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
         src._capability = None
     from ._capability import ensure_capability_probe
     ensure_capability_probe(src)
+    # Probe for a thinking-separation toggle (nx/_thinking.py). Uses st.MODEL
+    # (the possibly-overridden active id), not src.model — a /source <name>
+    # <model> override can point at a thinking model the source default
+    # isn't (e.g. bubbles' glm-5.2 default vs a glm-5.3-flash override).
+    from ._thinking import ensure_thinking_probe
+    ensure_thinking_probe(src)
     return True
 
 

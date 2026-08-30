@@ -107,6 +107,15 @@ source so you can `/source together` or `/source openrouter` without defining
 Override either source's model with `/source <name> <model>`, and OpenRouter's
 provider routing with `/provider` or `NX_SOURCE_OPENROUTER_EXTRA_BODY`.
 
+**Hybrid thinking models:** some servers (glm-5.3-flash behind a vLLM proxy,
+for one) run a thinking model with its reasoning *merged* into `content` —
+no separator at all — unless the request carries a template toggle. nx
+probes each source/model once (a couple of tiny requests) for a toggle that
+makes the server separate `reasoning_content`, then attaches it to every
+request. Servers that already separate reasoning are left untouched, and
+servers that reject the extra field are unaffected. `NX_THINKING=off`
+disables the probe and the attach.
+
 ### Flags
 
 | flag | what it does |
@@ -136,6 +145,7 @@ sessions and exits without entering the REPL.
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
+| `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
 | `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
