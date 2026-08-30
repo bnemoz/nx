@@ -180,6 +180,52 @@ def test_run_tool_hides_body_when_collapsed(monkeypatch):
     assert "line one" not in text   # body hidden
 
 
+def test_edit_header_shows_target_path(monkeypatch):
+    """The box header must name the file being edited so the user can tell
+    which file an edit_file/multi_edit/write_file call targets even when the
+    truncated args preview (a big old/new diff body) buries the path."""
+    m = reload_nx()
+    m.st.TOOL_OUTPUT_VISIBLE = False
+    from nx import _dispatch as d
+    monkeypatch.setitem(d.DISPATCH, "edit_file", lambda **a: "ok")
+
+    args = {"path": "nx/_dispatch.py", "old": "x" * 200, "new": "y" * 200}
+    with capture_stdout() as out:
+        d.run_tool("edit_file", args)
+
+    text = out.getvalue()
+    # header line carries the path, independent of the (truncated) args preview
+    header_line = next(ln for ln in text.splitlines() if "edit_file" in ln)
+    assert "nx/_dispatch.py" in header_line
+
+
+def test_list_path_header_uses_first(monkeypatch):
+    m = reload_nx()
+    m.st.TOOL_OUTPUT_VISIBLE = False
+    from nx import _dispatch as d
+    monkeypatch.setitem(d.DISPATCH, "search_files", lambda **a: "no matches")
+
+    with capture_stdout() as out:
+        d.run_tool("search_files", {"pattern": "x", "path": ["a/b.py", "c.py"]})
+
+    header_line = next(ln for ln in out.getvalue().splitlines() if "search_files" in ln)
+    assert "a/b.py" in header_line
+
+
+def test_dot_path_header_stays_name_only(monkeypatch):
+    """A relative '.' path adds nothing — header should stay just the name."""
+    m = reload_nx()
+    m.st.TOOL_OUTPUT_VISIBLE = False
+    from nx import _dispatch as d
+    monkeypatch.setitem(d.DISPATCH, "list_dir", lambda **a: "ok")
+
+    with capture_stdout() as out:
+        d.run_tool("list_dir", {"path": "."})
+
+    header_line = next(ln for ln in out.getvalue().splitlines() if "list_dir" in ln)
+    assert "list_dir ." not in header_line
+
+
 def test_todo_write_always_renders(monkeypatch):
     m = reload_nx()
     m.st.TOOL_OUTPUT_VISIBLE = False

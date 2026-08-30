@@ -197,7 +197,17 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     arg_preview = json.dumps(args)
     if len(arg_preview) > 120:
         arg_preview = arg_preview[:117] + "..."
-    print(f"\n{C.ACCENT}  ┌─ {name}{RESET}")
+    # Surface the target path in the header line for path-taking tools, so the
+    # file a write_file/edit_file/multi_edit touches is obvious at a glance even
+    # when the args preview (usually a big old/new diff body) gets truncated and
+    # buries the path. Falls back to just the name when there's no usable path.
+    header = name
+    path_arg = args.get("path")
+    if isinstance(path_arg, list):
+        path_arg = path_arg[0] if path_arg else None
+    if isinstance(path_arg, str) and path_arg not in (".", ""):
+        header = f"{name} {path_arg}"
+    print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
     print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
