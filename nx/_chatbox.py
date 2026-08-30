@@ -145,9 +145,12 @@ def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
 def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:
     """Fuzzy-match `prefix` against the model ids `src_name` advertises via
     GET /models (cached on the Source after the first fetch -- see
-    Source.list_model_ids). Always leads with a "" sentinel (rendered as
-    "(default)") so a bare Enter on this dropdown submits the plain
-    `/source <name>` switch instead of forcing a model pick."""
+    Source.list_model_ids; a NX_SOURCE_<NAME>_MODELS pin replaces the fetch
+    when the server's list is stale). Always leads with a "" sentinel
+    (rendered as "(default)") so a bare Enter on this dropdown submits the
+    plain `/source <name>` switch instead of forcing a model pick. Not
+    capped: multi-model hosts can advertise dozens of ids, and the dropdown
+    window (_dropdown_window) scrolls instead of hiding them."""
     src = st.SOURCES.get(src_name)
     if src is None:
         return [("", "")]
@@ -155,6 +158,27 @@ def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:
     matches = [("", "")] if not prefix else []
     matches += [(m, "") for m in _fuzzy_filter(ids, prefix)]
     return matches
+
+
+# Dropdown rows rendered before the list scrolls. Bigger than the 6-row
+# caps on the slash/arg dropdowns because model lists (multi-model hosts,
+# aggregators) are long, unranked, and often browsed rather than typed.
+_DROPDOWN_MAX_ROWS = 8
+
+
+def _dropdown_window(n: int, sel: int, top: int) -> tuple[int, bool, bool]:
+    """Clamp a scrolling dropdown window over `n` rows so it contains row
+    `sel`. Returns (window_top, more_above, more_below). `top` is the
+    previous window top (0 after a reset) so the window only moves when the
+    selection walks off an edge — it never re-centers per keystroke."""
+    if n <= _DROPDOWN_MAX_ROWS:
+        return 0, False, False
+    top = max(0, min(top, n - _DROPDOWN_MAX_ROWS))
+    if sel < top:
+        top = sel
+    elif sel >= top + _DROPDOWN_MAX_ROWS:
+        top = sel - _DROPDOWN_MAX_ROWS + 1
+    return top, top > 0, top + _DROPDOWN_MAX_ROWS < n
 
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -362,6 +386,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
     current_kind: str | None = None
     current_at_start: int | None = None
     sel_idx = 0
+    win_top = 0  # first rendered row of a scrolling dropdown (see render)
 
     def move_up(n: int) -> str:
         return f"\x1b[{n}A" if n > 0 else ""
@@ -388,7 +413,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         return visual
 
     def render() -> None:
-        nonlocal rendered_lines, cursor_line, current_matches, current_kind, current_at_start, sel_idx
+        nonlocal rendered_lines, cursor_line, current_matches, current_kind, current_at_start, sel_idx, win_top
         width = shutil.get_terminal_size((80, 24)).columns
         box_w = max(20, width - 2)
         inner_w = max(1, box_w - 2)
@@ -439,7 +464,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             kind = "arg"
         elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
             _cmd, src_name, rest = buf[0].split(" ", 2)
-            matches = _match_source_model(src_name, rest)[:6]
+            matches = _match_source_model(src_name, rest)
             kind = "arg2"
         else:
             at_tok = _at_token_at_cursor(buf[row], col)
@@ -449,12 +474,20 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
                 kind = "file"
         if matches != current_matches:
             sel_idx = 0
+            win_top = 0
         elif sel_idx >= len(matches):
             sel_idx = max(0, len(matches) - 1)
         current_matches = matches
         current_kind = kind
         current_at_start = at_start
-        for i, (cmd, desc) in enumerate(matches):
+        # Scroll window: rows beyond _DROPDOWN_MAX_ROWS stay reachable via
+        # ↑/↓ (and PageUp/PageDown) instead of being silently cut off.
+        win_top, more_above, more_below = _dropdown_window(
+            len(matches), sel_idx, win_top)
+        if more_above:
+            lines.append(f"{DIM}  ···{RESET}")
+        for i, (cmd, desc) in enumerate(
+                matches[win_top:win_top + _DROPDOWN_MAX_ROWS], start=win_top):
             if kind == "file":
                 label = f"@{cmd}"
             elif kind == "arg2" and cmd == "":
@@ -465,6 +498,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             pad_w = box_w - 2 - _str_width(f"{label}  {desc}" if desc else label)
             marker = "› " if i == sel_idx else "  "
             lines.append(f"{DIM}{marker}{RESET}{text}{' ' * max(0, pad_w)}")
+        if more_below:
+            lines.append(f"{DIM}  ···{RESET}")
 
         redraw_rows = max(rendered_lines, len(lines))
         out = "\r" + move_up(cursor_line)
@@ -578,6 +613,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             elif history and h_idx < len(history):
                 h_idx += 1
                 load_from_history("" if h_idx == len(history) else history[h_idx])
+            return
+        # PageUp/PageDown: jump a whole dropdown window at a time (clamped,
+        # not wrapping) so long model lists stay browsable.
+        if seq in ("[5~", "[6~") and current_matches:
+            step = _DROPDOWN_MAX_ROWS if seq == "[6~" else -_DROPDOWN_MAX_ROWS
+            sel_idx = max(0, min(len(current_matches) - 1, sel_idx + step))
             return
         if seq in ("[1;5C", "[1;3C", "[5C"):
             word_right()

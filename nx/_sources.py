@@ -44,7 +44,8 @@ from . import _state as st
 class Source:
     def __init__(self, name: str, base_url: str | None, api_key: str | None,
                  model: str | None = None, extra_body: dict[str, Any] | None = None,
-                 http_headers: dict[str, str] | None = None):
+                 http_headers: dict[str, str] | None = None,
+                 pinned_models: str | None = None):
         self.name = name
         self.base_url = base_url
         if base_url and not re.search(r"/v\d+/?$", base_url):
@@ -73,6 +74,14 @@ class Source:
         # /source <name> <model> override pins a different model id).
         self._context_window = None
         self._context_window_probe_attempted = False
+        # Optional user-pinned list of model ids for this source (sorted,
+        # de-duplicated). Set via NX_SOURCE_<NAME>_MODELS (comma-separated)
+        # when the server's GET /models is stale — proxies that keep retired
+        # models listed (and newer ones missing) would otherwise steer the
+        # /source <name> <model> dropdown. Empty/whitespace entries are
+        # dropped. list_model_ids() serves this instead of the network.
+        self._pinned_model_ids = sorted({m.strip() for m in (pinned_models or "")
+                                          .split(",") if m.strip()}) or None
         # Whether this source's /tokenize endpoint has been confirmed working
         # (True), confirmed absent/broken (False), or not yet tried (None).
         self._tokenize_ok = None
@@ -337,10 +346,18 @@ class Source:
         return self._context_window
 
     def list_model_ids(self, force: bool = False) -> list[str]:
-        """Model ids advertised by this source's GET /models, cached after
-        the first successful fetch. Best-effort: network/parse failures
-        return [] (and aren't cached, so a later retry can succeed once the
-        server's up). Used by the /source arg-completion dropdown."""
+        """Model ids advertised by this source, cached after the first
+        successful fetch. Best-effort: network/parse failures return [] (and
+        aren't cached, so a later retry can succeed once the server's up).
+        Used by the /source arg-completion dropdown.
+
+        An NX_SOURCE_<NAME>_MODELS pin (self._pinned_model_ids) replaces the
+        fetch entirely — trust the user's list over a server that keeps
+        retired models listed (stale proxies) or omits new ones. `force`
+        re-fetches/keeps the pin, so it stays an escape hatch for genuine
+        server changes too (drop the env var or edit its list)."""
+        if self._pinned_model_ids is not None:
+            return list(self._pinned_model_ids)
         if self._model_ids is not None and not force:
             return self._model_ids
         try:
@@ -589,7 +606,8 @@ def _discover_sources() -> None:
             os.environ.get(p + "APP_NAME"),
             os.environ.get(p + "APP_URL"))
         src = Source(name, base_url, api_key, model, extra_body=extra_body,
-                     http_headers=http_headers)
+                     http_headers=http_headers,
+                     pinned_models=os.environ.get(p + "MODELS"))
         st.SOURCES[name] = src
         st.SOURCE_ORDER.append(name)
     if not st.SOURCES:

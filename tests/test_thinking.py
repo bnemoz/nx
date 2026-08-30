@@ -210,27 +210,50 @@ print("TEST 7: ensure_thinking_probe caches per model id, no re-probe")
 cli = _Recorder(merged_handler)
 src = _make_source(cli)
 m.st.MODEL = "glm-5.3-flash"
-th.ensure_thinking_probe(src, "glm-5.3-flash")
-for _ in range(100):
-    if "glm-5.3-flash" in src._thinking_kwargs:
-        break
-    time.sleep(0.05)
-got = src._thinking_kwargs.get("glm-5.3-flash")
-print(f"  cached: {got}")
-assert got == {"chat_template_kwargs": {"thinking": True}}
-n_req = len(cli.requests)
-th.ensure_thinking_probe(src, "glm-5.3-flash")
-time.sleep(0.15)
-assert len(cli.requests) == n_req, "re-probing an already-cached model"
-assert n_req == 2, f"probe should have made 2 requests, made {n_req}"
-# A different model id on the SAME source is probed separately.
-th.ensure_thinking_probe(src, "glm-5.2")
-for _ in range(100):
-    if "glm-5.2" in src._thinking_kwargs:
-        break
-    time.sleep(0.05)
-assert src._thinking_kwargs.get("glm-5.2") == {"chat_template_kwargs": {"thinking": True}}
-m.st.MODEL = None
+# Hermetic lock: the real STARTUP_PROBE_LOCK serializes this background
+# probe against capability/context probes. In a full-suite run, earlier
+# modules (test_sources.py's import-time switch_source calls) leave a live
+# probe holding that lock for real network-timeout seconds, which
+# intermittently starved the 5s cache wait below — a cross-module race,
+# not a thinking-probe behavior. Swap in a no-op lock for this test only;
+# the probe talks solely to the fake client above either way.
+import nx._capability as _cap  # noqa: E402
+
+
+class _NullLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_real_lock = _cap.STARTUP_PROBE_LOCK
+_cap.STARTUP_PROBE_LOCK = _NullLock()
+try:
+    th.ensure_thinking_probe(src, "glm-5.3-flash")
+    for _ in range(100):
+        if "glm-5.3-flash" in src._thinking_kwargs:
+            break
+        time.sleep(0.05)
+    got = src._thinking_kwargs.get("glm-5.3-flash")
+    print(f"  cached: {got}")
+    assert got == {"chat_template_kwargs": {"thinking": True}}
+    n_req = len(cli.requests)
+    th.ensure_thinking_probe(src, "glm-5.3-flash")
+    time.sleep(0.15)
+    assert len(cli.requests) == n_req, "re-probing an already-cached model"
+    assert n_req == 2, f"probe should have made 2 requests, made {n_req}"
+    # A different model id on the SAME source is probed separately.
+    th.ensure_thinking_probe(src, "glm-5.2")
+    for _ in range(100):
+        if "glm-5.2" in src._thinking_kwargs:
+            break
+        time.sleep(0.05)
+    assert src._thinking_kwargs.get("glm-5.2") == {"chat_template_kwargs": {"thinking": True}}
+finally:
+    _cap.STARTUP_PROBE_LOCK = _real_lock
+    m.st.MODEL = None
 print("  PASS\n")
 
 # --- Test 8: malformed response shapes degrade to None -----------------------

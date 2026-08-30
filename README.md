@@ -88,6 +88,12 @@ NX_SOURCE_ZAI_MODEL=glm-x-preview
 See [`sources.example.env`](sources.example.env) for a full annotated example.
 Context is preserved across `/source` switches (`/reset` for a clean slate).
 
+The `/source <name> <model>` dropdown lists the ids the server advertises
+via `GET /v1/models` and scrolls when the list is long (↑/↓, PageUp/PageDown).
+When a proxy's list is stale (retired models still listed, new ones missing),
+pin the true lineup with `NX_SOURCE_<NAME>_MODELS` — see
+[`sources.example.env`](sources.example.env).
+
 Each source's max context window is probed once and cached, shown in the
 `/source` list and the per-turn `ctx 12K/150K` footer (colorized green/yellow/red
 by fullness). At `NX_AUTOCOMPRESS_PERCENT` (default 85%) of the window, older
@@ -140,7 +146,7 @@ sessions and exits without entering the REPL.
 | --- | --- |
 | `NX_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` |
 | `NX_BASE_URL` / `NX_MODEL` / `NX_API_KEY` | single-source config |
-| `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints |
+| `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (`NX_SOURCE_<NAME>_MODELS` pins a source's model-id dropdown list when its `GET /v1/models` is stale) |
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` |
