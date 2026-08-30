@@ -9,20 +9,23 @@ undocumented everywhere else.
 A slash command has **three** touch points. Miss one and the command "works"
 but is broken in a way that's easy to not notice:
 
-1. **Dispatch** — `nx/_repl.py`, the `if user == "/x" or user.startswith("/x "):`
-   chain in the main REPL loop. This is where the command actually runs.
+1. **Dispatch** — `nx/_repl.py`, the `_REPL_COMMANDS` dict (command → handler
+   from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py`).
+   This is where the command actually runs.
 2. **Chatbox hint menu** — `nx/_chatbox.py`, the `SLASH_COMMANDS` list
    (`(command, description)` tuples). Drives the autocomplete dropdown when
    typing `/`. A command missing here still works if typed in full, but users
    who rely on the menu will never discover it.
 3. **README** — the `## Commands` table. User-facing reference doc.
 
-All three must be updated together for a new command. When reviewing a diff
-that adds a command, grep for the command string across all three files
-before considering it done:
+Also add the command to `_HELP_COMMANDS` in `_repl_settings_cmds.py` (the
+`/help` output) — a fourth touch point that's easy to miss. All four must be
+updated together for a new command. When reviewing a diff that adds a
+command, grep for the command string across all four files before
+considering it done:
 
 ```bash
-grep -rn '"/yourcommand"' nx/_repl.py nx/_chatbox.py README.md
+grep -rn '"/yourcommand"' nx/_repl.py nx/_chatbox.py nx/_repl_settings_cmds.py README.md
 ```
 
 If `/help`-style guidance text exists inline for the command (e.g. the

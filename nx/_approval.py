@@ -9,6 +9,11 @@ classifier call.
   "medium" -> auto-approve low + medium (edits, cp, mv, tests); prompt high
   "high"   -> auto-approve low + medium + high
 
+On top of the level threshold, a persistent per-pattern allowlist
+(nx/_allowed.py) can auto-allow specific action shapes the user blessed with
+`A` at a prompt (or /approval allow) — checked BEFORE the classifier call, so
+an allowed action costs no model round-trip.
+
 Also owns the interactive Y/n/esc prompt (_ask_approval), the top-level
 _confirm() gate every write/edit/bash tool call goes through, and the
 _EscToChat control-flow exception that lets the user bail out of an
@@ -142,26 +147,32 @@ class _EscToChat(Exception):
     pass
 
 
-def _ask_approval(prompt: str) -> str:
+def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
     """Read a single keypress for a Y/n/esc approval prompt. Returns one of
-    'y', 'n', 'esc'. Esc is accepted both as the bare Esc key (read in raw
-    mode) and as the letter 'e'/'E' for terminals where raw mode isn't
+    'y', 'n', 'esc', 'always'. Esc is accepted both as the bare Esc key (read
+    in raw mode) and as the letter 'e'/'E' for terminals where raw mode isn't
     usable. Falls back to line-based `input()` when stdin isn't a TTY.
 
     Only an explicit Y (or Enter, the documented default) permits an action.
     Invalid input is discarded and the prompt is shown again; it must never
     inherit the default approval, especially for high-risk actions.
+    `allow_hint` (the action string) enables the `a` key: "always allow
+    actions matching this shape" — the prompt advertises [Y/n/a/esc] and the
+    saved rule auto-allows future matches via nx/_allowed.py.
     """
+    keys_hint = "[Y/n/a/esc]" if allow_hint else "[Y/n/esc]"
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         ans = input(prompt).strip().lower()
         if ans in ("", "y", "yes"):
             return "y"
         if ans in ("esc", "e", "\x1b"):
             return "esc"
+        if ans in ("a", "always"):
+            return "a"
         if ans == "n":
             return "n"
-        print("Unrecognized response; please enter Y, n, or esc.")
-        return _ask_approval(prompt)
+        print("Unrecognized response; please enter Y, n, a (always), or esc.")
+        return _ask_approval(prompt, allow_hint)
     fd = sys.stdin.fileno()
     with raw_mode(fd):
         sys.stdout.write(prompt)
@@ -198,12 +209,12 @@ def _ask_approval(prompt: str) -> str:
                     sys.stdout.write(
                         f"{DIM}\n  yolo {on}  approval={_approval_display()}{RESET}\n")
                     sys.stdout.flush()
-                    return _ask_approval(prompt)
+                    return _ask_approval(prompt, allow_hint)
                 # Any other non-bare-Esc sequence (arrow keys, Home/End,
                 # bracketed paste, …) is meaningless at a Y/n/esc prompt.
                 sys.stdout.write(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}\n")
                 sys.stdout.flush()
-                return _ask_approval(prompt)
+                return _ask_approval(prompt, allow_hint)
             sys.stdout.write(f"{DIM}esc{RESET}\n")
             sys.stdout.flush()
             return "esc"
@@ -214,12 +225,14 @@ def _ask_approval(prompt: str) -> str:
             shown, result = "Y", "y"
         elif c in ("n", "N"):
             shown, result = "n", "n"
+        elif c in ("a", "A") and allow_hint:
+            shown, result = "A (always allow this shape)", "a"
         elif c in ("e", "E"):
             shown, result = "esc", "esc"
         else:
             sys.stdout.write(f"{DIM}unrecognized response; please press Y, n, or esc{RESET}\n")
             sys.stdout.flush()
-            return _ask_approval(prompt)
+            return _ask_approval(prompt, allow_hint)
         sys.stdout.write(f"{DIM}{shown}{RESET}\n")
         sys.stdout.flush()
         return result
@@ -233,18 +246,33 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     Flow:
       1. YOLO → True (no call, no prompt). `preview` is still printed so
          diffs stay colored instead of falling back to plain tool-output text.
-      2. Ask the model for a risk level (skipped in step 1).
-      3. If APPROVE_LEVEL is set and level ≤ APPROVE_LEVEL → auto-allow,
+      2. A saved allow rule (from a previous `A` / /approval allow) matching
+         this action → True, before any classifier round-trip.
+      3. Ask the model for a risk level (skipped in step 1).
+      4. If APPROVE_LEVEL is set and level ≤ APPROVE_LEVEL → auto-allow,
          printing `preview` (if given) after the auto-allow line.
-      4. Otherwise prompt (Y/n/esc), showing the level + reason so the user
+      5. Otherwise prompt (Y/n/a/esc), showing the level + reason so the user
          has context. If `preview` (e.g. a diff from `_diff_preview`) is
-         given, it's printed just above the prompt.
+         given, it's printed just above the prompt. `a` saves a persistent
+         allow rule for this action's shape (see nx/_allowed.py).
 
     Reads module globals YOLO and APPROVE_LEVEL at call time — /yolo and
     /approval reassign them mid-session, and we must always see the latest
     value, not a snapshot from when the tool function was defined.
     """
     if st.YOLO:
+        if preview:
+            print(preview)
+        return True
+    # Saved allow rules ("A" at a previous prompt, /approval allow) come
+    # before the risk classifier: an explicitly-blessed action shape needs no
+    # model round-trip and never prompts, regardless of the level threshold.
+    from ._allowed import check_allow, _allowlist_tool
+    hit = check_allow(_allowlist_tool(action), action)
+    if hit is not None:
+        pattern, scope = hit
+        short = action if len(action) <= 80 else action[:77] + "..."
+        print(f"{DIM}  ↳ auto-allow [rule: {pattern!r} ({scope})] {short}{RESET}")
         if preview:
             print(preview)
         return True
@@ -283,9 +311,20 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             print(preview)
         choice = _m._ask_approval(
             f"{C.WARNING}  allow {action}? {lvl_color}[risk: {level.upper()} — {short}]{RESET} "
-            f"{C.WARNING}[Y/n/esc] {RESET}")
+            f"{C.WARNING}[Y/n/a/esc] {RESET}", allow_hint=action)
         if choice == "esc":
             raise _EscToChat(action)
+        if choice == "a":
+            # Save a persistent allow rule derived from this action, then run.
+            # The rule matches the exact shape shown above (tool + path/command
+            # prefix), so a one-off permission never silently widens into yolo.
+            from ._allowed import add_rule, _rule_from_action
+            rule = add_rule(*_rule_from_action(action))
+            print(f"{DIM}  ↳ always allowing {rule['tool']} {rule['pattern']!r} "
+                  f"({rule['scope']}) — /approval allow list to review{RESET}")
+            if preview:
+                print(preview)
+            return True
         return choice != "n"
     finally:
         if sp is not None and paused:

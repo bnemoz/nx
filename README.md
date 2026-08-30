@@ -144,7 +144,8 @@ sessions and exits without entering the REPL.
 
 | env var | what it does |
 | --- | --- |
-| `NX_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` |
+| `NX_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` (`/approval set-default <level>` rewrites it from the REPL) |
+| `NX_ALLOWED_FILE` | the approval allowlist JSON (default `~/.nx/allowed.json`); rules are saved with `A` at an approval prompt or `/approval allow` and auto-allow matching actions before the risk classifier runs |
 | `NX_BASE_URL` / `NX_MODEL` / `NX_API_KEY` | single-source config |
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (`NX_SOURCE_<NAME>_MODELS` pins a source's model-id dropdown list when its `GET /v1/models` is stale) |
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
@@ -156,6 +157,13 @@ sessions and exits without entering the REPL.
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
+| `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor) |
+| `NX_VISION` | offer the `read_image` tool on native-tool-call sources (default off; requires the backend to accept image content parts) |
+| `NX_IMAGE_MAX_BYTES` | max image size `read_image` will load into context (default 8 MB) |
+| `NX_PRE_TOOL_HOOK` / `NX_POST_TOOL_HOOK` | shell command run around every tool call with `{tool, args(, result)}` JSON on stdin; a non-zero pre-hook exit vetoes the call (10s timeout, fail-closed) |
+| `NX_BASH_MAX_SECONDS` | watchdog: reap a backgrounded `run_bash` job after N seconds (SIGTERM→SIGKILL; default 0 = off) |
+| `NX_BASH_PROMPT_SECRETS` | `1` forces the approval prompt when a `run_bash` command looks like it carries a credential (sk-/ghp_/AKIA/PEM…), even in yolo |
+| `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 200) |
@@ -245,15 +253,20 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/source [name] [model]` | list sources, switch to one, or override its model |
 | `/provider [source] [a,b,…\|off]` | show or set OpenRouter provider-routing order |
 | `/yolo` | toggle auto-approve for writes and bash |
-| `/approval [level]` | show or set risk threshold (all/low/medium/high/yolo) |
+| `/approval [level]` | show or set risk threshold (`all`/`low`/`medium`/`high`/`yolo`; session-only)
+| `/approval set-default <level>` | persist the default approval mode to `~/.env` |
+| `/approval allow …` | manage the persistent allowlist: `list`, `forget <n>`, `forget-all`, or save `<tool> <pattern>` |
 | `/theme [name]` | list color themes, or switch to one |
 | `/reasoning on\|off\|last` | toggle or show the reasoning trace |
 | `/tooloutput on\|off\|last` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
-| `/sessions [n]` / `/resume [target]` | list or resume a past session |
+| `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search) |
+| `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|list` | manage persistent memory |
-| `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim) |
+| `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive) |
+| `/ctx [pin\|unpin\|clear]` | per-message token breakdown; pin turns so every later compress keeps them verbatim |
+| `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
 | `/undo` | revert the last write/edit (LIFO) |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
@@ -300,7 +313,15 @@ cheap model call before it runs:
 
 The prompt shows the risk reason (`[risk: HIGH — recursive force delete in
 /tmp]`) so you have context for the decision. **Y**/Enter approves, **n**
-denies, **Esc** stops the turn and drops back to the prompt.
+denies, **a** saves a persistent allow rule for this action's shape (an
+`edit src/main.py` prompt blesses future edits in that file; a `run: pytest -q`
+prompt blesses future pytest runs — reviewed with `/approval allow list`),
+**Esc** stops the turn and drops back to the prompt. Saved rules are checked
+before the risk classifier, so an allowed action costs no model round-trip.
+
+Read-only tool calls in an all-read-only turn (e.g. three `read_file` calls
+plus a `search_files`) execute concurrently; anything mutating or
+approval-gated keeps strict sequential dispatch.
 
 ## Sessions
 
@@ -322,8 +343,9 @@ go through the approval gate above.
 | --- | --- | --- |
 | `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list |
 | `write_file` | `path`, `content` | overwrites; requires confirmation |
-| `edit_file` | `path`, `old`, `new` | `old` must match exactly once (or `replace_all`) |
+| `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly |
 | `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation |
+| `delete_file` | `path` | delete one file; restorable via `/undo` (unlike `rm` via bash) |
 | `sed_edit` | `pattern`, `replacement`, `path` | regex find/replace over a file or glob |
 | `apply_patch` | `diff`, `path?` | apply a unified diff; for multi-file restructure |
 | `list_dir` | `path`, `pattern?` | flat list, or recursive glob (`**/*.py`) |
@@ -336,6 +358,8 @@ go through the approval gate above.
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; read-only |
+| `spawn_agent` | `instruction`, `max_turns?` | delegate a read-only investigation to a sub-agent (`NX_SUBAGENTS=1`) |
+| `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
 or any `run_bash`. `wait_background` is omitted from the tool schemas sent to

@@ -43,6 +43,7 @@ from ._sessions_cmd import (
     _print_session_list, _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
     _cmd_sessions, _cmd_resume, _cmd_delete,
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
+    _cmd_export,
 )
 from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
@@ -53,6 +54,7 @@ from ._repl_settings_cmds import (
     _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
+    _cmd_ctx, _cmd_cost,
 )
 
 
@@ -92,6 +94,8 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/provider": _cmd_provider,
     "/resources": _cmd_resources,
     "/resmon": _cmd_resources,
+    "/ctx": _cmd_ctx,
+    "/cost": _cmd_cost,
     "/bg": _cmd_bg,
     "/yolo": _cmd_yolo,
     "/approval": _cmd_approval,
@@ -106,6 +110,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/autocompress": _cmd_autocompress,
     "/sessions": _cmd_sessions_handler,
     "/resume": _cmd_resume_handler,
+    "/export": _cmd_export,
     "/save": _cmd_save,
     "/memory": _cmd_memory_handler,
     "/delete": _cmd_delete_handler,

@@ -316,7 +316,9 @@ def _cmd_sessions(user: str, current_id: str | None) -> None:
     sessions = _list_sessions(limit=50)
     sid = _resolve_session(arg, sessions)
     if not sid:
-        print(f"{C.WARNING}  no session matching {arg!r}{RESET}")
+        # Not a title/id match — try full-text body search (FTS5) before
+        # giving up. "which session touched _turn.py?" shouldn't need scrolling.
+        _print_session_body_search(arg)
         return
     data = _load_session(sid)
     if not data:
@@ -329,6 +331,28 @@ def _cmd_sessions(user: str, current_id: str | None) -> None:
     print(f"{DIM}  messages: {len(msgs)} · updated {_fmt_when(data.get('updated_at', 0))}{RESET}")
     print(f"{DIM}  ── transcript ──{RESET}")
     _print_transcript(msgs)
+
+
+def _print_session_body_search(query: str, limit: int = 10) -> None:
+    """Print FTS matches over session bodies for a /sessions <query> that
+    didn't match any title/id. Degrades to the old 'no session matching'
+    message when the index is unavailable or the query isn't valid FTS."""
+    from ._sessions_search import search_sessions
+    try:
+        hits = search_sessions(query, limit=limit)
+    except Exception:
+        hits = []
+    if not hits:
+        print(f"{C.WARNING}  no session matching {query!r}{RESET}")
+        return
+    print(f"{DIM}  sessions containing {query!r}:{RESET}")
+    for h in hits:
+        title = h.get("title") or "(untitled)"
+        print(f"{DIM}   · {h['id'][:12]}  {title}{RESET}")
+        snippet = h.get("snippet") or ""
+        if snippet:
+            print(f"{DIM}     {snippet[:160]}{RESET}")
+    print(f"{DIM}  /resume <n|short-id|title> to open one (body matches: /sessions <query>){RESET}")
 
 
 def _cmd_resume(user: str, current_id: str | None) -> str | None:
@@ -405,6 +429,36 @@ def _cmd_delete(target: str | None, current_id: str | None) -> None:
 
 def _cmd_sessions_handler(user: str, state: _ReplState) -> None:
     _cmd_sessions(user, state.session_id)
+
+
+def _cmd_export(user: str, state: _ReplState) -> None:
+    """/export [md] [path] — write the current session to a markdown file.
+    Default path: nx-export-<session-id>.md in the project root."""
+    import nx as _m
+    from ._sessions_search import export_markdown
+    parts = user.split()
+    args = [a for a in parts[1:] if a != "md"]  # 'md' is the (only) format today
+    out_path = args[0] if args else f"nx-export-{(state.session_id or 'session')[:12]}.md"
+    data = {
+        "id": state.session_id,
+        "title": getattr(state, "title", None) or None,
+        "description": None,
+        "source": st.ACTIVE.name if st.ACTIVE else None,
+        "model": st.MODEL,
+        "messages": state.messages,
+        "usage": (st._METRICS.totals() if st._METRICS and hasattr(st._METRICS, "totals") else None),
+    }
+    md = export_markdown(data)
+    try:
+        parent = os.path.dirname(os.path.abspath(out_path))
+        os.makedirs(parent, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(md)
+    except OSError as e:
+        print(f"{C.ERROR}  ✗ export failed: {e}{RESET}")
+        return
+    print(f"{DIM}  wrote {os.path.abspath(out_path)} ({len(md)} chars, "
+          f"{len(state.messages)} messages){RESET}")
 
 
 def _cmd_resume_handler(user: str, state: _ReplState) -> None:

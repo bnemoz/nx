@@ -23,6 +23,7 @@ from ._ansi import DIM, RESET, C
 from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
 from ._sessions_io import _prune_empty_assistant_messages, _drop_leading_dangling_tool_turns
+from ._ctxreport import _pinned_indexes
 from ._metrics import _abbr, _record_usage
 from ._grammar import build_tool_call_grammar
 from . import _state as st
@@ -50,6 +51,9 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if st._PENDING_BACKGROUND_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
         st._PENDING_BACKGROUND_NOTICE = None
+    if getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None):
+        messages.append({"role": "user", "content": st._PENDING_BG_COMPLETION_NOTICE})
+        st._PENDING_BG_COMPLETION_NOTICE = None
     if st._PENDING_MULTI_EDIT_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_MULTI_EDIT_NOTICE})
         st._PENDING_MULTI_EDIT_NOTICE = None
@@ -354,6 +358,51 @@ def compress(
         head.extend(tail[:n_dropped])
         summarized_n += n_dropped
     tail = safe_tail
+
+    # Pinned turns (/ctx pin N) survive every fold: pinned messages move into
+    # the kept tail (appended in index order, AFTER the verbatim tail) instead
+    # of being summarized away. A chat template can't render a tool result
+    # without its preceding assistant tool_call turn (see
+    # _drop_leading_dangling_tool_turns), so pins expand to complete pairs and
+    # an incomplete pair is dropped from the pins with a note rather than
+    # corrupting the tail.
+    pins = _pinned_indexes()
+    if pins:
+        body_start = 1 if sys_msg else 0  # index 0 of `messages` == system
+        split = len(body) - keep           # body indexes < split are foldable
+        pin_idx = {i - body_start for i in pins if body_start <= i < split}
+        # expand to complete tool_call/tool-result pairs, then drop orphans
+        expanded = set(pin_idx)
+        for i in pin_idx:
+            m = body[i]
+            tcs = m.get("tool_calls")
+            if tcs:
+                for j in range(i + 1, min(i + 1 + len(tcs), len(body))):
+                    if body[j].get("role") == "tool":
+                        expanded.add(j)
+            elif m.get("role") == "tool":
+                for j in range(i - 1, max(i - 4, -1), -1):
+                    if body[j].get("tool_calls"):
+                        expanded.add(j)
+                        break
+        orphans = []
+        for i in sorted(expanded):
+            m = body[i]
+            if m.get("tool_calls"):
+                if not any(body[j].get("role") == "tool" for j in expanded if j > i):
+                    orphans.append(i)
+            elif m.get("role") == "tool":
+                if not any(body[j].get("tool_calls") for j in expanded if j < i):
+                    orphans.append(i)
+        expanded -= set(orphans)
+        if orphans:
+            print(f"{C.WARNING}  ↳ {len(orphans)} pinned turn(s) skipped: an "
+                  f"assistant-tool-call/tool-result pair must be pinned together{RESET}")
+        if expanded:
+            pinned_msgs = [body[i] for i in sorted(expanded)]
+            head = [m for i, m in enumerate(body[:-keep]) if i not in expanded]
+            summarized_n = len(head)
+            tail = tail + pinned_msgs
 
     # Render the head as plain text the model can summarize. Tool outputs are
     # the bulkiest part of a real session — include them but truncate each one

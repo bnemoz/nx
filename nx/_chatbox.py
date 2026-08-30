@@ -37,9 +37,12 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/provider", "show or set OpenRouter provider-routing order"),
     ("/yolo", "toggle auto-approve for writes and bash"),
     ("/resources", "show this nx process's CPU% and RSS memory"),
+    ("/ctx", "context breakdown by message; pin/unpin turns against /compress"),
+    ("/cost", "session usage + per-source cost scoreboard"),
     ("/bg", "list background run_bash jobs, or /bg kill <pid>"),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)"),
     ("/sessions", "list recent sessions, or show one in full"),
+    ("/export", "write the current session to a markdown file"),
     ("/resume", "resume a past session (n/id/prefix/title)"),
     ("/save", "save the current session (optional custom title)"),
     ("/memory", "manage persistent memory"),
@@ -73,6 +76,8 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/tools": ["on", "off", "last"],  # legacy alias arg dropdown
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
+    "/ctx": ["pin", "unpin", "clear"],
+    "/export": ["md"],
     "/source": lambda: list(st.SOURCE_ORDER),
 }
 

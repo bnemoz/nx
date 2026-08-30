@@ -153,6 +153,11 @@ class _Metrics:
         self.cache_read_tokens = 0
         self.reasoning_tokens = 0
         self.api_calls = 0
+        # Per-source scoreboard for /cost: source name → totals dict. A /source
+        # switch mid-session is exactly the comparison /cost exists for (local
+        # vs hosted on the same task), so usage is bucketed by the ACTIVE
+        # source at the time of each call.
+        self.by_source: dict[str, dict[str, int]] = {}
         self.push_url = push_url
         self._push_disabled = False  # latched off after the first failure
 
@@ -165,6 +170,15 @@ class _Metrics:
         self.cache_read_tokens += delta.get("cache_read_tokens") or 0
         self.reasoning_tokens += delta.get("reasoning_tokens") or 0
         self.api_calls += 1
+        src = st.ACTIVE.name if st.ACTIVE is not None else (self.source or "unknown")
+        bucket = self.by_source.setdefault(src, {
+            "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+            "reasoning_tokens": 0, "api_calls": 0})
+        bucket["input_tokens"] += delta.get("input_tokens") or 0
+        bucket["output_tokens"] += delta.get("output_tokens") or 0
+        bucket["cache_read_tokens"] += delta.get("cache_read_tokens") or 0
+        bucket["reasoning_tokens"] += delta.get("reasoning_tokens") or 0
+        bucket["api_calls"] += 1
 
     def as_meta(self) -> dict[str, Any]:
         """The fields merged into the session JSON on save."""

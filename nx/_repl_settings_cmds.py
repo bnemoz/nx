@@ -29,6 +29,7 @@ from ._sources import switch_source, _set_provider_order, _provider_order
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
+from ._bash_jobs import _read_bg_exit_status
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
 from ._todo import render_todos_display
 
@@ -44,14 +45,19 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>]", "list/kill background bash jobs"),
     ("/yolo", "toggle yolo mode (disable all approval prompts)"),
-    ("/approval [all|low|medium|high|yolo]", "show/set approval level"),
+    ("/approval [level]", "show/set approval level (session-only)"),
+    ("/approval set-default <level>", "persist the default approval mode to ~/.env"),
+    ("/approval allow [list|forget <n>|<tool> <pattern>]", "manage the persistent approval allowlist"),
     ("/reset, /clear, /new", "clear context, start a new session"),
     ("/init", "have the model write/update AGENTS.md"),
     ("/recover [note]", "force a visible recovery checkpoint turn"),
     ("/undo [--list]", "undo last file change / list undo checkpoints"),
     ("/compress, /compact", "fold older turns into a summary"),
+    ("/ctx [pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
+    ("/cost", "session usage + per-source cost scoreboard"),
     ("/autocompress [percent|on|off]", "configure automatic compression threshold"),
-    ("/sessions [...]", "list/manage sessions"),
+    ("/sessions [...]", "list/manage sessions (non-title query → full-text body search)"),
+    ("/export [md] [path]", "write the current session to a markdown file"),
     ("/resume [target]", "switch to another session"),
     ("/save [title]", "persist current session, optionally with a title"),
     ("/memory [...]", "memory-related subcommands"),
@@ -275,6 +281,68 @@ def _cmd_resources(user: str, state: _ReplState) -> None:
     print(f"{DIM}  pid {stats['pid']} · cpu {stats['cpu_percent']:.1f}% · rss {rss_s}{RESET}")
 
 
+def _cmd_ctx(user: str, state: _ReplState) -> None:
+    """/ctx — per-message token report; /ctx pin|unpin <spec> — pin turns so
+    compress() keeps them verbatim; /ctx clear — drop all pins."""
+    import nx as _m
+    from ._ctxreport import _messages_token_report, _ctx_pin, _ctx_unpin
+    from ._metrics import _abbr
+    parts = user.split()
+    sub = parts[1].lower() if len(parts) >= 2 else ""
+    messages = state.messages
+    if sub == "clear":
+        removed, remaining = _ctx_unpin(None, messages)
+        print(f"{DIM}  unpinned {len(removed)} turn(s){RESET}")
+        return
+    if sub in ("pin", "unpin"):
+        spec = " ".join(parts[2:]) if len(parts) >= 3 else None
+        if not spec:
+            print(f"{C.WARNING}  usage: /ctx {sub} <n | n-m | n,m,n-m>  (1-based message numbers from /ctx){RESET}")
+            return
+        try:
+            if sub == "pin":
+                added, pinned = _ctx_pin(spec, messages)
+                print(f"{DIM}  pinned {len(added)} turn(s) — compress will keep them verbatim ({len(pinned)} pinned){RESET}")
+            else:
+                removed, remaining = _ctx_unpin(spec, messages)
+                print(f"{DIM}  unpinned {len(removed)} turn(s) ({len(remaining)} pinned remain){RESET}")
+        except (ValueError, TypeError) as e:
+            print(f"{C.WARNING}  {e} — want e.g. /ctx pin 12  or  /ctx pin 4,8,12-15{RESET}")
+        return
+    # default: the report
+    report = _messages_token_report(messages)
+    rows = report["rows"]
+    print(f"{DIM}  context by message (est. tokens, {len(rows)} messages, "
+          f"~{report['total_est']}{RESET}{DIM} total est):{RESET}")
+    # Compact: show the top consumers fully, roll small turns into one line
+    top = sorted(rows, key=lambda r: -r[2])[:12]
+    top_idx = {r[0] for r in top if r[2] >= max(32, report["total_est"] // 40)}
+    for i, role, t, preview, pinned in rows:
+        if i in top_idx or pinned:
+            mark = "📌" if pinned else " "
+            print(f"{DIM}  {mark}{i + 1:>4}  {role:<9} {t:>6}  {preview}{RESET}")
+    rolled = [r for r in rows if r[0] not in top_idx or r[2] < max(32, report["total_est"] // 40)]
+    if rolled and len(rolled) < len(rows):
+        print(f"{DIM}        … {len(rolled)} smaller turn(s), ~{sum(r[2] for r in rolled)} tokens "
+              f"(all messages: /ctx all){RESET}")
+    by_role = report["by_role"]
+    role_s = "  ".join(f"{r}:{_abbr(t)}" for r, t in sorted(by_role.items(), key=lambda kv: -kv[1]))
+    print(f"{DIM}  by role: {role_s}{RESET}")
+    mx = st.ACTIVE._context_window if st.ACTIVE else None
+    if isinstance(mx, int) and mx > 0:
+        pct = 100 * report["total_est"] // mx
+        print(f"{DIM}  ≈{pct}% of {_abbr(mx)} window (estimate; the per-turn footer "
+              f"uses the server's exact count){RESET}")
+    print(f"{DIM}  pin turns to protect them from /compress: /ctx pin <n | n-m | n,m>{RESET}")
+
+
+def _cmd_cost(user: str, state: _ReplState) -> None:
+    """/cost — session usage totals + per-source scoreboard ($ when
+    NX_PRICE_<SOURCE>_* is set)."""
+    from ._cost import print_cost_report
+    print_cost_report(st._METRICS)
+
+
 def _cmd_bg(user: str, state: _ReplState) -> None:
     parts = user.split()
     if len(parts) >= 2 and parts[1] == "kill":
@@ -326,9 +394,62 @@ def _cmd_approval(user: str, state: _ReplState) -> None:
     parts = user.split()
     if len(parts) == 1:
         # /approval with no arg → show current setting
-        print(f"{DIM}  approval={_approval_display()}  (all|low|medium|high|yolo){RESET}")
+        print(f"{DIM}  approval={_approval_display()}  (all|low|medium|high|yolo; set-default <level> persists){RESET}")
         return
     arg = parts[1]
+    if arg == "allow":
+        # /approval allow [list|forget N|forget-all|<tool> <pattern>]
+        from . import _allowed as _allowed_mod
+        sub = parts[2].lower() if len(parts) >= 3 else "list"
+        if sub == "list":
+            rules = _allowed_mod.list_rules()
+            if not rules:
+                print(f"{DIM}  no allow rules saved (press A at an approval prompt to save one){RESET}")
+                return
+            print(f"{DIM}  allow rules ({len(rules)}):{RESET}")
+            for i, r in enumerate(rules, 1):
+                print(f"{DIM}   {i:>2}. [{r['tool']}] {r['pattern']}  ({r['scope']}){RESET}")
+            return
+        if sub in ("forget", "rm", "remove"):
+            if len(parts) < 4 or not parts[3].isdigit():
+                print(f"{C.WARNING}  usage: /approval allow forget <n>  (see /approval allow list){RESET}")
+                return
+            removed = _allowed_mod.forget(int(parts[3]))
+            if removed:
+                print(f"{DIM}  forgot [{removed['tool']}] {removed['pattern']}{RESET}")
+            else:
+                print(f"{C.WARNING}  no rule #{parts[3]} (see /approval allow list){RESET}")
+            return
+        if sub == "forget-all":
+            n = _allowed_mod.forget_all()
+            print(f"{DIM}  forgot {n} rule(s){RESET}")
+            return
+        # /approval allow <tool> <pattern> — save a rule by hand
+        if len(parts) >= 4:
+            rule = _allowed_mod.add_rule(parts[2], " ".join(parts[3:]))
+            print(f"{DIM}  saved [{rule['tool']}] {rule['pattern']} ({rule['scope']}){RESET}")
+            return
+        print(f"{C.WARNING}  usage: /approval allow [list | forget <n> | forget-all | <tool> <pattern>]{RESET}")
+        return
+    if arg in ("set-default", "default", "persist"):
+        # /approval set-default <level> — persist the current (or given) mode to
+        # ~/.env as NX_APPROVAL, the same way /theme persists NX_THEME. Bare
+        # `/approval <level>` stays session-scoped so a one-off yolo doesn't
+        # silently become your standing default.
+        target = parts[2] if len(parts) >= 3 else _approval_display()
+        kind, resolved = _normalize_approval(target)
+        if not kind:
+            print(f"{C.WARNING}  unknown level {target!r} — want all|low|medium|high|yolo{RESET}")
+            return
+        _apply_approval(kind, resolved, update_default=True)
+        persisted = "yolo" if kind == "yolo" else (resolved or "all")
+        _set_env_var("NX_APPROVAL", persisted)
+        os.environ["NX_APPROVAL"] = persisted
+        shown = "all" if kind == "prompt_all" else (resolved or "all")
+        print(f"{BOLD}{C.WARNING}  → approval: {shown}{RESET} "
+              f"{DIM}(saved to ~/.env — /approval set-default all to reset){RESET}")
+        print(_m._banner())
+        return
     kind, resolved = _normalize_approval(arg)
     if kind:
         _apply_approval(kind, resolved, update_default=(kind != "yolo"))
@@ -338,12 +459,15 @@ def _cmd_approval(user: str, state: _ReplState) -> None:
             print(f"{DIM}  approval={resolved} (auto-allow ≤ {resolved}){RESET}")
         else:
             print(f"{DIM}  approval=off (yolo — never prompt){RESET}")
+        print(f"{DIM}  (session only — /approval set-default <level> persists to ~/.env){RESET}")
         print(_m._banner())
     else:
-        print(f"{C.WARNING}  unknown level {arg!r} — want all|low|medium|high|yolo{RESET}")
+        print(f"{C.WARNING}  unknown level {arg!r} — want all|low|medium|high|yolo "
+              f"(or set-default <level> to persist){RESET}")
 
 
 def _cmd_reset(user: str, state: _ReplState) -> None:
+    import nx as _m
     sys.stdout.write("\033[2J\033[3J\033[H")
     sys.stdout.flush()
     state.messages = _initial_messages()
@@ -358,6 +482,9 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     # Fresh recorder for the fresh session.
     st._METRICS = _fresh_metrics(state.session_id)
     print(f"{DIM}  new session {state.session_id}{RESET}")
+    # The reset clears the screen, which wipes the startup banner — reprint it
+    # so the user can see which model/source they're now chatting with.
+    print(_m._banner())
 
 
 def _cmd_init(user: str, state: _ReplState) -> None:

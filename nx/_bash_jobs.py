@@ -16,7 +16,9 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from contextlib import nullcontext
 from typing import Any
@@ -67,13 +69,17 @@ def _run_bash(command: str) -> tuple[str, str]:
     pid = r.stdout.strip()
     # Write a tiny pid→logpath map file so wait_background can find it.
     # Also stash the command + start time so /bg can render a dashboard
-    # without needing to re-derive anything from the log itself.
+    # without needing to re-derive anything from the log itself. `owner` is
+    # this process's pid: the completion scan only announces jobs this nx
+    # process started, never another session's strays (or jobs from an old
+    # ~/.nx shared by every session on the machine).
     try:
         map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
         with open(map_path, "w") as f:
             json.dump({"log_path": log_path, "command": command,
                        "started": time.time(),
-                       "pid_start_time": _pid_start_time(pid)}, f)
+                       "pid_start_time": _pid_start_time(pid),
+                       "owner_pid": os.getpid()}, f)
     except OSError:
         pass
     return pid, log_path
@@ -139,6 +145,7 @@ def list_bg_jobs() -> list[dict[str, Any]]:
             "command": data.get("command", ""),
             "started": data.get("started"),
             "log_path": log_path,
+            "owner_pid": data.get("owner_pid"),
             "tail": _tail_last_line(log_path) if log_path else "",
         })
     jobs.sort(key=lambda j: j.get("started") or 0, reverse=True)
@@ -297,38 +304,97 @@ def _read_log(log_path: str) -> tuple[str, int | None]:
 
 
 def _infer_timeout_from_sleep(command: str, default: int) -> int:
-    """If *command* contains ``sleep N`` (with N in seconds), return a poll
-    timeout that's ``max(N) + 10``, so the command finishes synchronously
+    """If *command* contains ``sleep N`` (with N in seconds, fractional seconds,
+    or a time suffix — ``sleep 0.5``, ``sleep 2m``, ``sleep 1h30m``), return a poll
+    timeout that comfortably covers it, so the command finishes synchronously
     without the model having to remember ``timeout=N``.
 
     This compensates for the natural habit of writing
     ``run_bash("sleep 30 && cat …")`` — a pattern that *seems* like it should
-    block (the shell waits, then cats) but is itself launched via nohup, so
+    block (the shell waits, then cats) but is itself launched detached (setsid), so
     it gets backgrounded after ~3 s just like anything else.  By recognising
     the sleep we make the "obvious" pattern work again.
     """
-    max_sleep = 0
-    for m in re.finditer(r'(?:^|[;&|]\s*)sleep\s+(\d+)', command):
-        n = int(m.group(1))
+    max_sleep = 0.0
+    # `sleep` accepts an integer number of seconds, a fractional one (GNU/BSD
+    # both take `sleep 0.5`), or a suffixed form (GNU coreutils ≥8.4: `s`, `m`,
+    # `h`, `d`, chained as in `sleep 1h30m`). A suffixed or fractional sleep is
+    # still a wall-clock wait, so it must extend the poll window just like
+    # `sleep 30` does — previously anything non-integer silently fell through
+    # to the 3 s default and backgrounded.
+    # Accept only values GNU/BSD sleep would (a bare number or a suffixed
+    # duration chain, validated by _sleep_seconds); a bare `sleep $VAR` is
+    # left alone — its value is unknowable here. The capture grabs sleep's
+    # first argument up to whitespace/shell-boundary; junk like `2M` or `1x`
+    # parses to 0.0 and falls back to the default poll window. (GNU sums
+    # multiple `sleep 30 5` args — we take the first, which covers the
+    # overwhelming case of a single wait.)
+    for m in re.finditer(r'(?:^|[;&|]\s*)sleep\s+([^\s;&|]+)', command):
+        n = _sleep_seconds(m.group(1))
         if n > max_sleep:
             max_sleep = n
     if max_sleep > 0:
-        return max_sleep + 10
+        return int(max_sleep) + 10
     return default
+
+
+def _sleep_seconds(token: str) -> float:
+    """Parse one ``sleep`` argument — a bare number (``30``, ``0.5``) or a
+    suffixed duration chain (``2m``, ``1h30m``, ``1h30``) — into seconds,
+    following GNU sleep semantics: each number carries an optional unit
+    (default seconds) and units may repeat. Returns 0.0 for anything
+    unparseable so the caller falls back to the default poll window. Units are
+    case-sensitive lowercase — GNU sleep rejects ``2M`` (it is not case-
+    insensitive), so an uppercase unit must not extend the poll window."""
+    unit_mult = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+    part_re = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)", re.ASCII)
+    total = 0.0
+    pos = 0
+    for m in part_re.finditer(token):
+        if m.start() != pos:
+            return 0.0  # gap between number/unit pairs → not a clean chain
+        total += float(m.group(1)) * unit_mult[m.group(2) or "s"]
+        pos = m.end()
+    if pos != len(token) or pos == 0:
+        return 0.0
+    return total
+
+
+# Secret-looking patterns in a run_bash command string. When NX_BASH_PROMPT_SECRETS=1,
+# a command matching any of these forces the approval prompt even in YOLO / high
+# auto-approve mode — a guard against the model echoing a fetched secret into
+# another command (curl … | sh), pasting a key into a file write, etc.
+_SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),                    # OpenAI-style keys
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),               # GitHub tokens
+    re.compile(r"AKIA[0-9A-Z]{16}"),                          # AWS access key ids
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),             # Slack tokens
+    re.compile(r"glpat-[A-Za-z0-9_-]{16,}"),                 # GitLab PATs
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),       # PEM blocks
+)
+
+
+def _contains_secret(command: str) -> str | None:
+    """Return the name of the first secret pattern the command matches, or None."""
+    for rx in _SECRET_PATTERNS:
+        m = rx.search(command)
+        if m:
+            return m.group(0)[:8] + "…"
+    return None
 
 
 def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     """Run a shell command.
 
-    Commands always run via nohup — they never block the agent loop.
+    Commands always run detached via setsid — they never block the agent loop.
     If the command finishes within a short poll window (~3 s by default),
     output is returned directly and the log file is deleted.  If it's still
     running after the poll window, it continues in the background and you
     get a PID + log path to check later with ``read_file``.
 
     **Do NOT use** ``sleep N && …`` inside the command string as a way to
-    wait — the entire command is launched via nohup so *it* will also be
-    backgrounded after a few seconds.  Instead, pass ``timeout=N`` to tell
+    wait — the entire command is launched detached (setsid) so *it* will also
+    be backgrounded after a few seconds.  Instead, pass ``timeout=N`` to tell
     nx to wait synchronously (e.g. ``timeout=35`` for a ``sleep 30``
     command).  As a convenience, if your command *does* start with
     ``sleep N …`` the tool auto-extends its poll window to ``N+10`` s
@@ -342,14 +408,40 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     at ``~/.nx/bg-logs/``, automatically cleaned up (max ~50 files /
     7 days).  Pressing Esc during the poll window immediately backgrounds
     the command.
+
+    NX_BASH_MAX_SECONDS (default 0 = off) is a watchdog on *backgrounded*
+    commands: after the poll window expires and the process keeps running, nx
+    reaps it at N seconds (SIGTERM, then SIGKILL) instead of leaving it to run
+    forever. Long-running servers/builds that SHOULD outlive the tool call are
+    the normal case — the default is off; set it when you want a hard ceiling.
+
+    With NX_BASH_PROMPT_SECRETS=1, a command that looks like it carries a
+    credential (sk-…, ghp_…, AKIA…, a PEM block, …) always prompts, even in
+    YOLO mode — the prompt is the last chance to catch a secret before it
+    lands in a log, a file, or a remote host.
     """
-    if not _confirm(f"run: {command}"):
+    secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
+    if secret is not None:
+        # force the prompt even under YOLO: bypass the level/YOLO short-circuit
+        # with a direct ask (Esc still drops to chat)
+        from ._approval import _ask_approval
+        import nx as _m
+        choice = _m._ask_approval(
+            f"  run (contains possible secret {secret!r}): {command[:120]}? "
+            f"[Y/n/esc] ", allow_hint=None)
+        if choice == "esc":
+            from ._approval import _EscToChat
+            raise _EscToChat(f"run: {command}")
+        if choice != "y":
+            return "DENIED by user"
+    elif not _confirm(f"run: {command}"):
         return "DENIED by user"
     if timeout is None:
         timeout = _env_int("NX_BASH_POLL_SECONDS", 3)
         timeout = _infer_timeout_from_sleep(command, timeout)
     if timeout <= 0:
         timeout = 999999999  # ∞ — wait indefinitely
+    max_seconds = _env_int("NX_BASH_MAX_SECONDS", 0)
     pid, log_path = _run_bash(command)
     status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
                        expected_start_time=_find_bg_start_time_for_pid(pid))
@@ -360,10 +452,62 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
                 "in the background. "
                 f"Check output with read_file('{os.path.abspath(log_path)}')")
     if status == "timeout":
+        _maybe_start_watchdog(pid, command, max_seconds)
         return (f"[background] PID {pid} | log: {log_path}\n"
                 "The command is still running in the background. "
                 f"Check output with read_file('{os.path.abspath(log_path)}')")
     return _finish_bg_job(log_path)
+
+
+# PIDs this process has handed a watchdog thread (avoid duplicates when the
+# same pid is reported backgrounded twice — shouldn't happen, but cheap).
+_WATCHDOG_PIDS: set[int] = set()
+
+
+def _maybe_start_watchdog(pid: int | str, command: str, max_seconds: int) -> None:
+    """Arm the NX_BASH_MAX_SECONDS reaper for a just-backgrounded job.
+
+    A daemon thread sleeps out the remaining budget (poll-window seconds are
+    already spent by the time we get here — the watchdog counts from process
+    start as closely as we can observe), then SIGTERMs and, after a grace
+    period, SIGKILLs the process group. Setsid put the job in its own session,
+    so killing the group takes down any children it spawned — which is what
+    you want from a ceiling: nothing survives to keep consuming the machine.
+    """
+    if max_seconds <= 0:
+        return
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return
+    start_time = _find_bg_start_time_for_pid(pid)
+    if pid_i in _WATCHDOG_PIDS:
+        return
+    _WATCHDOG_PIDS.add(pid_i)
+
+    def _reap() -> None:
+        try:
+            time.sleep(max(1, max_seconds))
+            if not _pid_is_alive(pid_i, start_time):
+                return
+            try:
+                os.killpg(os.getpgid(pid_i), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                return
+            time.sleep(5)
+            if _pid_is_alive(pid_i, start_time):
+                try:
+                    os.killpg(os.getpgid(pid_i), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            _log_event("tool", f"watchdog killed bg job pid {pid_i} after {max_seconds}s: {command[:120]}")
+        except Exception:
+            pass  # a watchdog must never take the agent down
+        finally:
+            _WATCHDOG_PIDS.discard(pid_i)
+
+    threading.Thread(target=_reap, daemon=True,
+                     name=f"nx-bash-watchdog-{pid_i}").start()
 
 
 def _finish_bg_job(log_path: str) -> str:
@@ -421,6 +565,23 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
         return (f"[timeout after {timeout}s] PID {pid} still running. "
                 f"Check output so far with read_file('{os.path.abspath(log_path)}')")
     return _finish_bg_job(log_path)
+
+
+def _read_bg_exit_status(pid: int | str) -> tuple[bool, int | None, str]:
+    """Non-destructive status probe for a background job's completion notice.
+
+    Returns (exited, exit_code, log_path). Unlike _finish_bg_job it does NOT
+    delete the log or consume the output — the model is still free to call
+    wait_background/read_file on it. exit_code is None when the job is alive
+    or the [exit: N] marker hasn't been written yet.
+    """
+    log_path = _find_bg_log_for_pid(pid)
+    if not log_path:
+        return True, None, ""
+    if _pid_is_alive(int(pid), _find_bg_start_time_for_pid(pid)):
+        return False, None, log_path
+    out, exit_code = _read_log(log_path)
+    return True, exit_code, log_path
 
 
 def _find_bg_start_time_for_pid(pid: int | str) -> str | None:

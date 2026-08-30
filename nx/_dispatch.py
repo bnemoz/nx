@@ -21,12 +21,14 @@ from . import _state as st
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
-from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch
+from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
 from ._memory_cmd import memory_write, memory_search, _load_memory_note
 from ._metrics import _abbr
 from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
+from ._subagent import spawn_agent
+from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
 
@@ -35,12 +37,22 @@ DISPATCH = {
     "list_dir": list_dir, "run_bash": run_bash, "wait_background": wait_background,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
-    "todo_write": todo_write, "apply_patch": apply_patch,
+    "todo_write": todo_write, "apply_patch": apply_patch, "delete_file": delete_file,
     "memory_write": memory_write, "memory_search": memory_search,
+    "spawn_agent": spawn_agent, "read_image": read_image,
 }
+
+# spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH:
+# read-only entries ONLY, so a sub-agent can never mutate state or run commands
+# even if it tries. run_tool() consults it before DISPATCH. None = normal dispatch.
+st._SUBAGENT_DISPATCH = None
+st._SUBAGENT_ACTIVE = False
 
 st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash call in this session actually backgrounds
 st._PENDING_BACKGROUND_NOTICE = None  # set by run_tool() on that first flip; flushed once by model_turn (see _flush_pending_background_notice)
+st._BG_SCAN_DONE = False  # per-turn: scan for finished bg jobs once, on the first tool call
+st._PENDING_BG_COMPLETION_NOTICE = None  # set by that scan; flushed with the other runtime notes
+st._BG_NOTICE_SEEN = None  # pids already announced (None → seed from _BG_NOTICE_BASELINE)
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
@@ -50,11 +62,18 @@ _MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batchin
 
 def _active_tools() -> list[dict[str, Any]]:
     """The tool schema list to send this turn. wait_background is included
-    only once run_bash has actually backgrounded this session — see run_tool()."""
+    only once run_bash has actually backgrounded this session — see run_tool();
+    spawn_agent (read-only sub-agent) only when NX_SUBAGENTS=1; read_image
+    only when NX_VISION=1 AND native tool_calls have been confirmed this
+    session (a text-protocol tool result can't carry a content-parts array)."""
     import nx as _m
     tools = _m.TOOLS
     if not st._SESSION_HAS_BACKGROUNDED:
         tools = [t for t in tools if t["function"]["name"] != "wait_background"]
+    if not _m.NX_SUBAGENTS:
+        tools = [t for t in tools if t["function"]["name"] != "spawn_agent"]
+    if not _m.NX_VISION or not st._NATIVE_TOOL_CALLS_CONFIRMED:
+        tools = [t for t in tools if t["function"]["name"] != "read_image"]
     return tools
 
 
@@ -129,7 +148,7 @@ BACKGROUND_GUIDANCE = (
     "the short poll window) — wait_background is now available as a tool. "
     "Guidance for backgrounded commands:\n"
     "- Do NOT use `sleep N && …` as a chaining trick — the whole command is "
-    "detached so it backgrounds too. Only pass `timeout=N` to run_bash when "
+    "detached (setsid) so it backgrounds too. Only pass `timeout=N` to run_bash when "
     "you KNOW the command finishes in ~N seconds (e.g. `timeout=35` for "
     "`sleep 30`).\n"
     "- For commands of unknown duration (docker pull, builds, servers), let "
@@ -161,6 +180,50 @@ MULTI_EDIT_GUIDANCE = (
     "instead of several, and applies atomically.]"
 )
 
+
+def _scan_background_completions() -> str | None:
+    """One-time notice for tracked background jobs that finished since the
+    model last looked (checked on the first tool call of each turn).
+
+    The model must otherwise REMEMBER to wait_background/read_file a job it
+    backgrounded turns ago; a build that failed 20 minutes ago doesn't
+    announce itself. Returns the note text (or None): lists finished jobs with
+    exit codes once, then marks them seen — no repeated noise."""
+    from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
+    try:
+        jobs = list_bg_jobs()
+    except Exception:
+        return None
+    mine = os.getpid()
+    seen = getattr(st, "_BG_NOTICE_SEEN", None)
+    if seen is None:
+        seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
+    notes = []
+    finished = []
+    for j in jobs:
+        pid = str(j.get("pid", ""))
+        if not pid:
+            continue
+        # only jobs this nx process launched — never another session's strays
+        if j.get("owner_pid") != mine:
+            continue
+        if j.get("alive"):
+            continue  # still running — the existing [background] flow covers it
+        if pid in seen:
+            continue
+        seen.add(pid)
+        finished.append(j)
+        code = _read_bg_exit_status(pid)[1]
+        tail = (j.get("tail") or "").strip()[:80]
+        code_s = "unknown" if code is None else str(code)
+        notes.append(f"  pid {pid} exited (code {code_s})" + (f" — tail: {tail}" if tail else ""))
+    st._BG_NOTICE_SEEN = seen
+    if not notes:
+        return None
+    return ("[Runtime note: background job(s) you started have finished:\n"
+            + "\n".join(notes)
+            + "\nCheck their output with read_file(log) or wait_background before relying on them.]")
+
 _CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search")
 
 
@@ -181,9 +244,30 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
 
 
 def run_tool(name: str, args: dict[str, Any]) -> str:
-    fn = DISPATCH.get(name)
+    # A spawn_agent() sub-loop installs a read-only table; the sub-agent's tool
+    # calls resolve against it (so "write_file" inside a subagent is simply an
+    # unknown tool), and nested spawn_agent calls are refused by _subagent.py.
+    table = st._SUBAGENT_DISPATCH or DISPATCH
+    fn = table.get(name)
     if not fn:
+        if st._SUBAGENT_ACTIVE:
+            return f"ERROR: {name} is not available to the read-only sub-agent (parent must do it)"
         return f"ERROR: unknown tool {name}"
+    # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
+    # exit vetoes the call. Checked before any cache/approval machinery so a
+    # policy can block even cached reads.
+    from ._hooks import pre_tool_hook
+    veto = pre_tool_hook(name, args)
+    if veto:
+        return f"ERROR: {veto}"
+    # Background-completion notice: on the first tool call of a turn, check
+    # whether any tracked bg job finished since the model last looked, and
+    # stage a one-time runtime note (flushed with the other pending notices).
+    if not st._BG_SCAN_DONE:
+        st._BG_SCAN_DONE = True
+        note = _scan_background_completions()
+        if note:
+            st._PENDING_BG_COMPLETION_NOTICE = note
     if name in _CACHEABLE_READ_TOOLS:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
@@ -191,7 +275,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             return cached[0]
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.
-    undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit") else None
+    undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit", "delete_file") else None
     # newline so the tool arrow gets its own line — streamed text uses end=""
     # and would otherwise run straight into the indicator
     arg_preview = json.dumps(args)
@@ -232,18 +316,28 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # Dedup + cap the result BEFORE it enters the message history (the model and
     # the on-screen preview both get this sanitized form). Bounding repetitive
     # tool output is the cheapest defense against context-copying collapse.
-    result = _sanitize_tool_result(result)
-    # box the result; the preview is a further display-only trim of the (already
-    # context-bounded) result
-    preview_lines = result.splitlines()
-    if len(preview_lines) > 8:
-        hidden = len(preview_lines) - 8
-        preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+    # A content-parts result (read_image) is not a string — it bypasses text
+    # sanitization entirely and gets a one-line display hint instead.
+    if isinstance(result, list):
+        preview_lines = [f"[image attached — {len(result)} part(s), base64 payload not shown]"]
+    else:
+        result = _sanitize_tool_result(result)
+        # box the result; the preview is a further display-only trim of the (already
+        # context-bounded) result
+        preview_lines = result.splitlines()
+        if len(preview_lines) > 8:
+            hidden = len(preview_lines) - 8
+            preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+    # User/org post-hook (NX_POST_TOOL_HOOK): observer only — failures are
+    # logged, never raised, and the result is unaffected. Parts results are
+    # serialized for the hook's JSON stdin.
+    from ._hooks import post_tool_hook
+    post_tool_hook(name, args, result if isinstance(result, str) else json.dumps(result)[:2000])
     # Stash the sanitized result of the most recent tool call regardless of
     # visibility, so /tooloutput last can replay it after the fact even when the
     # result body was collapsed live (mirrors _LAST_REASONING for reasoning).
     st._LAST_TOOL_NAME = name
-    st._LAST_TOOL_OUTPUT = result
+    st._LAST_TOOL_OUTPUT = result if isinstance(result, str) else preview_lines[0]
     # todo_write colors each item by status itself (render_todos_display:
     # done=green, in_progress=yellow, pending=orange) and sanitizes the item
     # text, so it goes to the screen verbatim inside the box — not the generic
@@ -267,7 +361,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         if isinstance(cache_path, list):
             cache_path = cache_path[0] if cache_path else "."
         st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(cache_path))
-    elif name in ("write_file", "edit_file", "multi_edit") and not result.startswith("ERROR"):
+    elif name in ("write_file", "edit_file", "multi_edit", "delete_file") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
         if result != "DENIED by user":
             _undo_push(name, [undo_snapshot])
@@ -281,6 +375,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if name == "run_bash" and result.startswith("[background]") and not st._SESSION_HAS_BACKGROUNDED:
         st._SESSION_HAS_BACKGROUNDED = True
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE
+    # (No seen-marking here: a just-backgrounded job is still alive, so the
+    # completion scan's alive-check already skips it — and if it exits before
+    # the next scan, announcing "exited (code N)" is exactly what the model
+    # needs to hear, since it was told the job was backgrounded.)
     if name == "edit_file" and not result.startswith("ERROR"):
         st._CONSECUTIVE_EDITS += 1
         if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_NUDGE_THRESHOLD and not st._MULTI_EDIT_NUDGED:

@@ -275,15 +275,50 @@ def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[s
     return TURN_DONE
 
 
+def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int, str]:
+    """Execute 2+ read-only, approval-free tool calls concurrently.
+
+    The common agent turn is 'read 3 files + grep' — strictly sequential
+    dispatch burns wall-clock on I/O that could overlap. Read-only cacheable
+    tools have no approval gate, no state mutation, and no output ordering
+    requirement beyond the Observation order, so a thread pool is safe here.
+    Mutating/prompting calls keep the sequential path (approval UX depends on
+    it). Results print in original order after all complete; observations map
+    back by index so the model sees the same transcript shape as before."""
+    results: dict[int, str] = {}
+    jobs = [(i, n, a) for i, (n, a) in enumerate(calls)]
+    workers = min(8, len(jobs))
+
+    def _one(job: tuple[int, str, dict[str, Any]]) -> tuple[int, str]:
+        i, n, a = job
+        try:
+            return i, run_tool(n, a)
+        except _EscToChat:
+            raise  # read-only tools can't prompt, but propagate defensively
+        except Exception as e:  # noqa: BLE001 — mirror run_tool's error surfacing
+            return i, f"ERROR: {type(e).__name__}: {e}"
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for i, res in ex.map(_one, jobs):
+            results[i] = res
+    return results
+
+
+def _all_read_only(calls: list[tuple[str, dict[str, Any]]]) -> bool:
+    """True when every call in the turn is a cacheable read-only tool (the
+    same set run_tool() result-caches — no approval gate, no mutation)."""
+    import nx as _m
+    return bool(calls) and all(n in _m._CACHEABLE_READ_TOOLS for n, _ in calls)
+
+
 def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> None:
     """Warm the read_file/list_dir cache concurrently for this turn's calls.
 
-    run_tool() below still executes every call sequentially, in order, for
-    printing/spinner/approval reasons — but if two-plus of them are cache-
-    eligible reads, doing the actual blocking I/O in parallel here means
-    run_tool()'s later cache hits are near-instant, cutting wall-clock without
-    touching the tool schema or the sequential dispatch contract.
-    """
+    Kept for the MIXED-call case: when a turn combines mutating and read-only
+    calls, reads still run sequentially inside run_tool(), so warming the
+    cache in parallel here keeps those hits instant. When EVERY call is a
+    cacheable read, _run_read_only_parallel() handles dispatch directly and
+    this prefetch is skipped (it would double-execute the reads)."""
     jobs = []
     seen_keys = set()
     for c, args in zip(ordered, parsed_args):
@@ -363,6 +398,19 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             "valid tool call with all required arguments. For large file "
             "writes, emit only the tool call and skip any explanatory prose.")
         return TURN_STREAM_CUT
+    # All-read-only turns dispatch concurrently (the 'read 3 files + grep'
+    # pattern); mixed turns keep the sequential contract and only prefetch.
+    as_calls = [(c["name"], args) for c, args in zip(ordered, parsed_args)]
+    if _all_read_only(as_calls) and len(as_calls) >= 2:
+        parallel_results = _run_read_only_parallel(as_calls)
+        messages.append({"role": "assistant", "content": text or None, "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
+            for c in ordered]})
+        for idx in range(len(ordered)):
+            messages.append({"role": "tool", "tool_call_id": ordered[idx]["id"],
+                             "content": parallel_results[idx]})
+        _flush_pending_background_notice(messages)
+        return TURN_TOOL
     _prefetch_cacheable_tools(ordered, parsed_args)
     messages.append({"role": "assistant", "content": text or None, "tool_calls": [
         {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
@@ -440,6 +488,14 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             return TURN_DONE
         return None
     messages.append({"role": "assistant", "content": text})
+    # All-read-only multi-call turns dispatch concurrently (same rationale as
+    # the native path); single calls and mixed turns stay sequential.
+    if _all_read_only(calls) and len(calls) >= 2:
+        parallel_results = _run_read_only_parallel(calls)
+        obs = [f"Observation ({calls[i][0]}): {parallel_results[i]}" for i in range(len(calls))]
+        messages.append({"role": "user", "content": "\n".join(obs)})
+        _flush_pending_background_notice(messages)
+        return TURN_TOOL
     obs = []
     esc_action = None
     for n, a in calls:
@@ -701,6 +757,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     _USER_INTERRUPTED.clear()
     st._INTERRUPT_REDIRECT_TEXT = ""
     st._INTERRUPT_REDIRECT_SUBMITTED = False
+    # Reset the per-turn bg-completion scan flag: the first tool call of this
+    # new turn re-checks for finished background jobs (see run_tool()).
+    st._BG_SCAN_DONE = False
     # Clear the "termios restored" flag BEFORE arming so we can wait on it
     # after disarm. The watcher sets it in its inner finally once it has
     # restored cooked mode. Without this handshake the watcher's termios
@@ -958,11 +1017,15 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 200)
 
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
-                         on_step: Optional[Callable[[], None]] = None) -> dict:
+                         on_step: Optional[Callable[[], None]] = None,
+                         max_turns_override: Optional[int] = None) -> dict:
     """Runs model_turn() to completion (or MAX_MODEL_TURNS). Returns a summary
     dict {"status": "done"|"esc"|"cap", "turns": int} — interactive callers
     ignore it, but headless one-shot mode (nx/_cli.py) uses it to report
-    whether the model actually finished vs. hit the turn cap."""
+    whether the model actually finished vs. hit the turn cap.
+    max_turns_override caps the loop below MAX_MODEL_TURNS for scoped loops
+    (spawn_agent sub-agents); None = the global cap, as before."""
+    max_turns = st.MAX_MODEL_TURNS if max_turns_override is None else max(1, int(max_turns_override))
     steps = 0
     reasoning_loop_cuts = 0
     malformed_stream_cuts = 0
@@ -972,7 +1035,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     # a test that monkeypatches `nx.model_turn` (to avoid a real model
     # round-trip) takes effect on every call this loop makes.
     import nx as _m
-    while steps < st.MAX_MODEL_TURNS:  # cap runaway tool/retry loops
+    while steps < max_turns:  # cap runaway tool/retry loops (scoped override for sub-agents)
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
@@ -1033,14 +1096,14 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             malformed_stream_cuts = 0
             empty_turn_cuts = 0
             continue
-    # Loop exited because steps >= st.MAX_MODEL_TURNS.  In interactive mode the
+    # Loop exited because steps >= max_turns.  In interactive mode the
     # user can simply type another instruction; in headless mode (benchmarks)
     # the session would end with whatever partial work exists.  Give the model
     # one last forced-final turn so it can produce a visible answer from the
     # state so far — but only if we haven't already tried (force_final was
     # already consumed by the loop above).
-    if steps >= st.MAX_MODEL_TURNS and not force_final:
-        print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({st.MAX_MODEL_TURNS}) — "
+    if steps >= max_turns and not force_final:
+        print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
               f"forcing a final answer from current state{RESET}")
         final_status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                    empty_turn_count=empty_turn_cuts,

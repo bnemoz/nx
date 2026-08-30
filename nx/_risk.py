@@ -69,6 +69,8 @@ def _extract_action_path(action: str) -> str | None:
         if m := re.match(r"^(.+?)\s+\(\d+\s+edits\)$", rest):
             return m.group(1).strip() or None
         return rest or None
+    if action.startswith("delete "):
+        return action[len("delete "):].strip() or None
     if m := re.match(r"^write memory\s+(.+)\s+\(\d+\s+bytes\)$", action):
         return m.group(1).strip() or None
     if m := re.match(r"^write\s+(.+)\s+\(\d+\s+bytes\)$", action):
@@ -209,6 +211,20 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
     falls through to _assess_risk() exactly as before this existed."""
     if action.startswith("run: "):
         return _local_risk_hint_bash(_strip_shell_comment(action[len("run: "):].strip()))
+    # delete_file: removal is the action the risk buckets call out — a project
+    # file delete is at least medium (reversible only via /undo, which is
+    # in-memory), anything outside the project or a home dotdir stays a
+    # judgment call for the model classifier (fall through, as with writes).
+    if action.startswith("delete "):
+        path = _extract_action_path(action)
+        if path:
+            info = _classify_action_path(path)
+            if (info.get("path_scope") == "in_project" and st.PROJECT_ROOT_IS_GIT
+                    and not info["path_touches_home_dotdir"]):
+                if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT):
+                    return ("high", "deletes a hook/CI/build file")
+                return ("medium", "deletes a file inside the project (undoable)")
+        return None
     path = _extract_action_path(action)
     if path is None:
         return None

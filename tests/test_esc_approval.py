@@ -44,7 +44,7 @@ def setup_function(_function):
 # ---------------------------------------------------------------------------
 def test_confirm_esc_raises():
     saved_ask, saved_assess = m._ask_approval, m._assess_risk
-    m._ask_approval = lambda prompt: "esc"
+    m._ask_approval = lambda prompt, allow_hint=None: "esc"
     m._assess_risk = lambda action: ("high", "because test")
     try:
         try:
@@ -65,9 +65,9 @@ def test_confirm_y_n():
     m._assess_risk = lambda action: ("high", "because test")
     builtins.print = lambda *a, **k: None  # hush
     try:
-        m._ask_approval = lambda prompt: "y"
+        m._ask_approval = lambda prompt, allow_hint=None: "y"
         assert m._confirm("write foo.py") is True
-        m._ask_approval = lambda prompt: "n"
+        m._ask_approval = lambda prompt, allow_hint=None: "n"
         assert m._confirm("write foo.py") is False
     finally:
         m._ask_approval, m._assess_risk = saved_ask, saved_assess

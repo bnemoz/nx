@@ -75,12 +75,122 @@ def write_file(path: str, content: str, **_: Any) -> str:
     return f"wrote {len(content)} bytes to {path}"
 
 
-def edit_file(path: str, old: str, new: str, replace_all: bool = False, **_: Any) -> str:
+def _apply_line_range(src: str, start: int, end: int, new: str) -> tuple[str, int, int]:
+    """Replace the 1-based inclusive line range [start, end] with `new` text.
+    Returns (new_src, replaced_count, new_line_count). Raises ValueError when
+    the range is outside the file."""
+    lines = src.split("\n")
+    n = len(lines)
+    if src.endswith("\n"):
+        n -= 1  # the trailing element after the final \n is '', not a line
+    if start < 1 or end < start or end > n:
+        raise ValueError(f"line range {start}-{end} outside 1..{n}")
+    # Preserve the file's trailing-newline convention.
+    had_nl = src.endswith("\n")
+    prefix = "\n".join(lines[:start - 1])
+    suffix = "\n".join(lines[end:])
+    new_body = new.rstrip("\n")
+    out = "\n".join([prefix, new_body, suffix]) if prefix or suffix else new_body
+    # normalize: ensure exactly the original trailing-newline shape
+    if had_nl and not out.endswith("\n"):
+        out += "\n"
+    elif not had_nl and out.endswith("\n"):
+        out = out[:-1]
+    return out, end - start + 1, new_body.count("\n") + 1
+
+
+def _whitespace_tolerant_match(src: str, old: str) -> str | None:
+    """Find the unique region of `src` matching `old` modulo leading/trailing
+    whitespace and blank-line count — the common model failure of getting
+    indentation wrong. Returns the exact source slice to replace, or None.
+    Only tried when the exact match already failed, and only accepted when it
+    matches exactly ONE region (ambiguity never guesses)."""
+    if not old.strip():
+        return None
+    old_lines = old.strip("\n").split("\n")
+    sig = [(ln.strip(), bool(ln.strip())) for ln in old_lines]
+    sig = [s for s in sig if s[1]]  # ignore blank lines for matching
+    if not sig:
+        return None
+    src_lines = src.split("\n")
+    sig = [s[0] for s in sig]  # content lines only (blanks already dropped)
+    hits = []
+    for i in range(len(src_lines)):
+        # the window must contain the content lines contiguously, with blank
+        # lines allowed between/around them (the model may include blanks the
+        # source has more/fewer of)
+        window = src_lines[i:i + len(sig) + 4]
+        if len(window) < len(sig):
+            break
+        wi = 0
+        ok = True
+        for s in sig:
+            # skip up to 4 blank lines in the window between content lines
+            while wi < len(window) and window[wi].strip() == "" and wi < len(sig) + 3:
+                wi += 1
+            if wi >= len(window) or window[wi].strip() != s:
+                ok = False
+                break
+            wi += 1
+        if ok and wi == len(sig) + sum(1 for w in window[:wi] if w.strip() == ""):
+            hits.append((i, i + wi))
+    if len(hits) != 1:
+        return None
+    i, j = hits[0]
+    return "\n".join(src_lines[i:j])
+
+
+def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False,
+              old_lines: str = "", **_: Any) -> str:
     """Replace `old` with `new` in `path`. By default `old` must match exactly
     once (ambiguous matches error rather than guessing). Pass replace_all=True
     to replace every occurrence instead — e.g. renaming a variable throughout
-    a file — without needing multi_edit for a single literal string."""
+    a file — without needing multi_edit for a single literal string.
+
+    Alternative targeting: pass `old_lines="10-14"` (1-based, inclusive, the
+    numbering read_file prints) instead of `old` to replace those lines with
+    `new` directly — no exact-match hunting, useful after read_file paging.
+    `old_lines` and `old` are mutually exclusive.
+
+    Fallback when the exact match fails uniquely at the wrong indentation:
+    the edit applies whitespace-tolerantly (leading/trailing indentation
+    ignored, blank-line runs collapsed) and the result says so, so a model
+    that mis-indents doesn't have to re-read the file and retry."""
     src, src_mtime = _read_with_mtime(path)
+    ws_fallback_used = False
+    if old_lines:
+        if old:
+            return "ERROR: pass either `old` or `old_lines`, not both"
+        try:
+            m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", str(old_lines))
+            if not m:
+                m2 = re.fullmatch(r"\s*(\d+)\s*", str(old_lines))
+                if not m2:
+                    raise ValueError
+                start = end = int(m2.group(1))
+            else:
+                start, end = int(m.group(1)), int(m.group(2))
+        except ValueError:
+            return "ERROR: old_lines wants 'N' or 'N-M' (1-based lines, e.g. '10-14')"
+        try:
+            new_src, replaced, _ = _apply_line_range(src, start, end, new)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        if new_src == src:
+            return f"ERROR: no change to {path} (new content identical to lines {start}-{end})"
+        action = f"edit {path} (lines {start}-{end})"
+        if not _confirm(action, preview=_diff_preview(src, new_src)):
+            return "DENIED by user"
+        try:
+            now_mtime = os.stat(path).st_mtime
+        except OSError:
+            now_mtime = None
+        if now_mtime != src_mtime:
+            return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
+        _atomic_write(path, new_src)
+        return f"edited {path} (replaced lines {start}-{end})\n{_diff_hunk(src, new_src)}"
+    if not isinstance(old, str) or not old:
+        return "ERROR: provide `old` (text to find) or `old_lines` (line range)"
     if not replace_all and src.count(old) != 1:
         # The model may have pasted read_file's numbered output into `old`.
         # Only as a fallback (exact match already failed), retry with the
@@ -92,7 +202,15 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False, **_: Any
             old, new = stripped_old, _strip_line_numbers(new)
     count = src.count(old)
     if count == 0:
-        return "ERROR: `old` matched 0 times (need at least 1)"
+        # Last-resort whitespace-tolerant match (unique only) — see docstring.
+        ws_slice = _whitespace_tolerant_match(src, old)
+        if ws_slice is not None:
+            old = ws_slice
+            new = _strip_line_numbers(new)
+            ws_fallback_used = True
+            count = 1
+        else:
+            return "ERROR: `old` matched 0 times (need at least 1)"
     if not replace_all and count != 1:
         return f"ERROR: `old` matched {count} times (need exactly 1, or pass replace_all=True)"
     new_src = src.replace(old, new) if replace_all else src.replace(old, new, 1)
@@ -108,7 +226,8 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False, **_: Any
     if now_mtime != src_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, new_src)
-    return f"edited {path}\n{_diff_hunk(src, new_src)}"
+    note = "\n(edit applied whitespace-tolerantly — `old`'s indentation was normalized to match)" if ws_fallback_used else ""
+    return f"edited {path}\n{_diff_hunk(src, new_src)}{note}"
 
 
 def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
@@ -154,6 +273,39 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, work)
     return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}"
+
+
+def delete_file(path: str, **_: Any) -> str:
+    """Delete one file, with undo support: the snapshot pushed here is what
+    /undo restores (a plain `rm` via run_bash bypasses the undo stack — this
+    tool is the recoverable path). Refuses directories and dotfiles-at-home;
+    goes through the normal approval gate."""
+    if not path or path in (".", "..") or os.path.basename(path).startswith("."):
+        return f"ERROR: refusing to delete {path!r} (need a concrete non-dotfile path)"
+    if os.path.isdir(path):
+        return f"ERROR: {path} is a directory — delete_file only removes files"
+    existed = os.path.exists(path)
+    if not existed:
+        return f"ERROR: {path} does not exist"
+    snap = _undo_snapshot(path)
+    if not _confirm(f"delete {path}"):
+        return "DENIED by user"
+    try:
+        now = os.stat(path).st_mtime
+    except OSError:
+        now = None
+    try:
+        before_mtime = os.stat(path).st_mtime
+    except OSError:
+        before_mtime = None
+    if now != before_mtime:
+        return f"ERROR: {path} changed on disk while awaiting approval; re-check and retry"
+    try:
+        os.remove(path)
+    except OSError as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+    _undo_push("delete_file", [snap])
+    return f"deleted {path} (restorable with /undo)"
 
 
 # Extensions never worth opening as text; skipped before the read/decode

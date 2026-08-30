@@ -281,7 +281,7 @@ from ._tools import (
 )
 from ._undo import undo_last, list_checkpoints
 
-from ._edit_tools import write_file, edit_file, multi_edit, sed_edit
+from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, delete_file
 from ._bash_jobs import (
     _run_bash, list_bg_jobs, _delete_old_bg_logs, _tail_last_line, _poll_pid,
     _read_log, _infer_timeout_from_sleep, run_bash, _finish_bg_job,
@@ -293,8 +293,10 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"path": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Replace old->new in an EXISTING file (errors if missing -- use write_file for new). old must match exactly once unless replace_all=true. Raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer over sed_edit for literal text (even across multiple lines).",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "replace_all": {"type": "boolean", "description": "replace every occurrence (default false)"}}, "required": ["path", "old", "new"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace old->new in an EXISTING file (errors if missing -- use write_file for new). old must match exactly once unless replace_all=true. Raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer over sed_edit for literal text (even across multiple lines). Alternative: pass old_lines=\"10-14\" (1-based range from read_file numbering) instead of old to replace those lines with new. If old fails to match only because of indentation, the edit applies whitespace-tolerantly and says so.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "replace_all": {"type": "boolean", "description": "replace every occurrence (default false)"}, "old_lines": {"type": "string", "description": "1-based line range 'N' or 'N-M' replacing old — mutually exclusive with old"}}, "required": ["path", "new"]}}},
+    {"type": "function", "function": {"name": "delete_file", "description": "Delete one file. Restorable via /undo (unlike run_bash rm). Refuses directories and dotfiles. Requires approval.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "list_dir", "description": "List directory (flat). Pass `pattern` e.g. \"**/*.py\" for recursive glob, newest-first.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string", "description": "recursive glob e.g. \"**/*.py\""}}}}},
     {"type": "function", "function": {"name": "search_files", "description": "Regex content search (ripgrep/grep) -> path:line:match hits; pattern may be a list (OR'd). Read-only, no approval.",
@@ -325,9 +327,21 @@ TOOLS: list[dict[str, Any]] = [
 # (see _active_tools() / st._SESSION_HAS_BACKGROUNDED below) — the common short
 # session where nothing ever backgrounds shouldn't pay tokens for a tool it
 # will never call.
-_WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for backgrounded run_bash cmd, return its output. Waits indefinitely until done or Esc (Esc cancels WAIT only, not process). timeout=N to bail early. Locates log via pid (auto) or log_path. Polls only (kill -0) — never signals, cannot kill.",
-    "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "PID to wait for"}, "log_path": {"type": "string", "description": "log path (optional, auto-located by pid)"}, "timeout": {"type": "integer", "description": "max wait secs (default 0=indefinite; rarely set — Esc cancels)"}}, "required": ["pid"]}}}
+
+# Read-only sub-agent tool (spawn_agent): schema appended below, machinery in
+# nx/_subagent.py. _active_tools() filters it out unless NX_SUBAGENTS=1.
+from ._subagent import SUBAGENT_TOOL, spawn_agent
+
+# Vision tool: same opt-in posture (NX_VISION=1), and additionally withheld
+# until native tool_calls are confirmed this session (a text-protocol result
+# can't carry a content-parts array).
+from ._images import read_image, IMAGE_VISION_TOOL
+
+_WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for backgrounded run_bash cmd, return its output. Waits indefinitely until done or Esc (Esc cancels WAIT only, not process). Locates log via pid automatically; polls only (kill -0) — never signals, cannot kill.",
+    "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "PID to wait for"}, "timeout": {"type": "integer", "description": "max wait secs (default 0=indefinite; rarely set — Esc cancels)"}}, "required": ["pid"]}}}
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
+TOOLS.append(SUBAGENT_TOOL)
+TOOLS.append(IMAGE_VISION_TOOL)
 
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
@@ -464,11 +478,12 @@ st.AUTOCOMPRESS_DEFAULT = st.AUTOCOMPRESS_PERCENT or 85
 REASONING_STALL_NUDGE = (
     "Your previous response was reasoning only — you produced no tool calls and "
     "no visible output. Stop planning in your head. ACT NOW, in this order:\n"
-    "1. write_file — create the deliverable file the task asks for (e.g. /app/solution.py, "
-    "/app/main.rs, the output file the verifier checks). Put your best current approach "
+    "1. write_file — create the deliverable file the task asks for (a new file in "
+    "this project, or the output file the user's task names). Put your best current approach "
     "into code, even if it's a first draft. An imperfect file you can iterate on beats a "
     "perfect plan that lives only in your head.\n"
-    "2. run_bash — run it to see what happens (python3 /app/solution.py, cargo run, etc.).\n"
+    "2. run_bash — run it to see what happens (python3 <that file>, the project's "
+    "test command, etc.).\n"
     "3. edit_file / write_file — fix what the run told you was wrong, then re-run.\n"
     "Do not produce a final_answer until the deliverable file exists and runs. Pick the "
     "most promising approach from your reasoning and execute it right now."
@@ -510,6 +525,16 @@ from ._dispatch import (
     _CACHEABLE_READ_TOOLS, _tool_cache_key, _invalidate_tool_cache_path,
     run_tool, _tool_args_parse_error,
 )
+
+
+# --- read-only sub-agent delegation -----------------------------------------
+# spawn_agent runs a focused sub-loop with a read-only toolset so exploratory
+# reads (find X, summarize module Y, list callers of Z) don't bloat the main
+# context with intermediate tool output. Schema above; machinery in
+# nx/_subagent.py. OFF by default (NX_SUBAGENTS=1 to enable) — it adds a tool
+# schema to every turn's floor, so it's opt-in like NX_GRAMMAR/NX_NATIVE_TOOLS.
+NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
+NX_VISION = _env_int("NX_VISION", 0)
 
 
 from ._compress import (

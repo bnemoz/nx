@@ -1,0 +1,143 @@
+"""Per-message token accounting and pinned-turn protection for /ctx + compress.
+
+Two pieces:
+
+1. `_estimate_tokens` / `_messages_token_report` — a char-based estimator
+   (chars/4, the standard heuristic; within ~15% for code-heavy English) with
+   a per-role breakdown. Used by /ctx to show where the context actually goes.
+   When the active source's /tokenize endpoint works, /ctx uses it for the
+   total (exact); per-message numbers stay estimated (tokenizing each message
+   separately would round-trip the server N times).
+
+2. Pinned turns — `_ctx_pin(index_range)` marks message indexes that
+   compress() must keep verbatim (pinned turns move into the kept tail even
+   when they're old). State is a list of indexes on st (session lifetime,
+   persisted by the session save like todos — see _repl_state).
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from . import _state as st
+
+CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens(text: str) -> int:
+    """char/4 estimate — the standard rough heuristic; good enough to rank
+    messages by size, which is what /ctx exists for."""
+    if not text:
+        return 0
+    if isinstance(text, list):  # content-parts form
+        text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+    return max(1, len(str(text)) // CHARS_PER_TOKEN)
+
+
+def _message_content_text(msg: dict[str, Any]) -> str:
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(p.get("text", "") for p in c if isinstance(p, dict))
+    return ""
+
+
+def _message_tokens(msg: dict[str, Any]) -> int:
+    """Estimated tokens for one message, including native tool_calls args."""
+    n = _estimate_tokens(_message_content_text(msg))
+    tcs = msg.get("tool_calls") or []
+    for tc in tcs:
+        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+        n += _estimate_tokens(str(fn.get("name") or "")) + _estimate_tokens(str(fn.get("arguments") or ""))
+    return n
+
+
+def _tokenize_total(messages: list[dict[str, Any]]) -> int | None:
+    """Exact total via the server's /tokenize endpoint when available, else None.
+    Never raises, never blocks long — this is a UX nicety, not a correctness path."""
+    try:
+        if st.ACTIVE is None or not getattr(st.ACTIVE, "_tokenize_ok", None):
+            return None
+        resp = st.ACTIVE.client._client.post(
+            "/tokenize", json={"messages": messages})
+        resp.raise_for_status()
+        n = resp.json().get("tokens")
+        return n if isinstance(n, int) and n > 0 else None
+    except Exception:
+        return None
+
+
+def _messages_token_report(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-message token estimates + role subtotals, for /ctx.
+
+    Returns {"rows": [(idx, role, tokens, preview, pinned)], "total_est": int,
+             "total_exact": int|None, "by_role": {role: tokens}}.
+    Indexes are into `messages` itself (what /ctx pin N takes).
+    """
+    pinned = set(getattr(st, "_CTX_PINNED", []) or [])
+    rows = []
+    by_role: dict[str, int] = {}
+    total = 0
+    for i, m in enumerate(messages):
+        t = _message_tokens(m)
+        role = m.get("role", "?")
+        preview = _message_content_text(m).strip().replace("\n", " ")[:64]
+        if not preview and m.get("tool_calls"):
+            preview = "→ " + ", ".join(
+                ((c.get("function") or {}).get("name") or "?")
+                for c in m["tool_calls"])
+        rows.append((i, role, t, preview, i in pinned))
+        by_role[role] = by_role.get(role, 0) + t
+        total += t
+    return {"rows": rows, "total_est": total,
+            "total_exact": _tokenize_total(messages), "by_role": by_role}
+
+
+# --- pinned turns -----------------------------------------------------------
+
+def _parse_pin_spec(spec: str, n_messages: int) -> list[int]:
+    """'12', '12-15', '4,8,12-15' (1-based, inclusive) → message indexes.
+    Raises ValueError on anything unparseable or out of range."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            lo, hi = int(a), int(b)
+            if lo > hi:
+                lo, hi = hi, lo
+        else:
+            lo = hi = int(part)
+        if lo < 1 or hi > n_messages:
+            raise ValueError(f"range {lo}-{hi} outside 1..{n_messages}")
+        out.update(range(lo - 1, hi))
+    return sorted(out)
+
+
+def _ctx_pin(spec: str, messages: list[dict[str, Any]]) -> tuple[list[int], list[int]]:
+    """Pin message indexes (1-based spec). Returns (newly_pinned, all_pinned)."""
+    idxs = _parse_pin_spec(spec, len(messages))
+    pinned = set(getattr(st, "_CTX_PINNED", []) or [])
+    added = [i for i in idxs if i not in pinned]
+    pinned.update(idxs)
+    st._CTX_PINNED = sorted(pinned)
+    return added, st._CTX_PINNED
+
+
+def _ctx_unpin(spec: str | None, messages: list[dict[str, Any]]) -> tuple[list[int], list[int]]:
+    """Unpin all (spec None) or the given 1-based spec. Returns (removed, remaining)."""
+    pinned = set(getattr(st, "_CTX_PINNED", []) or [])
+    if spec is None or spec.strip().lower() in ("all", "*"):
+        removed = sorted(pinned)
+        st._CTX_PINNED = []
+        return removed, []
+    idxs = set(_parse_pin_spec(spec, len(messages)))
+    removed = sorted(pinned & idxs)
+    st._CTX_PINNED = sorted(pinned - idxs)
+    return removed, st._CTX_PINNED
+
+
+def _pinned_indexes() -> set[int]:
+    return set(getattr(st, "_CTX_PINNED", []) or [])
