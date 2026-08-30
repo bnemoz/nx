@@ -211,7 +211,7 @@ def open_stream(
     # circular import between the two.
     from ._turn import _LoggingStream
     assert st.client is not None and st.MODEL is not None
-    if tool_choice is None and tools and not NX_NATIVE_TOOLS:
+    if tool_choice is None and tools:
         # Default posture (see NX_NATIVE_TOOLS above): keep tools= so the
         # schema still renders into the prompt (that's the model's only
         # source of tool names/params — dropping tools= entirely blinds it,
@@ -222,7 +222,24 @@ def open_stream(
         # model to actually invoke a tool. A caller that forces tool_choice
         # (e.g. the forced-final-answer path) already opted into native for
         # that one call, so it's left untouched.
-        tool_choice = "none"
+        #
+        # Exception: once the startup capability probe (_capability.py) has
+        # classified this source as CAPABILITY_NATIVE, forcing tool_choice="none"
+        # is actively harmful, not just redundant — some models (e.g. GLM/Qwen
+        # generations tested against the bubbles proxy) only ever honor tools
+        # via the native tool_calls machinery and completely ignore the
+        # prompt-instructed <tool_call> tag convention once native tool_calls
+        # are suppressed. On those servers "none" doesn't fall back to the
+        # text protocol, it just produces prose narration with no tool call
+        # at all. So: native-confirmed sources (probed, or reactively via
+        # st._NATIVE_TOOL_CALLS_CONFIRMED) get tool_choice="auto"; everyone
+        # else keeps the old "none" default.
+        capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+        from ._capability import CAPABILITY_NATIVE
+        if NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED or capability == CAPABILITY_NATIVE:
+            tool_choice = "auto"
+        else:
+            tool_choice = "none"
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens
