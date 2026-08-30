@@ -229,6 +229,12 @@ a tool — which nx parses and can repair itself. Set `NX_NATIVE_TOOLS=1` to
 opt into server-side native `tool_calls` for backends known to emit
 well-formed arguments.
 
+Qwen-style chat templates (qwen3.8-27b, Qwen3.8-flash-next, …) interleave a
+literal newline as a `content` delta between their native `tool_calls`; nx
+treats those whitespace-only separators as stream punctuation rather than
+prose, so a multi-call turn renders its preamble once instead of once per
+call.
+
 ## Commands
 
 Run `/help` in the REPL for the full list. The essentials:

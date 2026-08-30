@@ -104,6 +104,8 @@ class StreamParser:
         self.tool_status_active = False
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
+        self.had_tool_call = False  # a native tool_calls delta already arrived this turn
+        self._live_committed = False  # say_live already frozen once; never reopen it
         self.think_start: float | None = None
         self.last_say_render = 0.0
 
@@ -230,6 +232,11 @@ class StreamParser:
         """Returns True if the stream should be cut (collapse detected)."""
         self.clear_tool_status()
         self.close_think_block()
+        if self._live_committed:
+            # say_live was already frozen once (text-tool-tag path): never
+            # reopen — a second Live would re-render the whole accumulated
+            # text again on screen.
+            return False
         self.mode = "say"
         chunk = raw_chunk
         if _LEAKED_SPECIAL_TOKEN_RE.search(chunk):
@@ -237,6 +244,16 @@ class StreamParser:
             self.leaked_token_run += 1
         else:
             self.leaked_token_run = 0
+        if self.had_tool_call and not chunk.strip():
+            # A whitespace-only content delta AFTER native tool-calling
+            # started: Qwen-style chat templates emit a literal "\n" between
+            # each tool call (and often trailing ones after the last). It is a
+            # separator, not prose — treating it as prose re-opens a Live
+            # panel re-rendering the whole accumulated preamble (printed once
+            # per separator on screen: 2 calls → doubled, 3 → tripled), and
+            # its byte-identical <=40-char shape falsely trips the
+            # repetition-collapse detector once a turn hits ~6 calls. Drop it.
+            return False
         if REPEAT_CHUNK_LIMIT > 0 and chunk and len(chunk) <= 40:
             if chunk == self.last_chunk:
                 self.repeat_chunk_run += 1
@@ -287,6 +304,7 @@ class StreamParser:
                         self.say_live.update(Markdown(strip_ansi_for_display(prefix)))
                         self.say_live.stop()
                         self.say_live = None
+                    self._live_committed = True
                     self.in_text_tool_tag = True
             if self.in_text_tool_tag:
                 self.show_tool_status()
@@ -310,6 +328,7 @@ class StreamParser:
         elif self.mode == "say":
             self.stop_say_live()
             self.mode = None
+        self.had_tool_call = True
         s = self.tcs.setdefault(tc.index, {"id": "", "name": "", "args": ""})
         if tc.id:
             s["id"] = tc.id
