@@ -423,6 +423,10 @@ REASONING_CAPTURE_CHARS = _env_int("NX_REASONING_CAPTURE_CHARS", 8000)
 # context-copying repetition collapse some local models fall into — bounding
 # them is the cheapest prevention. 0 disables the size cap (dedup still runs).
 from ._text_fallback import TOOL_RESULT_CHARS
+from ._overflow import (
+    overflow_dir, spill_to_disk, build_overflow_result,
+    OVERFLOW_TTL_DAYS, MAX_SPILL_ECHO,
+)
 
 # --- leaked special-token collapse ------------------------------------------
 from ._special_tokens import (

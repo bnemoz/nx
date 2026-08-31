@@ -6,6 +6,7 @@ import re
 from typing import Any, List, Tuple
 
 from ._env import _env_int
+from ._overflow import build_overflow_result, spill_to_disk
 
 TOOL_OPEN_TAG = re.compile(r"<tool_call\s*>\s*", re.DOTALL)
 NX_OPEN_TAG = re.compile(r"\[nx_tool_call\]\s*", re.DOTALL)
@@ -60,6 +61,11 @@ TOOL_RESULT_PROTOCOL_NOTE = (
 
 
 TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
+
+# Oversized results are additionally spilled to disk (see _overflow.py): the
+# model gets head + tail + the path of the full text instead of a blind cut.
+# 0 disables spilling (plain elision marker, as before).
+TOOL_RESULT_SPILL = _env_int("NX_TOOL_RESULT_SPILL", 1)
 
 
 def _inside_code_fence(text: str, index: int) -> bool:
@@ -346,8 +352,19 @@ def _sanitize_tool_result(text: Any) -> Any:
         head = budget * 2 // 3
         tail = budget - head
         elided = len(result) - head - tail
-        result = (result[:head]
-                  + f"\n... [{elided} chars elided to bound context; "
-                    f"re-run more narrowly if you need the rest]\n"
-                  + result[-tail:])
+        marker = (f"\n... [{elided} chars elided to bound context; "
+                  f"re-run more narrowly if you need the rest]\n")
+        spill_path = None
+        if TOOL_RESULT_SPILL:
+            # Spill the FULL text to disk first — the model then gets real
+            # head/tail content plus the path instead of a blind cut, and can
+            # read_file/search_files the spill for the elided middle.
+            try:
+                spill_path = spill_to_disk(result)
+                if spill_path:
+                    result = build_overflow_result(result, spill_path)
+            except Exception:  # noqa: BLE001 — spilling must never lose a result
+                spill_path = None
+        if not spill_path:
+            result = (result[:head] + marker + result[-tail:])
     return result
