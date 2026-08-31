@@ -264,6 +264,15 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
         if preview:
             print(preview)
         return True
+    # A quiet (async background sub-agent) loop can never prompt: there is no
+    # user watching and this thread is detached from the terminal. Its only
+    # _confirm caller is run_bash behind the read-only sub-agent allowlist
+    # (_subagent_bash), which is the actual safety gate — same reasoning as
+    # the YOLO swap sync read-only agents get, just without the process-global
+    # swap a detached loop can't safely take (it would outlive the turn).
+    from ._subagent import _subagent_quiet
+    if _subagent_quiet():
+        return True
     # Saved allow rules ("A" at a previous prompt, /approval allow) come
     # before the risk classifier: an explicitly-blessed action shape needs no
     # model round-trip and never prompts, regardless of the level threshold.

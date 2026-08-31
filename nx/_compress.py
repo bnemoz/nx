@@ -55,6 +55,13 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None):
         messages.append({"role": "user", "content": st._PENDING_BG_COMPLETION_NOTICE})
         st._PENDING_BG_COMPLETION_NOTICE = None
+    # Finished async sub-agent answer(s): staged by the agent worker itself
+    # (nx/_subagent.py) the moment the sub-loop completes, swept by run_tool()'s
+    # first-tool-of-turn scan, and delivered here as the parent's runtime note.
+    subagent_note = getattr(st, "_PENDING_SUBAGENT_NOTICE", None)
+    if subagent_note:
+        messages.append({"role": "user", "content": subagent_note})
+        st._PENDING_SUBAGENT_NOTICE = None
     if st._PENDING_MULTI_EDIT_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_MULTI_EDIT_NOTICE})
         st._PENDING_MULTI_EDIT_NOTICE = None

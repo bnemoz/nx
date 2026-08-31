@@ -30,6 +30,7 @@ from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
 from ._bash_jobs import _read_bg_exit_status
+from ._subagent import list_async_agents
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
 from ._todo import render_todos_display
 
@@ -374,8 +375,26 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
             print(f"{C.ERROR}  ✗ {e}{RESET}")
         return
     jobs = list_bg_jobs()
+    agents = list_async_agents()
+    if not jobs and not agents:
+        print(f"{DIM}  no background jobs or sub-agents{RESET}")
+        return
+    if agents:
+        print(f"{DIM}  background sub-agents (newest first):{RESET}")
+        for a in agents:
+            if a["alive"]:
+                status = f"{C.SUCCESS}running{RESET}"
+            elif a["status"] == "done":
+                status = f"{C.SUCCESS}done{RESET}"
+            else:
+                status = f"{C.ERROR}{a['status']}{RESET}"
+            instr = a["instruction"]
+            instr = instr if len(instr) <= 60 else instr[:59] + "…"
+            print(f"  {DIM}{a['id']:>12}{RESET}  {status:<18}  {instr}")
+            if a["tail"]:
+                print(f"           {DIM}└ {a['tail']}{RESET}")
+        print(f"{DIM}  answers arrive as [Runtime note] on a later turn{RESET}")
     if not jobs:
-        print(f"{DIM}  no background jobs{RESET}")
         return
     print(f"{DIM}  background jobs (newest first):{RESET}")
     for j in jobs:

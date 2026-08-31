@@ -94,9 +94,14 @@ class StreamParser:
     don't masquerade as slow decoding.
     """
 
-    def __init__(self, say_console: Console, t0: float) -> None:
+    def __init__(self, say_console: Console, t0: float, quiet: bool = False) -> None:
         self._say_console = say_console
         self._t0 = t0
+        # quiet=True (async sub-agent loop): parse and account everything, but
+        # write NOTHING to the shared terminal — no reasoning text, no Live
+        # say-panel, no tool-status line. The agent's answer reaches the user
+        # only as the staged [Runtime note].
+        self.quiet = quiet
         self.content: list[str] = []
         self._content_str = ""
         self.tcs: dict[int, dict[str, Any]] = {}
@@ -126,6 +131,8 @@ class StreamParser:
 
     # --- tool-call status line (throttled) ---------------------------------
     def show_tool_status(self, force: bool = False) -> None:
+        if self.quiet:
+            return
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
@@ -158,7 +165,9 @@ class StreamParser:
             return
         elapsed = time.time() - self.think_start
         dur = _fmt_think_duration(elapsed)
-        if st.REASONING_VISIBLE:
+        if self.quiet:
+            pass  # parse only — the closer line is terminal noise here
+        elif st.REASONING_VISIBLE:
             print()
             print(f"{DIM}  ────────────── (thought for {dur}){RESET}")
         else:
@@ -237,7 +246,9 @@ class StreamParser:
         """Returns True if the stream should be cut (collapse detected)."""
         if self.mode != "think":
             self.think_start = time.time()
-            if st.REASONING_VISIBLE:
+            if self.quiet:
+                pass
+            elif st.REASONING_VISIBLE:
                 print(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
             else:
                 print(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
@@ -248,7 +259,9 @@ class StreamParser:
         else:
             self.leaked_token_run = 0
         if rc.strip():
-            if st.REASONING_VISIBLE:
+            if self.quiet:
+                pass
+            elif st.REASONING_VISIBLE:
                 print(f"{C.REASONING_TEXT}{rc}{RESET}", end="", flush=True)
             self.reasoning_parts.append(rc)
         if not self.content and not self.tcs:
@@ -323,7 +336,7 @@ class StreamParser:
                 full = self._content_str
                 tag_idx = _first_tool_tag_index(full)
                 if tag_idx is None:
-                    if self.say_live is None:
+                    if not self.quiet and self.say_live is None:
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()

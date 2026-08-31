@@ -56,6 +56,10 @@ st._SESSION_HAS_BACKGROUNDED = False  # flips True the first time a run_bash cal
 st._PENDING_BACKGROUND_NOTICE = None  # set by run_tool() on that first flip; flushed once by model_turn (see _flush_pending_background_notice)
 st._BG_SCAN_DONE = False  # per-turn: scan for finished bg jobs once, on the first tool call
 st._PENDING_BG_COMPLETION_NOTICE = None  # set by that scan; flushed with the other runtime notes
+# [Runtime note: ...] staged when a background (async) sub-agent finishes —
+# worker-side via _subagent._stage_subagent_answer, swept by the same
+# first-tool-of-turn scan below, flushed once with the other runtime notes.
+st._PENDING_SUBAGENT_NOTICE = None
 st._BG_NOTICE_SEEN = None  # pids already announced (None → seed from _BG_NOTICE_BASELINE)
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
@@ -272,7 +276,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # Background-completion notice: on the first tool call of a turn, check
     # whether any tracked bg job finished since the model last looked, and
     # stage a one-time runtime note (flushed with the other pending notices).
-    if not st._BG_SCAN_DONE:
+    # Skipped inside a sub-agent loop (run_tool is shared machinery): the
+    # notices belong to the PARENT's transcript — an agent thread must never
+    # consume/stage them into its own scoped messages, and async agents run
+    # turns long after the parent's per-turn reset, so the flag alone can't
+    # keep them out anymore.
+    from ._subagent import _subagent_ctx
+    if not st._BG_SCAN_DONE and _subagent_ctx() is None:
         st._BG_SCAN_DONE = True
         note = _scan_background_completions()
         if note:
@@ -282,6 +292,14 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         from ._verify import _stage_verify_outcome
         try:
             _stage_verify_outcome()
+        except Exception:
+            pass
+        # Async sub-agent finished since the last look? Its answer is
+        # normally staged by the worker itself; this sweep catches any
+        # finished-but-unstaged stragglers (idempotent per job id).
+        from ._subagent import _stage_subagent_completions
+        try:
+            _stage_subagent_completions()
         except Exception:
             pass
     if name in _CACHEABLE_READ_TOOLS:
@@ -312,12 +330,17 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # sub-agent's edit, not the parent's. The tag rides the header line only —
     # the action string inside _confirm stays the standard shape, so allow
     # rules / risk hints match sub-agent and parent writes alike.
-    from ._subagent import _subagent_ctx
+    from ._subagent import _subagent_ctx, _subagent_quiet
     ctx = _subagent_ctx()
     if ctx is not None and ctx.write and name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
         header = f"{header} (sub-agent)"
-    print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
-    print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
+    # A quiet (async-agent) loop renders NO tool box: the box, its spinner,
+    # and st._ACTIVE_SPINNER all belong to the parent's terminal while this
+    # agent runs detached. Results still flow to the agent's own transcript.
+    quiet = _subagent_quiet()
+    if not quiet:
+        print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
+        print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -325,19 +348,22 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # screen after the green model output finishes. _confirm pauses/resumes
     # us around its own I/O so the auto-allow line / Y/n prompt aren't clobbered.
     spinner = LifeSpinner(label=f"running {name}")
-    spinner.start()
-    st._ACTIVE_SPINNER = spinner
+    if not quiet:
+        spinner.start()
+        st._ACTIVE_SPINNER = spinner
     try:
         result = fn(**args)
     except _EscToChat:
         # Close the tool box before propagating so it isn't left visually open.
-        print(f"{C.ACCENT}  └─{RESET} {DIM}(escaped){RESET}")
+        if not quiet:
+            print(f"{C.ACCENT}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         result = f"ERROR: {type(e).__name__}: {e}"
     finally:
-        st._ACTIVE_SPINNER = None
-        spinner.stop()
+        if not quiet:
+            st._ACTIVE_SPINNER = None
+            spinner.stop()
     # Post-edit structural check: for a successful .py write/edit, parse the
     # new contents in-process (~1ms) and append the verdict to the result, so
     # a broken edit is surfaced on the turn that caused it. Also records the
@@ -385,7 +411,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # done=green, in_progress=yellow, pending=orange) and sanitizes the item
     # text, so it goes to the screen verbatim inside the box — not the generic
     # strip + uniform-recolor path used for other tool/bash output.
-    if name == "todo_write":
+    if quiet:
+        pass  # quiet (async-agent) loop: no box, no result echo
+    elif name == "todo_write":
         disp = render_todos_display().splitlines()
         if len(disp) > 8:
             disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
@@ -398,7 +426,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
         print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
-    print(f"{C.ACCENT}  └─{RESET}")
+    if not quiet:
+        print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         cache_path = args.get("path", ".")
         if isinstance(cache_path, list):

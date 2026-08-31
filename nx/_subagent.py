@@ -27,6 +27,13 @@ reads the TLS-first context, so simultaneous agents each see their own
 restricted table. Thread-local falls back to the globals for tests/REPL code
 that sets them directly.
 
+Async (background) sub-agents: `spawn_agent(async=true)` returns a job id
+immediately and runs the same turn loop on a daemon thread. The finished
+answer is announced exactly like a finished bash job — a one-time [Runtime
+note] appended to the parent's messages on a later turn — so long
+investigations stop blocking the parent loop. Async is read-only even when
+the write tier is on (nobody is watching a Y/n prompt on a detached thread).
+
 Deliberately NOT offered to the sub-agent: final_answer's forced-final mode
 (we reuse it), wait_background, and every mutating tool (write/edit/sed/patch/
 memory_write) UNLESS the write tier is on (NX_SUBAGENT_WRITE=1). With the
@@ -49,9 +56,9 @@ result the sub-loop continues from.
 """
 from __future__ import annotations
 
-import json
 import shlex
 import threading
+import time
 from typing import Any
 
 from . import _state as st
@@ -82,6 +89,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
         "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40)."},
+        "async": {"type": "boolean", "description": "Run in the background: returns a job id immediately, and the answer arrives as a [Runtime note] on a later turn. Use only for investigations that genuinely take a while; don't declare the task done until the note lands."},
     }, "required": ["instruction"]},
 }}
 
@@ -118,12 +126,14 @@ _SPAWN_LOCK = threading.Lock()
 class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
-    __slots__ = ("table", "active", "write")
+    __slots__ = ("table", "active", "write", "quiet")
 
-    def __init__(self, table: dict[str, Any], write: bool = False) -> None:
+    def __init__(self, table: dict[str, Any], write: bool = False,
+                 quiet: bool = False) -> None:
         self.table = table
         self.active = True
         self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
+        self.quiet = quiet  # no terminal writes (async worker threads)
 
 
 def _subagent_ctx() -> "_SubagentContext | None":
@@ -290,28 +300,181 @@ def _subagent_bash(command: str, **_: Any) -> str:
     return run_bash(command)
 
 
-def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
-    """Run a sub-agent on `instruction`; return its final answer. Read-only by
-    default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
-    four file-mutation tools, each still gated by the parent's _confirm())."""
-    if not isinstance(instruction, str) or not instruction.strip():
-        # flash-tier models keep sending {"prompt": ...} instead of the
-        # documented `instruction` key; without a hint they burn a whole
-        # sub-turn learning the schema by trial and error (seen live on
-        # glm-5.3-flash).
-        return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
-                "\"...\"} — you may have used a different key, e.g. `prompt`; "
-                "retry with `instruction`)")
+# --- async (background) sub-agents ------------------------------------------
+# `spawn_agent(async=true)` runs the same sub-loop on a daemon thread and
+# returns a job id immediately. The completed answer is delivered to the
+# PARENT as a one-time [Runtime note]: the worker stages it on st the moment
+# it finishes, run_tool()'s first-tool-of-turn scan sweeps any stragglers
+# (the same hook that runs _scan_background_completions() for bg bash jobs
+# and _stage_verify_outcome() for NX_VERIFY_CMD launches), and
+# _compress._flush_pending_background_notice appends it to the parent's
+# messages with the other runtime notes. Long investigations therefore stop
+# blocking the parent loop.
+#
+# Quiet mode: an async agent's turn loop must not touch the shared terminal —
+# no LifeSpinner, no streamed text, no stats footer, no interrupt-watcher
+# arming (the singleton stdin watcher is the PARENT's to arm; an agent thread
+# clearing/setting it mid-parent-stream would eat keystrokes or break Esc).
+# The sub-agent's answer arrives only as the staged [Runtime note], so the
+# visible-by-default read-only tool output would be noise; and a sync
+# sub-agent spawned BY an async agent is quiet too (its parent thread is
+# already detached from the terminal). Quiet mode is read off the per-thread
+# sub-agent context, so it composes with concurrent agents (sync fan-out and
+# async workers each keep their own context).
+_ASYNC_QUIET_SLOTS = threading.local()
+
+
+def _subagent_quiet() -> bool:
+    """True when THIS thread's loop must not write to the shared terminal:
+    async-agent worker threads, and any sub-loop running on one."""
+    if getattr(_ASYNC_QUIET_SLOTS, "quiet", False):
+        return True
+    ctx = _subagent_ctx()
+    return bool(ctx is not None and getattr(ctx, "quiet", False))
+#
+# Thread hygiene: the worker runs _run_sync_agent, which installs its own TLS
+# sub-agent context and restores it, so concurrent agents (sync fan-out or
+# async) each keep their own restricted dispatch table. Async is read-only
+# even when NX_SUBAGENT_WRITE=1 — a detached agent has nobody to show a Y/n
+# prompt to, and it must not inherit the process-global YOLO/APPROVE_LEVEL
+# swap while the parent turn is mid-flight (a leaked YOLO=True would silently
+# disable the parent's approval gate — see _SPAWN_LOCK).
+_ASYNC_ANSWER_CHARS = 4000  # cap on an async answer's size inside the [Runtime note]
+
+# Job id → agent record. Only agents from this process are tracked/announced
+# (same posture as the bg map files' owner_pid check). `announced` marks a
+# finished answer whose [Runtime note] has been staged — staged once, never
+# re-announced on later turns (mirrors _bash_jobs' _BG_NOTICE_SEEN).
+_ASYNC_AGENTS: dict[str, dict[str, Any]] = {}
+_ASYNC_LOCK = threading.Lock()
+_ASYNC_SEQ = 0
+
+# st slot the finished answer is staged into, flushed (and cleared) by
+# _compress._flush_pending_background_notice.
+_PENDING_NOTICE_KEY = "_PENDING_SUBAGENT_NOTICE"
+
+
+def _new_job_id() -> str:
+    """A collision-proof job id: monotonic counter + random suffix, so two
+    agents spawned in the same instant (a fan-out turn) still get distinct
+    ids the model can tell apart."""
+    global _ASYNC_SEQ
+    import secrets
+    with _ASYNC_LOCK:
+        _ASYNC_SEQ += 1
+        return f"agent-{_ASYNC_SEQ}-{secrets.token_hex(3)}"
+
+
+def list_async_agents() -> list[dict[str, Any]]:
+    """Dashboard-ready view of this process's async sub-agents (newest first):
+    {"id", "alive", "instruction", "status", "tail"}. Used by /bg, which
+    renders them alongside the _bash_jobs registry entries."""
+    with _ASYNC_LOCK:
+        recs = sorted(_ASYNC_AGENTS.items(),
+                      key=lambda kv: kv[1].get("started") or 0, reverse=True)
+    out = []
+    for jid, rec in recs:
+        status = rec.get("status", "running")
+        answer = rec.get("answer") or ""
+        out.append({
+            "id": jid,
+            "alive": status == "running",
+            "instruction": rec.get("instruction", ""),
+            "status": status,
+            "tail": answer[-160:] if answer else "",
+        })
+    return out
+
+
+def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
+    """Worker body: run the sub-loop, then stage the parent's notice.
+
+    On any failure the job is still finalized (status=error) and staged, so
+    the parent gets exactly one note — never a dangling, silently-dead agent
+    it waits on forever."""
     try:
-        max_turns = max(1, min(40, int(max_turns)))
-    except (TypeError, ValueError):
-        max_turns = 12
+        answer = _run_sync_agent(instruction, max_turns)
+        # _run_sync_agent turns most failures into an "ERROR: sub-agent
+        # failed: ..." answer string rather than raising (a failed agent is a
+        # tool error, not a crash) — surface those as FAILED to the parent.
+        status = "error" if answer.startswith("ERROR: sub-agent failed") else "done"
+    except Exception as e:  # noqa: BLE001 — a failed agent is a note, not a crash
+        answer = f"{type(e).__name__}: {e}"
+        status = "error"
+    with _ASYNC_LOCK:
+        rec = _ASYNC_AGENTS.get(job_id)
+        if rec is not None:
+            rec["answer"] = answer
+            rec["status"] = status
+            rec["finished"] = time.time()
+    _stage_subagent_answer(job_id)
+
+
+def _stage_subagent_answer(job_id: str) -> None:
+    """Stage the one-time [Runtime note] announcing a finished async agent.
+
+    Idempotent: the first caller to run a finished record wins `announced`,
+    so the answer is never announced twice (direct staging by the worker and
+    the run_tool() sweep both land here). Merges with any earlier unstaged
+    note so a burst of finishing agents is announced together (one flush,
+    not N)."""
+    with _ASYNC_LOCK:
+        rec = _ASYNC_AGENTS.get(job_id)
+        if rec is None or rec.get("announced") or rec.get("status") == "running":
+            return
+        rec["announced"] = True
+        status, answer = rec.get("status", "done"), rec.get("answer") or ""
+        prev = getattr(st, _PENDING_NOTICE_KEY, None)
+        if status == "done":
+            body = answer[:_ASYNC_ANSWER_CHARS]
+            if len(answer) > _ASYNC_ANSWER_CHARS:
+                body += "\n…[truncated]"
+            note = (f"[Runtime note: background sub-agent {job_id} finished. "
+                    f"Its answer:\n{body}]")
+        else:
+            note = (f"[Runtime note: background sub-agent {job_id} FAILED — "
+                    f"{answer[:600]}\n"
+                    "Retry the task inline (async=false) if it still matters.]")
+        setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
+
+
+def _spawn_async(instruction: str, max_turns: int) -> str:
+    """Launch the agent's turn loop on a quiet daemon thread and return the
+    job id result the parent's tool message carries."""
+    job_id = _new_job_id()
+    with _ASYNC_LOCK:
+        _ASYNC_AGENTS[job_id] = {
+            "instruction": instruction, "status": "running",
+            "answer": None, "started": time.time(), "announced": False,
+        }
+
+    def _worker() -> None:
+        # Quiet: this thread never writes the shared terminal (no spinner,
+        # no streamed text, no footer) and never arms the interrupt watcher —
+        # those belong to the parent's loop while this agent runs.
+        _ASYNC_QUIET_SLOTS.quiet = True
+        try:
+            _run_async_agent(job_id, instruction, max_turns)
+        finally:
+            _ASYNC_QUIET_SLOTS.quiet = False
+
+    threading.Thread(target=_worker, daemon=True,
+                     name=f"nx-subagent-{job_id}").start()
+    return (f"[background sub-agent] job {job_id}\n"
+            f"instruction: {instruction[:200]}\n"
+            "The agent is running in the background; continue other work in "
+            "the meantime. Its answer will arrive automatically as a "
+            "[Runtime note] on a later turn — do not declare the task done "
+            "until then.")
+
+
+def _run_sync_agent(instruction: str, max_turns: int) -> str:
+    """The synchronous spawn_agent body, factored out so the sync tool call
+    and the async worker run identical machinery."""
     if st.client is None or st.MODEL is None:
         return "ERROR: no active model source"
     if st.YOLO is None:  # pragma: no cover — defensive; YOLO is always a bool
         return "ERROR: approval state unavailable"
-    if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent
-        return "ERROR: nested spawn_agent refused — sub-agents cannot delegate"
 
     from ._turn import _run_model_turn_loop  # import-check only (circular-import canary)
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
@@ -321,6 +484,9 @@ def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
+    # A sub-loop inherits this thread's quiet mode (an async agent's own
+    # nested spawn stays off the terminal).
+    quiet = _subagent_quiet()
     messages = [{"role": "system", "content": SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM},
                 {"role": "user", "content": instruction.strip()}]
     # Force the sub-loop through the restricted dispatch table. run_tool() and
@@ -332,17 +498,21 @@ def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
     # manual, serial-only fallback for tests.
     table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
-    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=write)
+    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=write, quiet=quiet)
     # YOLO/APPROVE_LEVEL are process-global: snapshot+swap under the spawn lock
     # so two concurrent agents can't restore each other's snapshot out of order
     # (a leaked YOLO=True would silently disable the parent's approval gate).
-    # Read-only agents force YOLO (their tools never prompt anyway). Write-tier
-    # agents inherit the parent's real approval posture instead — the confirm-
-    # through wrappers must see it, and they also drop the TLS context around
-    # each body, so _confirm() runs exactly as it would for a parent write.
+    # Read-only agents force YOLO (their tools never prompt anyway) — EXCEPT
+    # quiet ones: an async agent's swap would outlive the parent turn and
+    # silently disable the approval gate for the agent's whole (minutes-long)
+    # run, so quiet agents run with the parent's real posture and rely on
+    # their read-only toolset never prompting. Write-tier agents inherit the
+    # parent's real approval posture (the confirm-through wrappers must see
+    # it; they also drop the TLS context around each body, so _confirm()
+    # runs exactly as it would for a parent write).
     with _SPAWN_LOCK:
         prev_yolo, prev_level = st.YOLO, st.APPROVE_LEVEL
-        if write:
+        if write or quiet:
             st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level
         else:
             st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
@@ -372,3 +542,62 @@ def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
     if status == "cap":
         return (f"[sub-agent hit its {max_turns}-turn cap; partial answer]\n{answer}")
     return answer
+
+
+def spawn_agent(instruction: str, max_turns: int = 12, async_: bool = False,
+                **extra: Any) -> str:
+    """Run a sub-agent on `instruction`; return its final answer. Read-only by
+    default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
+    four file-mutation tools, each still gated by the parent's _confirm()).
+    async_=True (the tool schema's `async` key — a keyword, so run_tool() can
+    only deliver it via **extra) returns a job id immediately and delivers
+    the answer as a [Runtime note] on a later turn."""
+    if not isinstance(instruction, str) or not instruction.strip():
+        # flash-tier models keep sending {"prompt": ...} instead of the
+        # documented `instruction` key; without a hint they burn a whole
+        # sub-turn learning the schema by trial and error (seen live on
+        # glm-5.3-flash).
+        return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
+                "\"...\"} — you may have used a different key, e.g. `prompt`; "
+                "retry with `instruction`)")
+    try:
+        max_turns = max(1, min(40, int(max_turns)))
+    except (TypeError, ValueError):
+        max_turns = 12
+    # Models send booleans as real booleans through native tool calls but as
+    # "true"/"1" strings through the text-protocol fallback — accept both.
+    # The schema key is `async` — a Python keyword, so it can never bind to a
+    # named parameter; run_tool() dispatches fn(**args) and it would silently
+    # land in **extra and be dropped (the agent would run synchronously).
+    raw_async = extra.pop("async", None)
+    if async_ is False and raw_async is not None:
+        async_ = raw_async
+    want_async = async_ is True or (
+        isinstance(async_, str) and async_.strip().lower() in ("1", "true", "yes", "on"))
+    if want_async:
+        if st.client is None or st.MODEL is None:
+            return "ERROR: no active model source"
+        if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent
+            return "ERROR: nested spawn_agent refused — sub-agents cannot delegate"
+        return _spawn_async(instruction, max_turns)
+    return _run_sync_agent(instruction, max_turns)
+
+
+# --- parent-side completion sweep --------------------------------------------
+
+def _stage_subagent_completions() -> None:
+    """Stage [Runtime note]s for async agents that finished since the model
+    last looked. Called from run_tool()'s first-tool-of-turn scan — the same
+    hook that runs _scan_background_completions() for bg bash jobs and
+    _stage_verify_outcome() for NX_VERIFY_CMD launches — and flushed with the
+    other pending notices by _compress._flush_pending_background_notice.
+
+    Normally redundant (the worker stages its own answer the moment it
+    finishes) but it guarantees an agent that finished between the worker's
+    staging and a lost update still announces exactly once — _stage_subagent_answer
+    is idempotent per job id."""
+    with _ASYNC_LOCK:
+        finished = [jid for jid, rec in _ASYNC_AGENTS.items()
+                    if rec.get("status") != "running" and not rec.get("announced")]
+    for jid in finished:
+        _stage_subagent_answer(jid)

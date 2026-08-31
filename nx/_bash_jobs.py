@@ -430,6 +430,12 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     """
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
     if secret is not None:
+        from ._subagent import _subagent_quiet
+        if _subagent_quiet():
+            # A detached agent can't show the secret-guard prompt — fail the
+            # call instead of prompting from a background thread.
+            return (f"ERROR: command looks like it carries a credential ({secret!r}); "
+                    "refused in a background sub-agent — let the parent run it")
         # force the prompt even under YOLO: bypass the level/YOLO short-circuit
         # with a direct ask (Esc still drops to chat)
         from ._approval import _ask_approval

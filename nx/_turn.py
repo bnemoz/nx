@@ -44,7 +44,7 @@ from . import (
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
 )
-from ._subagent import _subagent_active
+from ._subagent import _subagent_active, _subagent_quiet
 from concurrent.futures import ThreadPoolExecutor
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
@@ -234,7 +234,7 @@ def _window_tps(gen_n: float, window: float) -> float:
 
 def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
                          elapsed: float, text: str, tcs: dict, messages: Optional[list[Message]] = None,
-                         parser: Optional[Any] = None) -> None:
+                         parser: Optional[Any] = None, quiet: bool = False) -> None:
     """Render the per-turn stats footer.
 
     Prefers llama.cpp `timings` (server-measured, real tok/s) when present;
@@ -249,6 +249,8 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     Prompt-token caching itself lives in _capture_last_prompt_tokens(), called
     separately so it also runs on turns that never reach this footer.
     """
+    if quiet:
+        return
     if timings and timings.get("predicted_n"):
         prompt_n = timings.get("prompt_n", 0)
         gen_n = timings["predicted_n"]
@@ -468,6 +470,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
     history stays valid. Returns a TURN_* status for model_turn.
     """
     st._NATIVE_TOOL_CALLS_CONFIRMED = True  # server is actually using native tool_calls this session
+    quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
     parsed_args = []
     parse_error = None
@@ -492,13 +495,15 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         detail = _tool_args_parse_error(c, err, finish_reasons)
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
-            print(f"{C.ERROR}  ✗ malformed tool call after "
-                  f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
-            print(f"{DIM}    {detail}{RESET}")
+            if not quiet:
+                print(f"{C.ERROR}  ✗ malformed tool call after "
+                      f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+                print(f"{DIM}    {detail}{RESET}")
             return TURN_DONE
-        print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {detail}; "
-              f"discarded partial tool args and retrying cleanly "
-              f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {detail}; "
+                  f"discarded partial tool args and retrying cleanly "
+                  f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         _nudge_current_user_turn(
             messages,
             "Your previous native tool call had malformed or truncated JSON "
@@ -543,7 +548,8 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             break
         messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
     if esc_action is not None:
-        print(f"{C.WARNING}  ↳ escaped approval of {esc_action!r} — back to chat input{RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ↳ escaped approval of {esc_action!r} — back to chat input{RESET}")
         messages.append({"role": "user", "content":
             "[User pressed Esc at a tool approval prompt and returned to chat to "
             "add more input. Acknowledge briefly and wait for their next message.]"})
@@ -571,10 +577,12 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     tag on every future turn.
     """
     calls, errors = parse_text_calls_with_errors(text)
+    quiet = _subagent_quiet()
     if not calls:
         if errors and malformed_call_count < 1:
-            print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {errors[0]}; "
-                  f"nudging correction (attempt {malformed_call_count + 1}/1){RESET}")
+            if not quiet:
+                print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {errors[0]}; "
+                      f"nudging correction (attempt {malformed_call_count + 1}/1){RESET}")
             messages.append({"role": "assistant", "content": text})
             messages.append({"role": "user", "content": (
                 "[Runtime note: Your last tool call did not parse — "
@@ -587,9 +595,10 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             )})
             return TURN_MALFORMED_CALL
         if errors:
-            print(f"{C.ERROR}  ✗ MALFORMED TOOL CALL — correction retry also failed; "
-                  f"discarded invalid tool-call output and waiting for user input{RESET}")
-            print(f"{DIM}    {errors[0]}{RESET}")
+            if not quiet:
+                print(f"{C.ERROR}  ✗ MALFORMED TOOL CALL — correction retry also failed; "
+                      f"discarded invalid tool-call output and waiting for user input{RESET}")
+                print(f"{DIM}    {errors[0]}{RESET}")
             # Do not retain `text`: it may be a truncated <tool_call> fragment
             # and would be replayed as assistant context on every later turn.
             messages.append({"role": "assistant", "content":
@@ -619,7 +628,8 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     if esc_action is not None:
         obs.append("[User pressed Esc at a tool approval prompt and returned to chat "
                    "to add more input. Acknowledge briefly and wait for their next message.]")
-        print(f"{C.WARNING}  ↳ escaped approval of {esc_action!r} — back to chat input{RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ↳ escaped approval of {esc_action!r} — back to chat input{RESET}")
         messages.append({"role": "user", "content": "\n".join(obs)})
         return TURN_ESC
     messages.append({"role": "user", "content": "\n".join(obs)})
@@ -648,7 +658,6 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                      reasoning_only_chars: int, reasoning_parts: list[str],
                      malformed_stream_cut_count: int = 0) -> str:
     """Recover from a streamed turn that was cut mid-flight.
-
     Handles two cases that share the "cut" path:
       • special-token / repetition collapse — degenerated output, nudged fresh.
       • reasoning-only stall — the model thought but never acted; two-tier
@@ -665,17 +674,20 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     # reasoning-stall logic so we don't mis-classify a collapse as a stall.
     is_leak_collapse = (leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
                        or repeat_chunk_run >= REPEAT_CHUNK_LIMIT)
+    quiet = _subagent_quiet()
     if is_leak_collapse and not forced_final:
         collapse_type = ("special-token collapse" if leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
                          else "repetition collapse")
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
-            print(f"{C.ERROR}  ✗ {collapse_type} after "
-                  f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+            if not quiet:
+                print(f"{C.ERROR}  ✗ {collapse_type} after "
+                      f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
             return TURN_DONE
-        print(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
-              f"output and nudging clean recovery "
-              f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
+                  f"output and nudging clean recovery "
+                  f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         # Do NOT feed the degenerated reasoning/content back — it's spam
         # that would reinforce the collapse on the next turn.  Nudge fresh.
         # Once we've collapsed more than once on the same turn, the repeat is
@@ -719,7 +731,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         # than showing the model's own reasoning as a best-effort answer —
         # surface it instead of leaving the user with an empty turn.
         salvaged = _strip_unterminated_tool_call("".join(reasoning_parts)).strip()
-        if salvaged:
+        if quiet:
+            pass  # the salvage prints below are terminal noise on an agent thread
+        elif salvaged:
             print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
                   f"showing captured reasoning as a best-effort answer{RESET}")
             _say_console.print(salvaged)
@@ -733,9 +747,10 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             # we let the model think as long as it wants).  The model
             # produced only reasoning and no action — that's an honest
             # model-capability signal, not a harness rescue scenario.
-            print(f"{DIM}  • reasoning-only turn ended naturally "
-                  f"({loop_detail}); failsafes disabled, ending turn{RESET}")
-        else:
+            if not quiet:
+                print(f"{DIM}  • reasoning-only turn ended naturally "
+                      f"({loop_detail}); failsafes disabled, ending turn{RESET}")
+        elif not quiet:
             print(f"{C.ERROR}  ✂ REASONING-ONLY RESCUE FAILED — gave up after "
                   f"{cut_count} stall "
                   f"attempt{'s' if cut_count != 1 else ''} "
@@ -769,8 +784,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             reasoning_text = ("[…earlier reasoning truncated…]\n"
                               + reasoning_text[-cap:])
         messages.append({"role": "assistant", "content": reasoning_text})
-        print(f"{DIM}  ↳ captured {len(reasoning_text)} chars of reasoning "
-              f"for feedback{RESET}")
+        if not quiet:
+            print(f"{DIM}  ↳ captured {len(reasoning_text)} chars of reasoning "
+                  f"for feedback{RESET}")
 
     # Two-tier recovery:
     #   • First (and any intermediate) stall: nudge the model to ACT —
@@ -784,8 +800,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     #     loop, so we at least get a visible answer instead of a hang.
     is_last_retry = (cut_count == retry_limit - 1)
     if is_last_retry:
-        print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; forcing final "
-              f"answer (attempt {cut_count + 1}/{retry_limit}){RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; forcing final "
+                  f"answer (attempt {cut_count + 1}/{retry_limit}){RESET}")
         if reasoning_text.strip():
             messages.append({"role": "user", "content":
                 "[Runtime note: Your reasoning has been preserved as your "
@@ -796,8 +813,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         else:
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
         return TURN_FORCE_FINAL
-    print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; nudging to act "
-          f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
+    if not quiet:
+        print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; nudging to act "
+              f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
     if reasoning_text.strip():
         messages.append({"role": "user", "content":
             "[Runtime note: You were thinking about the task above. "
@@ -829,6 +847,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # processing and the first token may be sitting in the buffer by the time
     # we start the clock, making TTFT look implausibly tiny.
     t0 = time.time()
+    quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"
         if forced_final else
@@ -836,7 +855,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         "thinking · esc to interrupt"
     )
     spinner = LifeSpinner(label=spinner_label)
-    spinner.start()
+    if not quiet:
+        spinner.start()
     # Go through the top-level package (not a bare same-module reference) so
     # a test that monkeypatches `nx.open_stream` (to avoid a real model
     # round-trip) takes effect.
@@ -853,24 +873,33 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         else:
             stream = _m.open_stream(messages, tools=_active_tools(), recovery_sampling=recovery_sampling)
     except Exception:
-        spinner.stop()
+        if not quiet:
+            spinner.stop()
         raise
     if stream is None:
-        spinner.stop()
+        if not quiet:
+            spinner.stop()
         return TURN_DONE  # error already reported; REPL continues
 
     # Interrupt watcher: the singleton daemon thread watches stdin for bare Esc
     # while ARMED. On hit it sets _USER_INTERRUPTED; the main loop breaks out of
     # the chunk loop on its next iteration. We arm it BEFORE the spinner so the
     # user always has a moment to interrupt even if the first token takes a
-    # while to arrive.
+    # while to arrive. A quiet (async-agent) loop NEVER touches it: the watcher
+    # is a process singleton — the parent's stream owns it right now, and an
+    # agent thread clearing/restoring it would eat keystrokes or break Esc.
     _ensure_interrupt_watcher()
-    _USER_INTERRUPTED.clear()
-    st._INTERRUPT_REDIRECT_TEXT = ""
-    st._INTERRUPT_REDIRECT_SUBMITTED = False
+    if not quiet:
+        _USER_INTERRUPTED.clear()
+        st._INTERRUPT_REDIRECT_TEXT = ""
+        st._INTERRUPT_REDIRECT_SUBMITTED = False
     # Reset the per-turn bg-completion scan flag: the first tool call of this
-    # new turn re-checks for finished background jobs (see run_tool()).
-    st._BG_SCAN_DONE = False
+    # new turn re-checks for finished background jobs (see run_tool()). A
+    # quiet (async-agent) loop skips that scan entirely — run_tool() gates it
+    # on _subagent_ctx(), because the notices belong to the PARENT's
+    # transcript; the flag here just mirrors the reset for the parent turn.
+    if not quiet:
+        st._BG_SCAN_DONE = False
     # Clear the "termios restored" flag BEFORE arming so we can wait on it
     # after disarm. The watcher sets it in its inner finally once it has
     # restored cooked mode. Without this handshake the watcher's termios
@@ -879,8 +908,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # as its "old" state — leaving the terminal stuck in VMIN=0
     # with broken Enter and garbled typing.
     _INTERRUPT_RESTORED.clear()
-    _INTERRUPT_ARMED.set()
-    parser = StreamParser(_say_console, t0)
+    if not quiet:
+        _INTERRUPT_ARMED.set()
+    parser = StreamParser(_say_console, t0, quiet=quiet)
     stream_error = None
     interrupted = False
 
@@ -919,7 +949,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             except Exception:
                 pass
     finally:
-        spinner.stop()
+        if not quiet:
+            spinner.stop()
         parser.clear_tool_status()
         # Safety net: interrupted/errored/collapsed breaks may leave the Live
         # display still open (the mode-transition sites above only stop it on
@@ -936,11 +967,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # inside _drain_redirect_text, which has its own 2.0s deadline — wait
         # past that (not just 0.5s) so we never proceed while it still holds
         # raw termios mid-drain.
-        _INTERRUPT_ARMED.clear()
-        _INTERRUPT_RESTORED.wait(timeout=2.5)
-        _USER_INTERRUPTED.clear()
+        if not quiet:
+            _INTERRUPT_ARMED.clear()
+            _INTERRUPT_RESTORED.wait(timeout=2.5)
+            _USER_INTERRUPTED.clear()
     dropped_lines = getattr(stream, "dropped_lines", 0)
-    if dropped_lines:
+    if dropped_lines and not quiet:
         print(f"{C.WARNING}  ⚠ {dropped_lines} malformed SSE frame(s) dropped mid-stream — "
               f"any tool call in this turn may have truncated arguments{RESET}")
     # Account before every post-stream early return (stream error, user
@@ -952,23 +984,30 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in messages),
     )
     if stream_error is not None:
-        if parser.mode in ("think", "say"):
-            print()
-        parser.close_think_block()
-        print(RESET)
         if isinstance(stream_error, httpx.TimeoutException):
-            print(f"{C.WARNING}  ✂ STREAM TIMEOUT — server stopped delivering chunks; "
-                  f"discarded partial output and returned to chat input{RESET}")
-            print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
+            if not quiet:
+                if parser.mode in ("think", "say"):
+                    print()
+                parser.close_think_block()
+                print(RESET)
+                print(f"{C.WARNING}  ✂ STREAM TIMEOUT — server stopped delivering chunks; "
+                      f"discarded partial output and returned to chat input{RESET}")
+                print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
             return TURN_DONE
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
-            print(f"{C.ERROR}  ✗ malformed stream from model/API after "
-                  f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
-            print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
+            if not quiet:
+                if parser.mode in ("think", "say"):
+                    print()
+                parser.close_think_block()
+                print(RESET)
+                print(f"{C.ERROR}  ✗ malformed stream from model/API after "
+                      f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+                print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
             return TURN_DONE
-        print(f"{C.WARNING}  ✂ MALFORMED STREAM — discarded partial output/tool args; "
-              f"retrying cleanly ({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ MALFORMED STREAM — discarded partial output/tool args; "
+                  f"retrying cleanly ({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         _nudge_current_user_turn(
             messages,
             "Your previous streamed response became malformed before it completed. "
@@ -991,8 +1030,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     _capture_last_prompt_tokens(parser.usage, parser.timings)
 
     if interrupted:
-        print(f"{C.WARNING}  ↳ interrupted by user (Esc) after {elapsed:4.1f}s, "
-              f"{len(parser.content)} chars streamed{RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ↳ interrupted by user (Esc) after {elapsed:4.1f}s, "
+                  f"{len(parser.content)} chars streamed{RESET}")
         # Discard partial content — it's almost certainly a half-formed
         # sentence / tool-call args.
         redirect = st._INTERRUPT_REDIRECT_TEXT.strip()
@@ -1034,7 +1074,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # shown when available — for local it comes from llama.cpp timings, for
     # remote we measure it client-side.
     _print_stats_footer(parser.usage, parser.timings, parser.streamed_chars, parser.t_first,
-                         elapsed, text, parser.tcs, messages=messages, parser=parser)
+                         elapsed, text, parser.tcs, messages=messages, parser=parser,
+                         quiet=_subagent_quiet())
 
     if forced_final and parser.tcs:
         return _handle_forced_final_tool_call(messages, parser.tcs)

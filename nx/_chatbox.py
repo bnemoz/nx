@@ -39,7 +39,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/resources", "show this nx process's CPU% and RSS memory"),
     ("/ctx", "context breakdown by message; pin/unpin turns against /compress"),
     ("/cost", "session usage + per-source cost scoreboard"),
-    ("/bg", "list background run_bash jobs, or /bg kill <pid>"),
+    ("/bg", "list background run_bash jobs and sub-agents, or /bg kill <pid>"),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)"),
     ("/sessions", "list recent sessions, or show one in full"),
     ("/export", "write the current session to a markdown file"),
