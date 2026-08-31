@@ -138,7 +138,7 @@ disables the probe and the attach.
 | `--resume [target]` | resume a saved session; bare = most recent |
 | `--session <id>` | start a fresh run attached to a specific session id |
 | `--prompt-file <path>` / `-f <path>` | headless one-shot mode: run one turn and exit (`-` reads stdin) |
-| `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat |
+| `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat; exits `4` when the run errors (endpoint unreachable, API rejects the request) and `0` otherwise |
 | `nx run -f tasks.jsonl` | headless batch mode: every JSONL line is one task — emits one JSON result line per task on stdout, one process exit code for the run (see "Batch mode" below) |
 | `--tokens` / `--bench` | print the exact prompt-token floor and exit |
 | `-h` / `--help` | print flag usage and exit |
@@ -382,7 +382,10 @@ lines — every human-facing render is suppressed; progress and the summary go
 to stderr.
 
 Per-task exit codes ride each result line (`exit_code` field): `0` done, `3`
-turn cap, `4` error/refused. The process exit code summarizes the run: `0`
+turn cap, `4` error/refused. An unreachable endpoint or a request the server
+rejects outright (bad key, context-length overrun, 4xx/5xx after fallbacks) is
+an `error` task with `error` naming the failure — never a `done` line with
+zeroed tokens. The process exit code summarizes the run: `0`
 every task done, `3` any cap, `4` any error, `2` harness misuse (unreadable
 file, zero tasks, no source, unknown flag). A streaming consumer can score
 each task as its line arrives without waiting for the process to end.

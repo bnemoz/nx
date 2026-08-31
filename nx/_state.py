@@ -50,6 +50,16 @@ MODEL: str | None = None
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
 _LAST_PROMPT_TOKENS: int = 0
 
+# Terminal API-failure marker for the turn path. open_stream() latches
+# "<ExceptionType>: <msg>" here when a request hard-fails (endpoint
+# unreachable, HTTP transport error, API error after all fallbacks) instead of
+# returning a stream; model_turn() reads it to distinguish "the request never
+# happened" from a legitimately completed (possibly empty) turn, and
+# _run_model_turn_loop() turns that into a {"status": "error"} summary so
+# headless batch/one-shot runs report exit_code=4 instead of a clean pass.
+# Cleared by model_turn() before every open and consumed on read.
+_LAST_API_ERROR: str | None = None
+
 # Last turn's prompt-cache hit fraction (0.0–1.0, or None when the server
 # didn't report cache numbers). Written by _capture_last_prompt_tokens();
 # read by the stats footer and /ctx so the user can see whether the KV/prompt

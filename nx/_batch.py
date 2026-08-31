@@ -10,7 +10,8 @@ that summarizes the whole run:
 
   0   every task reported status "done"
   3   at least one task hit its turn cap ("cap"); nothing errored
-  4   at least one task crashed or was refused ("error")
+  4   at least one task crashed, was refused, or the endpoint hard-failed
+      ("error": task exception, API connection failure, 4xx after fallbacks)
   2   harness-level misuse (unreadable file, zero tasks, no source, bad flag)
 
 Per-task exit codes ride the result lines (`exit_code`), so a consumer that

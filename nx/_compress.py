@@ -223,7 +223,10 @@ def open_stream(
     recovery_sampling: bool = False,
 ):
     """Open a streaming completion. Retries without tools= if the server rejects
-    that param; returns None (after a friendly message) on connection/API failure."""
+    that param; returns None (after a friendly message) on connection/API failure.
+    A terminal failure also latches st._LAST_API_ERROR ("Type: msg") so
+    model_turn() can distinguish a request that never happened from a
+    legitimately empty turn — headless callers turn that into status "error"."""
     # _LoggingStream lives in _turn.py, which itself imports open_stream from
     # this module — a lazy import here (instead of at module scope) avoids a
     # circular import between the two.
@@ -309,12 +312,14 @@ def open_stream(
                 raise  # all fallbacks exhausted
         # Wrap the stream so every chunk is captured to the log on its way out.
         return _LoggingStream(stream, _llog)
-    except (APIConnectionError, httpx.HTTPError):
+    except (APIConnectionError, httpx.HTTPError) as e:
+        st._LAST_API_ERROR = f"{type(e).__name__}: {e}"
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():
             print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — is the server up? "
                   f"Set NX_BASE_URL (and NX_MODEL) to point at it.{RESET}")
     except Exception as e:
+        st._LAST_API_ERROR = f"{type(e).__name__}: {e}"
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():
             print(f"{C.ERROR}  ✗ API error: {type(e).__name__}: {e}{RESET}")

@@ -595,7 +595,8 @@ from ._verify import (
 # --- one model turn (streamed), returns TURN_* status -----------------------
 from ._turn import (
     _LoggingStream, TURN_DONE, TURN_TOOL, TURN_STREAM_CUT,
-    TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL, _ctx_field,
+    TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL,
+    TURN_API_ERROR, _ctx_field,
     _ensure_ctx_probe, _print_stats_footer, _handle_forced_final_tool_call,
     _handle_native_tool_calls, _handle_text_tool_calls, _handle_loop_cut,
     model_turn, _run_model_turn_loop,

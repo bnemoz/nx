@@ -88,6 +88,7 @@ TURN_EMPTY = "empty"  # assistant emitted no content and no tool calls → silen
 TURN_ESC = "esc"  # user pressed Esc at an approval prompt → drop to chat input
 TURN_REDIRECT = "redirect"  # user typed+submitted a new instruction right after Esc
 TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unparseable → one corrective retry
+TURN_API_ERROR = "api_error"  # request hard-failed before any chunk (endpoint down, 4xx/5xx) — never retried
 
 
 def _ctx_field(prompt_n: int) -> str:
@@ -874,6 +875,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # processing and the first token may be sitting in the buffer by the time
     # we start the clock, making TTFT look implausibly tiny.
     t0 = time.time()
+    st._LAST_API_ERROR = None  # cleared before every open; set by open_stream() on a terminal failure
     quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"
@@ -906,6 +908,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     if stream is None:
         if not quiet:
             spinner.stop()
+        if st._LAST_API_ERROR:
+            # open_stream() already printed the friendly message; interactive
+            # mode keeps the REPL alive below, but headless callers must NOT
+            # score this as a completed turn — report the hard failure up.
+            return TURN_API_ERROR
         return TURN_DONE  # error already reported; REPL continues
 
     # Interrupt watcher: the singleton daemon thread watches stdin for bare Esc
@@ -1209,9 +1216,10 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                          on_step: Optional[Callable[[], None]] = None,
                          max_turns_override: Optional[int] = None) -> dict:
     """Runs model_turn() to completion (or MAX_MODEL_TURNS). Returns a summary
-    dict {"status": "done"|"esc"|"cap", "turns": int} — interactive callers
-    ignore it, but headless one-shot mode (nx/_cli.py) uses it to report
-    whether the model actually finished vs. hit the turn cap.
+    dict {"status": "done"|"esc"|"cap"|"error", "turns": int} — interactive
+    callers ignore it, but headless one-shot mode (nx/_cli.py) uses it to
+    report whether the model actually finished vs. hit the turn cap vs. the
+    endpoint hard-failing (status "error" → exit_code 4 in batch/one-shot).
     max_turns_override caps the loop below MAX_MODEL_TURNS for scoped loops
     (spawn_agent sub-agents); None = the global cap, as before."""
     max_turns = st.MAX_MODEL_TURNS if max_turns_override is None else max(1, int(max_turns_override))
@@ -1244,6 +1252,14 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input
+        if status == TURN_API_ERROR:
+            # Endpoint unreachable / API rejected the request outright. Unlike
+            # every recovery path above this is terminal: the next open would
+            # fail identically (nothing was added to `messages`), so burning
+            # turns on it would only delay the same verdict.
+            return {"status": "error",
+                    "error": f"API request failed: {st._LAST_API_ERROR}",
+                    "turns": steps + 1}
         if status == TURN_REDIRECT:
             # Esc-then-type: the user already supplied their next instruction
             # (appended to `messages` by model_turn()) — loop straight into
@@ -1307,6 +1323,10 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                    recovery_sampling=recovery_sampling)
         if on_step is not None:
             on_step()
+        if final_status == TURN_API_ERROR:
+            return {"status": "error",
+                    "error": f"API request failed: {st._LAST_API_ERROR}",
+                    "turns": steps + 1}
         if final_status == TURN_DONE:
             return {"status": "cap", "turns": steps + 1}
     return {"status": "cap", "turns": steps}

@@ -37,7 +37,9 @@ flags:
   --prompt-file <path> / -f <path>
                                    headless one-shot mode; "-" reads stdin
   --json                          (with --prompt-file) emit a JSON result summary
-                                   on stdout instead of streamed chat output
+                                   on stdout instead of streamed chat output;
+                                   exit 4 if the run errored (endpoint down,
+                                   API rejected the request), else 0
 
 Batch mode — run every task in a JSONL file and emit JSONL results:
 
@@ -132,7 +134,11 @@ def _run_one_shot() -> bool:
     if _JSON_OUTPUT:
         real_stdout.write(json.dumps(_one_shot_result(
             messages, start_idx, summary, time.time() - started)) + "\n")
-    sys.exit(0)
+    # exit 4 mirrors batch's EXIT_ERROR contract: a turn loop that ended in
+    # status "error" (endpoint unreachable / API rejected the request) is a
+    # failed run, not a clean one — a harness keying on the exit code must
+    # never score it as a pass.
+    sys.exit(4 if isinstance(summary, dict) and summary.get("status") == "error" else 0)
 
 
 def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: float,
@@ -199,6 +205,7 @@ def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: flo
     return {
         "final_answer": final_answer,
         "status": summary.get("status") if summary else "error",
+        "error": (summary or {}).get("error"),
         "turns": summary.get("turns") if summary else 0,
         "elapsed_seconds": round(elapsed, 2),
         "tokens": tokens,
