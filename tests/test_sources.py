@@ -23,6 +23,23 @@ def clear_nx_env():
 clear_nx_env()
 sys.argv = ["nx.py"]
 import nx
+# Keep the ~14 reloads below offline: the built-in sources (openrouter,
+# together) point at real URLs and every switch_source() fires resolve_model()
+# plus the capability/thinking background probes. Stub them once at class /
+# module level — importlib.reload(nx) re-executes nx/__init__.py but NOT these
+# submodules, so the stubs survive every reload below. The configured-model
+# assertions (nx.MODEL == ...) are unaffected: the stub returns self.model.
+# pytest imports every test module into ONE process, so the stubs MUST be
+# undone before this file finishes — else later modules (test_thinking.py
+# drives ensure_thinking_probe for real) see the no-ops. Restored at the end.
+import nx._capability as _cap_mod
+import nx._thinking as _think_mod
+_real_resolve_model = nx._sources.Source.resolve_model
+_real_ensure_cap = _cap_mod.ensure_capability_probe
+_real_ensure_think = _think_mod.ensure_thinking_probe
+nx._sources.Source.resolve_model = lambda self: self.model or "local-model"
+_cap_mod.ensure_capability_probe = lambda src: None
+_think_mod.ensure_thinking_probe = lambda src, mid=None: None
 importlib.reload(nx)
 print("TEST 1: legacy fallback")
 print(f"  SOURCES: {list(nx.SOURCES.keys())}")
@@ -312,4 +329,8 @@ assert nx.ACTIVE.extra_request_kwargs() == \
 print("  PASS\n")
 
 print("=" * 50)
+# undo the offline stubs (see the note at the top) before pytest moves on
+nx._sources.Source.resolve_model = _real_resolve_model
+_cap_mod.ensure_capability_probe = _real_ensure_cap
+_think_mod.ensure_thinking_probe = _real_ensure_think
 print("ALL TESTS PASSED")

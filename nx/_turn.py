@@ -35,7 +35,7 @@ from ._compress import (
     _nudge_current_user_turn,
     _flush_pending_background_notice, _last_is_dangling_tool,
 )
-from ._env import _env_int
+from ._env import _env_float, _env_int
 from ._verify import _launch_verify_if_settled
 from . import _state as st
 from . import (
@@ -1010,10 +1010,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # completes in <0.1s. But if a bare Esc just fired, the watcher is
         # inside _drain_redirect_text, which has its own 2.0s deadline — wait
         # past that (not just 0.5s) so we never proceed while it still holds
-        # raw termios mid-drain.
+        # raw termios mid-drain. NX_INTERRUPT_RESTORE_WAIT tunes the wait
+        # (nx/_interrupt.py); keep the two call sites' effective values equal.
         if not quiet:
             _INTERRUPT_ARMED.clear()
-            _INTERRUPT_RESTORED.wait(timeout=2.5)
+            _INTERRUPT_RESTORED.wait(
+                timeout=_env_float("NX_INTERRUPT_RESTORE_WAIT", 2.5))
             _USER_INTERRUPTED.clear()
     dropped_lines = getattr(stream, "dropped_lines", 0)
     if dropped_lines and not quiet:

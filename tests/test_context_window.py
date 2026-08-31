@@ -28,6 +28,9 @@ for k in list(os.environ):
 os.environ.pop("TOGETHER_API_KEY", None)
 os.environ["NX_ENV_FILE"] = "/dev/null"
 os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
+# Test 6b asserts the over-max_tokens overrun probe FIRES — opt back out of
+# conftest's NX_SKIP_STARTUP_PROBES=1 default (fake client absorbs the probe).
+os.environ["NX_SKIP_STARTUP_PROBES"] = "0"
 sys.argv = ["nx.py"]
 import nx as m  # noqa: E402
 
@@ -208,6 +211,10 @@ print("  PASS\n")
 urllib.request.urlopen = orig_urlopen
 
 # --- Test 6b: silently-clamped probes are negatively cached -----------------
+# The clamping.example overrun probe must actually FIRE here; swap in a
+# urlopen stub first so the /props leg can't reach a real host.
+urllib.request.urlopen = lambda url, timeout=None: (_ for _ in ()).throw(
+    urllib.error.URLError("conn refused"))
 print("TEST 6b: silently-clamped overrun probe is attempted only once")
 silent_probe_calls = [0]
 

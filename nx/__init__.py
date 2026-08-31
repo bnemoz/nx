@@ -153,7 +153,7 @@ _DESC_REFRESH_DEFAULT = 6
 from ._sources import (
     Source, _resolve_api_key, _parse_extra_body, _build_http_headers,
     _discover_sources, switch_source, restore_source, _set_provider_order,
-    _provider_order,
+    _provider_order, _startup_probes_skipped,
 )
 
 # Bootstrap the source registry. Deliberately kept here (not inside
@@ -195,6 +195,11 @@ if not _start or _start not in st.SOURCES:
 # _cli_help_or_version in _cli.py) — skip switch_source()'s network calls
 # (resolve_model()'s /v1/models round-trip, capability probe) so `nx --help`
 # against an unreachable host stays instant instead of blocking ~10-15s.
+# switch_source() itself must still run on every import: it wires
+# st.ACTIVE/st.client/st.MODEL, and tests (test_sources.py) reload nx and
+# assert that wiring. Per-probe skipping — resolve_model's network fallback,
+# the capability/thinking background probes, the ctx overrun probe — is what
+# NX_SKIP_STARTUP_PROBES (nx/_sources.py) gates instead.
 if _start and not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])):
     switch_source(_start)
 

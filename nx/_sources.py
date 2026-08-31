@@ -21,6 +21,7 @@ import sys
 import urllib.request
 from typing import Any
 
+from ._env import _env_float, _env_int
 from ._openai_client import OpenAI
 
 from ._ansi import RESET, C
@@ -188,6 +189,11 @@ class Source:
     def resolve_model(self) -> str:
         if self.model:
             return self.model
+        if _startup_probes_skipped():
+            # NX_SKIP_STARTUP_PROBES: no live /v1/models or /props round-trip
+            # (see the gate's docstring) — keep the configured model or the
+            # same "local-model" placeholder the probes' failure path ends at.
+            return self.model or "local-model"
         advertised = None
         try:
             advertised = self.client.models.list(timeout=10).data[0].id
@@ -372,6 +378,8 @@ class Source:
         """Pull n_ctx / context_length from GET /v1/models. llama.cpp stashes
         it under data[0].meta.n_ctx; some generic hosts expose context_length
         as a top-level model field. Returns int or None."""
+        if _startup_probes_skipped():
+            return None
         try:
             data = self.client.models.list(timeout=10).data
         except Exception:
@@ -415,6 +423,8 @@ class Source:
 
     def _ctx_from_props(self) -> int | None:
         """llama.cpp /props fallback: default_generation_settings.n_ctx."""
+        if _startup_probes_skipped():
+            return None
         try:
             root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/props", timeout=5) as r:
@@ -444,6 +454,8 @@ class Source:
         the overrun probe, which doesn't work: LM Studio silently clamps an
         over-large max_tokens instead of returning a 400. Returns int or
         None."""
+        if _startup_probes_skipped():
+            return None
         try:
             root = re.sub(r"/v\d+/?$", "", (self.base_url or "").rstrip("/"))
             with urllib.request.urlopen(root + "/api/v0/models", timeout=5) as r:
@@ -471,8 +483,13 @@ class Source:
         and a 1-token prompt; parse the 400's "maximum context length is N
         tokens" message. Works for Together and any host mirroring OpenAI's
         over-limit wording. No tokens are generated (the request is rejected
-        before inference). Returns int or None."""
+        before inference). Returns int or None.
+
+        NX_SKIP_STARTUP_PROBES=1 turns the whole probe into a no-op (it is a
+        real request; see switch_source()'s skip note)."""
         if not mid:
+            return None
+        if _env_int("NX_SKIP_STARTUP_PROBES", 0):
             return None
         try:
             self.client.chat.completions.create(
@@ -720,15 +737,30 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     # already-probed source's default model keeps its prior answer.
     if model_override:
         src._capability = None
-    from ._capability import ensure_capability_probe
-    ensure_capability_probe(src)
-    # Probe for a thinking-separation toggle (nx/_thinking.py). Uses st.MODEL
-    # (the possibly-overridden active id), not src.model — a /source <name>
-    # <model> override can point at a thinking model the source default
-    # isn't (e.g. bubbles' glm-5.3 default vs a glm-5.3-flash override).
-    from ._thinking import ensure_thinking_probe
-    ensure_thinking_probe(src)
+    if not _startup_probes_skipped():
+        from ._capability import ensure_capability_probe
+        ensure_capability_probe(src)
+        # Probe for a thinking-separation toggle (nx/_thinking.py). Uses st.MODEL
+        # (the possibly-overridden active id), not src.model — a /source <name>
+        # <model> override can point at a thinking model the source default
+        # isn't (e.g. bubbles' glm-5.3 default vs a glm-5.3-flash override).
+        from ._thinking import ensure_thinking_probe
+        ensure_thinking_probe(src)
     return True
+
+
+def _startup_probes_skipped() -> bool:
+    """NX_SKIP_STARTUP_PROBES=1 (default off): don't fire the model-id,
+    capability, or thinking probes at startup or on /source switches.
+
+    Every probe is a real HTTP round-trip; against an unreachable or
+    slow-to-dial endpoint they serialize into tens of seconds of dead import
+    time (import nx runs switch_source() — see __init__). Tests set this so
+    the suite stays offline and fast. Trades startup autodetection for
+    latency: when unset, set the model explicitly (NX_MODEL /
+    NX_SOURCE_<NAME>_MODEL); tool-calling falls back to reactive text-protocol
+    parsing until a turn reveals better."""
+    return _env_int("NX_SKIP_STARTUP_PROBES", 0) != 0
 
 
 def restore_source(source_name: str | None, model: str | None = None) -> bool:

@@ -24,7 +24,7 @@ from contextlib import nullcontext
 from typing import Any
 
 from . import _state as st
-from ._env import _env_int
+from ._env import _env_float, _env_int
 from ._interrupt import _USER_INTERRUPTED, _watch_for_interrupts
 from ._logging import _log_event
 
@@ -494,6 +494,13 @@ def _maybe_start_watchdog(pid: int | str, command: str, max_seconds: int) -> Non
     period, SIGKILLs the process group. Setsid put the job in its own session,
     so killing the group takes down any children it spawned — which is what
     you want from a ceiling: nothing survives to keep consuming the machine.
+
+    NX_WATCHDOG_POLL_SECONDS (default 0.5) is the _reap poll granularity: how
+    often the reaper checks whether the job died on its own before the budget
+    elapses, and how often it re-checks after SIGTERM (bounded by
+    NX_WATCHDOG_KILL_GRACE, default 5s, before escalating to SIGKILL).
+    Finer = a shorter tail after early-exit; coarser = fewer wakeups.
+    Tests shrink it so background-job tests don't pay the default tail.
     """
     if max_seconds <= 0:
         return
@@ -508,14 +515,27 @@ def _maybe_start_watchdog(pid: int | str, command: str, max_seconds: int) -> Non
 
     def _reap() -> None:
         try:
-            time.sleep(max(1, max_seconds))
+            remaining = max(1, max_seconds)
+            poll = _env_float("NX_WATCHDOG_POLL_SECONDS", 0.5)
+            # Poll instead of one long sleep so a job that exits early doesn't
+            # leave its pid parked in _WATCHDOG_PIDS until the full budget
+            # elapses (tests poll that set).
+            while remaining > 0 and _pid_is_alive(pid_i, start_time):
+                step = min(poll, remaining)
+                time.sleep(step)
+                remaining -= step
             if not _pid_is_alive(pid_i, start_time):
                 return
             try:
                 os.killpg(os.getpgid(pid_i), signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
                 return
-            time.sleep(5)
+            grace = _env_float("NX_WATCHDOG_KILL_GRACE", 5.0)
+            deadline = time.time() + grace
+            while time.time() < deadline:
+                if not _pid_is_alive(pid_i, start_time):
+                    break
+                time.sleep(min(grace, poll))
             if _pid_is_alive(pid_i, start_time):
                 try:
                     os.killpg(os.getpgid(pid_i), signal.SIGKILL)

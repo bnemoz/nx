@@ -22,6 +22,10 @@ import tempfile
 _tmp = tempfile.mkdtemp(prefix="nx-autocomp-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
 os.environ["NX_HOME"] = _tmp
+# conftest.py sets this for pytest runs; set it here too so the standalone
+# invocation (python3 tests/test_autocompress.py) skips nx's startup probes —
+# its reloads would otherwise dial the configured endpoint(s) for seconds.
+os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
@@ -233,6 +237,11 @@ print("TEST 2b: latest todo_write turn auto-pinned across a fold")
 
 m.compress = _real_compress  # Test 3 leaves a throw-stub installed
 m.ACTIVE = None  # and a _FakeSource without extra_request_kwargs()
+# Test 1 restored the real client; Test 2b drives the REAL compress() three
+# times, which would otherwise POST to the user's configured endpoint for the
+# fake summary (these compress calls only assert keep/pin bookkeeping).
+m.client = _FakeClient()
+m.MODEL = "test-model"
 
 import nx._todo as _todo_mod  # noqa: E402
 _real_todo_fn = _todo_mod._latest_todo_turn
@@ -292,6 +301,8 @@ result = m.compress(msgs_no_todo)
 kept_n, summarized_n, _ = result
 assert kept_n == m.COMPRESS_KEEP, f"no todo → plain manual keep, got {kept_n}"
 print("  no todo_write anywhere → keep count unchanged → PASS")
+m.client = _real_client
+m.MODEL = _real_model
 
 # ---------------------------------------------------------------------------
 # 4. /autocompress command: show, set, off, on, invalid.
@@ -383,6 +394,9 @@ for k in list(os.environ):
         del os.environ[k]
 os.environ["NX_ENV_FILE"] = "/dev/null"
 os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
+# the del-loop above wiped conftest's NX_SKIP_STARTUP_PROBES; re-pin so the
+# reloads below don't dial localhost:8080 three times (~3.5s each)
+os.environ["NX_SKIP_STARTUP_PROBES"] = "1"
 os.environ["NX_AUTOCOMPRESS_PERCENT"] = "60"
 sys.argv = ["nx.py"]
 importlib.reload(m)
@@ -416,6 +430,10 @@ for k in list(os.environ):
     if k.startswith("NX_"):
         del os.environ[k]
 os.environ.update({k: v for k, v in saved_env.items() if k.startswith("NX_") or k == "NX_ENV_FILE"})
+# the restore above re-imports the user's real multi-source config; keep the
+# final reload probe-free like conftest's default (its value was scrubbed by
+# the del-loop just above)
+os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
 importlib.reload(m)
 
 print()

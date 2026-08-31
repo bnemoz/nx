@@ -13,8 +13,9 @@ so the model can react, and the user sees the hook's message. The post-hook's
 exit code is advisory only (logged to the event log) — the tool already ran.
 
 Hooks are best-effort infrastructure: a missing binary, non-zero exit, or
-garbage output must never crash the agent loop. A 10s timeout bounds a hung
-hook. Never set? Zero overhead — not even a subprocess.
+garbage output must never crash the agent loop. A timeout (NX_HOOK_TIMEOUT,
+default 10s) bounds a hung hook. Never set? Zero overhead — not even a
+subprocess.
 """
 from __future__ import annotations
 
@@ -23,8 +24,14 @@ import os
 import subprocess
 from typing import Any, Optional
 
-_PRE_TIMEOUT = 10
-_POST_TIMEOUT = 10
+from ._env import _env_int
+
+
+def _hook_timeout() -> int:
+    """Read at call time (not import time): tests scrub NX_* env wholesale
+    during pytest collection, and NX_HOOK_TIMEOUT must reflect the value in
+    force when the hook actually runs."""
+    return _env_int("NX_HOOK_TIMEOUT", 10)
 
 
 def _hook_cmd(kind: str) -> str | None:
@@ -61,7 +68,7 @@ def pre_tool_hook(tool: str, args: dict[str, Any]) -> Optional[str]:
     cmd = _hook_cmd("NX_PRE_TOOL_HOOK")
     if not cmd:
         return None
-    ok, msg = _run_hook(cmd, {"tool": tool, "args": args}, _PRE_TIMEOUT)
+    ok, msg = _run_hook(cmd, {"tool": tool, "args": args}, _hook_timeout())
     if ok:
         return None
     from ._subagent import _subagent_quiet
@@ -75,7 +82,7 @@ def post_tool_hook(tool: str, args: dict[str, Any], result: str) -> None:
     cmd = _hook_cmd("NX_POST_TOOL_HOOK")
     if not cmd:
         return
-    ok, msg = _run_hook(cmd, {"tool": tool, "args": args, "result": result}, _POST_TIMEOUT)
+    ok, msg = _run_hook(cmd, {"tool": tool, "args": args, "result": result}, _hook_timeout())
     if not ok:
         from ._logging import _log_event
         _log_event("hook", {"tool": tool, "post_hook_error": msg})

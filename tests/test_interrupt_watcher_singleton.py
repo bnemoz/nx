@@ -241,6 +241,10 @@ def test_watch_for_interrupts_waits_past_slow_drain():
     """
     import time as _time
 
+    # conftest shrinks NX_INTERRUPT_RESTORE_WAIT to 0.05s for the whole suite;
+    # THIS test must run at the production default (2.5s) — it asserts the
+    # disarm wait outlasts a slow drain, which 0.05s would truncate.
+    saved = os.environ.pop("NX_INTERRUPT_RESTORE_WAIT", None)
     m._INTERRUPT_ARMED.clear()
     m._INTERRUPT_RESTORED.set()
     m._USER_INTERRUPTED.clear()
@@ -274,6 +278,8 @@ def test_watch_for_interrupts_waits_past_slow_drain():
         m._INTERRUPT_ARMED.clear()
         m._USER_INTERRUPTED.clear()
         m._INTERRUPT_RESTORED.set()
+        if saved is not None:
+            os.environ["NX_INTERRUPT_RESTORE_WAIT"] = saved
     print("PASS — disarm wait outlasts a slow (0.8s) drain, not truncated at 0.5s")
 
 

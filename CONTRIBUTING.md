@@ -80,6 +80,30 @@ Per CLAUDE.md: env vars, not config files. New tunables:
 - `NX_*` prefix, read via `_env_int`/`_env_float` with a sane default.
 - Document in the README's environment variables table.
 
+## Keeping the suite fast and offline
+
+The suite runs in ~15s; keep it that way (see tests/conftest.py and
+tests/test_test_speed_tunables.py).
+
+- Test modules must not dial the network, including at import time. pytest
+  imports every test module before running anything, so a module-scope probe
+  (a live compress(), a switch_source() against a real URL) becomes a hidden
+  multi-second stall inside "collection". tests/conftest.py defaults
+  NX_SKIP_STARTUP_PROBES=1 so `import nx` never probes; if your test needs a
+  probe to actually fire, set NX_SKIP_STARTUP_PROBES=0 (or stub the
+  client/urlopen) rather than removing that default, and undo any stubs
+  before the module finishes loading — pytest keeps one process for all
+  modules, so a stubbed resolve_model leaks into every later file.
+- Interactive-latency budgets are env-tunable. Don't hardcode sleeps against
+  constants like the 2.5s interrupt-restore wait or the watchdog grace: read
+  them via _env_int/_env_float (NX_INTERRUPT_RESTORE_WAIT,
+  NX_WATCHDOG_POLL_SECONDS, NX_WATCHDOG_KILL_GRACE, NX_HOOK_TIMEOUT) and let
+  conftest shrink them. A test that is about the default budget (the
+  slow-drain regression, for example) pops the env var for its own duration.
+- Read env-var-dependent values at call time, not at module import: the
+  standalone assertion-style files scrub NX_* at module scope, so an
+  import-time _env_int freezes whatever the shell had during collection.
+
 ## Choosing what tests to run
 
 The suite is fast, but "run everything every time" isn't required — scale the

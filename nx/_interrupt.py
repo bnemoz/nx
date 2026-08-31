@@ -60,6 +60,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _state as st
+from ._env import _env_float
 from ._tty import (
     apply_interrupt_mode, capture_input_mode, read_byte, restore_input_mode, wait_ready,
 )
@@ -250,16 +251,21 @@ def _watch_for_interrupts():
     _USER_INTERRUPTED.clear()
     _INTERRUPT_RESTORED.clear()
     _INTERRUPT_ARMED.set()
+    # _drain_redirect_text's own deadline is 2.0s; the default 2.5s wait covers
+    # it with slack so we never proceed while the watcher still holds raw
+    # input mode mid-drain. NX_INTERRUPT_RESTORE_WAIT tunes it — tests shrink
+    # it so they don't pay the full drain window 6+ times per run.
+    restore_wait = _env_float("NX_INTERRUPT_RESTORE_WAIT", 2.5)
     try:
         yield
     finally:
         _INTERRUPT_ARMED.clear()
         # _drain_redirect_text's own deadline is 2.0s; wait past it so we never
         # proceed while the watcher still holds raw input mode mid-drain.
-        if not _INTERRUPT_RESTORED.wait(timeout=2.5):
+        if not _INTERRUPT_RESTORED.wait(timeout=restore_wait):
             print(
-                "nx: warning: interrupt watcher did not confirm input-mode "
-                "restore within 2.5s; terminal state may be stale",
+                f"nx: warning: interrupt watcher did not confirm input-mode "
+                f"restore within {restore_wait:g}s; terminal state may be stale",
                 file=sys.stderr,
             )
         # Do not let an Esc from this operation interrupt a later model turn.

@@ -147,8 +147,9 @@ def test_fresh_backgrounded_job_not_announced(nx_fresh):
 def test_watchdog_kills_runaway_command(nx_fresh):
     nx, tmp = nx_fresh
     from nx._bash_jobs import run_bash, _WATCHDOG_PIDS
-    os.environ["NX_BASH_MAX_SECONDS"] = "3"
-    # poll window 1s → backgrounds at 1s; watchdog reaps at ~3s
+    os.environ["NX_BASH_MAX_SECONDS"] = "1"
+    # poll window 1s → backgrounds at 1s; watchdog reaps just past 1s
+    # (conftest shrinks NX_WATCHDOG_POLL_SECONDS / _KILL_GRACE for the tail)
     out = run_bash("sleep 120", timeout=1)
     assert out.startswith("[background]")
     pid = int(re.search(r"PID (\d+)", out).group(1))
