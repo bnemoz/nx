@@ -1,9 +1,10 @@
-"""The spawn_agent tool: run a focused read-only sub-agent turn loop.
+"""The spawn_agent tool: run a focused sub-agent turn loop. Read-only by
+default, with an opt-in write tier (NX_SUBAGENT_WRITE=1).
 
 A sub-agent is a fresh `messages` list (scoped SYSTEM + the instruction) run
 through the same `_run_model_turn_loop` machinery, but with a READ-ONLY toolset
 (derived from _CACHEABLE_READ_TOOLS — the tools that never touch state) plus a
-read-only bash tier, and YOLO semantics inside the loop, so a read-only
+read-only bash tier — and YOLO semantics inside the loop, so a read-only
 subtask never prompts and never mutates anything. The sub-agent's final answer
 comes back as the tool result — the parent's context stays clean of the
 exploration (reads, greps, dir walks) the subagent did, which is the point:
@@ -28,9 +29,23 @@ that sets them directly.
 
 Deliberately NOT offered to the sub-agent: final_answer's forced-final mode
 (we reuse it), wait_background, and every mutating tool (write/edit/sed/patch/
-memory_write). If the model needs to change something, it must report back and
-let the parent do it — one actor per capability keeps the approval story
-simple.
+memory_write) UNLESS the write tier is on (NX_SUBAGENT_WRITE=1). With the
+write tier the four file-mutation tool schemas are offered and resolve to
+confirm-through wrappers (_write_tier_dispatch): they run the parent's real
+body, whose own _confirm() — the same risk-classified Y/n gate with a diff
+preview the parent shows — appears while the sub-agent loop is suspended.
+Only write/edit/multi_edit/sed_edit are tier-eligible: delete_file is not
+(removal is one `edit away` from a recreate, while a delete needs its own
+undo snapshot the parent should own), and spawn_agent stays nested-refused.
+Because every write still crosses the real approval gate, the sub-loop is
+NOT forced YOLO when the tier is on — a sub-agent inherits the parent's
+approval posture exactly. That means the wrapper bodies must run outside the
+sub-agent context (nested spawn_agent inside a wrapper body would be a
+second loop on the same thread): the context is torn down before the body
+runs and restored after, so _confirm() sees the parent's approval state.
+Esc at a prompt still
+raises _EscToChat, which run_tool catches and converts into a DENIED tool
+result the sub-loop continues from.
 """
 from __future__ import annotations
 
@@ -50,9 +65,20 @@ SUBAGENT_SYSTEM = (
     "read-only allowlist (grep, ls, du, ps, git log, ...)."
 )
 
+SUBAGENT_WRITE_SYSTEM = (
+    "You are a focused sub-agent completing ONE task for a parent agent. You "
+    "may write: write_file, edit_file, multi_edit, and sed_edit are available "
+    "(no delete_file, no nested spawn_agent), and every change is shown to "
+    "the user as a diff and confirmed by them — the sub-agent pauses at each "
+    "prompt. run_bash is limited to a read-only allowlist (git diff, grep, "
+    "ls, ...). Read files, make the edits, verify, then reply in plain prose "
+    "with what changed (paths + what each edit did) and anything the parent "
+    "must finish itself — no preamble, no plan narration."
+)
+
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused READ-ONLY investigation (find where X is implemented, summarize module Y, locate callers of Z) to a sub-agent that returns only its findings. Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log) — it cannot write or run arbitrary commands. Multiple spawn_agent calls in one turn run concurrently. Use for exploratory reads whose output would bloat this conversation; do it yourself when the answer is one read_file away.",
+    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Multiple spawn_agent calls in one turn run concurrently (write-capable ones run one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
         "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40)."},
@@ -75,6 +101,15 @@ _READ_ONLY_TOOL_NAMES = (
 # for code (tests, REPL) that sets them directly.
 _SUBAGENT_TLS = threading.local()
 
+# Tools offered only when the write tier is on (NX_SUBAGENT_WRITE=1): the
+# schemas come from the parent TOOLS list, but inside a tier-enabled sub-loop
+# they resolve to the confirm-through wrappers in _write_tier_dispatch().
+# delete_file is deliberately excluded (removal, not creation — a delete is
+# one edit away from a recreate, but its undo snapshot belongs to the parent);
+# so are apply_patch (one call already covers multi-file restructures),
+# memory_write, and run_bash (the read-only allowlist tier covers inspection).
+_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit")
+
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
 _SPAWN_LOCK = threading.Lock()
@@ -83,11 +118,12 @@ _SPAWN_LOCK = threading.Lock()
 class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
-    __slots__ = ("table", "active")
+    __slots__ = ("table", "active", "write")
 
-    def __init__(self, table: dict[str, Any]) -> None:
+    def __init__(self, table: dict[str, Any], write: bool = False) -> None:
         self.table = table
         self.active = True
+        self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
 
 
 def _subagent_ctx() -> "_SubagentContext | None":
@@ -114,9 +150,13 @@ def _subagent_active() -> bool:
 
 
 def _subagent_tools() -> list[dict[str, Any]]:
-    """Tool schemas for the sub-loop: restricted to read-only entries."""
+    """Tool schemas for the sub-loop: read-only entries, plus the write tier
+    when NX_SUBAGENT_WRITE=1 (only when a write-capable sub-agent is actually
+    being spawned — see spawn_agent)."""
     import nx as _m
     wanted = set(_READ_ONLY_TOOL_NAMES)
+    if _write_tier_enabled():
+        wanted.update(_WRITE_TIER_TOOL_NAMES)
     return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
 
 
@@ -125,6 +165,62 @@ def _read_only_dispatch() -> dict[str, Any]:
     table = {name: DISPATCH[name] for name in _READ_ONLY_TOOL_NAMES if name in DISPATCH}
     table["run_bash"] = _subagent_bash  # allowlist gate in front of run_bash
     return table
+
+
+def _write_tier_enabled() -> bool:
+    """NX_SUBAGENT_WRITE=1 opts into write-capable sub-agents. Read from the
+    top-level module attribute first (resolved from the env at import, like
+    NX_SUBAGENTS) so tests/REPL code can flip it live; the env is the
+    fallback when the attribute isn't there (partially-initialized module)."""
+    import nx as _m
+    try:
+        return bool(int(_m.NX_SUBAGENT_WRITE))
+    except (AttributeError, TypeError, ValueError):
+        from ._env import _env_int
+        return bool(_env_int("NX_SUBAGENT_WRITE", 0))
+
+
+def _write_tier_dispatch() -> dict[str, Any]:
+    """Dispatch table for a write-tier sub-agent: the read-only entries (bash
+    still allowlist-gated — git diff/grep for verifying an edit) plus the four
+    file-mutation tools bound to _write_tier_wrapper, which runs the parent's
+    real tool body OUTSIDE the sub-agent context. The body's own _confirm()
+    then hits the normal gate — risk classification, the Y/n prompt with the
+    same colored diff preview the parent's writes show — so a sub-agent edit
+    is exactly as approved as a parent edit, just tagged (sub-agent) in the
+    tool box."""
+    table = _read_only_dispatch()
+    for name in _WRITE_TIER_TOOL_NAMES:
+        table[name] = _write_tier_wrapper(name)
+    return table
+
+
+def _write_tier_wrapper(name: str):
+    """Build the confirm-through binding for one write-tier tool.
+
+    Closures over the parent's real body (resolved at spawn time) so a test
+    or hook that swaps nx.write_file still governs what actually runs. The
+    wrapper tears down this thread's sub-agent context around the body so
+    _confirm() sees the parent's real approval state (and a nested
+    spawn_agent from inside a hook would be refused, not looped)."""
+    from ._dispatch import DISPATCH
+
+    def _run(**args: Any) -> str:
+        body = DISPATCH.get(name)
+        if body is None:
+            return f"ERROR: {name} is unavailable"
+        ctx = _subagent_ctx()
+        if ctx is None:  # defensive: a wrapper escaped its sub-agent context
+            return f"ERROR: {name} write-tier wrapper used outside a sub-agent"
+        prev_ctx = _SUBAGENT_TLS.ctx
+        _SUBAGENT_TLS.ctx = None  # body + _confirm() run as the parent
+        try:
+            return body(**args)
+        finally:
+            _SUBAGENT_TLS.ctx = prev_ctx
+
+    _run.__name__ = f"_subagent_write_{name}"
+    return _run
 
 
 # Read-only binaries the sub-agent tier may run as a single bare command
@@ -195,7 +291,9 @@ def _subagent_bash(command: str, **_: Any) -> str:
 
 
 def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
-    """Run a read-only sub-agent on `instruction`; return its final answer."""
+    """Run a sub-agent on `instruction`; return its final answer. Read-only by
+    default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
+    four file-mutation tools, each still gated by the parent's _confirm())."""
     if not isinstance(instruction, str) or not instruction.strip():
         # flash-tier models keep sending {"prompt": ...} instead of the
         # documented `instruction` key; without a hint they burn a whole
@@ -217,24 +315,37 @@ def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
 
     from ._turn import _run_model_turn_loop  # import-check only (circular-import canary)
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
-    messages = [{"role": "system", "content": SUBAGENT_SYSTEM},
+    # Write tier: opt-in (NX_SUBAGENT_WRITE=1) and refused from inside another
+    # sub-agent (only the parent ever holds the approval gate).
+    write = _write_tier_enabled()
+    if write and _subagent_ctx() is not None:
+        return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
+                "delegate; report the change and let the parent make it")
+    messages = [{"role": "system", "content": SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM},
                 {"role": "user", "content": instruction.strip()}]
-    # Force the sub-loop through the read-only dispatch table. run_tool() and
+    # Force the sub-loop through the restricted dispatch table. run_tool() and
     # model_turn() consult the per-thread sub-agent context first (so two
     # concurrent agents never clobber each other's restricted table). The
     # global st._SUBAGENT_DISPATCH is deliberately NOT written here: a
     # concurrent sibling's run_tool("spawn_agent") would see this thread's
     # restricted table mid-flight and refuse itself. The global stays a
     # manual, serial-only fallback for tests.
-    table = _read_only_dispatch()
+    table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
-    _SUBAGENT_TLS.ctx = _SubagentContext(table)
+    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=write)
     # YOLO/APPROVE_LEVEL are process-global: snapshot+swap under the spawn lock
     # so two concurrent agents can't restore each other's snapshot out of order
     # (a leaked YOLO=True would silently disable the parent's approval gate).
+    # Read-only agents force YOLO (their tools never prompt anyway). Write-tier
+    # agents inherit the parent's real approval posture instead — the confirm-
+    # through wrappers must see it, and they also drop the TLS context around
+    # each body, so _confirm() runs exactly as it would for a parent write.
     with _SPAWN_LOCK:
         prev_yolo, prev_level = st.YOLO, st.APPROVE_LEVEL
-        st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
+        if write:
+            st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level
+        else:
+            st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
     try:
         summary = _m._run_model_turn_loop(
             messages,

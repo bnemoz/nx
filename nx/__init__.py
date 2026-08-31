@@ -547,6 +547,12 @@ from ._tool_cache import cache_store_entry as _tool_cache_store_entry  # noqa: F
 # nx/_subagent.py. OFF by default (NX_SUBAGENTS=1 to enable) — it adds a tool
 # schema to every turn's floor, so it's opt-in like NX_GRAMMAR/NX_NATIVE_TOOLS.
 NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
+# Opt-in write tier for sub-agents (NX_SUBAGENT_WRITE=1): the four file-mutation
+# tools (write_file/edit_file/multi_edit/sed_edit) are additionally offered
+# inside a sub-agent, bound to wrappers that run the parent's real bodies — so
+# every sub-agent write still crosses the parent's own _confirm() (risk gate +
+# Y/n prompt with a diff preview), tagged (sub-agent) in the tool box.
+NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 NX_VISION = _env_int("NX_VISION", 0)
 
 

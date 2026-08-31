@@ -307,6 +307,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         path_arg = path_arg[0] if path_arg else None
     if isinstance(path_arg, str) and path_arg not in (".", ""):
         header = f"{name} {path_arg}"
+    # Tag write-tier sub-agent calls in the box so a diff prompt that appears
+    # mid-sub-agent (the model's own loop output is suspended) is visibly the
+    # sub-agent's edit, not the parent's. The tag rides the header line only —
+    # the action string inside _confirm stays the standard shape, so allow
+    # rules / risk hints match sub-agent and parent writes alike.
+    from ._subagent import _subagent_ctx
+    ctx = _subagent_ctx()
+    if ctx is not None and ctx.write and name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
+        header = f"{header} (sub-agent)"
     print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
     print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool

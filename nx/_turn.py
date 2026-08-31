@@ -381,6 +381,17 @@ def _all_read_only(calls: list[tuple[str, dict[str, Any]]]) -> bool:
     return bool(calls) and all(n in _m._CACHEABLE_READ_TOOLS for n, _ in calls)
 
 
+def _write_capable_agent(calls: list[tuple[str, dict[str, Any]]]) -> bool:
+    """True when any call in the turn is a spawn_agent that will run with the
+    write tier (NX_SUBAGENT_WRITE=1). Those agents' tool bodies hit the real
+    _confirm() prompt, so they must stay on the sequential path — overlapping
+    them would interleave two agents' approval prompts on one terminal."""
+    if not any(n == "spawn_agent" for n, _ in calls):
+        return False
+    from ._subagent import _write_tier_enabled
+    return _write_tier_enabled()
+
+
 def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
     """True when this turn's 2+ calls may run concurrently on the thread pool.
 
@@ -391,8 +402,10 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
         so overlapping them is the whole point of delegating. Reads may ride
         along in the same turn (all read-only, no ordering requirements).
 
-    Single calls, mutating/prompting tools, and any turn while already inside
-    a sub-agent (no nested fan-out) stay sequential."""
+    Single calls, mutating/prompting tools, any turn while already inside
+    a sub-agent (no nested fan-out), and WRITE-TIER fan-outs stay sequential:
+    a write-capable sub-agent's bodies run the parent's real _confirm(), so
+    two of them in flight would interleave approval prompts."""
     if len(calls) < 2:
         return False
     import nx as _m
@@ -400,6 +413,8 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
         return False  # a sub-agent never fans out further
     spawn = sum(1 for n, _ in calls if n == "spawn_agent")
     if spawn:
+        if _write_capable_agent(calls):
+            return False  # write-tier agents prompt — never overlap them
         return all(n in _m._CACHEABLE_READ_TOOLS or n == "spawn_agent" for n, _ in calls)
     return _all_read_only(calls)
 
