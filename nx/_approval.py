@@ -260,18 +260,23 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     /approval reassign them mid-session, and we must always see the latest
     value, not a snapshot from when the tool function was defined.
     """
+    # A quiet loop (async sub-agent, batch task) can never prompt and must
+    # never write to the shared terminal — not even the YOLO diff preview,
+    # which is a stdout render and would pollute a batch run's JSONL stream.
+    # Check this BEFORE the YOLO fast path for exactly that reason, but keep
+    # the approval decision honest: without --yolo a batch task's gated call
+    # is auto-DENIED (documented: batch is headless, so nothing may approve a
+    # write the user never opted into) — only an explicit yolo posture
+    # approves. Async read-only sub-agents are unaffected: their tools never
+    # reach _confirm.
+    from ._subagent import _subagent_quiet
+    if _subagent_quiet():
+        if st.YOLO:
+            return True
+        return False
     if st.YOLO:
         if preview:
             print(preview)
-        return True
-    # A quiet (async background sub-agent) loop can never prompt: there is no
-    # user watching and this thread is detached from the terminal. Its only
-    # _confirm caller is run_bash behind the read-only sub-agent allowlist
-    # (_subagent_bash), which is the actual safety gate — same reasoning as
-    # the YOLO swap sync read-only agents get, just without the process-global
-    # swap a detached loop can't safely take (it would outlive the turn).
-    from ._subagent import _subagent_quiet
-    if _subagent_quiet():
         return True
     # Saved allow rules ("A" at a previous prompt, /approval allow) come
     # before the risk classifier: an explicitly-blessed action shape needs no

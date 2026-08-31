@@ -341,7 +341,8 @@ class StreamParser:
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
                     now = time.time()
-                    if now - self.last_say_render >= 0.05:
+                    if not self.quiet and self.say_live is not None \
+                            and now - self.last_say_render >= 0.05:
                         self.say_live.update(Markdown(strip_ansi_for_display(full)))
                         self.last_say_render = now
                 else:
@@ -362,7 +363,7 @@ class StreamParser:
                     # the (tag-free) prefix right before stopping, that stray
                     # partial-opener frame would be the one left on screen.
                     prefix = full[:tag_idx]
-                    if self.say_live is None and prefix.strip():
+                    if not self.quiet and self.say_live is None and prefix.strip():
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
@@ -410,4 +411,5 @@ class StreamParser:
         for any reason (normal end, interrupt, error) before reading back
         mode/say_live elsewhere."""
         self.close_think_block()
-        print(RESET)
+        if not self.quiet:
+            print(RESET)

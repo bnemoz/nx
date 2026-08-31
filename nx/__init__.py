@@ -622,7 +622,11 @@ from ._repl import (
 
 
 # --- one-shot (non-interactive) / CLI entry ----------------------------------
-from ._cli import _run_one_shot, main
+from ._cli import _run_one_shot, _one_shot_result, main
+
+
+# --- headless batch mode (nx run -f tasks.jsonl) -----------------------------
+from ._batch import run_batch, _batch_active
 
 
 # --- state proxy -------------------------------------------------------------

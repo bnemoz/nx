@@ -310,10 +310,14 @@ def open_stream(
         # Wrap the stream so every chunk is captured to the log on its way out.
         return _LoggingStream(stream, _llog)
     except (APIConnectionError, httpx.HTTPError):
-        print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — is the server up? "
-              f"Set NX_BASE_URL (and NX_MODEL) to point at it.{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — is the server up? "
+                  f"Set NX_BASE_URL (and NX_MODEL) to point at it.{RESET}")
     except Exception as e:
-        print(f"{C.ERROR}  ✗ API error: {type(e).__name__}: {e}{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ API error: {type(e).__name__}: {e}{RESET}")
     return None
 
 
@@ -427,8 +431,10 @@ def compress(
                     orphans.append(i)
         expanded -= set(orphans)
         if orphans:
-            print(f"{C.WARNING}  ↳ {len(orphans)} pinned turn(s) skipped: an "
-                  f"assistant-tool-call/tool-result pair must be pinned together{RESET}")
+            from ._subagent import _subagent_quiet
+            if not _subagent_quiet():
+                print(f"{C.WARNING}  ↳ {len(orphans)} pinned turn(s) skipped: an "
+                      f"assistant-tool-call/tool-result pair must be pinned together{RESET}")
         if expanded:
             pinned_msgs = [body[i] for i in sorted(expanded)]
             head = [m for i, m in enumerate(body[:-keep]) if i not in expanded]
@@ -480,10 +486,14 @@ def compress(
         except Exception:
             pass  # never let logging break the summary call
     except APIConnectionError:
-        print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — context unchanged{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — context unchanged{RESET}")
         return None
     except Exception as e:
-        print(f"{C.ERROR}  ✗ compress failed: {type(e).__name__}: {e}{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ compress failed: {type(e).__name__}: {e}{RESET}")
         return None
 
     _record_usage(
@@ -494,7 +504,9 @@ def compress(
 
     summary = (resp.choices[0].message.content or "").strip()
     if not summary:
-        print(f"{C.ERROR}  ✗ compress returned empty summary — context unchanged{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ compress returned empty summary — context unchanged{RESET}")
         return None
 
     header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
@@ -535,7 +547,9 @@ def _maybe_autocompress(messages: list[dict[str, Any]], prompt_tokens: int) -> b
         return False
     kept_n, summarized_n, summary_chars = result
     pct = int(ratio * 100)
-    print(f"{DIM}  ↻ auto-compressed {summarized_n} turns → 1 summary "
-          f"({summary_chars} chars), kept last {kept_n} verbatim "
-          f"(context was at {pct}% of {_abbr(mx)}){RESET}")
+    from ._subagent import _subagent_quiet
+    if not _subagent_quiet():
+        print(f"{DIM}  ↻ auto-compressed {summarized_n} turns → 1 summary "
+              f"({summary_chars} chars), kept last {kept_n} verbatim "
+              f"(context was at {pct}% of {_abbr(mx)}){RESET}")
     return True

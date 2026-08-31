@@ -272,8 +272,11 @@ def test_quiet_run_tool_prints_nothing(nx_fresh, monkeypatch, capsys):
 
 
 def test_quiet_confirm_never_prompts(nx_fresh, monkeypatch):
-    """_confirm short-circuits True on a quiet thread: a detached agent has
-    no user to ask, and its bash tier is allowlist-gated anyway."""
+    """_confirm short-circuits on a quiet thread — it never prompts and never
+    reaches the risk classifier. The verdict still honors the approval
+    posture: quiet + yolo approves (a detached agent's bash tier is
+    allowlist-gated anyway), quiet + no yolo denies (batch is headless:
+    nothing may approve a write the user never opted into)."""
     from nx._approval import _confirm
     from nx._subagent import _ASYNC_QUIET_SLOTS
 
@@ -283,9 +286,14 @@ def test_quiet_confirm_never_prompts(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_assess_risk", _never)
     _ASYNC_QUIET_SLOTS.quiet = True
     try:
-        assert _confirm("write: x") is True
+        nx_fresh.YOLO = True
+        assert _confirm("write: x") is True  # explicit yolo: approve, silently
+        nx_fresh.YOLO = False
+        assert _confirm("write: x") is False  # no yolo: headless = deny
+        nx_fresh.YOLO = True
     finally:
         _ASYNC_QUIET_SLOTS.quiet = False
+        nx_fresh.YOLO = False
 
 
 def test_bg_after_async_finish_shows_done_status(nx_fresh, monkeypatch, capsys):

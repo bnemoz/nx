@@ -86,7 +86,9 @@ def _save_current(
     try:
         _write_session(state.session_id, state.messages, m, update_index=update_index)
     except OSError as e:
-        print(f"{C.ERROR}  ✗ couldn't save session: {type(e).__name__}: {e}{RESET}")
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet():
+            print(f"{C.ERROR}  ✗ couldn't save session: {type(e).__name__}: {e}{RESET}")
     # Fire-and-forget push to the optional metrics endpoint. Only does
     # anything if NX_METRICS_URL is set; self-disables on first
     # failure so a down/absent dashboard never slows the REPL.

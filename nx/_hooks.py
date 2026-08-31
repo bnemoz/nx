@@ -64,7 +64,9 @@ def pre_tool_hook(tool: str, args: dict[str, Any]) -> Optional[str]:
     ok, msg = _run_hook(cmd, {"tool": tool, "args": args}, _PRE_TIMEOUT)
     if ok:
         return None
-    print(f"  ↳ pre-hook blocked {tool}: {msg}")
+    from ._subagent import _subagent_quiet
+    if not _subagent_quiet():
+        print(f"  ↳ pre-hook blocked {tool}: {msg}")
     return f"blocked by NX_PRE_TOOL_HOOK ({msg})"
 
 

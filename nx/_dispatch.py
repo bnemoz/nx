@@ -294,7 +294,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # turns long after the parent's per-turn reset, so the flag alone can't
     # keep them out anymore.
     from ._subagent import _subagent_ctx
-    if not st._BG_SCAN_DONE and _subagent_ctx() is None:
+    from ._batch import _batch_active
+    if not st._BG_SCAN_DONE and _subagent_ctx() is None and not _batch_active():
         st._BG_SCAN_DONE = True
         note = _scan_background_completions()
         if note:

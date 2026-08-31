@@ -45,6 +45,7 @@ from . import (
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
 )
 from ._subagent import _subagent_active, _subagent_quiet
+from ._batch import _batch_active
 from ._plan import plan_active
 from concurrent.futures import ThreadPoolExecutor
 
@@ -302,6 +303,7 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
     """Under forced-final mode, extract the `final_answer` tool call (if any) the
     model emitted and render its answer as visible assistant text. Returns a
     TURN_* status to bubble up from model_turn."""
+    quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
     for c in ordered:
         if c["name"] != "final_answer":
@@ -313,15 +315,18 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
         answer = str(args.get("answer") or "").strip()
         status = str(args.get("status") or "answered").strip()
         if answer:
-            print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
+            if not quiet:
+                print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
             messages.append({"role": "assistant", "content": answer})
             return TURN_DONE
-        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
-              f"returning to chat input{RESET}")
+        if not quiet:
+            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
+                  f"returning to chat input{RESET}")
         return TURN_DONE
     names = ", ".join(c["name"] or "tool" for c in ordered)
-    print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
-          f"returning to chat input{RESET}")
+    if not quiet:
+        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
+              f"returning to chat input{RESET}")
     return TURN_DONE
 
 
@@ -330,21 +335,25 @@ def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[s
     mode a text-protocol model can still emit <tool_call> blocks, so corral it into
     final_answer-only here instead of letting _handle_text_tool_calls execute arbitrary
     tools (which would defeat the stall-recovery safety valve for non-native backends)."""
+    quiet = _subagent_quiet()
     for n, a in calls:
         if n != "final_answer":
             continue
         answer = str(a.get("answer") or "").strip()
         status = str(a.get("status") or "answered").strip()
         if answer:
-            print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
+            if not quiet:
+                print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
             messages.append({"role": "assistant", "content": answer})
             return TURN_DONE
-        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
-              f"returning to chat input{RESET}")
+        if not quiet:
+            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
+                  f"returning to chat input{RESET}")
         return TURN_DONE
     names = ", ".join(n or "tool" for n, _ in calls)
-    print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
-          f"returning to chat input{RESET}")
+    if not quiet:
+        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
+              f"returning to chat input{RESET}")
     return TURN_DONE
 
 
@@ -362,14 +371,27 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
     jobs = [(i, n, a) for i, (n, a) in enumerate(calls)]
     workers = min(8, len(jobs))
 
+    # Pool threads inherit nothing from the dispatching thread's quiet state
+    # (thread-local by design), so a quiet loop's read-only fan-out would print
+    # tool boxes from the pool onto the shared terminal. Re-apply THIS thread's
+    # quiet posture in each worker: it can only be True here when the caller is
+    # a quiet loop (async sub-agent or batch task) — the interactive parent
+    # never fans out quiet.
+    from ._subagent import _subagent_quiet, _ASYNC_QUIET_SLOTS
+    quiet = _subagent_quiet()
+
     def _one(job: tuple[int, str, dict[str, Any]]) -> tuple[int, str]:
         i, n, a = job
+        if quiet:
+            _ASYNC_QUIET_SLOTS.quiet = True
         try:
             return i, run_tool(n, a)
         except _EscToChat:
             raise  # read-only tools can't prompt, but propagate defensively
         except Exception as e:  # noqa: BLE001 — mirror run_tool's error surfacing
             return i, f"ERROR: {type(e).__name__}: {e}"
+        finally:
+            _ASYNC_QUIET_SLOTS.quiet = False
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for i, res in ex.map(_one, jobs):
@@ -1099,8 +1121,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             return status
 
     if forced_final and text.strip() and "length" in parser.finish_reasons:
-        print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
-              f"with truncation marker{RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
+                  f"with truncation marker{RESET}")
         messages.append({
             "role": "assistant",
             "content": text.rstrip() + "\n\n[Truncated by token limit before completion.]",
@@ -1123,15 +1146,17 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         if (not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0
                 and empty_turn_count < st.EMPTY_TURN_RETRY_LIMIT):
             dangling = _last_is_dangling_tool(messages)
-            print(f"{C.WARNING}  ✂ EMPTY TURN — no content and no tool call"
-                  f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
-                  f"; nudging the model to continue "
-                  f"({empty_turn_count + 1}/{st.EMPTY_TURN_RETRY_LIMIT}){RESET}")
+            if not quiet:
+                print(f"{C.WARNING}  ✂ EMPTY TURN — no content and no tool call"
+                      f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
+                      f"; nudging the model to continue "
+                      f"({empty_turn_count + 1}/{st.EMPTY_TURN_RETRY_LIMIT}){RESET}")
             _nudge_current_user_turn(messages, EMPTY_TURN_NUDGE)
             return TURN_EMPTY
         if not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0:
-            print(f"{C.WARNING}  ✂ EMPTY TURN — no content after {empty_turn_count} nudge"
-                  f"{'s' if empty_turn_count != 1 else ''}; forcing a final answer{RESET}")
+            if not quiet:
+                print(f"{C.WARNING}  ✂ EMPTY TURN — no content after {empty_turn_count} nudge"
+                      f"{'s' if empty_turn_count != 1 else ''}; forcing a final answer{RESET}")
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
             return TURN_FORCE_FINAL
         return TURN_DONE
@@ -1154,9 +1179,10 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     if (not forced_final and reasoning_loop_cut_count > 0
             and reasoning_loop_cut_count < max(0, st.REASONING_ONLY_RETRY_LIMIT)
             and not _last_is_dangling_tool(messages)):
-        print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
-              f"intent but made no tool call; nudging to act "
-              f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
+        if not quiet:
+            print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
+                  f"intent but made no tool call; nudging to act "
+                  f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
         messages.append({"role": "assistant", "content": text})
         _nudge_current_user_turn(
             messages,
@@ -1209,10 +1235,11 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
-            if not _subagent_active():
+            if not _subagent_active() and not _batch_active():
                 # Only the parent loop fires NX_VERIFY_CMD — concurrent
-                # sub-agents hitting this line together would race the
-                # settle log and double-launch the verify command.
+                # sub-agents or batch-task threads hitting this line together
+                # would race the settle log and double-launch the verify
+                # command.
                 _launch_verify_if_settled()  # model went quiet — fire NX_VERIFY_CMD if its settle window passed
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
@@ -1271,8 +1298,9 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     # state so far — but only if we haven't already tried (force_final was
     # already consumed by the loop above).
     if steps >= max_turns and not force_final:
-        print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
-              f"forcing a final answer from current state{RESET}")
+        if not _subagent_quiet():
+            print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
+                  f"forcing a final answer from current state{RESET}")
         final_status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                    empty_turn_count=empty_turn_cuts,
                    forced_final=True,

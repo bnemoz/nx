@@ -139,6 +139,7 @@ disables the probe and the attach.
 | `--session <id>` | start a fresh run attached to a specific session id |
 | `--prompt-file <path>` / `-f <path>` | headless one-shot mode: run one turn and exit (`-` reads stdin) |
 | `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat |
+| `nx run -f tasks.jsonl` | headless batch mode: every JSONL line is one task — emits one JSON result line per task on stdout, one process exit code for the run (see "Batch mode" below) |
 | `--tokens` / `--bench` | print the exact prompt-token floor and exit |
 | `-h` / `--help` | print flag usage and exit |
 | `--version` / `-v` | print the installed version and exit |
@@ -347,11 +348,69 @@ approval-gated keeps strict sequential dispatch.
 Every chat auto-saves to `~/.nx/sessions/` as one human-readable JSON file per
 session (message array + id/title/description/source/timestamps + cumulative
 token usage). Auto-save happens after every turn, so a crash never loses work.
+
 `nx --resume <target>` (short id, prefix, title, or bare for most recent)
 restores it, reselects the original source, and replays a recap of the
 conversation. `nx sessions [query]` lists/filters sessions from the shell
 without entering the REPL; inside the REPL, `/sessions` and `/resume` do the
 same.
+
+## Batch mode
+
+`nx run -f tasks.jsonl` is the headless CI/benchmark harness: every line of
+the file is one task, each runs as a full one-shot agent run (fresh session,
+fresh token counters, its own resumable transcript under `~/.nx/sessions/`),
+and one JSON result line lands on stdout per task the moment it finishes.
+
+```
+$ nx run -f tasks.jsonl --parallel 4 --yolo
+```
+
+Each input line is a bare JSON string (the instruction) or an object:
+
+```
+"refactor the retry loop in _openai_client.py"
+{"instruction": "summarize README.md", "id": "t1", "session": "bench-07"}
+```
+
+Blank lines and `#` comments are skipped. Flags: `--parallel <N>` runs up to N
+tasks concurrently (each on its own thread with per-task state), `--max-turns
+<N>` caps each task's turns, `--continue-on-error` keeps scheduling after a
+task fails (default: stop scheduling new tasks at the first error),
+`--source <name>` picks the endpoint. stdout carries ONLY the JSONL result
+lines — every human-facing render is suppressed; progress and the summary go
+to stderr.
+
+Per-task exit codes ride each result line (`exit_code` field): `0` done, `3`
+turn cap, `4` error/refused. The process exit code summarizes the run: `0`
+every task done, `3` any cap, `4` any error, `2` harness misuse (unreadable
+file, zero tasks, no source, unknown flag). A streaming consumer can score
+each task as its line arrives without waiting for the process to end.
+
+Approval: batch is headless — nobody can answer a Y/n prompt. Without
+`--yolo`, every gated call is auto-denied and the task reports that; run with
+`--yolo` (or `--approval high`) when tasks must write files and run commands.
+Each task's transcript is saved like an interactive session's, so a scored run
+is also a resumable one.
+
+Result-line shape (one JSON object per task):
+
+```
+{"index": 0, "id": "task-0", "line": 1, "session": "20260831-125110-08f950",
+ "batch": "20260831-125110", "exit_code": 0, "status": "done", "turns": 3,
+ "elapsed_seconds": 12.4, "final_answer": "…", "tokens": {"input": 2630,
+ "output": 412, "cache_read": 1980, "reasoning": 0, "api_calls": 4},
+ "tool_calls": [{"tool": "read_file", "args": "…", "result": "…"}],
+ "error": null}
+```
+
+Tasks compose with sub-agents: a task's model may call `spawn_agent`
+(read-only by default, write tier with `NX_SUBAGENT_WRITE=1`), including
+`async: true` — the finished agent's answer arrives in that task's transcript
+as a `[Runtime note]`. With `--parallel > 1` the async-note channel is
+process-global, so prefer `--parallel 1` when a task relies on async agents.
+`NX_VERIFY_CMD` and the interactive background-completion scan stay off for
+batch workers (they're parent-loop machinery).
 
 ## Tools
 

@@ -13,6 +13,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
@@ -23,6 +24,7 @@ from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
 
 _HELP_TEXT = """\
 usage: nx [flags]
+       nx run -f tasks.jsonl [flags]
        nx sessions [query]
 
 flags:
@@ -36,6 +38,13 @@ flags:
                                    headless one-shot mode; "-" reads stdin
   --json                          (with --prompt-file) emit a JSON result summary
                                    on stdout instead of streamed chat output
+
+Batch mode — run every task in a JSONL file and emit JSONL results:
+
+  nx run -f tasks.jsonl [--parallel N] [--continue-on-error]
+
+Per-task exit codes: 0 done, 3 turn cap, 4 error. `nx run --help` for details.
+
   --tokens / --bench               print the exact prompt-token floor and exit
   -h, --help                      show this help and exit
   --version / -v                  show the version and exit
@@ -126,7 +135,8 @@ def _run_one_shot() -> bool:
     sys.exit(0)
 
 
-def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: float) -> dict:
+def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: float,
+                     metrics: Any = None) -> dict:
     """Build the --json result payload from the messages this run appended
     (everything from start_idx on) plus the turn-loop's status summary.
 
@@ -182,7 +192,7 @@ def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: flo
                 rest = obs_text[j + len(marker):]
                 nxt = rest.find("\nObservation (")
                 t["result"] = rest[:nxt] if nxt != -1 else rest
-    m = st._METRICS
+    m = metrics if metrics is not None else st._METRICS
     tokens = ({"input": m.input_tokens, "output": m.output_tokens,
                "cache_read": m.cache_read_tokens, "reasoning": m.reasoning_tokens,
                "api_calls": m.api_calls} if m is not None else None)
@@ -200,6 +210,12 @@ def main() -> None:
     # --help/--version short-circuit before any source/network setup.
     if _cli_help_or_version(sys.argv[1:]):
         return
+    # `nx run ...` — headless batch mode: every line of a JSONL file is one
+    # task, each runs the one-shot machinery on its own quiet thread and
+    # emits one JSONL result line; the process exit code summarizes the run.
+    if sys.argv[1:2] == ["run"]:
+        from ._batch import run_batch
+        sys.exit(run_batch(sys.argv[2:]))
     # --prompt-file: headless single-shot mode — run one turn and exit.
     import nx as _m
     if _m._run_one_shot():

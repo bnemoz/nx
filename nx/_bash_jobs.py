@@ -267,6 +267,13 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
     # model_turn disarms the watcher before dispatching a tool. Re-arm it for
     # the actual polling window; otherwise this check could only observe a
     # stale event and Esc could never interrupt run_bash/wait_background.
+    # Esc is only meaningful on an interactive parent thread: a quiet thread
+    # (async sub-agent, batch task) never owns the singleton stdin watcher, so
+    # arming it here would fight the parent's arm/disarm handshake and emit
+    # spurious "did not confirm input-mode restore" warnings. Poll without it.
+    from ._subagent import _subagent_quiet
+    if check_esc and _subagent_quiet():
+        check_esc = False
     watch = _watch_for_interrupts() if check_esc else nullcontext()
     with watch:
         last_tail = None
