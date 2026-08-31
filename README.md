@@ -402,9 +402,14 @@ commands remain for distilling a whole session at once.
 nx logs token usage (input/output/cache-read/reasoning, per the OpenAI usage
 convention, with a llama.cpp `timings` and a client-side character-estimate
 fallback) into each session's JSON, always on. The cache-read numbers also
-surface live: `cached: N%` in the per-turn stats footer and a per-turn cache
-column in `/ctx` (approximate alignment — one row per message, one entry per
-model call). Set `NX_METRICS_URL` to also
+surface live: `cached: N%` in the per-turn footer and the cache column in `/ctx` come from
+what the server reports. Three states are distinguished: a fraction (rendered
+with the green/yellow/red thresholds above), an explicit `0%` (server said it
+served nothing from cache — the busted-prefix signal), and `—` / no `cached`
+field (server sent no cache breakdown at all — common on vLLM builds, which
+omit `prompt_tokens_details.cached_tokens` unless something actually hit;
+some gateways never send it). Only the middle one is a warning; a server that
+never reports cache numbers renders nothing rather than a lying `0%`. Set `NX_METRICS_URL` to also
 POST cumulative totals to a dashboard after each turn (fire-and-forget,
 disables itself on first failure — nothing leaves the machine unless you set
 this).

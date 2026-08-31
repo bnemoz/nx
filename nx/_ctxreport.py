@@ -85,8 +85,11 @@ def _cache_hits_by_turn(n_messages: int) -> list[float | None]:
     hits: list[float | None] = []
     for t in getattr(m, "turns", []) or []:
         p = int(t.get("prompt_tokens") or 0)
+        # cache_read_tokens < 0 is the _normalize_usage sentinel for "the
+        # server sent no cache breakdown at all" — distinct from a real 0
+        # (breakdown present, cache missed), which /ctx should render as 0%.
         c = int(t.get("cache_read_tokens") or 0)
-        hits.append(min(1.0, c / p) if p else None)
+        hits.append((min(1.0, c / p) if p else None) if c >= 0 else None)
     if not hits:
         return []
     if len(hits) < n_messages:

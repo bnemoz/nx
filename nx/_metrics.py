@@ -91,13 +91,19 @@ def _normalize_usage(
     prompt_total = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion_total = int(getattr(usage, "completion_tokens", 0) or 0)
     # OpenAI/Z.ai: prompt_tokens_details.cached_tokens is the cache portion.
+    # Absent breakdown (ptd None, or cached_tokens absent — vLLM omits the
+    # whole object when nothing was served from cache) is NOT the same fact
+    # as a reported 0. Sentinel -1 keeps the distinction through the ring
+    # buffer so /ctx renders "—", not a lying 0%. Cost math treats unknown
+    # as uncached (cache_read_tokens clamped at 0 in _source_cost's inputs).
     ptd = getattr(usage, "prompt_tokens_details", None)
-    cache_n = int(getattr(ptd, "cached_tokens", 0) or 0) if ptd else 0
+    cached_raw = getattr(ptd, "cached_tokens", None) if ptd is not None else None
+    cache_n = -1 if cached_raw is None else int(cached_raw)
     # Reasoning models break completion into content + reasoning.
     otd = getattr(usage, "output_tokens_details", None)
     reasoning_n = int(getattr(otd, "reasoning_tokens", 0) or 0) if otd else 0
     return {
-        "input_tokens": max(0, prompt_total - cache_n),
+        "input_tokens": max(0, prompt_total - max(0, cache_n)),
         "output_tokens": max(0, completion_total - reasoning_n),
         "cache_read_tokens": cache_n,
         "reasoning_tokens": reasoning_n,
@@ -177,12 +183,14 @@ class _Metrics:
             return
         self.input_tokens += delta.get("input_tokens") or 0
         self.output_tokens += delta.get("output_tokens") or 0
-        self.cache_read_tokens += delta.get("cache_read_tokens") or 0
+        # -1 (server sent no cache breakdown) contributes 0 here but is kept
+        # verbatim in the ring buffer below for /ctx's "—" rendering.
+        self.cache_read_tokens += max(0, delta.get("cache_read_tokens") or 0)
         self.reasoning_tokens += delta.get("reasoning_tokens") or 0
         self.api_calls += 1
         self.turns.append({
             "prompt_tokens": (delta.get("input_tokens") or 0)
-                              + (delta.get("cache_read_tokens") or 0),
+                              + max(0, delta.get("cache_read_tokens") or 0),
             "cache_read_tokens": delta.get("cache_read_tokens") or 0,
         })
         del self.turns[:-_TURN_RING_MAX]
@@ -192,7 +200,7 @@ class _Metrics:
             "reasoning_tokens": 0, "api_calls": 0})
         bucket["input_tokens"] += delta.get("input_tokens") or 0
         bucket["output_tokens"] += delta.get("output_tokens") or 0
-        bucket["cache_read_tokens"] += delta.get("cache_read_tokens") or 0
+        bucket["cache_read_tokens"] += max(0, delta.get("cache_read_tokens") or 0)
         bucket["reasoning_tokens"] += delta.get("reasoning_tokens") or 0
         bucket["api_calls"] += 1
 

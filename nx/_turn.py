@@ -173,20 +173,32 @@ def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
     """
     prompt_n = 0
     cache_n = 0
+    reported = False  # server actually sent a cache breakdown this call?
     if timings and timings.get("predicted_n"):
         prompt_n = int(timings.get("prompt_n") or 0)
         cache_n = int(timings.get("cache_n") or 0)
+        reported = True
     elif usage and (usage.prompt_tokens or 0):
         prompt_n = int(usage.prompt_tokens or 0)
         ptd = getattr(usage, "prompt_tokens_details", None)
-        cache_n = int(getattr(ptd, "cached_tokens", 0) or 0) if ptd else 0
+        if ptd is not None and getattr(ptd, "cached_tokens", None) is not None:
+            cache_n = int(ptd.cached_tokens)
+            reported = True
     if prompt_n:
         st._LAST_PROMPT_TOKENS = prompt_n
         # Fraction of the prompt served from the server's KV/prompt cache.
         # A steady high value here is the regression signal for append-only
         # discipline (memory_write cache keys, /undo-style message edits): a
         # silent prefix bust shows up as this collapsing to ~0.
-        st._LAST_CACHE_HIT = min(1.0, cache_n / prompt_n) if cache_n else 0.0
+        #
+        # "Server reported 0" and "server reported nothing" are different
+        # facts, so they render differently: 0.0 (red, a real signal) vs None
+        # (no `cached` field at all). Several OpenAI-compatible backends
+        # (vLLM, some gateways) omit prompt_tokens_details entirely whenever
+        # nothing was served from cache — or always — and rendering that as
+        # 0% cached turns the footer into a permanent false alarm.
+        st._LAST_CACHE_HIT = (min(1.0, cache_n / prompt_n)
+                              if reported else None)
 
 
 def _cache_hit_field(hit: Optional[float]) -> str:
