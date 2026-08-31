@@ -539,7 +539,11 @@ llama.cpp servers report `timings.predicted_per_second` directly and that
 server-measured figure is shown as-is. When the window is under ~0.5s (a
 short tool call can arrive in one or two SSE reads) the figure is
 pacing-free guessing and renders as `~N.N tok/s` — treat those as order-of-
-magnitude only.
+magnitude only. Below ~0.02s the span is SSE arrival quantization rather
+than pacing at all (a bursty server can deliver a whole short generation
+in one or two reads a fraction of a millisecond apart), so the footer
+divides by full turn wall-clock instead — the end-to-end average, a true
+lower bound — rather than printing a five-digit artifact.
 
 ## Architecture
 

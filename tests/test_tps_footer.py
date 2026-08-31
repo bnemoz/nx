@@ -155,6 +155,48 @@ def test_gen_window_below_floor_is_untrusted():
     assert trusted is False
 
 
+def test_gen_window_burst_span_falls_back_to_wall_not_quantization():
+    # GLM-5.3-flash / vLLM on a short tool-call turn: the whole generation
+    # lands in two SSE reads 0.0004s apart. The old code divided 22 tok by
+    # that span and printed ~51008.7 tok/s — arrival quantization, not
+    # pacing. Below the _TPS_MIN_SPAN floor the window gives way to the
+    # end-to-end average (22 / 0.6 ≈ 36.7), a true lower bound.
+    from nx._stream_parse import _TPS_MIN_SPAN
+    first = 0.5
+    p = _new_parser()
+    p.t_first = first
+    p.t_last = first + 0.0004
+    window, trusted = p.gen_window(elapsed_total=0.6)
+    assert trusted is False
+    assert abs(window - 0.6) < 1e-9
+    from nx._turn import _window_tps
+    assert _window_tps(22, window) == pytest.approx(22 / 0.6, rel=1e-3)
+    assert _TPS_MIN_SPAN < 0.05  # floor is sub-trust-window by design
+
+
+def test_gen_window_burst_span_keeps_window_when_longer_than_wall():
+    # Defensive mirror: if elapsed is somehow tiny (clock edge), never let
+    # the fallback shrink below the span we did observe.
+    from nx._stream_parse import _TPS_MIN_SPAN
+    p = _new_parser()
+    p.t_first = 0.5
+    p.t_last = 0.5 + (_TPS_MIN_SPAN / 2)
+    window, trusted = p.gen_window(elapsed_total=0.01)
+    assert trusted is False
+    assert window == pytest.approx(_TPS_MIN_SPAN / 2)
+
+
+def test_gen_window_just_above_min_span_is_kept():
+    # Real multi-read pacing just above the quantization floor is untouched.
+    from nx._stream_parse import _TPS_MIN_SPAN
+    p = _new_parser()
+    p.t_first = 0.5
+    p.t_last = 0.5 + _TPS_MIN_SPAN + 0.001
+    window, trusted = p.gen_window(elapsed_total=9.9)
+    assert trusted is False                    # still under the 0.5s trust floor
+    assert window == pytest.approx(_TPS_MIN_SPAN + 0.001)  # but kept as the span
+
+
 def test_gen_window_zero_span_single_event():
     p = _new_parser()
     p.t_first = p.t_last = 3.3  # whole generation in one SSE event
@@ -216,6 +258,21 @@ def test_footer_untrusted_window_marks_tps_approximate(nx_fresh, capsys):
     out = _footer_out(nx_fresh, capsys, _Usage(500, 40), None, 0, 0.1, 6.0, "ok", {},
                       parser=_ParserStub(0.05, False))
     assert "~800.0 tok/s" in out  # 40 / 0.05 — huge AND visibly untrusted
+
+
+def test_footer_burst_turn_renders_wall_average_not_quantization_artifact(nx_fresh, capsys):
+    # The reported glm-5.3-flash shape, end to end through the footer:
+    # 22 completion tokens whose whole arrival span is 0.0004s across a
+    # 0.6s turn. The footer must print the wall-time average (~36.7),
+    # never the ~51008.7 artifact.
+    from nx._stream_parse import StreamParser
+    p = StreamParser(Console(file=open(os.devnull, "w")), 0.0)
+    p.t_first = 0.5
+    p.t_last = 0.5004
+    out = _footer_out(nx_fresh, capsys, _Usage(24912, 22), None, 0, 0.5, 0.6, "ok", {},
+                      parser=p)
+    assert "~" in out and "tok/s" in out
+    assert "51008" not in out and "~ 36.7 tok/s" in out
 
 
 def test_footer_trusted_tps_tucks_into_padded_slot(nx_fresh, capsys):

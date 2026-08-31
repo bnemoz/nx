@@ -35,6 +35,15 @@ from . import REASONING_ONLY_TIME_LIMIT
 # usefully, it's just the resolution boundary of what the client can observe.
 _TPS_TRUST_WINDOW = 0.5
 
+# Below this, the span isn't pacing at all — it's SSE arrival quantization.
+# A bursty server (vLLM on a short tool-call turn) can deliver an entire
+# generation in one or two reads a fraction of a millisecond apart, and
+# dividing completion_tokens by that "span" printed ~51008.7 tok/s. Below the
+# threshold the client never observed a pace, so gen_window() falls back to
+# the full elapsed time: the end-to-end average, a true lower bound on the
+# decode rate, still marked `~`. Above it, real multi-read pacing — kept.
+_TPS_MIN_SPAN = 0.02
+
 
 def _fmt_think_duration(elapsed: float) -> str:
     """ms below 1s, seconds below 1min, else 'Xmin Ys'."""
@@ -194,6 +203,14 @@ class StreamParser:
         one or two SSE reads on a bursty client or a batching/speculating
         server, and no client-side math can recover pacing it never saw.
         Callers should still render a number but mark it approximate.
+
+        Sub-millisecond spans are a stronger kind of noise than "untrusted":
+        they're arrival quantization, not pacing — a bursty server (vLLM on
+        a short tool-call turn) delivers the whole generation in one or two
+        SSE reads a fraction of a millisecond apart, and dividing 22 tok by
+        a 0.0004s span printed ~51008 tok/s. Below _TPS_MIN_SPAN the window
+        gives way to `elapsed_total`: the end-to-end average over the whole
+        turn, a true lower bound on the decode rate, still `~`-marked.
         """
         if self.t_first is None or self.t_last is None:
             # No token ever arrived (empty turn) — nothing was paced.
@@ -204,6 +221,10 @@ class StreamParser:
         if window <= 0:
             # Entire generation in a single event: zero pacing information.
             return 0.0, False
+        if window < _TPS_MIN_SPAN:
+            # Arrival quantization: no observed pace, so no paced denominator.
+            # The wall-time average is the only honest (lower-bound) number.
+            return max(elapsed_total, window), False
         return window, window >= _TPS_TRUST_WINDOW
 
     # --- per-chunk entry point ----------------------------------------------
