@@ -29,7 +29,7 @@ try:
         path: str
         mtime_ns: Optional[int]
 except ImportError:  # pragma: no cover
-    _CacheEntry = None
+    _CacheEntry = None  # ty: ignore[invalid-assignment]  # py3.6- fallback
 
 
 def _mtime_ns_of(path: str) -> Optional[int]:

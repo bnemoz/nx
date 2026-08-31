@@ -22,7 +22,7 @@ import os
 import shutil
 import sys
 import unicodedata
-from typing import Callable
+from typing import Callable, cast
 
 from . import _state as st
 from ._ansi import DIM, RESET, C, THEMES, raw_mode
@@ -147,9 +147,8 @@ def _match_slash_args(cmd: str, prefix: str) -> list[tuple[str, str]]:
     opts = SLASH_ARG_OPTIONS.get(cmd)
     if not opts:
         return []
-    if callable(opts):
-        opts = opts()
-    return [(o, "") for o in _fuzzy_filter(opts, prefix)]
+    names = cast("list[str]", opts if isinstance(opts, list) else opts())
+    return [(o, "") for o in _fuzzy_filter(names, prefix)]
 
 
 def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:

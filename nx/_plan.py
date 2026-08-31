@@ -77,7 +77,7 @@ def plan_dir() -> str:
     return os.path.join(root, ".nx")
 
 
-def plan_path() -> str:
+def plan_path() -> "str | None":
     """The active plan's file path, or None when no plan is active."""
     if not st._PLAN_ACTIVE:
         return None

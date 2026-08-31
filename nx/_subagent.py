@@ -173,7 +173,7 @@ def _subagent_tools() -> list[dict[str, Any]]:
 def _read_only_dispatch() -> dict[str, Any]:
     from ._dispatch import DISPATCH
     table = {name: DISPATCH[name] for name in _READ_ONLY_TOOL_NAMES if name in DISPATCH}
-    table["run_bash"] = _subagent_bash  # allowlist gate in front of run_bash
+    table["run_bash"] = _subagent_bash  # ty: ignore[invalid-assignment]  # allowlist gate in front of run_bash
     return table
 
 

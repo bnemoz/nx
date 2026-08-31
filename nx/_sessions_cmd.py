@@ -446,7 +446,7 @@ def _cmd_export(user: str, state: _ReplState) -> None:
         "source": st.ACTIVE.name if st.ACTIVE else None,
         "model": st.MODEL,
         "messages": state.messages,
-        "usage": (st._METRICS.totals() if st._METRICS and hasattr(st._METRICS, "totals") else None),
+        "usage": (st._METRICS.as_meta() if st._METRICS is not None else None),
     }
     md = export_markdown(data)
     try:

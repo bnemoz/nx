@@ -230,6 +230,8 @@ def _word_spans(text: str) -> list[re.Match]:
 def _drop_dup_line(new: str, sig: str, context: str) -> str | None:
     """Repair `duplicated line N->M` by deleting the second copy."""
     m = re.search(r"duplicated line (\d+)->(\d+)", sig)
+    if m is None:
+        return None  # signature went stale after an earlier repair
     j, i = int(m.group(1)), int(m.group(2))
     lines = new.split("\n")
     if i > len(lines) or lines[j - 1].strip() != lines[i - 1].strip():
@@ -271,14 +273,14 @@ def _dedup_phrase(new: str, sig: str, context: str) -> str | None:
     """Repair `repeated phrase` by collapsing the periodic echo to one copy
     (the first is the one the model meant to keep)."""
     m = re.search(r"repeated phrase: '(.*)'$", sig)
-    return _collapse_periodic(new, _WORD_RE.findall(m.group(1)), context)
+    return None if m is None else _collapse_periodic(new, _WORD_RE.findall(m.group(1)), context)
 
 
 def _destutter(new: str, sig: str, context: str) -> str | None:
     """Repair `stuttered words` (period-2 echo, e.g. hyphenated tokens the
     5-gram check can't see) the same way: keep one period."""
     m = re.search(r"stuttered words: '(.*)'$", sig)
-    return _collapse_periodic(new, _WORD_RE.findall(m.group(1)), context)
+    return None if m is None else _collapse_periodic(new, _WORD_RE.findall(m.group(1)), context)
 
 
 def _desplice(new: str, sig: str, context: str) -> str | None:
@@ -286,6 +288,8 @@ def _desplice(new: str, sig: str, context: str) -> str | None:
     content in line N-1 (that's where the stream was) and a duplicate at the
     head of line N — trim them off line N's head."""
     m = re.search(r"spliced line boundary at line (\d+): '(.*)'$", sig)
+    if m is None:
+        return None  # signature went stale after an earlier repair
     i = int(m.group(1)) - 1  # index of the second line
     if not _novel_fragment(m.group(2), context, ""):
         return None
@@ -312,7 +316,7 @@ _REPAIRERS = (
 )
 
 
-def realign_new(new: str, sigs: list[str], context: str) -> str | None:
+def realign_new(new: str, sigs: list[str], context: str) -> str:
     """One best-effort repair pass over *new* given *sigs* from
     garble_signature(). Returns the repaired text (or *new* unchanged when no
     signature could be repaired — the caller treats no-progress as failure).

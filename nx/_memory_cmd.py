@@ -202,11 +202,15 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
         title = body.split("\n")[0][:80].strip() or "untitled"
 
     try:
-        path, _scope = _write_memory_file(title, body, "project")
-        print(f"{DIM}  ✓ saved memory: {title}{RESET}")
-        print(f"{DIM}    {path}{RESET}")
+        written = _write_memory_file(title, body, "project")
     except OSError as e:
         print(f"{C.ERROR}  ✗ couldn't write memory: {e}{RESET}")
+        return
+    if written is None:  # gate denied — not possible with gate=False; kept safe
+        return
+    path, _scope = written
+    print(f"{DIM}  ✓ saved memory: {title}{RESET}")
+    print(f"{DIM}    {path}{RESET}")
 
 
 def _cmd_memory_remember(query: str) -> None:
@@ -226,16 +230,9 @@ def _cmd_memory_remember(query: str) -> None:
     print(f"{DIM}  memories matching {query!r} ({shown_n}):{RESET}")
     for hit in hits:
         print(f"\n{C.ACCENT}  ┌─ {hit.title}{RESET}  {DIM}({hit.name}){RESET}")
-        # Show first ~10 lines as preview, strip the title line
-        shown = 0
-        for line in hit.content.split("\n"):
-            if line.startswith("# ") and shown == 0:
-                continue  # skip the title line in preview (already shown)
-            if shown >= 10:
-                print(f"{DIM}  │  …{RESET}")
-                break
+        # Snippet preview (title line already shown separately)
+        for line in hit.snippet.split(" / "):
             print(f"{DIM}  │{RESET} {line[:100]}")
-            shown += 1
 
 
 def _cmd_memory_delete(target: str) -> None:

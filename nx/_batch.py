@@ -200,6 +200,7 @@ def _parse_tasks(path: str) -> list[dict[str, Any]]:
     key; `id` and `session` are optional. Blank lines and `#` comments are
     skipped. Line numbers are 1-based and preserved in `line`."""
     tasks: list[dict[str, Any]] = []
+    task: dict[str, Any]
     for lineno, raw in enumerate(_read_task_lines(path), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):

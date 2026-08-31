@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.17.0"
+version = "0.17.1"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -31,3 +31,21 @@ dev = ["pytest"]
 # and external callers) and imports each submodule right above the section of
 # code that uses it, rather than all at the top — both intentional.
 "nx/__init__.py" = ["F401", "E402"]
+
+[[tool.ty.overrides]]
+# The test suite drives nx through its deliberately dynamic seams:
+# `nx.<STATE_NAME>` reads/writes go through _StateProxyModule.__getattr__,
+# fixtures monkeypatch module attributes (m._confirm, m.print, nx.client, …)
+# with test doubles, and negative tests pass malformed arguments on purpose
+# to exercise runtime validation. Static resolution of those attribute reads
+# and signature checks is wrong by design here, so the dynamic-access rules
+# are disabled for tests/** only — the nx/ package itself stays fully strict.
+include = ["tests/**"]
+rules.unresolved-attribute = "ignore"
+rules.invalid-assignment = "ignore"
+rules.invalid-argument-type = "ignore"
+rules.not-subscriptable = "ignore"
+rules.not-iterable = "ignore"
+rules.unsupported-operator = "ignore"
+rules.unresolved-import = "ignore"
+rules.possibly-missing-submodule = "ignore"

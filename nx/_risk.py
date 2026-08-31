@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from typing import Any
 
 from ._openai_client import APIConnectionError
 
@@ -221,7 +222,7 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
             info = _classify_action_path(path)
             if (info.get("path_scope") == "in_project" and st.PROJECT_ROOT_IS_GIT
                     and not info["path_touches_home_dotdir"]):
-                if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT):
+                if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT or ""):
                     return ("high", "deletes a hook/CI/build file")
                 return ("medium", "deletes a file inside the project (undoable)")
         return None
@@ -231,7 +232,7 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
     info = _classify_action_path(path)
     scope = info.get("path_scope")
     if scope == "in_project" and st.PROJECT_ROOT_IS_GIT and not info["path_touches_home_dotdir"]:
-        if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT):
+        if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT or ""):
             return ("high", "writes a self-executing hook/CI/build file")
         return ("medium", "writes a file inside the project")
     # Not a real git project root (cwd fallback, e.g. running from $HOME),
@@ -289,7 +290,7 @@ st.PROJECT_ROOT = _detect_project_root()
 
 def _classify_action_path(
     path: str, cwd: str | None = None, project_root: str | None = None
-) -> dict[str, object]:
+) -> "dict[str, Any]":
     cwd = os.path.realpath(cwd or os.getcwd())
     project_root = os.path.realpath(project_root or st.PROJECT_ROOT or cwd)
     expanded = os.path.expanduser(path)

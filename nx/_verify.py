@@ -30,16 +30,16 @@ from ._env import _env_float
 
 # Timestamps (time.monotonic) of successful .py write_file/edit_file/multi_edit
 # calls this session. Consumed/reset by _launch_verify_if_settled().
-st._VERIFY_EDIT_LOG: list[float] = []
+st._VERIFY_EDIT_LOG = []  # annotated in nx/_state.py
 # Set when a verify job is in flight, so a later settle doesn't double-launch
 # while one is still running.
 st._VERIFY_INFLIGHT = False
 # [Runtime note: ...] text staged by the bg-completion scan; flushed with the
 # other pending notices by _flush_pending_background_notice.
-st._PENDING_VERIFY_NOTICE: str | None = None
+st._PENDING_VERIFY_NOTICE = None  # annotated in nx/_state.py
 # verify-job pids already announced (so a finished verify job is reported once,
 # never re-announced on later turns).
-st._VERIFY_SEEN: set[str] = set()
+st._VERIFY_SEEN = set()  # annotated in nx/_state.py
 
 # Quiet period after the last edit before the verify command fires. Long
 # enough to skip dead time between two tool calls in the same burst, short
@@ -111,7 +111,7 @@ def _launch_verify(command: str) -> bool:
     if fn is None:
         print("[verify] run_bash unavailable — NX_VERIFY_CMD not run")
         return False
-    out = fn(command)
+    out = fn(command)  # ty: ignore[missing-argument, invalid-argument-type]  # run_bash(command)
     if not isinstance(out, str) or out.startswith("ERROR") or out.startswith("DENIED"):
         print(f"[verify] NX_VERIFY_CMD did not start: {out if isinstance(out, str) else type(out).__name__}")
         return False

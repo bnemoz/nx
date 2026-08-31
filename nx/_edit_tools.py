@@ -195,12 +195,13 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
             return "ERROR: old_lines wants 'N' or 'N-M' (1-based lines, e.g. '10-14')"
         status, msg, repaired = garble_check(new, src, path=path)
         if status == "error":
-            return msg
+            return msg or "ERROR: garble guard rejected the edit"
         if status == "repaired":
+            assert repaired is not None and msg is not None
             new = repaired
             garble_note = msg
         try:
-            new_src, replaced, _ = _apply_line_range(src, start, end, new)
+            new_src, _n_repl, _n_lines = _apply_line_range(src, start, end, new)
         except ValueError as e:
             return f"ERROR: {e}"
         if new_src == src:
@@ -246,7 +247,7 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
         return f"ERROR: `old` matched {count} times (need exactly 1, or pass replace_all=True)"
     status, msg, repaired = garble_check(new, src, old, path=path)
     if status == "error":
-        return msg
+        return msg or "ERROR: garble guard rejected the edit"
     if status == "repaired":
         new = repaired
         garble_note = msg
@@ -303,9 +304,12 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
                     f"(need exactly 1); no edits applied" + (f"\n{hint}" if hint else ""))
         status, msg, repaired = garble_check(new, work, old, path=path)
         if status == "error":
-            detail = msg[len("ERROR: "):] if msg.startswith("ERROR: ") else msg
+            detail = msg or "garble guard rejected the edit"
+            if detail.startswith("ERROR: "):
+                detail = detail[len("ERROR: "):]
             return f"ERROR: edit #{i + 1} {detail} no edits applied"
         if status == "repaired":
+            assert repaired is not None and msg is not None
             new = repaired
             garble_notes.append(msg)
         work = work.replace(old, new, 1)

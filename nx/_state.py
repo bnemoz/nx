@@ -236,6 +236,34 @@ def _set_thread_metrics(m: "_Metrics | None") -> "_Metrics | None":
 # may behave differently.
 _NATIVE_TOOL_CALLS_CONFIRMED: bool = False
 
+# --- sub-agent dispatch --------------------------------------------------------
+# spawn_agent() runs its sub-loop with this table installed here (plus a
+# per-thread copy in _subagent._SUBAGENT_TLS): read-only entries ONLY. See
+# _dispatch.py (which assigns the initial values) and _subagent.py.
+_SUBAGENT_DISPATCH: dict[str, Any] | None = None
+_SUBAGENT_ACTIVE: bool = False
+
+# --- bg-job / sub-agent completion sweep ---------------------------------------
+# Per-turn scan flags and staged runtime-note text, owned by _dispatch.py's
+# first-tool-of-turn scan (initial values assigned there).
+_BG_SCAN_DONE: bool = False
+_PENDING_BG_COMPLETION_NOTICE: str | None = None
+_PENDING_SUBAGENT_NOTICE: str | None = None
+_BG_NOTICE_SEEN: set[str] | None = None
+
+# --- post-edit verification (NX_VERIFY_CMD) ------------------------------------
+# Owned by _verify.py (initial values assigned there): timestamps of recent
+# .py edits, an in-flight latch, the staged verify notice, and the pids
+# already announced.
+_VERIFY_EDIT_LOG: list[float] = []
+_VERIFY_INFLIGHT: bool = False
+_PENDING_VERIFY_NOTICE: str | None = None
+_VERIFY_SEEN: set[str] = set()
+
+# --- /ctx pinned messages ------------------------------------------------------
+# 1-based message indexes pinned by /ctx pin (see _ctxreport.py).
+_CTX_PINNED: list[int] = []
+
 # --- write/edit checkpoint stack (for /undo) -----------------------------------
 # Populated by run_tool() after a successful write_file/edit_file/multi_edit;
 # see _undo.py for the entry shape and undo_last()'s restore logic.
