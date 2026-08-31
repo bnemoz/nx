@@ -23,7 +23,7 @@ from ._tool_cache import cache_store_entry, cache_valid, drop_changed_entries
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
-from ._memory_cmd import memory_write, memory_search, _load_memory_note
+from ._memory_cmd import memory_write, memory_search, memory_delete, _load_memory_note
 from ._metrics import _abbr
 from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
@@ -40,6 +40,7 @@ DISPATCH = {
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
     "todo_write": todo_write, "apply_patch": apply_patch, "delete_file": delete_file,
     "memory_write": memory_write, "memory_search": memory_search,
+    "memory_delete": memory_delete,
     "spawn_agent": spawn_agent, "read_image": read_image,
 }
 
@@ -402,8 +403,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         # bash can touch any path; entries whose backing file is unchanged
         # (re-stat) stay valid — only mtime-changed/vanished entries are dropped.
         drop_changed_entries(st._TOOL_RESULT_CACHE)
-    elif name == "memory_write" and not result.startswith("ERROR") and result != "DENIED by user":
-        # A new memory invalidates any cached memory_search index/snippets.
+    elif name in ("memory_write", "memory_delete") and not result.startswith("ERROR") and result != "DENIED by user":
+        # A new (or removed) memory invalidates any cached memory_search
+        # index/snippets — regardless of the scope the write/delete targeted.
         for k in [k for k in st._TOOL_RESULT_CACHE if k[0] == "memory_search"]:
             del st._TOOL_RESULT_CACHE[k]
     if name == "run_bash" and result.startswith("[background]") and not st._SESSION_HAS_BACKGROUNDED:

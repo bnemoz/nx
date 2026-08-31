@@ -11,8 +11,8 @@ staleness bug) are re-read or dropped.
 
 Non-file-backed entries (no usable path arg — e.g. memory_search, or git_* in
 a bare repo) store st_mtime_ns None and keep whole-result validity: they were
-never meaningful to invalidate per-path, and memory_write already drops
-memory_search entries explicitly.
+never meaningful to invalidate per-path, and memory_write / memory_delete
+already drop memory_search entries explicitly.
 """
 from __future__ import annotations
 

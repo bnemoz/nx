@@ -323,8 +323,10 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"enum": ["pending", "in_progress", "done"]}}}}}, "required": ["todos"]}}},
     {"type": "function", "function": {"name": "memory_write", "description": "Save a durable memory note for recall via memory_search. scope=project (default) or global. Requires approval.",
         "parameters": {"type": "object", "properties": {"title": {"type": "string", "description": "short topic title"}, "body": {"type": "string", "description": "markdown: facts, paths, commands, why-it-works reasoning"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project = this repo; global = cross-project"}}, "required": ["title", "body"]}}},
-    {"type": "function", "function": {"name": "memory_search", "description": "Keyword-search saved memories (project+global); newest first. Read-only. Empty query lists titles.",
+    {"type": "function", "function": {"name": "memory_search", "description": "Keyword-search saved memories (project+global); title hits rank first. Read-only. Empty query lists newest titles.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search terms; empty = list newest"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) searches both; global only global"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "memory_delete", "description": "Delete one saved memory note by exact title, filename, or unique prefix. Requires approval.",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string", "description": "exact title, filename, or unique title prefix"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) searches both; global only global"}}, "required": ["target"]}}},
 ]
 
 # Only offered once a run_bash call has actually backgrounded this session
@@ -389,7 +391,8 @@ in_progress at a time). Re-issue todo_write as the work or its scope grows.
 Memory: call memory_search before re-deriving something you may have
 already learned; call memory_write to persist a durable learning worth
 recalling in future sessions (scope=project for this repo, global for
-cross-project)."""
+cross-project). Search first; supersede an outdated note by writing the
+replacement and memory_delete-ing the stale one."""
 
 from ._env import _env_int, _env_float
 
@@ -588,8 +591,9 @@ from ._repl import (
     _print_transcript, _session_list_page_options, _print_session_list,
     _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
     _cmd_sessions, _cmd_resume, _cmd_delete, _cmd_memory, _slugify,
-    _cmd_memory_save, _cmd_memory_remember, _cmd_memory_list,
-    _render_transcript_for_memory, memory_write, memory_search, _load_memory_note,
+    _cmd_memory_save, _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
+    _render_transcript_for_memory, memory_write, memory_search, memory_delete,
+    _load_memory_note, _write_memory_file,
 )
 
 

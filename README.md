@@ -172,6 +172,7 @@ sessions and exits without entering the REPL.
 | `NX_BASH_PROMPT_SECRETS` | `1` forces the approval prompt when a `run_bash` command looks like it carries a credential (sk-/ghp_/AKIA/PEM…), even in yolo |
 | `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
+| `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -272,7 +273,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
-| `/memory save\|remember\|list` | manage persistent memory |
+| `/memory save\|remember\|delete\|list` | manage persistent memory |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive) |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown; pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -367,7 +368,8 @@ go through the approval gate above.
 | `wait_background` | `pid`, `log_path?`, `timeout?` | only offered after a `run_bash` call has backgrounded |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
-| `memory_search` | `query`, `scope?` | keyword-search saved memories; read-only |
+| `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |
+| `memory_delete` | `target`, `scope?` | delete one memory by exact title, filename, or unique prefix; requires confirmation |
 | `spawn_agent` | `instruction`, `max_turns?` | delegate a read-only investigation to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log) but cannot write; send several in one turn to run them concurrently |
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
@@ -379,10 +381,14 @@ nothing ever backgrounds doesn't pay tokens for a tool it will never call.
 ## Memory
 
 The model can save durable memory notes itself — no manual `/memory save`
-needed. Two tools drive it: `memory_search` (recall prior learnings before
-re-deriving them) and `memory_write` (persist a new one). At session start a
-short note listing already-saved titles is appended to context so the model
-knows what's remembered.
+needed. Three tools drive it: `memory_search` (recall prior learnings before
+re-deriving them), `memory_write` (persist a new one), and `memory_delete`
+(retire a superseded one). At session start a short note listing
+already-saved titles is appended to context so the model knows what's
+remembered; a resumed session gets the same note when its transcript predates
+it. Searches require every query term to match, rank title hits above body
+hits, and cap results at `NX_MEMORY_SEARCH_LIMIT` (default 8) so a large
+store can't flood a turn with snippets.
 
 Memories live in two scopes:
 
@@ -393,9 +399,14 @@ Memories live in two scopes:
   general learnings).
 
 Each memory is a markdown file (`<timestamp>_<slug>.md`) starting with a
-`# Title`. `memory_write` goes through the approval gate like `write_file`;
-`memory_search` is read-only. The manual `/memory save|remember|list` slash
-commands remain for distilling a whole session at once.
+`# Title`. All writes go through one shared writer: files are created
+`0600` (dirs `0700`) regardless of umask, written atomically (tmp + rename),
+and never clobber — a same-second same-title collision gets a `-2`, `-3`…
+suffix instead of overwriting. `memory_write` and `memory_delete` go through
+the approval gate like `write_file`/`delete_file`; `memory_search` is
+read-only. The manual `/memory save|remember|delete|list` slash commands
+remain for distilling a whole session at once (project scope, same
+convention) and hand-managing notes.
 
 ## Metrics
 

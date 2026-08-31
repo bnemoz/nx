@@ -1,43 +1,96 @@
 """The `/memory` subtree and the model-callable `memory_write` /
-`memory_search` tools.
+`memory_search` / `memory_delete` tools.
 
 Two storage scopes:
   - global:  ~/.nx/memories/            (cross-project, via _memories_dir)
   - project: <project_root>/.nx/memories/ (via _project_memories_dir)
 
-`/memory save|remember|list` are the manual slash commands (the model
-round-trips the whole session into one distilled note). The two *tools*
-are what the model calls itself mid-turn: `memory_write` to persist a
-discrete learning, `memory_search` to recall prior notes. The session-start
-memory-awareness note (`_load_memory_note`) lists saved titles so the model
-knows memories exist without burning tokens on the full bodies.
+`/memory save|remember|delete|list` are the manual slash commands (`/memory
+save` round-trips the whole session into one distilled note). The *tools* are
+what the model calls itself mid-turn: `memory_write` to persist a discrete
+learning, `memory_search` to recall prior notes, `memory_delete` to remove a
+superseded one. The session-start memory-awareness note (`_load_memory_note`)
+lists saved titles so the model knows memories exist without burning tokens
+on the full bodies.
+
+Every write — tool or slash command — goes through `_write_memory_file`: one
+filename convention (`<timestamp>_<slug>.md`, `-2`/`-3`… on a same-second
+same-title collision), one footer convention (`_scope:`/`_saved:`), atomic
+tmp+rename, private 0600 permissions (memories are distilled from sessions
+and may contain paths/commands/credentials; same posture as session files).
+
+Searches go through `_memory_scan`: every query term must appear, title hits
+rank above body hits, newest wins ties, and results are capped at
+NX_MEMORY_SEARCH_LIMIT so a big store can't dump an unbounded context blob
+into a turn. `/memory remember` shares the scan (unlimited) for its previews.
 
 Self-contained aside from a model round-trip (via `st.client`), the
-transcript-flattening helper shared with `_sessions_cmd.py`, and
-`_confirm()` (read via the top-level module, same pattern as _edit_tools).
+transcript-flattening helper shared with `_sessions_cmd.py`,
+`_open_private` (from _sessions_fs, same 0600 discipline as session files),
+and `_confirm()` (read via the top-level module, same pattern as _edit_tools).
 """
 from __future__ import annotations
 
 import os
 import re
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 from ._ansi import DIM, RESET, C
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
+from ._sessions_fs import _open_private
 from ._sessions_io import _flatten_message_text
 from . import _state as st
 from . import _memories_dir, _project_memories_dir
 
+# Cap on memory_search results. A store that outgrows the cap says so
+# in-band ("… N more not shown") instead of silently hiding or flooding.
+MEMORY_SEARCH_DEFAULT_LIMIT = 8
+
+
+def _memory_search_limit() -> int:
+    """Result cap for memory_search (/memory remember stays unlimited).
+    0 = no cap. Read via nx._env_int at call time so tests can set the env."""
+    import nx as _m
+    try:
+        return max(0, _m._env_int("NX_MEMORY_SEARCH_LIMIT", MEMORY_SEARCH_DEFAULT_LIMIT))
+    except Exception:
+        return MEMORY_SEARCH_DEFAULT_LIMIT
+
+
+def _first_title(content: str, fallback: str) -> str:
+    """The `# Title` H1 of a memory note, else the filename stem."""
+    for ln in content.splitlines():
+        if ln.startswith("# "):
+            t = ln[2:].strip()
+            if t:
+                return t
+            break
+    stem = fallback[:-3] if fallback.endswith(".md") else fallback
+    return stem or fallback
+
+
+def _slugify(text: str, maxlen: int = 60) -> str:
+    """Turn a title into a filesystem-safe slug."""
+    s = text.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    if len(s) > maxlen:
+        s = s[:maxlen].rstrip("-")
+    return s or "untitled"
+
+
+# --- /memory slash commands ----------------------------------------------------
 
 def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
-    """Handle /memory save|remember|list  — manual memories.
+    """Handle /memory save|remember|delete|list  — manual memories.
 
     /memory save [focus...]      — distill session into a memory (optional focus
                                    guidance for the model: e.g. "focus on config")
     /memory remember <query>     — keyword search through saved memories
+    /memory delete <target>      — remove one memory (title/file/prefix)
     /memory list                 — list all saved memories
     """
     parts = user_input.split(None, 2)
@@ -52,6 +105,11 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
         _cmd_memory_remember(query)
         return
 
+    if sub == "delete":
+        target = parts[2] if len(parts) >= 3 else ""
+        _cmd_memory_delete(target)
+        return
+
     if sub == "save":
         notes = parts[2] if len(parts) >= 3 else None
         _cmd_memory_save(messages, notes)
@@ -59,9 +117,10 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
 
     # Bare /memory — show usage
     print(f"{DIM}  usage:{RESET}")
-    print(f"{DIM}    /memory save [focus...]   save a memory (optional focus guidance){RESET}")
-    print(f"{DIM}    /memory remember <query>   search memories{RESET}")
-    print(f"{DIM}    /memory list               list all memories{RESET}")
+    print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
+    print(f"{DIM}    /memory remember <query>    search memories{RESET}")
+    print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
+    print(f"{DIM}    /memory list                list all memories{RESET}")
 
 
 def _cmd_memory_handler(user: str, state: Any) -> None:
@@ -75,31 +134,19 @@ def _cmd_memory_handler(user: str, state: Any) -> None:
         _save_current(state)
 
 
-def _slugify(text: str, maxlen: int = 60) -> str:
-    """Turn a title into a filesystem-safe slug."""
-    s = text.lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = s.strip("-")
-    if len(s) > maxlen:
-        s = s[:maxlen].rstrip("-")
-    return s or "untitled"
-
-
 def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -> None:
-    """Save a memory to ~/.nx/memories/<slug>.md.
+    """Distill a session into a memory note.
 
-    The model always distills the session into a markdown memory note.
+    The model round-trips the transcript into a markdown memory note, saved to
+    the project scope (<root>/.nx/memories/, falling back to global when there
+    is no project root) — the same resolution as the `memory_write` tool, so
+    both write paths share one convention (see _write_memory_file).
     ``notes``, if provided, serves as guidance: "focus on the build system",
     "capture the API endpoint details", etc.
     """
     if st.client is None or st.MODEL is None:
         print(f"{C.ERROR}  ✗ no active source — memory not saved{RESET}")
         return
-    memories_dir = _memories_dir()
-    os.makedirs(memories_dir, exist_ok=True)
-
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    fname_stamp = time.strftime("%Y%m%d-%H%M%S")
 
     print(f"{DIM}  distilling session into a memory…{RESET}")
     transcript = _render_transcript_for_memory(messages)
@@ -150,23 +197,12 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
         print(f"{C.ERROR}  ✗ model returned empty — memory not saved{RESET}")
         return
 
-    # Extract title from the markdown H1
-    title = ""
-    for line in body.split("\n"):
-        if line.startswith("# "):
-            title = line[2:].strip()
-            break
+    title = _first_title(body, "")
     if not title:
-        title = body.split("\n")[0][:80].strip() or f"Memory {fname_stamp}"
+        title = body.split("\n")[0][:80].strip() or "untitled"
 
-    # Write the file — timestamp_slug.md so it's human-readable on the filesystem
-    slug = _slugify(title)
-    fname = f"{fname_stamp}_{slug}.md"
-    content = f"{body}\n\n---\n_Saved on {stamp}_\n"
-    path = os.path.join(memories_dir, fname)
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        path, _scope = _write_memory_file(title, body, "project")
         print(f"{DIM}  ✓ saved memory: {title}{RESET}")
         print(f"{DIM}    {path}{RESET}")
     except OSError as e:
@@ -174,53 +210,25 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
 
 
 def _cmd_memory_remember(query: str) -> None:
-    """Keyword-search through saved memories."""
-    memories_dir = _memories_dir()
-    if not os.path.isdir(memories_dir):
-        print(f"{DIM}  no memories saved yet{RESET}")
-        return
-
+    """Keyword-search through saved memories — same scan/ranking as the
+    memory_search tool, with a longer per-hit preview for the human."""
+    query = (query or "").strip()
     if not query:
         print(f"{C.WARNING}  usage: /memory remember <search terms>{RESET}")
         return
 
-    q = query.lower()
-    files = []
-    try:
-        for name in sorted(os.listdir(memories_dir), reverse=True):
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(memories_dir, name)
-            try:
-                with open(path, encoding="utf-8") as f:
-                    content = f.read()
-            except OSError:
-                continue
-            if q in content.lower():
-                # Extract title from first H1 or first line
-                title = ""
-                for line in content.split("\n"):
-                    if line.startswith("# "):
-                        title = line[2:].strip()
-                        break
-                if not title:
-                    title = name
-                files.append((name, title, content))
-    except OSError:
-        print(f"{DIM}  no memories saved yet{RESET}")
-        return
-
-    if not files:
+    hits, overflow, total = _memory_scan(query, "project", 0)
+    if not hits:
         print(f"{DIM}  no memories matching {query!r}{RESET}")
         return
 
-    print(f"{DIM}  memories matching {query!r}:{RESET}")
-    for name, title, content in files:
-        print(f"\n{C.ACCENT}  ┌─ {title}{RESET}  {DIM}({name}){RESET}")
+    shown_n = f"{len(hits)} of {total}" if overflow else f"{total}"
+    print(f"{DIM}  memories matching {query!r} ({shown_n}):{RESET}")
+    for hit in hits:
+        print(f"\n{C.ACCENT}  ┌─ {hit.title}{RESET}  {DIM}({hit.name}){RESET}")
         # Show first ~10 lines as preview, strip the title line
-        lines = content.split("\n")
         shown = 0
-        for line in lines:
+        for line in hit.content.split("\n"):
             if line.startswith("# ") and shown == 0:
                 continue  # skip the title line in preview (already shown)
             if shown >= 10:
@@ -228,6 +236,17 @@ def _cmd_memory_remember(query: str) -> None:
                 break
             print(f"{DIM}  │{RESET} {line[:100]}")
             shown += 1
+
+
+def _cmd_memory_delete(target: str) -> None:
+    """`/memory delete <title|file|prefix>` — same resolver and approval gate
+    as the memory_delete tool."""
+    if not target:
+        print(f"{C.WARNING}  usage: /memory delete <title | filename | unique prefix>{RESET}")
+        return
+    res = memory_delete(target=target, scope="project")
+    for line in res.split("\n"):
+        print(f"{DIM}  {line}{RESET}")
 
 
 def _cmd_memory_list() -> None:
@@ -266,18 +285,35 @@ def _cmd_memory_list() -> None:
         print(f"  {C.SUCCESS}{i:>2}.{RESET} {title}  {DIM}({date}){RESET}")
 
 
+_MEMORY_TRANSCRIPT_CHARS = 48000  # hard cap on the /memory save distillation input
+
+
 def _render_transcript_for_memory(messages: list[dict[str, Any]]) -> str:
     """Render session messages into a compact text transcript for the model.
 
     Skips the system prompt, truncates long tool outputs, and shows tool calls.
+    The whole transcript is also capped (_MEMORY_TRANSCRIPT_CHARS): a long
+    session's tail is dropped, and the cut is announced in-band so the
+    distillation knows it saw a truncated session.
     """
     out = []
+    total = 0
+    truncated = False
     for m in messages:
         if m.get("role") == "system":
             continue
+        if total >= _MEMORY_TRANSCRIPT_CHARS:
+            truncated = True
+            break
         role = m.get("role", "?")
         text = _flatten_message_text(m, per_msg=2000, tool_call_arg_chars=100)
+        if total + len(text) > _MEMORY_TRANSCRIPT_CHARS:
+            text = text[:_MEMORY_TRANSCRIPT_CHARS - total]
+            truncated = True
+        total += len(text)
         out.append(f"[{role}] {text}")
+    if truncated:
+        out.append("[transcript truncated — only the earlier part of the session appears above]")
     return "\n\n".join(out)
 
 
@@ -301,11 +337,205 @@ def _memory_dirs_for(project_root: str | os.PathLike[str] | None) -> list[str]:
     return dirs
 
 
+def _iter_memory_dirs(scope: str = "project") -> list[tuple[str, str]]:
+    """Memory dirs to operate on as (dir, label) pairs — global first then
+    project (scope="project"), or global only (scope="global"). Unlike
+    _memory_dirs_for this includes not-yet-existing dirs; callers scan
+    defensively."""
+    if scope == "global":
+        return [(_memories_dir(), "global")]
+    pairs = [(_memories_dir(), "global")]
+    p = _project_memories_dir(getattr(st, "PROJECT_ROOT", None))
+    if p:
+        pairs.append((p, "project"))
+    return pairs
+
+
 def _confirm_memory(action: str, preview: str | None = None) -> bool:
     """`_confirm` is monkeypatched by tests via the top-level module, so call
     it through `import nx as _m` — same pattern as _edit_tools."""
     import nx as _m
     return _m._confirm(action, preview=preview)
+
+
+class _MemoryHit(NamedTuple):
+    mtime: float
+    name: str
+    title: str
+    snippet: str
+    label: str
+    score: float
+
+
+def _read_memory_file(path: str, name: str) -> tuple[str, str] | None:
+    """(title, content) for one memory file, or None when unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+    return _first_title(content, name), content
+
+
+def _rank_hit(content: str, query: str) -> float:
+    """Score one memory against a multi-term query (the caller has already
+    verified every term appears somewhere): a term in the `# Title` outweighs
+    body occurrences, and body occurrences are capped so a term repeated all
+    over one long note can't dominate ranking."""
+    low = content.lower()
+    title_low = None
+    for ln in content.splitlines():
+        if ln.startswith("# "):
+            title_low = ln[2:].strip().lower()
+            break
+    score = 0.0
+    for term in query.lower().split():
+        if title_low and term in title_low:
+            score += 3.0
+        else:
+            score += min(2.0, 0.5 * low.count(term))
+    return score
+
+
+def _memory_scan(
+    query: str, scope: str, limit: int
+) -> tuple[list[_MemoryHit], int, int]:
+    """Scan the memory dirs for `query`. Every term must appear; ranking is
+    title-hits above body-hits, then newest first. Returns
+    (hits, overflow, total): overflow = how many ranked hits the cap removed
+    (0 when unlimited or nothing cut), total = matches before the cap.
+    limit=0 → unlimited. Empty query → newest-first index of every note."""
+    terms = query.lower().split()
+    hits: list[_MemoryHit] = []
+    for d, label in _iter_memory_dirs(scope):
+        try:
+            names = sorted(os.listdir(d), reverse=True)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(d, name)
+            read = _read_memory_file(path, name)
+            if read is None:
+                continue
+            title, content = read
+            if terms:
+                low = content.lower()
+                if not all(t in low for t in terms):
+                    continue
+                score = _rank_hit(content, query)
+            else:
+                score = 0.0
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            hits.append(_MemoryHit(
+                mtime, name, title, _memory_snippet(content, query), label, score))
+    hits.sort(key=lambda h: (-h.score, -h.mtime))
+    total = len(hits)
+    if limit and total > limit:
+        return hits[:limit], total - limit, total
+    return hits, 0, total
+
+
+def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
+    """Every saved memory as a hit — no query, no snippet, no limit. The
+    resolver behind memory_delete and `/memory delete`."""
+    hits: list[_MemoryHit] = []
+    for d, label in _iter_memory_dirs(scope):
+        try:
+            names = sorted(os.listdir(d), reverse=True)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(d, name)
+            read = _read_memory_file(path, name)
+            if read is None:
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            hits.append(_MemoryHit(mtime, name, read[0], "", label, 0.0))
+    hits.sort(key=lambda h: -h.mtime)  # newest first, same order memory_search uses
+    return hits
+
+
+def _atomic_write_private(path: str, content: str) -> None:
+    """Write `content` to `path` 0600 (regardless of umask, via
+    _sessions_fs._open_private) and atomically — tmp file + os.replace, so a
+    crash mid-write can't leave a truncated memory behind."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with _open_private(tmp) as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) -> tuple[str, str] | None:
+    """The single memory writer: shared by the memory_write tool and
+    `/memory save` so both produce identical files. Returns (path, scope), or
+    None when gate=True and the user denied the confirmation.
+
+    Resolves project→global fallback (no project root), avoids a doubled H1
+    when the body already starts with its own title, makedirs 0700, and never
+    clobbers: a same-second same-title write gets a `-2`/`-3`… suffix instead
+    of silently overwriting its predecessor.
+
+    gate=True runs the approval gate (same action shape write_file uses — the
+    risk classifier's `write memory <path> (N bytes)` regex) after the path is
+    resolved but before anything is written. The user-invoked `/memory save`
+    passes gate=False: the user asked for it directly.
+    """
+    title = (title or "").strip()
+    body = (body or "").strip()
+    if not title:
+        title = _first_title(body, "") or (
+            body.split("\n")[0][:80].strip() if body else "") or "untitled"
+    # Avoid a doubled H1 when the distilled body already carries its title.
+    lines = body.splitlines()
+    if lines and lines[0].startswith("# ") and lines[0][2:].strip() == title:
+        body = "\n".join(lines[1:]).strip()
+
+    if scope == "global":
+        memories_dir = _memories_dir()
+    else:
+        pdir = _project_memories_dir(getattr(st, "PROJECT_ROOT", None))
+        if not pdir:
+            # No project root (bare cwd / outside a repo): fall back to global
+            # rather than refusing — a memory worth saving shouldn't be lost.
+            scope = "global"
+            memories_dir = _memories_dir()
+        else:
+            memories_dir = pdir
+    os.makedirs(memories_dir, exist_ok=True)
+    try:
+        os.chmod(memories_dir, 0o700)
+    except OSError:
+        pass
+
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    slug = _slugify(title)
+    base = os.path.join(memories_dir, f"{time.strftime('%Y%m%d-%H%M%S')}_{slug}.md")
+    path, n = base, 1
+    while os.path.exists(path):
+        n += 1
+        path = f"{base[:-3]}-{n}.md"
+    content = f"# {title}\n\n{body}\n\n---\n_scope: {scope}  _saved: {stamp}\n"
+    if gate and not _confirm_memory(f"write memory {path} ({len(content)} bytes)", preview=None):
+        return None
+    _atomic_write_private(path, content)
+    return path, scope
 
 
 def memory_write(
@@ -316,7 +546,11 @@ def memory_write(
     scope="project" writes to <project_root>/.nx/memories/ (falls back to
     global when there is no project root); scope="global" writes to
     ~/.nx/memories/ (cross-project). The note is a markdown file named
-    <timestamp>_<slug>.md starting with a `# Title` line.
+    <timestamp>_<slug>.md starting with a `# Title` line — written 0600 via
+    tmp+rename, and never clobbering an existing note.
+
+    Search first: prefer updating/superseding an existing note (memory_delete
+    the stale one) over accumulating near-duplicates.
 
     Goes through the approval gate (it writes a file) — same as write_file.
     """
@@ -329,34 +563,13 @@ def memory_write(
     if scope not in ("project", "global"):
         scope = "project"
 
-    if scope == "project":
-        pdir = _project_memories_dir(getattr(st, "PROJECT_ROOT", None))
-        if not pdir:
-            # No project root (bare cwd / outside a repo): fall back to global
-            # rather than refusing — a memory worth saving shouldn't be lost.
-            scope = "global"
-            pdir = None
-    else:
-        pdir = None
-
-    memories_dir = pdir if scope == "project" and pdir else _memories_dir()
-    os.makedirs(memories_dir, exist_ok=True)
-
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    fname_stamp = time.strftime("%Y%m%d-%H%M%S")
-    slug = _slugify(title)
-    fname = f"{fname_stamp}_{slug}.md"
-    content = f"# {title}\n\n{body}\n\n---\n_scope: {scope}  _saved: {stamp}_\n"
-    path = os.path.join(memories_dir, fname)
-
-    action = f"write memory {path} ({len(content)} bytes)"
-    if not _confirm_memory(action, preview=None):
-        return "DENIED by user"
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        written = _write_memory_file(title, body, scope, gate=True)
     except OSError as e:
         return f"ERROR: {type(e).__name__}: {e}"
+    if written is None:
+        return "DENIED by user"
+    path, scope = written
     rel = path
     try:
         rel = os.path.relpath(path)
@@ -381,56 +594,103 @@ def _memory_snippet(content: str, query: str, max_lines: int = 4) -> str:
 
 
 def memory_search(query: str, scope: str = "project", **_: Any) -> str:
-    """Keyword-search saved memories (global + project) and return title +
-    snippet for each match, newest first. Read-only; no approval. Use this to
-    recall prior learnings before re-deriving them.
+    """Keyword-search saved memories (global + project): title + snippet per
+    match, best match first — title hits above body hits, newer above older.
+    Read-only; no approval. Use this to recall prior learnings before
+    re-deriving them.
 
     scope="project" searches both project and global memories; scope="global"
-    searches only global. An empty query returns the newest few titles as a
-    quick index (so the model can discover what exists).
+    searches only global. Every query term must appear. An empty query returns
+    the newest titles as a quick index (so the model can discover what
+    exists). Results are capped at NX_MEMORY_SEARCH_LIMIT (default 8); the
+    response says how many were cut.
     """
     query = (query or "").strip()
-    roots = _memory_dirs_for(
-        getattr(st, "PROJECT_ROOT", None) if scope == "project" else None
-    )
-    if not roots:
-        return "[no memories saved yet]"
-    hits: list[tuple[float, str, str, str, str]] = []  # mtime, name, title, snippet, scope
-    for d in roots:
-        label = "project" if d == _project_memories_dir(
-            getattr(st, "PROJECT_ROOT", None)) else "global"
-        try:
-            names = sorted(os.listdir(d), reverse=True)
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(d, name)
-            try:
-                mtime = os.path.getmtime(path)
-                with open(path, encoding="utf-8") as f:
-                    content = f.read()
-            except OSError:
-                continue
-            title = ""
-            for ln in content.splitlines():
-                if ln.startswith("# "):
-                    title = ln[2:].strip()
-                    break
-            if not title:
-                title = name[:-3]
-            if query and query.lower() not in content.lower():
-                continue
-            hits.append((mtime, name, title, _memory_snippet(content, query), label))
+    hits, overflow, total = _memory_scan(query, scope, _memory_search_limit())
     if not hits:
         return f"[no memories matching {query!r}]" if query else "[no memories saved yet]"
-    hits.sort(key=lambda x: x[0], reverse=True)
-    out = [f"memories matching {query!r} ({len(hits)}):" if query else f"memories ({len(hits)}):"]
-    for _mt, name, title, snippet, label in hits:
-        out.append(f"[{label}] {title} ({name})")
-        out.append(f"  {snippet}")
+    if query:
+        head = (f"memories matching {query!r} ({len(hits)} of {total}):" if overflow
+                else f"memories matching {query!r} ({total}):")
+    else:
+        head = f"memories ({len(hits)} of {total}):" if overflow else f"memories ({total}):"
+    out = [head]
+    for hit in hits:
+        out.append(f"[{hit.label}] {hit.title} ({hit.name})")
+        out.append(f"  {hit.snippet}")
+    if overflow:
+        out.append(f"  … {overflow} more not shown — raise NX_MEMORY_SEARCH_LIMIT to see them")
     return "\n".join(out)
+
+
+def memory_delete(target: str, scope: str = "project", **_: Any) -> str:
+    """Delete one saved memory note by exact title, filename, or unique title
+    prefix. An ambiguous or unknown target returns candidate titles instead of
+    deleting. Goes through the approval gate like memory_write; on success it
+    drops any cached memory_search results (see run_tool)."""
+    target = (target or "").strip()
+    if not target:
+        return "ERROR: memory_delete requires a non-empty `target`"
+    if scope not in ("project", "global"):
+        scope = "project"
+    entries = _scan_memory_entries(scope)
+    if not entries:
+        return "[no memories saved yet]"
+
+    low = target.lower()
+    exact = [h for h in entries
+             if h.name.lower() == low or h.name[:-3].lower() == low
+             or h.title.lower() == low]
+    if len(exact) == 1:
+        chosen = exact[0]
+    else:
+        cands = exact if exact else [
+            h for h in entries if h.title.lower().startswith(low)]
+        if len(cands) > 1:
+            listing = "\n".join(f"  - {h.title} ({h.name})" for h in cands[:10])
+            return (f"AMBIGUOUS: {target!r} matches {len(cands)} memories — "
+                    f"delete by exact title or filename:\n{listing}")
+        if not cands:
+            recent = "\n".join(f"  - {h.title} ({h.name})" for h in entries[:5])
+            return (f"no memory matching {target!r} — recent memories:\n{recent} "
+                    f"(memory_search with an empty query lists all)")
+        chosen = cands[0]
+
+    path = None
+    for d, _label in _iter_memory_dirs(scope):
+        p = os.path.join(d, chosen.name)
+        if os.path.exists(p):
+            path = p
+            break
+    if path is None:
+        return f"ERROR: memory file for {chosen.title!r} vanished"
+
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    if not _confirm_memory(f"delete memory {path} ({size} bytes)", preview=None):
+        return "DENIED by user"
+    try:
+        os.unlink(path)
+    except OSError as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+    return f"deleted {chosen.label} memory: {chosen.title}\nfile: {path}"
+
+
+def _add_memory_note_if_absent(messages: list[dict[str, Any]]) -> None:
+    """Insert the session-start memory note (see _load_memory_note) unless the
+    transcript already carries one. Fresh sessions get it from
+    _initial_messages(); a resumed session replays a transcript that may
+    predate the feature — or predate the memories it would list."""
+    for m in messages:
+        if (m.get("role") == "user" and isinstance(m.get("content"), str)
+                and "[Saved memories" in m["content"]):
+            return
+    note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
+    if note is not None:
+        at = 1 if (messages and messages[0].get("role") == "system") else 0
+        messages.insert(at, note)
 
 
 def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, str] | None:
@@ -438,22 +698,24 @@ def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, 
     the model knows memories exist and which are already saved. Titles only
     (not bodies) and capped — keeps the per-turn token floor (see
     test_initial_context.py) from growing with how much you've remembered.
-    Returns None when there are no memories in either scope.
+    When a scope holds more than the cap, a pointer to memory_search is added
+    instead of silently hiding the rest. Returns None when there are no
+    memories in either scope.
     """
     roots = _memory_dirs_for(project_root)
     if not roots:
         return None
     titles: list[str] = []
+    overflow = False
     for d in roots:
         label = "project" if d == _project_memories_dir(project_root) else "global"
         try:
             names = sorted(os.listdir(d), reverse=True)
         except OSError:
             continue
-        count = 0
-        for name in names:
-            if not name.endswith(".md"):
-                continue
+        md_names = [n for n in names if n.endswith(".md")]
+        overflow = overflow or len(md_names) > 5
+        for name in md_names[:5]:
             path = os.path.join(d, name)
             try:
                 with open(path, encoding="utf-8") as f:
@@ -462,12 +724,12 @@ def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, 
                 continue
             t = first_line[2:].strip() if first_line.startswith("# ") else name[:-3]
             titles.append(f"[{label}] {t}")
-            count += 1
-            if count >= 5:
-                break
     if not titles:
         return None
-    body = "\n".join(titles)
+    lines = list(titles)
+    if overflow:
+        lines.append("… more saved — memory_search with an empty query lists the rest")
+    body = "\n".join(lines)
     return {
         "role": "user",
         "content": (

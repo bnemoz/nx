@@ -79,6 +79,7 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/autocompress": ["off", "on"],
     "/verify": ["off", "run"],
     "/ctx": ["pin", "unpin", "clear"],
+    "/memory": ["save", "remember", "delete", "list"],
     "/export": ["md"],
     "/source": lambda: list(st.SOURCE_ORDER),
 }

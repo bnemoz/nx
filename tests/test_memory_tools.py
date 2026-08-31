@@ -259,6 +259,237 @@ def test_initial_messages_omits_memory_note_when_none_exist():
         m.st.PROJECT_ROOT = old
 
 
+# --- 0.7.3: hardening, ranking, lifecycle ------------------------------------
+
+def test_memory_write_files_are_private_and_never_collide():
+    a = _write_memory("Dup Title", "first body", scope="global", project_root=None)
+    b = _write_memory("Dup Title", "second body", scope="global", project_root=None)
+    fa = os.path.abspath(a.split("file: ", 1)[1].strip())
+    fb = os.path.abspath(b.split("file: ", 1)[1].strip())
+    assert fa != fb, (a, b)
+    # The second write must not have clobbered the first.
+    with open(fa, encoding="utf-8") as f:
+        assert "first body" in f.read()
+    mode = oct(os.stat(fb).st_mode & 0o777)
+    assert mode == "0o600", mode
+
+
+def test_memory_write_is_atomic_no_tmp_left_behind():
+    a = _write_memory("Atomic", "body", scope="global", project_root=None)
+    p = os.path.abspath(a.split("file: ", 1)[1].strip())
+    leftovers = [f for f in os.listdir(os.path.dirname(p)) if f.endswith(".tmp")]
+    assert not leftovers, leftovers
+
+
+def test_memory_search_ranks_title_above_body_and_requires_all_terms():
+    root = tempfile.mkdtemp(prefix="nx-rank-")
+    _write_memory("Quirk about the renderer",
+                  "unrelated body words here", scope="project", project_root=root)
+    _write_memory("Unrelated note",
+                  "something about renderer internals", scope="project", project_root=root)
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        res = _memory_cmd.memory_search(query="renderer")
+        assert res.index("Quirk about the renderer") < res.index("Unrelated note"), res
+        both = _memory_cmd.memory_search(query="renderer internals")
+        assert "Unrelated note" in both, both
+        assert "Quirk about the renderer" not in both, both
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+def test_memory_search_caps_results_with_more_note():
+    root = tempfile.mkdtemp(prefix="nx-cap-")
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    oldenv = os.environ.get("NX_MEMORY_SEARCH_LIMIT")
+    os.environ["NX_MEMORY_SEARCH_LIMIT"] = "3"
+    try:
+        for i in range(5):
+            _write_memory(f"Cap note {i}", f"capfill {i}", scope="project", project_root=root)
+        res = _memory_cmd.memory_search(query="capfill")
+        assert "Cap note" in res, res
+        assert "more not shown" in res, res
+        assert res.count("[project]") == 3, res
+    finally:
+        m.st.PROJECT_ROOT = old
+        if oldenv is None:
+            os.environ.pop("NX_MEMORY_SEARCH_LIMIT", None)
+        else:
+            os.environ["NX_MEMORY_SEARCH_LIMIT"] = oldenv
+
+
+def test_memory_delete_exact_ambiguous_missing_and_denied():
+    root = tempfile.mkdtemp(prefix="nx-del-")
+    pdir = os.path.join(root, ".nx", "memories")
+    _write_memory("Alpha Note", "alpha body", scope="project", project_root=root)
+    _write_memory("Alpha Note Two", "alpha2 body", scope="project", project_root=root)
+    _write_memory("Beta Note", "beta body", scope="project", project_root=root)
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        res = _memory_cmd.memory_delete(target="Alpha")
+        assert "matches 2 memories" in res, res
+        res = _memory_cmd.memory_delete(target="zzz")
+        assert "no memory matching" in res and "Beta Note" in res, res
+        m._confirm = lambda action, preview=None: True
+        res = _memory_cmd.memory_delete(target="Beta")
+        assert res.startswith("deleted project memory: Beta Note"), res
+        assert not [f for f in os.listdir(pdir) if f.endswith(".md") and "Beta" in f]
+        res = _memory_cmd.memory_delete(target="Alpha Note Two")
+        assert res.startswith("deleted project memory: Alpha Note Two"), res
+        m._confirm = lambda action, preview=None: False
+        res = _memory_cmd.memory_delete(target="Alpha Note")
+        assert res == "DENIED by user", res
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+def test_memory_delete_goes_through_approval_gate():
+    _confirm_calls.clear()
+    root = tempfile.mkdtemp(prefix="nx-delgate-")
+    _write_memory("Gate Note", "gate body", scope="project", project_root=root)
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        _memory_cmd.memory_delete(target="Gate Note")
+    finally:
+        m.st.PROJECT_ROOT = old
+    assert _confirm_calls, "memory_delete did not call _confirm (approval gate)"
+    assert any(a.startswith("delete memory ") for a in _confirm_calls), _confirm_calls
+
+
+def test_memory_delete_drops_cached_search_results():
+    root = tempfile.mkdtemp(prefix="nx-delcache-")
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    _write_memory("Cacheable Note", "cacheable body", scope="project", project_root=root)
+    key = ("memory_search", '{"query": "cacheable"}')
+    m.st._TOOL_RESULT_CACHE[key] = m._tool_cache_store_entry(
+        "stale", os.path.join(root, "x"))
+    try:
+        m._confirm = lambda action, preview=None: True
+        res = m.run_tool("memory_delete", {"target": "Cacheable"})
+        assert res.startswith("deleted project memory"), res
+        assert key not in m.st._TOOL_RESULT_CACHE
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+def test_load_memory_note_overflow_hint():
+    root = tempfile.mkdtemp(prefix="nx-overflow-")
+    for i in range(7):
+        _write_memory(f"Overflow note {i}", f"body {i}", scope="project", project_root=root)
+    note = m._load_memory_note(root)
+    assert note is not None
+    assert "more saved" in note["content"], note["content"]
+    assert "memory_search" in note["content"]
+    lines = [ln for ln in note["content"].split("\n") if ln.startswith("[project]")]
+    assert len(lines) == 5, note["content"]
+
+
+def test_add_memory_note_if_absent_inserts_once_and_skips_existing():
+    root = tempfile.mkdtemp(prefix="nx-note-")
+    _write_memory("Resume memo", "resume body", scope="project", project_root=root)
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        # Resumed transcript predating the feature -> note inserted after system.
+        msgs = [{"role": "system", "content": "S"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}]
+        _memory_cmd._add_memory_note_if_absent(msgs)
+        assert msgs[1]["role"] == "user" and "[Saved memories" in msgs[1]["content"]
+        # Transcript already carrying one -> untouched.
+        before = list(msgs)
+        _memory_cmd._add_memory_note_if_absent(msgs)
+        assert msgs == before
+        # No memories anywhere -> no note.
+        fresh = tempfile.mkdtemp(prefix="nx-note-fresh-")
+        old_home = m.st.SESSION_HOME
+        m.st.SESSION_HOME = fresh
+        try:
+            m.st.PROJECT_ROOT = None
+            msgs2 = [{"role": "system", "content": "S"}]
+            _memory_cmd._add_memory_note_if_absent(msgs2)
+            assert msgs2 == [{"role": "system", "content": "S"}]
+        finally:
+            m.st.SESSION_HOME = old_home
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+class _FakeSaveMsg:
+    content = "# Distilled Title\n\nDistilled body about this project."
+
+
+class _FakeSaveChoice:
+    message = _FakeSaveMsg()
+
+
+class _FakeSaveResp:
+    choices = [_FakeSaveChoice()]
+    usage = None
+
+    def model_dump(self):
+        return {}
+
+
+class _FakeSaveCompletions:
+    def create(self, **kwargs):
+        return _FakeSaveResp()
+
+
+class _FakeSaveChat:
+    completions = _FakeSaveCompletions()
+
+
+class _FakeSaveClient:
+    chat = _FakeSaveChat()
+    base_url = "http://localhost:9999/v1"
+
+
+def test_memory_save_distills_into_project_scope_with_unified_footer():
+    root = tempfile.mkdtemp(prefix="nx-save-")
+    old = m.st.PROJECT_ROOT
+    old_client, old_model, old_active = m.st.client, m.st.MODEL, m.st.ACTIVE
+    old_metrics = m.st._METRICS
+    m.st.PROJECT_ROOT = root
+    m.st.client = _FakeSaveClient()
+    m.st.MODEL = "test-model"
+    m.st.ACTIVE = None
+    m.st._METRICS = None  # usage recording is best-effort; keep it inert
+    try:
+        _memory_cmd._cmd_memory_save([{"role": "user", "content": "learned something"}])
+        pdir = os.path.join(root, ".nx", "memories")
+        files = [f for f in os.listdir(pdir) if f.endswith(".md")]
+        assert len(files) == 1, files
+        with open(os.path.join(pdir, files[0]), encoding="utf-8") as f:
+            content = f.read()
+        assert content.startswith("# Distilled Title\n\n"), content
+        assert "Distilled body" in content
+        assert "_scope: project" in content, content  # unified footer, project scope
+    finally:
+        m.st.PROJECT_ROOT = old
+        m.st.client, m.st.MODEL, m.st.ACTIVE = old_client, old_model, old_active
+        m.st._METRICS = old_metrics
+
+
+def test_memory_write_accepts_title_in_body_without_doubling_h1():
+    a = _write_memory("Plain Title", "body only", scope="global", project_root=None)
+    fa = os.path.abspath(a.split("file: ", 1)[1].strip())
+    with open(fa, encoding="utf-8") as f:
+        content = f.read()
+    assert content.count("# Plain Title") == 1, content
+
+    b = _memory_cmd._write_memory_file("Body Title", "# Body Title\n\nbody", "global")
+    assert b is not None
+    with open(b[0], encoding="utf-8") as f:
+        content2 = f.read()
+    assert content2.count("# Body Title") == 1, content2
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))

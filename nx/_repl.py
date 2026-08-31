@@ -47,8 +47,9 @@ from ._sessions_cmd import (
 )
 from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
-    _cmd_memory_remember, _cmd_memory_list, _render_transcript_for_memory,
-    memory_write, memory_search, _load_memory_note,
+    _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
+    _render_transcript_for_memory, memory_write, memory_search, memory_delete,
+    _load_memory_note, _add_memory_note_if_absent, _write_memory_file,
 )
 from ._repl_settings_cmds import (
     _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
@@ -169,6 +170,10 @@ def _repl() -> None:
             # resumed session picks up any SYSTEM edits / tool changes.
             messages = [m for m in messages if m.get("role") != "system"]
             messages.insert(0, {"role": "system", "content": SYSTEM})
+            # Fresh sessions get the memory-awareness note (titles-only, see
+            # _load_memory_note); give a resumed session the same signal when
+            # its saved transcript predates the feature or the memories.
+            _add_memory_note_if_absent(messages)
             st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(messages)
             st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(messages)
             n_msgs = len([m for m in messages if m.get("role") != "system"])
