@@ -373,6 +373,7 @@ Locating something (a function, string, section) in a file you haven't
 already read in full? search_files FIRST, always -- even on small files.
 read_file is for reading a file you already need in full, never for finding
 a thing inside one.
+BE TERSE WITH YOUR REASONING TRACES
 
 No native tool calls? Emit text-protocol call exactly:
 <tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>
