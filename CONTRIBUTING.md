@@ -80,6 +80,23 @@ Per CLAUDE.md: env vars, not config files. New tunables:
 - `NX_*` prefix, read via `_env_int`/`_env_float` with a sane default.
 - Document in the README's environment variables table.
 
+## Choosing what tests to run
+
+The suite is fast, but "run everything every time" isn't required — scale the
+verification to what the diff could actually break:
+
+- **Docs/comments only** (README, CONTRIBUTING, CLAUDE.md, docstrings, or code
+  comments with zero token change): no tests. Nothing executes it.
+- **Isolated additions** — a new pure function with no callers, a new private
+  module, a new env var read behind `_env_int`/`_env_float` with a default:
+  its new tests plus the touched module's existing tests.
+- **Behavioral changes** to dispatch, parsing, approval, compression,
+  terminal rendering, or anything mutating module state (`ACTIVE`, caches,
+  the interrupt watcher): the touched test files, then the full suite.
+
+When in doubt (you touched `__init__.py` wiring, or a test that imports other
+test helpers), run the full suite — it's the cheaper of the two mistakes.
+
 ## General checklist before calling a feature done
 
 - [ ] Does it show up in the chatbox `/` hint menu (if it's a slash command)?

@@ -27,7 +27,7 @@ Use standard Python conventions: four-space indentation, `snake_case` functions 
 
 ## Testing Guidelines
 
-Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file plus the full pytest suite before submitting.
+Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it.
 
 ## Commit & Pull Request Guidelines
 
