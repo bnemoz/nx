@@ -100,6 +100,33 @@ def test_post_hook_observes_but_never_blocks(nx_fresh):
     payload = json.loads((tmp / "post.json").read_text())
     assert payload["tool"] == "list_dir"
     assert "result" in payload
+    assert "cached" not in payload  # cache miss: no marker
+
+
+def test_post_hook_fires_on_cache_hit_with_marker(nx_fresh):
+    """Audit-trail contract: a cached read still fires the post-hook, tagged
+    "cached": true — otherwise reads appear in the trail only once (the miss),
+    making the observer non-deterministic."""
+    nx, tmp = nx_fresh
+    from nx import _dispatch
+    _dispatch.st._TOOL_RESULT_CACHE.clear()
+    stable = tmp / "stable"
+    stable.mkdir()
+    os.environ["NX_POST_TOOL_HOOK"] = _script(
+        tmp, '#!/bin/sh\ncat > ' + str(tmp / "post.json") + '\nexit 0\n', name="post2.sh")
+    # Read a stable dir rather than the cwd: the hook's own post.json write and
+    # this test's unlink would bump the cwd's mtime, turning the second call
+    # into a fresh miss before the cache-hit path is ever reached.
+    args = {"path": "stable"}
+    _dispatch.run_tool("git_status", args)   # miss: populates the cache
+    first = json.loads((tmp / "post.json").read_text())
+    assert "cached" not in first
+    (tmp / "post.json").unlink()
+    _dispatch.run_tool("git_status", args)   # hit: hook still fires
+    payload = json.loads((tmp / "post.json").read_text())
+    assert payload["cached"] is True
+    assert payload["tool"] == "git_status"
+    assert payload["result"]  # cached entries store the sanitized result string
 
 
 def test_missing_hook_binary_vetoes_rather_than_skips(nx_fresh):

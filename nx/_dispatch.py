@@ -319,6 +319,12 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
         if cached is not None and cache_valid(cached):
+            # A cache hit is still a read that happened: fire the post-hook
+            # (with "cached": true) so an audit trail sees every read, not
+            # just the miss that populated the entry. Pre-hook already ran
+            # above, so a vetoed call can never serve from the cache.
+            from ._hooks import post_tool_hook
+            post_tool_hook(name, args, cached.result, cached=True)
             return cached.result
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.

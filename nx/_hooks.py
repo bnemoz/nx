@@ -3,7 +3,8 @@
 Each is a shell command run (via `sh -c`, like run_bash) around every tool
 dispatch in run_tool(), receiving one JSON object on stdin:
   {"tool": "write_file", "args": {...},
-   "result": "<tool result string>"   (post-hook only)
+   "result": "<tool result string>",  (post-hook only)
+   "cached": true                      (post-hook only, on cache hits)
   }
 
 Exit code semantics (pre-hook): 0 = allow, non-zero = veto. On veto the tool
@@ -77,12 +78,19 @@ def pre_tool_hook(tool: str, args: dict[str, Any]) -> Optional[str]:
     return f"blocked by NX_PRE_TOOL_HOOK ({msg})"
 
 
-def post_tool_hook(tool: str, args: dict[str, Any], result: str) -> None:
-    """Fire-and-forget observer. Failures are logged, never raised."""
+def post_tool_hook(tool: str, args: dict[str, Any], result: str, cached: bool = False) -> None:
+    """Fire-and-forget observer. Failures are logged, never raised.
+
+    Fires on cache-hit reads too, with cached=True, so a post-hook used as an
+    audit trail sees every read — not just the one that populated the cache.
+    """
     cmd = _hook_cmd("NX_POST_TOOL_HOOK")
     if not cmd:
         return
-    ok, msg = _run_hook(cmd, {"tool": tool, "args": args, "result": result}, _hook_timeout())
+    payload = {"tool": tool, "args": args, "result": result}
+    if cached:
+        payload["cached"] = True
+    ok, msg = _run_hook(cmd, payload, _hook_timeout())
     if not ok:
         from ._logging import _log_event
         _log_event("hook", {"tool": tool, "post_hook_error": msg})
