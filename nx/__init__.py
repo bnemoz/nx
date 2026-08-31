@@ -83,6 +83,7 @@ _STATE_NAMES = frozenset((
     "_PENDING_SUBAGENT_NOTICE",
     "_VERIFY_EDIT_LOG", "_VERIFY_INFLIGHT",
     "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
+    "_PLAN_ACTIVE", "_PLAN_GOAL", "_PLAN_SLUG", "_PLAN_STARTED",
     "REASONING_ONLY_RETRY_LIMIT", "MALFORMED_STREAM_RETRY_LIMIT",
     "FORCED_FINAL_MAX_TOKENS", "EMPTY_TURN_RETRY_LIMIT", "REASONING_ONLY_CHAR_LIMIT",
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
@@ -339,6 +340,12 @@ TOOLS: list[dict[str, Any]] = [
 # nx/_subagent.py. _active_tools() filters it out unless NX_SUBAGENTS=1.
 from ._subagent import SUBAGENT_TOOL, spawn_agent
 
+# Plan-mode machinery (schema/body): the plan_edit tool plus the gate the
+# mutating tools cross while a plan is active. See nx/_plan.py.
+from ._plan import (plan_edit, PLAN_GATE_TOOLS, PLAN_READONLY_TOOLS,
+                    check_gate, gate_message, plan_active, plan_path, plan_dir,
+                    render_plan_display, PLAN_EDIT_TOOL)
+
 # Vision tool: same opt-in posture (NX_VISION=1), and additionally withheld
 # until native tool_calls are confirmed this session (a text-protocol result
 # can't carry a content-parts array).
@@ -349,6 +356,10 @@ _WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_backgrou
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
 TOOLS.append(SUBAGENT_TOOL)
 TOOLS.append(IMAGE_VISION_TOOL)
+# Plan-edit tool (schema here, body in nx/_plan.py): withheld per-turn by
+# _active_tools() until a plan is active (/plan <goal>), like wait_background
+# is withheld until something backgrounds.
+TOOLS.append(PLAN_EDIT_TOOL)
 
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
@@ -555,6 +566,8 @@ NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
 # Y/n prompt with a diff preview), tagged (sub-agent) in the tool box.
 NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 NX_VISION = _env_int("NX_VISION", 0)
+# Slug length cap for /plan <goal> → .nx/<slug>.md (see _plan.py).
+NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)
 
 
 from ._compress import (

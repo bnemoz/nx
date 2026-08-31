@@ -28,6 +28,7 @@ from ._metrics import _abbr
 from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
+from ._plan import plan_edit, plan_active, check_gate
 from ._subagent import spawn_agent
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
@@ -42,6 +43,7 @@ DISPATCH = {
     "memory_write": memory_write, "memory_search": memory_search,
     "memory_delete": memory_delete,
     "spawn_agent": spawn_agent, "read_image": read_image,
+    "plan_edit": plan_edit,
 }
 
 # spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH
@@ -73,7 +75,8 @@ def _active_tools() -> list[dict[str, Any]]:
     only once run_bash has actually backgrounded this session — see run_tool();
     spawn_agent (read-only sub-agent) only when NX_SUBAGENTS=1; read_image
     only when NX_VISION=1 AND native tool_calls have been confirmed this
-    session (a text-protocol tool result can't carry a content-parts array)."""
+    session (a text-protocol tool result can't carry a content-parts array);
+    plan_edit only while a plan is active (/plan <goal> — see _plan.py)."""
     import nx as _m
     tools = _m.TOOLS
     if not st._SESSION_HAS_BACKGROUNDED:
@@ -82,6 +85,8 @@ def _active_tools() -> list[dict[str, Any]]:
         tools = [t for t in tools if t["function"]["name"] != "spawn_agent"]
     if not _m.NX_VISION or not st._NATIVE_TOOL_CALLS_CONFIRMED:
         tools = [t for t in tools if t["function"]["name"] != "read_image"]
+    if not plan_active():
+        tools = [t for t in tools if t["function"]["name"] != "plan_edit"]
     return tools
 
 
@@ -255,6 +260,13 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
 
 
 def run_tool(name: str, args: dict[str, Any]) -> str:
+    # Plan-mode write gate: refuse mutating tools while a plan is active, with
+    # the gate message the model needs to act on (plan_edit, or ask for
+    # /plan done). Checked before every other gate so a gated call costs no
+    # classifier round-trip, no approval prompt, and no sub-agent dispatch.
+    gated = check_gate(name)
+    if gated:
+        return gated
     # A spawn_agent() sub-loop installs a read-only table (per-thread, so 2+
     # concurrent sub-agents each keep their own); the sub-agent's tool calls
     # resolve against it (so "write_file" inside a subagent is simply an

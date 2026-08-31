@@ -64,6 +64,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/memory [save|remember|delete|list]", "save a distilled memory, search/remove/list saved memories"),
     ("/delete [target]", "delete a session"),
     ("/todo", "show the model's current todo_write list"),
+    ("/plan [goal|done|off|discard]", "start/view/exit plan mode — while active, mutating tool calls are gated"),
     ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
 ]
 

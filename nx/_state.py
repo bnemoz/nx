@@ -210,3 +210,15 @@ _TOOL_RESULT_CACHE: dict = {}
 # own TodoWrite), persisted into the session JSON's "todos" key so /resume
 # restores it (see _repl_state.py's _save_current/_reload_metrics_totals).
 _TODOS: list[dict[str, str]] = []
+
+# --- plan mode -----------------------------------------------------------------
+# Plan-mode state machine (see _plan.py): while _PLAN_ACTIVE is True every
+# mutating tool call is refused by run_tool()'s gate check with a gate message
+# ("edit the plan or get it confirmed") instead of running. _PLAN_SLUG names the
+# plan file .nx/<slug>.md (under PROJECT_ROOT, or cwd when unset). All four are
+# persisted into the session JSON's "plan" key so /resume restores an active
+# plan (see _repl_state.py's _save_current/_reload_metrics_totals).
+_PLAN_ACTIVE: bool = False
+_PLAN_GOAL: str | None = None
+_PLAN_SLUG: str | None = None
+_PLAN_STARTED: float | None = None

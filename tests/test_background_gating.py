@@ -63,7 +63,7 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # e.g. --tokens's "full schema" framing and DISPATCH both rely on it.
     names = [t["function"]["name"] for t in m.TOOLS]
     assert names.count("wait_background") == 1
-    assert len(m.TOOLS) == 20  # 16 base + wait_background + spawn_agent + read_image + delete_file
+    assert len(m.TOOLS) == 21  # 16 base + wait_background + spawn_agent + read_image + delete_file + plan_edit
 
 
 # ---------------------------------------------------------------------------

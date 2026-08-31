@@ -168,6 +168,7 @@ sessions and exits without entering the REPL.
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
+| `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
 | `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and `async: true` runs one in the background (job id now, answer as a `[Runtime note]` on a later turn; `/bg` lists them) |
 | `NX_SUBAGENT_WRITE` | opt-in write tier for sub-agents (`NX_SUBAGENT_WRITE=1`): `spawn_agent` additionally gets `write_file`/`edit_file`/`multi_edit`/`sed_edit`, each still confirmed by you through the normal approval gate (risk classification + Y/n with a diff preview) and tagged `(sub-agent)` in the tool box. Write-capable agents never run concurrently and cannot delete files or spawn other agents |
 | `NX_VISION` | offer the `read_image` tool on native-tool-call sources (default off; requires the backend to accept image content parts) |
@@ -291,6 +292,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/resources` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |
 | `/todo` | show the model's current `todo_write` list |
+| `/plan [goal\|done\|off\|discard]` | plan mode: `/plan <goal>` writes `.nx/<slug>.md` and gates every mutating tool call (`write_file`, `edit_file`, `multi_edit`, `sed_edit`, `apply_patch`, `delete_file`, `run_bash`, `memory_write/delete`) behind a gate message until you run `/plan done`; the model refines the plan with `plan_edit` while gated; `discard` also deletes the file |
 | `/reset` / `/clear` / `/new` | clear conversation, start a fresh session |
 | `/quit` / `/exit` | exit |
 

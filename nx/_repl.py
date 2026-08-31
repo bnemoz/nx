@@ -57,6 +57,7 @@ from ._repl_settings_cmds import (
     _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
     _cmd_ctx, _cmd_cost, _cmd_verify,
 )
+from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
 
 # --- repl -------------------------------------------------------------------
@@ -116,6 +117,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/memory": _cmd_memory_handler,
     "/delete": _cmd_delete_handler,
     "/todo": _cmd_todo,
+    "/plan": _cmd_plan,
     "/verify": _cmd_verify,
 }
 

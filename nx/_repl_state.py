@@ -81,6 +81,8 @@ def _save_current(
     if st._METRICS is not None:
         m.update(st._METRICS.as_meta())
     m["todos"] = st._TODOS
+    m["plan"] = {"active": st._PLAN_ACTIVE, "goal": st._PLAN_GOAL,
+                 "slug": st._PLAN_SLUG, "started": st._PLAN_STARTED}
     try:
         _write_session(state.session_id, state.messages, m, update_index=update_index)
     except OSError as e:
@@ -103,6 +105,12 @@ def _reload_metrics_totals(session_id: str) -> None:
     saved = _load_session(session_id) or {}
     if isinstance(saved.get("todos"), list):
         st._TODOS = saved["todos"]
+    plan_meta = saved.get("plan")
+    if isinstance(plan_meta, dict):
+        st._PLAN_ACTIVE = bool(plan_meta.get("active"))
+        st._PLAN_GOAL = plan_meta.get("goal")
+        st._PLAN_SLUG = plan_meta.get("slug")
+        st._PLAN_STARTED = plan_meta.get("started")
     if st._METRICS is None:
         return
     if isinstance(saved.get("input_tokens"), int):

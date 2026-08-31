@@ -45,6 +45,7 @@ from . import (
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
 )
 from ._subagent import _subagent_active, _subagent_quiet
+from ._plan import plan_active
 from concurrent.futures import ThreadPoolExecutor
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
@@ -829,7 +830,11 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             "An imperfect file you iterate on beats a perfect plan that never "
             "gets written. Emit the write_file or run_bash tool call now.]"})
     else:
-        _nudge_current_user_turn(messages, REASONING_STALL_NUDGE)
+        _nudge_current_user_turn(
+            messages,
+            ("A plan is active — keep refining it with plan_edit until it "
+             "covers the whole task, then ask the user to run /plan done.")
+            if plan_active() else REASONING_STALL_NUDGE)
     return TURN_STALL
 
 
@@ -1153,7 +1158,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
               f"intent but made no tool call; nudging to act "
               f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
         messages.append({"role": "assistant", "content": text})
-        _nudge_current_user_turn(messages, REASONING_STALL_NUDGE)
+        _nudge_current_user_turn(
+            messages,
+            ("A plan is active — keep refining it with plan_edit until it "
+             "covers the whole task, then ask the user to run /plan done.")
+            if plan_active() else REASONING_STALL_NUDGE)
         return TURN_STALL
 
     messages.append({"role": "assistant", "content": text})
