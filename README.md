@@ -141,7 +141,7 @@ disables the probe and the attach.
 | `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat |
 | `--tokens` / `--bench` | print the exact prompt-token floor and exit |
 | `-h` / `--help` | print flag usage and exit |
-| `--version` | print the installed version and exit |
+| `--version` / `-v` | print the installed version and exit |
 
 `nx sessions [query]` is a shell subcommand (not a flag): it lists/filters saved
 sessions and exits without entering the REPL.

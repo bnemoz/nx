@@ -38,7 +38,7 @@ flags:
                                    on stdout instead of streamed chat output
   --tokens / --bench               print the exact prompt-token floor and exit
   -h, --help                      show this help and exit
-  --version                       show the version and exit
+  --version / -v                  show the version and exit
 
 Run `nx sessions` to list saved sessions, or `/help` in the REPL for the
 full in-session command list. See README.md for the full NX_* env var table.
@@ -57,7 +57,7 @@ def _cli_help_or_version(argv: list[str]) -> bool:
     if "-h" in argv or "--help" in argv:
         sys.stdout.write(_HELP_TEXT)
         return True
-    if "--version" in argv:
+    if "--version" in argv or "-v" in argv:
         print(f"nx {_cli_version()}")
         return True
     return False
