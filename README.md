@@ -192,6 +192,7 @@ sessions and exits without entering the REPL.
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 200) |
+| `NX_TASK_TIMEOUT_SECONDS` | `nx run` per-task wall-clock cap in seconds (default 0 = off; `--timeout` or the task's `timeout_seconds` field override) — a task that exceeds it stops at the next model-turn boundary and reports `status: "error"`, `timed_out: true` |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
 | `NX_HTTP_RETRIES` / `NX_HTTP_BACKOFF_BASE` | transient-failure retries for every endpoint call: 429/5xx and read/write timeouts are retried up to N times beyond the first attempt (default 2; `0` off) with exponential backoff (base seconds, default 0.5 → 0.5s, 1s, 2s…) or the server's `Retry-After` when it sends one (capped at 30s). Never retried: refused connections (a cold-start fails fast) and anything after the first streamed byte |
 | `NX_SKIP_STARTUP_PROBES` | skip every startup probe — `resolve_model()`'s `/v1/models` + `/props` round-trip, the capability/thinking fingerprint probes, the context-window metadata probes and the over-max_tokens overrun probe (default off; `1` disables). Startup becomes instant but model autodetection is off: set the model explicitly (`NX_MODEL` / `NX_SOURCE_<NAME>_MODEL`); tool-calling falls back to reactive text-protocol parsing until a turn reveals better. Also what keeps `import nx` network-free in test runs |
@@ -390,8 +391,14 @@ Blank lines and `#` comments are skipped. Flags: `--parallel <N>` runs up to N
 tasks concurrently (each on its own thread with per-task state — including
 per-task token accounting, so a benchmark's per-task token totals stay exact
 under `--parallel > 1`), `--max-turns <N>` caps each task's turns,
+`--timeout <seconds>` caps each task's wall-clock time (default
+`NX_TASK_TIMEOUT_SECONDS`, 0 = off: the task is stopped at the next
+model-turn boundary, its result line gets status `error`, an `error`
+naming the timeout, and `timed_out: true` — a task can also set its own
+`timeout_seconds` field, which wins over the flag),
 `--continue-on-error` keeps scheduling after a
-task fails (default: stop scheduling new tasks at the first error),
+task fails (default: stop scheduling new tasks at the first error — a
+timed-out task counts as an error),
 `--source <name>` picks the endpoint. stdout carries ONLY the JSONL result
 lines — every human-facing render is suppressed; progress and the summary go
 to stderr.

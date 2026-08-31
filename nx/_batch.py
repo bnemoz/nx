@@ -19,6 +19,14 @@ that summarizes the whole run:
 Per-task exit codes ride the result lines (`exit_code`), so a consumer that
 streams stdout can score each task without waiting for the process to end.
 
+Wall-clock bound: a task is also capped by a per-task timeout — `--timeout
+<seconds>` on the command, the task's own `timeout_seconds` field, or
+NX_TASK_TIMEOUT_SECONDS (default 0 = off). A lapsed deadline stops the task
+at the next model-turn boundary with status "error", an `error` naming the
+timeout, and `timed_out: true` on the result line — the turn cap's
+forced-final rescue is skipped, so a hung task can't stretch past its
+budget by another turn.
+
 Quiet + concurrency: every task's turn loop runs in quiet mode — no spinner,
 no streamed text, no stats footer, no interrupt-watcher arming, no tool box —
 reusing the async-sub-agent machinery (`_subagent._subagent_quiet()`), so a
@@ -49,6 +57,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from ._env import _env_int
 from . import _state as st
 
 # Exit codes a batch run (or any one-shot task) can exit with. Exported for
@@ -59,6 +68,13 @@ EXIT_CAP = 3       # ≥1 task hit its turn cap; nothing errored
 EXIT_ERROR = 4     # ≥1 task errored
 
 _MAX_PARALLEL = 64
+
+# Default per-task wall-clock timeout in seconds (0 = off). --timeout or the
+# task's own `timeout_seconds` field override it. Off by default so a batch
+# without the flag behaves exactly as before; a CI harness that needs a hard
+# bound gets one enforced at the next model-turn boundary (a mid-tool-call
+# cancel is deliberately NOT attempted).
+_TASK_TIMEOUT_DEFAULT = _env_int("NX_TASK_TIMEOUT_SECONDS", 0)
 
 # Per-field caps on a task's JSONL result line. A benchmark consumer streams
 # stdout and scores it task by task; a 250KB final_answer (a task that spent
@@ -86,6 +102,11 @@ flags:
                              headless: without yolo, gated calls are DENIED)
       --source <name>        endpoint to run the tasks against
       --max-turns <N>        per-task turn cap (default NX_MAX_MODEL_TURNS)
+      --timeout <seconds>    per-task wall-clock cap (default
+                             NX_TASK_TIMEOUT_SECONDS; 0 = off) — the task
+                             stops at the next model-turn boundary and the
+                             result line reports status "error", the timeout
+                             in `error`, and "timed_out": true
       --json                 accepted for symmetry with --prompt-file; JSONL
                              results are always emitted
 
@@ -104,7 +125,7 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
     one-task batch."""
     opts: dict[str, Any] = {
         "file": None, "parallel": 1, "continue_on_error": False,
-        "max_turns": None,
+        "max_turns": None, "timeout": None,
     }
     i = 0
     while i < len(argv):
@@ -135,6 +156,17 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
             if n < 1:
                 raise _BatchUsageError("--max-turns must be >= 1")
             opts["max_turns"] = n
+            i += 2
+        elif a == "--timeout":
+            if i + 1 >= len(argv):
+                raise _BatchUsageError("--timeout requires a seconds argument")
+            try:
+                t = float(argv[i + 1])
+            except ValueError:
+                raise _BatchUsageError(f"--timeout wants seconds, got {argv[i + 1]!r}")
+            if t < 0:
+                raise _BatchUsageError("--timeout must be >= 0 (0 disables the cap)")
+            opts["timeout"] = t
             i += 2
         elif a == "--continue-on-error":
             opts["continue_on_error"] = True
@@ -230,16 +262,41 @@ def _result_exit_code(status: str | None) -> int:
     return EXIT_ERROR
 
 
+def _task_timeout(task: dict[str, Any], default: float | None) -> float | None:
+    """Resolve one task's wall-clock budget in seconds (None = off).
+    Precedence: the task's own `timeout_seconds` field, then --timeout,
+    then NX_TASK_TIMEOUT_SECONDS. 0 anywhere means off."""
+    raw = task.get("timeout_seconds", default)
+    if raw is None:
+        return None
+    try:
+        secs = float(raw)
+        if secs < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise _BatchUsageError(
+            f"task line {task.get('line')}: timeout_seconds must be a "
+            f"non-negative number, got {raw!r}") from None
+    return secs if secs > 0 else None
+
+
 def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
-                  max_turns: int | None) -> dict[str, Any]:
+                  max_turns: int | None,
+                  timeout_seconds: float | None = None) -> dict[str, Any]:
     """Run one task headlessly: fresh messages, fresh metrics, fresh session
     id; the turn loop's chat output is suppressed (quiet). Returns the merged
     result dict (the JSONL line's content). Never raises — a raise is an
-    exit_code=4 result."""
+    exit_code=4 result.
+
+    timeout_seconds arms a wall-clock deadline on top of the turn cap: the
+    loop aborts at the next model-turn boundary with status "error" and
+    `timed_out` set on the result line, and the turn cap's forced-final
+    rescue is skipped so a hung task cannot stretch one more turn past its
+    budget."""
     import nx as _m  # lazy: the package re-exports what the loop needs
     from ._repl_state import _fresh_metrics
     from ._subagent import _ASYNC_QUIET_SLOTS
-    from ._turn import _ensure_ctx_probe
+    from ._turn import _ensure_ctx_probe, _task_deadline_at
 
     instruction = task["instruction"].strip()
     task_id = task.get("id") if isinstance(task.get("id"), str) else f"task-{idx}"
@@ -279,6 +336,7 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     # their token totals (the metrics TLS slot is per thread, like the quiet
     # slot and _TASK_TLS). prev is None except for a nested installation.
     prev_metrics = None
+    _task_deadline_at(None if timeout_seconds is None else started + timeout_seconds)
     try:
         prev_metrics = st._set_thread_metrics(_fresh_metrics(session_id))
         if st.ACTIVE is None:
@@ -292,6 +350,8 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         result.update(_m._one_shot_result(messages, start_idx, summary,
                                           time.time() - started,
                                           metrics=task_metrics))
+        if isinstance(summary, dict) and summary.get("timed_out"):
+            result["timed_out"] = True
         result["exit_code"] = _result_exit_code(result.get("status"))
         # Persist the transcript exactly like the REPL would — a benchmark
         # task is a real, resumable session.
@@ -306,6 +366,7 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         result["exit_code"] = EXIT_ERROR
         result["elapsed_seconds"] = round(time.time() - started, 2)
     finally:
+        _task_deadline_at(None)
         st._set_thread_metrics(prev_metrics)
         _TASK_TLS.task = None
         with _QUIET_GUARD:
@@ -371,12 +432,15 @@ def _summary_line(results: list[dict[str, Any]], n_tasks: int, elapsed: float) -
     n_done = sum(1 for r in results if r.get("status") == "done")
     n_cap = sum(1 for r in results if r.get("status") == "cap")
     n_err = sum(1 for r in results if r.get("status") == "error")
+    n_timed_out = sum(1 for r in results if r.get("timed_out"))
     skipped = n_tasks - len(results)
     bits = [f"{n_done} done"]
     if n_cap:
         bits.append(f"{n_cap} cap")
     if n_err:
         bits.append(f"{n_err} error")
+    if n_timed_out:
+        bits.append(f"{n_timed_out} timed out")
     if skipped:
         bits.append(f"{skipped} not run")
     return (f"nx run: {', '.join(bits)} ({len(results)}/{n_tasks} tasks, "
@@ -412,6 +476,12 @@ def run_batch(argv: list[str]) -> int:
     run_id = time.strftime("%Y%m%d-%H%M%S")
     parallel = opts["parallel"]
     max_turns = opts["max_turns"]
+    # Per-task wall-clock budget: --timeout wins over NX_TASK_TIMEOUT_SECONDS;
+    # a task's own `timeout_seconds` field (resolved per task, below) wins over
+    # both. None/0 = off.
+    timeout_default = opts["timeout"]
+    if timeout_default is None:
+        timeout_default = _TASK_TIMEOUT_DEFAULT or None
     results: list[dict[str, Any]] = []
     stop_scheduling = threading.Event()
     lock = threading.Lock()
@@ -421,7 +491,21 @@ def run_batch(argv: list[str]) -> int:
     def _worker(task: dict[str, Any], idx: int) -> None:
         if stop_scheduling.is_set():
             return
-        res = _run_one_task(task, run_id, idx, max_turns)
+        try:
+            task_timeout = _task_timeout(task, timeout_default)
+        except _BatchUsageError as e:
+            sys.stderr.write(f"nx run: {e}\n")
+            res = {"index": idx, "id": task.get("id") if isinstance(task.get("id"), str) else f"task-{idx}",
+                   "line": task.get("line"), "session": None, "batch": run_id,
+                   "exit_code": EXIT_MISUSE, "status": "error",
+                   "turns": 0, "elapsed_seconds": 0.0, "final_answer": None,
+                   "tokens": None, "tool_calls": [], "error": str(e)}
+            with lock:
+                results.append(res)
+            _emit(res)
+            stop_scheduling.set()
+            return
+        res = _run_one_task(task, run_id, idx, max_turns, task_timeout)
         with lock:
             results.append(res)
         _emit(res)
@@ -432,6 +516,14 @@ def run_batch(argv: list[str]) -> int:
         for i, task in enumerate(tasks):
             _worker(task, i)
     else:
+        # Bad timeout_seconds in task N must not hang around until its turn:
+        # resolve every task's budget up front when scheduling is parallel.
+        for task in tasks:
+            try:
+                _task_timeout(task, timeout_default)
+            except _BatchUsageError as e:
+                sys.stderr.write(f"nx run: {e}\n")
+                return EXIT_MISUSE
         with ThreadPoolExecutor(max_workers=parallel) as pool:
             futures = [pool.submit(_worker, task, i) for i, task in enumerate(tasks)]
             for f in futures:

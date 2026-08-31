@@ -1215,14 +1215,54 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 
 
 # Maximum number of model turns (tool calls + retries) per session before the
-# loop breaks.  The real bound on work is the per-task timeout (900-3600s);
-# each turn costs at minimum a few seconds (API round-trip + generation + tool
+# loop breaks.  The real bound on wall-clock work is the batch per-task
+# timeout (nx/_batch.py: --timeout / NX_TASK_TIMEOUT_SECONDS, enforced at
+# this loop's step boundaries); each turn costs at minimum a few seconds
+# (API round-trip + generation + tool
 # exec), so even 200 turns in a 900s budget means turns averaging <4.5s — that's
 # fast spinning, not productive work.  Individual pathologies (reasoning stalls,
 # empty turns, malformed streams) already have their own retry limits.  This cap
 # is just a total-work backstop so the loop can't run away *inside* the timeout.
 # Overridable via env var.  Set very high (e.g. 99999) to effectively disable.
 st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 200)
+
+# --- per-task wall-clock deadline (batch) -------------------------------------
+# The batch harness arms this per worker thread just before its turn loop and
+# clears it after. It must be a thread-local, not a module global -- with
+# --parallel > 1 sibling workers would share and clobber each other's
+# deadlines. The loop checks it at the on_step seam (every model-turn
+# boundary) and aborts with a status-"error" summary rather than let one slow
+# task hold a whole CI run open. A mid-tool-call cancel would be much messier
+# and buys little: the deadline still fires at the next step boundary.
+_TASK_DEADLINE_TLS = threading.local()
+
+
+def _task_deadline_at(deadline):
+    """Arm the calling worker's wall-clock deadline (None disarms it)."""
+    _TASK_DEADLINE_TLS.deadline = deadline
+
+
+def _task_deadline():
+    """Return the armed deadline for this worker, or None if not armed."""
+    return getattr(_TASK_DEADLINE_TLS, "deadline", None)
+
+
+def _task_deadline_exceeded():
+    d = getattr(_TASK_DEADLINE_TLS, "deadline", None)
+    return d is not None and time.time() > d
+
+
+def _task_timeout_summary(turns: int) -> dict:
+    """The summary _run_model_turn_loop returns when a batch worker's
+    wall-clock deadline lapses: status "error" so the task gets exit_code 4
+    and the run stops scheduling (unless --continue-on-error), with
+    "timed_out" so a harness can tell a timeout from a crash."""
+    return {"status": "error",
+            "error": (f"task timeout: exceeded the per-task wall-clock budget "
+                      f"at turn {turns}"),
+            "turns": turns,
+            "timed_out": True}
+
 
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
                          on_step: Optional[Callable[[], None]] = None,
@@ -1233,7 +1273,10 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     report whether the model actually finished vs. hit the turn cap vs. the
     endpoint hard-failing (status "error" → exit_code 4 in batch/one-shot).
     max_turns_override caps the loop below MAX_MODEL_TURNS for scoped loops
-    (spawn_agent sub-agents); None = the global cap, as before."""
+    (spawn_agent sub-agents); None = the global cap, as before.
+    Batch workers arm a wall-clock deadline via _task_deadline_at() (see
+    nx/_batch.py): when it lapses the loop stops at the next step boundary
+    and returns a status-"error" summary naming the timeout."""
     max_turns = st.MAX_MODEL_TURNS if max_turns_override is None else max(1, int(max_turns_override))
     steps = 0
     reasoning_loop_cuts = 0
@@ -1254,6 +1297,8 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                             malformed_call_count=malformed_call_cuts)
         if on_step is not None:
             on_step()
+        if _task_deadline_exceeded():
+            return _task_timeout_summary(steps + 1)
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
@@ -1365,6 +1410,8 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         if not _subagent_quiet():
             print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
                   f"forcing a final answer from current state{RESET}")
+        if _task_deadline_exceeded():
+            return _task_timeout_summary(steps)
         final_status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                    empty_turn_count=empty_turn_cuts,
                    forced_final=True,
@@ -1393,5 +1440,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                     "turns": steps + 1}
         if final_status == TURN_DONE:
             return {"status": "cap", "turns": steps + 1}
+    if _task_deadline_exceeded():
+        return _task_timeout_summary(steps)
     return {"status": "cap", "turns": steps}
 

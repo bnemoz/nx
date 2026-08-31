@@ -172,7 +172,9 @@ def test_arg_parsing(nx_fresh):
     o = nx._batch._parse_batch_args(["-f", "t.jsonl", "--parallel", "4",
                                      "--continue-on-error", "--max-turns", "9"])
     assert o == {"file": "t.jsonl", "parallel": 4, "continue_on_error": True,
-                 "max_turns": 9}
+                 "max_turns": 9, "timeout": None}
+    assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "900"])["timeout"] == 900.0
+    assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "2.5"])["timeout"] == 2.5
     with pytest.raises(nx._batch._BatchUsageError):
         nx._batch._parse_batch_args(["--frobnicate"])
     with pytest.raises(nx._batch._BatchUsageError, match="requires -f"):
@@ -609,3 +611,180 @@ def test_quiet_loop_prints_nothing_even_at_turn_cap(nx_fresh, monkeypatch):
         _ASYNC_QUIET_SLOTS.quiet = False
     assert summary["status"] == "cap"
     assert buf.getvalue() == ""
+
+
+# --- per-task wall-clock timeout -------------------------------------------------
+# The batch docstring used to promise "the per-task timeout" without shipping
+# one: --max-turns x (600s stream read + retries) was the only bound, so one
+# slow/pathological task could hold a CI run open for hours and a --parallel 1
+# batch serialized behind it. The deadline is armed per worker thread (a
+# thread-local in _turn.py) and enforced at the loop's on_step seam.
+
+def test_task_timeout_resolves_precedence_and_zero_off(nx_fresh):
+    nx, _ = nx_fresh
+    f = nx._batch._task_timeout
+    # task field wins over the --timeout default; 0 anywhere = off
+    assert f({"timeout_seconds": 30, "line": 1}, 900) == 30.0
+    assert f({}, 900) == 900.0
+    assert f({}, None) is None
+    assert f({"timeout_seconds": 0}, 900) is None
+    assert f({"timeout_seconds": 0, "line": 2}, None) is None
+    assert f({}, 0) is None
+    with pytest.raises(nx._batch._BatchUsageError, match="timeout_seconds"):
+        f({"timeout_seconds": -5, "line": 3}, 900)
+    with pytest.raises(nx._batch._BatchUsageError, match="timeout_seconds"):
+        f({"timeout_seconds": "soon", "line": 4}, 900)
+
+
+def test_task_timeout_fires_at_step_boundary(nx_fresh, tmp_path, monkeypatch):
+    """A task whose deadline lapses mid-loop reports an error line with
+    timed_out=true, and the process exit is 4."""
+    nx, tmp = nx_fresh
+
+    seen = {}
+
+    def slow_loop(messages, on_step=None, max_turns_override=None, **kw):
+        deadline = nx._turn._task_deadline()
+        seen["deadline"] = deadline
+        steps = 0
+        while steps < (max_turns_override or 50):
+            time.sleep(0.05)
+            steps += 1
+            if on_step is not None:
+                on_step()
+            if nx._turn._task_deadline_exceeded():
+                return nx._turn._task_timeout_summary(steps)
+        return {"status": "cap", "turns": steps}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", slow_loop)
+    f = _write_tasks(tmp, ['{"instruction": "slog", "id": "slow"}'])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--timeout", "0.2"])
+    assert code == nx._batch.EXIT_ERROR
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "error" and line["exit_code"] == 4
+    assert line["timed_out"] is True
+    assert "task timeout" in (line["error"] or "")
+    assert seen["deadline"] is not None
+    assert "timed out" in err.getvalue()
+    # the worker's deadline slot is disarmed after the run
+    assert nx._turn._task_deadline() is None
+
+
+def test_task_timeout_beats_turn_cap_rescue(nx_fresh, tmp_path, monkeypatch):
+    """At the turn cap the forced-final rescue turn is skipped when the
+    deadline has lapsed — the timeout, not one more model turn, is the bound."""
+    nx, tmp = nx_fresh
+    rescue_calls = []
+
+    def tool_then_cap(messages, *a, forced_final=False, **k):
+        if forced_final:
+            rescue_calls.append(1)
+        return nx._turn.TURN_TOOL
+
+    monkeypatch.setattr(nx, "model_turn", tool_then_cap)
+    messages = nx._initial_messages() + [{"role": "user", "content": "x"}]
+    from nx._subagent import _ASYNC_QUIET_SLOTS
+    _ASYNC_QUIET_SLOTS.quiet = True
+    nx._turn._task_deadline_at(time.time() - 1)  # already lapsed
+    try:
+        summary = nx._run_model_turn_loop(messages, max_turns_override=2)
+    finally:
+        _ASYNC_QUIET_SLOTS.quiet = False
+        nx._turn._task_deadline_at(None)
+    assert summary["status"] == "error" and summary.get("timed_out") is True
+    assert rescue_calls == []  # no forced-final turn after the deadline
+
+
+def test_task_timeout_field_per_task(nx_fresh, tmp_path, monkeypatch):
+    """`timeout_seconds` on the task line wins over --timeout and only binds
+    that one task."""
+    nx, tmp = nx_fresh
+
+    def loop(messages, on_step=None, max_turns_override=None, **kw):
+        steps = 0
+        while steps < (max_turns_override or 50):
+            time.sleep(0.05)
+            steps += 1
+            if on_step is not None:
+                on_step()
+            if nx._turn._task_deadline_exceeded():
+                return nx._turn._task_timeout_summary(steps)
+        return {"status": "done", "turns": steps}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop)
+    f = _write_tasks(tmp, [
+        '{"instruction": "short", "id": "quick", "timeout_seconds": 0.15}',
+        '{"instruction": "long", "id": "dur", "timeout_seconds": 30}',
+    ])
+    buf, err = _capture_stdout(monkeypatch)
+    # --continue-on-error so the timed-out task doesn't stop "dur" from
+    # being scheduled: the deadline binds only the task that declares it.
+    code = _run(nx, ["-f", f, "--timeout", "60", "--continue-on-error"])
+    lines = [json.loads(line) for line in buf.getvalue().strip().splitlines()]
+    assert len(lines) == 2
+    by_id = {line["id"]: line for line in lines}
+    assert by_id["quick"]["timed_out"] is True
+    assert by_id["quick"]["status"] == "error"
+    assert by_id["dur"]["status"] == "done"
+    assert code == nx._batch.EXIT_ERROR
+
+
+def test_task_timeout_env_default(nx_fresh, tmp_path, monkeypatch):
+    """NX_TASK_TIMEOUT_SECONDS is the flag-less default: run_batch reads it
+    from _TASK_TIMEOUT_DEFAULT (the import-time _env_int read — patched here
+    to the value the env var would have supplied). 0 / unset keeps the old
+    unbounded behavior."""
+    nx, tmp = nx_fresh
+
+    def loop(messages, on_step=None, max_turns_override=None, **kw):
+        # mirror the real loop: the deadline binds at the step boundary
+        time.sleep(0.3)
+        if nx._turn._task_deadline_exceeded():
+            return nx._turn._task_timeout_summary(1)
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop)
+    assert nx._batch._TASK_TIMEOUT_DEFAULT == 0  # env default: off
+    nx._batch._TASK_TIMEOUT_DEFAULT = 0.15
+    try:
+        f = _write_tasks(tmp, ['{"instruction": "slog", "id": "slow"}'])
+        buf, err = _capture_stdout(monkeypatch)
+        code = _run(nx, ["-f", f])
+        line = json.loads(buf.getvalue().strip())
+        assert code == nx._batch.EXIT_ERROR
+        assert line["timed_out"] is True
+    finally:
+        nx._batch._TASK_TIMEOUT_DEFAULT = 0
+
+
+def test_no_timeout_by_default_is_unbounded(nx_fresh, tmp_path, monkeypatch):
+    """Without the flag/env/field the deadline slot stays empty — the flagless
+    run behaves exactly as before (the fix must not time out legacy runs)."""
+    nx, tmp = nx_fresh
+
+    def loop(messages, on_step=None, max_turns_override=None, **kw):
+        seen = nx._turn._task_deadline()
+        return {"status": "done", "turns": 1} if seen is None else {"status": "cap"}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop)
+    f = _write_tasks(tmp, ['"t"'])
+    buf, _ = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f])
+    assert code == 0
+    assert json.loads(buf.getvalue().strip())["status"] == "done"
+
+
+def test_parallel_bad_timeout_field_is_misuse(nx_fresh, tmp_path, monkeypatch):
+    """A non-numeric timeout_seconds is a harness misuse (exit 2), caught up
+    front under --parallel so it can't fail lazily mid-run."""
+    nx, tmp = nx_fresh
+    f = _write_tasks(tmp, [
+        '{"instruction": "a", "id": "ok"}',
+        '{"instruction": "b", "id": "bad", "timeout_seconds": "soon"}',
+    ])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--parallel", "2"])
+    assert code == nx._batch.EXIT_MISUSE
+    assert "timeout_seconds" in err.getvalue()
+    assert buf.getvalue() == ""  # nothing ran
