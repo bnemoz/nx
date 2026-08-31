@@ -227,6 +227,30 @@ _CTX_OVERFLOW_RE = re.compile(
     r"reduce the (?:length|size) of)", re.IGNORECASE)
 
 
+def _is_request_field_rejection(e: BaseException) -> bool:
+    """True if `e` is a server response that rejected a FIELD of the request
+    (bad tools=/extra_body content) rather than a transport/status failure —
+    the only case where open_stream()'s no-tools / no-extra fallback ladder
+    should re-send.
+
+    The signal: a deterministic validation-shaped status (400/422) from a
+    server that parsed the request. 429/5xx mean busy or broken upstream —
+    _send has already spent its NX_HTTP_RETRIES on them, and the fallback
+    ladder would only multiply that amplification (each rung is a fresh
+    multi-attempt _send cycle against a degraded endpoint). Anything without
+    an int status_code (unexpected error shapes) also propagates: no evidence
+    the server understood and objected to a field, so no evidence a retry
+    without it would help."""
+    status = getattr(e, "status_code", None)
+    if not isinstance(status, int):
+        return False
+    if status not in (400, 422):
+        return False
+    text = " ".join(str(x) for x in (
+        getattr(e, "message", ""), getattr(e, "body", ""), str(e)) if x)
+    return bool(text)  # any body at all — validation errors always carry one
+
+
 def _is_context_overflow_error(e: BaseException) -> bool:
     """True if exception `e` looks like a context-window-length rejection (an
     HTTP 400 whose body/message matches the over-limit wording). Needs the
@@ -338,6 +362,17 @@ def open_stream(
             if _is_context_overflow_error(e):
                 st._LAST_CONTEXT_OVERRUN = str(e)
                 return None
+            # Only a FIELD rejection (server parsed the request and objected to
+            # tools=/tool_choice/extra_body) justifies re-sending. Anything else
+            # — a 429/5xx APIError that _send already exhausted NX_HTTP_RETRIES
+            # on, or an unexpected error shape — propagates immediately: the
+            # fallback rungs are fresh multi-attempt _send cycles, so re-sending
+            # here would amplify one degraded turn into up to 9 POSTs against
+            # an endpoint that is already failing for reasons no body-shedding
+            # can fix. (Tradeoff: a server that signals field rejection only
+            # via 5xx now fails fast instead of being rescued.)
+            if not _is_request_field_rejection(e):
+                raise
             # If extra_body (e.g. min_p / repeat_penalty / dry_*) is also
             # rejected — vLLM's speculative decoder doesn't support min_p etc. —
             # strip it too.  Try no-tools first, then no-tools + no-extra.
@@ -353,7 +388,17 @@ def open_stream(
                     break  # succeeded
                 except (APIConnectionError, httpx.HTTPError):
                     raise  # transport failure — don't retry further
-                except Exception:
+                except Exception as e2:
+                    # Same rule between rungs: only a field rejection (a 400/422
+                    # naming the field, not the over-length wording checked
+                    # below) advances the ladder; a status/transport-grade
+                    # failure surfaces to the terminal handlers instead of
+                    # re-sending a request that just failed for a bigger reason.
+                    if _is_context_overflow_error(e2):
+                        st._LAST_CONTEXT_OVERRUN = str(e2)
+                        return None
+                    if not _is_request_field_rejection(e2):
+                        raise
                     continue  # try next fallback level
             else:
                 raise  # all fallbacks exhausted
