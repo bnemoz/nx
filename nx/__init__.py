@@ -288,6 +288,7 @@ from ._tools import (
 from ._undo import undo_last, list_checkpoints
 
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, delete_file
+from ._garble import garble_signature, garble_check, realign_new, swapped_args
 from ._bash_jobs import (
     _run_bash, list_bg_jobs, _delete_old_bg_logs, _tail_last_line, _poll_pid,
     _read_log, _infer_timeout_from_sleep, run_bash, _finish_bg_job,

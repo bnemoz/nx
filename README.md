@@ -174,6 +174,7 @@ sessions and exits without entering the REPL.
 | `NX_READ_FILE_SCAN_LINES` | how far past a windowed `read_file` the header's exact line-count scan may reach (default 200000); beyond it the header reports a lower bound as `N+` instead of scanning an unbounded file |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
+| `NX_GARBLE_GUARD` | scan every edit's `new` text for model-garble signatures — duplicated lines, stuttered words/phrases, line-boundary splices, mid-sentence abandoned rewrites (default `1`; `0` disables). Unambiguous garble is repaired before the write (the tool result says so); ambiguous garble is refused once, then written as-is if the model resubmits the byte-identical edit |
 | `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
 | `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and `async: true` runs one in the background (job id now, answer as a `[Runtime note]` on a later turn; `/bg` lists them) |
 | `NX_SUBAGENT_WRITE` | opt-in write tier for sub-agents (`NX_SUBAGENT_WRITE=1`): `spawn_agent` additionally gets `write_file`/`edit_file`/`multi_edit`/`sed_edit`, each still confirmed by you through the normal approval gate (risk classification + Y/n with a diff preview) and tagged `(sub-agent)` in the tool box. Write-capable agents never run concurrently and cannot delete files or spawn other agents |
@@ -433,8 +434,8 @@ go through the approval gate above.
 | --- | --- | --- |
 | `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory |
 | `write_file` | `path`, `content` | overwrites; requires confirmation |
-| `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly |
-| `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation |
+| `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly; `new` passes the garble guard (see `NX_GARBLE_GUARD`) |
+| `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation; atomic — a garbled or unmatched edit rolls back the whole batch; each `new` passes the garble guard |
 | `delete_file` | `path` | delete one file; restorable via `/undo` (unlike `rm` via bash) |
 | `sed_edit` | `pattern`, `replacement`, `path` | regex find/replace over a file or glob |
 | `apply_patch` | `diff`, `path?` | apply a unified diff; for multi-file restructure |
@@ -456,6 +457,30 @@ go through the approval gate above.
 or any `run_bash`. `wait_background` is omitted from the tool schemas sent to
 the model until a `run_bash` has actually backgrounded, so a session where
 nothing ever backgrounds doesn't pay tokens for a tool it will never call.
+
+### Garble guard
+
+Small/quantized models sometimes emit textually corrupted replacement text —
+a line decoded twice, a phrase that restarts mid-stream, a line boundary
+written twice, or a half-abandoned rewrite left behind an ellipsis. Every
+`edit_file`/`multi_edit` `new` payload is scanned in-process (`nx/_garble.py`)
+before it can land:
+
+- **unambiguous** duplicates (adjacent duplicated lines, period-2 word
+  stutters, adjacent repeated phrases, line-boundary splices where the shared
+  words appear nowhere in the file) are repaired automatically — the diff you
+  approve already shows the repaired text, and the tool result says what was
+  fixed;
+- **ambiguous** corruption (e.g. a mid-sentence abandoned rewrite) is refused
+  once with the suspect text quoted; resubmitting the byte-identical edit
+  writes it as-is with a warning, so a false positive can never deadlock the
+  model;
+- repetition the file itself already contains (repeated decorators,
+  boilerplate) is left alone, and swapped `old`/`new` arguments get a
+  targeted resubmit hint.
+
+The guard is passive — no extra tool schema, no tokens per turn — and
+`NX_GARBLE_GUARD=0` turns it off.
 
 ## Memory
 

@@ -4,6 +4,11 @@ Split out of __init__.py as a focused submodule for the tools that write to
 disk (as opposed to nx/_tools.py's read-only ones). Each still goes through
 _confirm()/risk classification from _approval.py.
 
+Every mutating edit first crosses nx/_garble.py's garble_check(): the `new`
+payload is scanned for the duplicated-line/repeated-phrase/spliced-boundary
+corruption quantized models produce, repaired when unambiguous, hard-errored
+when not (see that module's docstring).
+
 `_confirm` is monkeypatched by tests via `m._confirm = fake` (the top-level
 `nx` module attribute), so it's called through a lazy `import nx as _m;
 _m._confirm(...)` rather than bound directly at import time — see the note
@@ -21,6 +26,7 @@ from typing import Any
 
 from ._ansi import DIM, RESET
 from ._approval import _diff_preview, _diff_hunk
+from ._garble import garble_check, swapped_args
 from ._tools import _strip_line_numbers
 from ._undo import push_checkpoint as _undo_push, snapshot as _undo_snapshot
 
@@ -158,6 +164,7 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     that mis-indents doesn't have to re-read the file and retry."""
     src, src_mtime = _read_with_mtime(path)
     ws_fallback_used = False
+    garble_note = ""
     if old_lines:
         if old:
             return "ERROR: pass either `old` or `old_lines`, not both"
@@ -172,6 +179,12 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
                 start, end = int(m.group(1)), int(m.group(2))
         except ValueError:
             return "ERROR: old_lines wants 'N' or 'N-M' (1-based lines, e.g. '10-14')"
+        status, msg, repaired = garble_check(new, src, path=path)
+        if status == "error":
+            return msg
+        if status == "repaired":
+            new = repaired
+            garble_note = msg
         try:
             new_src, replaced, _ = _apply_line_range(src, start, end, new)
         except ValueError as e:
@@ -188,7 +201,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
         if now_mtime != src_mtime:
             return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
         _atomic_write(path, new_src)
-        return f"edited {path} (replaced lines {start}-{end})\n{_diff_hunk(src, new_src)}"
+        return (f"edited {path} (replaced lines {start}-{end})\n{_diff_hunk(src, new_src)}"
+                + (f"\n{garble_note}" if garble_note else ""))
     if not isinstance(old, str) or not old:
         return "ERROR: provide `old` (text to find) or `old_lines` (line range)"
     if not replace_all and src.count(old) != 1:
@@ -210,9 +224,18 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
             ws_fallback_used = True
             count = 1
         else:
+            hint = swapped_args(new, src, old)
+            if hint:
+                return hint
             return "ERROR: `old` matched 0 times (need at least 1)"
     if not replace_all and count != 1:
         return f"ERROR: `old` matched {count} times (need exactly 1, or pass replace_all=True)"
+    status, msg, repaired = garble_check(new, src, old, path=path)
+    if status == "error":
+        return msg
+    if status == "repaired":
+        new = repaired
+        garble_note = msg
     new_src = src.replace(old, new) if replace_all else src.replace(old, new, 1)
     if new_src == src:
         return f"ERROR: no change to {path} (`old` and `new` are identical)"
@@ -227,6 +250,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, new_src)
     note = "\n(edit applied whitespace-tolerantly — `old`'s indentation was normalized to match)" if ws_fallback_used else ""
+    if garble_note:
+        note += f"\n{garble_note}"
     return f"edited {path}\n{_diff_hunk(src, new_src)}{note}"
 
 
@@ -243,6 +268,7 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     src, src_mtime = _read_with_mtime(path)
     if not isinstance(edits, list) or not edits:
         return "ERROR: `edits` must be a non-empty list of {old, new} objects"
+    garble_notes: list[str] = []
     work = src
     for i, edit in enumerate(edits):
         if not isinstance(edit, dict):
@@ -258,8 +284,16 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
                 old, new = stripped, _strip_line_numbers(new)
         count = work.count(old)
         if count != 1:
+            hint = "" if count else (swapped_args(new, work, old) or "")
             return (f"ERROR: edit #{i + 1} `old` matched {count} times "
-                    f"(need exactly 1); no edits applied")
+                    f"(need exactly 1); no edits applied" + (f"\n{hint}" if hint else ""))
+        status, msg, repaired = garble_check(new, work, old, path=path)
+        if status == "error":
+            detail = msg[len("ERROR: "):] if msg.startswith("ERROR: ") else msg
+            return f"ERROR: edit #{i + 1} {detail} no edits applied"
+        if status == "repaired":
+            new = repaired
+            garble_notes.append(msg)
         work = work.replace(old, new, 1)
     if work == src:
         return f"no change to {path} (edits were no-ops)"
@@ -272,7 +306,8 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     if now_mtime != src_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, work)
-    return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}"
+    tail = "\n" + "\n".join(dict.fromkeys(garble_notes)) if garble_notes else ""
+    return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}{tail}"
 
 
 def delete_file(path: str, **_: Any) -> str:
