@@ -10,13 +10,23 @@ already a direct dependency) covers that handful directly.
 Response objects are generic dict-attribute wrappers (`_Obj`) rather than
 typed models — nx's own code (`_stream_parse.py`, `_metrics.py`) only ever
 does `getattr`/`.get()`-style access on them, so exact typing isn't needed.
+
+Transient-failure retry: before the first byte of a response, a 429/5xx or a
+broken read is retried up to NX_HTTP_RETRIES times (default 2) with
+exponential backoff (NX_HTTP_BACKOFF_BASE, default 0.5s → 0.5s, 1s, 2s, …)
+or the server's Retry-After header when it sends one. Retries stop dead the
+moment a stream is open — see _send's docstring.
 """
 from __future__ import annotations
 
 import json
+import sys
+import time
 from typing import Any, Iterator, Literal, overload
 
 import httpx
+
+from ._env import _env_float, _env_int
 
 
 class APIError(Exception):
@@ -41,9 +51,91 @@ class APIError(Exception):
 
 class APIConnectionError(APIError):
     """Raised when the request never reached a server (DNS/refused/timeout),
-    as opposed to APIError for a reachable server returning an error status."""
-    def __init__(self, message: str = "connection error", *, request: httpx.Request | None = None):
+    as opposed to APIError for a reachable server returning an error status.
+    `.retryable` records whether `_send` judged the transport failure
+    transient (a connection existed and broke/timed out — worth a caller-level
+    retry) or not (the server refused/was unreachable — backoff can't help)."""
+    def __init__(self, message: str = "connection error", *,
+                 request: httpx.Request | None = None,
+                 retryable: bool = True):
         super().__init__(message, request=request)
+        self.retryable = retryable
+
+
+# --- transient-error retry ---------------------------------------------------
+# Default attempts *beyond the first* and the base of the exponential backoff
+# (base * 2**attempt: 0.5s, 1s, 2s, …). Read per-request via the env (not
+# cached at import) so tests can retune them without a reload.
+_HTTP_RETRIES_DEFAULT = 2
+_HTTP_BACKOFF_BASE_DEFAULT = 0.5
+# A Retry-After (or runaway backoff) can never stall a turn longer than this.
+_RETRY_DELAY_CAP = 30.0
+# Statuses worth a blind retry: 429 (rate limit — usually clears in seconds)
+# and 5xx (upstream/overloaded). Deliberately NOT 4xx generally: 400/401/403/
+# 404 are deterministic, and retrying them just multiplies the latency before
+# the same error (a 400 also feeds nx's context-window overrun probe, which
+# must see the error immediately).
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_transient_net_exc(e: BaseException) -> bool:
+    """True for transport failures where a connection existed and then broke or
+    stalled (read/write/remote reset/timeout) — the busy-server shapes a
+    backoff can plausibly outlast. A refused/never-established connection
+    (ConnectError/ConnectTimeout) means the server is down, not busy: no
+    retry, so a cold-start against a not-yet-up local server fails fast
+    exactly as it always has."""
+    return isinstance(e, (httpx.ReadError, httpx.WriteError,
+                          httpx.ReadTimeout, httpx.WriteTimeout,
+                          httpx.PoolTimeout, httpx.RemoteProtocolError))
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Retry-After as seconds (delay or HTTP-date form). None when absent or
+    unparseable, so the caller falls back to exponential backoff."""
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        import datetime as _dt
+        from email.utils import parsedate_to_datetime
+        delta = parsedate_to_datetime(raw) - _dt.datetime.now(_dt.timezone.utc)
+        return max(0.0, delta.total_seconds())
+    except Exception:
+        return None
+
+
+def _backoff_delay(attempt: int, retry_after: float | None) -> float:
+    """Seconds to wait before retry `attempt + 1` (0-based). A usable
+    Retry-After wins as-is; otherwise base * 2**attempt. Capped either way."""
+    if retry_after is not None:
+        return max(0.0, min(retry_after, _RETRY_DELAY_CAP))
+    base = max(0.0, _env_float("NX_HTTP_BACKOFF_BASE", _HTTP_BACKOFF_BASE_DEFAULT))
+    if base <= 0:
+        return 0.0
+    return min(base * (2 ** max(0, attempt)), _RETRY_DELAY_CAP)
+
+
+def _notice(req: httpx.Request, attempt: int, retries: int, why: str,
+            delay: float, retry_after: float | None) -> None:
+    """One-line stderr notice + traffic-log entry per retry. stderr, not
+    stdout: stdout is strictly chat rendering (and --json harness output)."""
+    basis = "Retry-After" if retry_after is not None else "backoff"
+    print(f"nx: {req.method} {req.url.path} failed ({why}); retrying "
+          f"{attempt + 1}/{retries} in {delay:.1f}s ({basis})", file=sys.stderr)
+    from ._logging import _log_event  # lazy: _logging builds on NX_HOME state
+    _log_event("http_retry", {"method": req.method, "url": str(req.url),
+                              "why": why, "attempt": attempt + 1,
+                              "retries": retries, "delay": delay,
+                              "retry_after": retry_after})
 
 
 class _Obj:
@@ -189,12 +281,17 @@ class _Models:
 
 class OpenAI:
     """Just enough of `openai.OpenAI` for nx: base_url + api_key + optional
-    default_headers, `.chat.completions.create()`, `.models.list()`."""
+    default_headers, `.chat.completions.create()`, `.models.list()`.
+
+    `transport` (optional) replaces httpx's default connection pooling —
+    tests pass an httpx.MockTransport to exercise _send's retry loop without
+    a live server."""
     def __init__(
         self,
         base_url: str,
         api_key: str | None = None,
         default_headers: dict[str, str] | None = None,
+        transport: httpx.BaseTransport | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -205,17 +302,54 @@ class OpenAI:
         # local models can take a while to start streaming.
         timeout = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=600.0)
         self._client = httpx.Client(base_url=self.base_url, headers=headers,
-                                     timeout=timeout)
+                                     timeout=timeout, transport=transport)
         self.chat = _Chat(self)
         self.models = _Models(self)
 
     def _send(self, req: httpx.Request, stream: bool) -> httpx.Response:
-        try:
-            resp = self._client.send(req, stream=stream)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-                httpx.NetworkError, httpx.TimeoutException) as e:
-            raise APIConnectionError(str(e), request=req) from e
-        if resp.status_code >= 400:
+        """Send `req`, retrying transient failures before the first byte.
+
+        Retried (NX_HTTP_RETRIES times beyond the first attempt, exponential
+        NX_HTTP_BACKOFF_BASE backoff, or the server's Retry-After when sent):
+
+          • 429 / 502 / 503 / 504 / 500 responses — rate limiting and
+            upstream overload, both usually gone in seconds
+          • a connection that existed and then broke or timed out
+            (read/write/reset — the busy-server shapes)
+
+        Never retried:
+
+          • other 4xx — deterministic (400/401/403/404); a 400 also feeds the
+            context-window overrun probe, which needs the error immediately
+          • ConnectError/ConnectTimeout — the server is down, not busy; a
+            cold-start probe must keep failing fast
+          • anything after the first streamed byte. `send(stream=True)`
+            returns as soon as response *headers* arrive, before any SSE
+            payload, so this loop is structurally incapable of retrying
+            mid-stream — and `_ChatStream`'s read errors stay un-retried on
+            purpose: a partially-consumed stream can't be replayed safely
+            (nx's turn loop owns recovery for those, with correct bookkeeping
+            around the tokens already rendered).
+        """
+        retries = max(0, _env_int("NX_HTTP_RETRIES", _HTTP_RETRIES_DEFAULT))
+        attempt = 0
+        while True:
+            try:
+                resp = self._client.send(req, stream=stream)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                    httpx.NetworkError, httpx.TimeoutException) as e:
+                if attempt < retries and _is_transient_net_exc(e):
+                    retry_after = None
+                    delay = _backoff_delay(attempt, retry_after)
+                    _notice(req, attempt, retries, f"connection error: {e}", delay,
+                            retry_after)
+                    attempt += 1
+                    time.sleep(delay)
+                    continue
+                raise APIConnectionError(str(e), request=req,
+                                         retryable=_is_transient_net_exc(e)) from e
+            if resp.status_code < 400:
+                return resp
             resp.read()
             body = None
             try:
@@ -231,7 +365,15 @@ class OpenAI:
                     msg = err
             if not msg:
                 msg = resp.text or f"HTTP {resp.status_code}"
+            if attempt < retries and resp.status_code in _RETRY_STATUSES:
+                retry_after = _retry_after_seconds(resp.headers)
+                delay = _backoff_delay(attempt, retry_after)
+                _notice(req, attempt, retries,
+                        f"HTTP {resp.status_code} — {msg[:160]}", delay, retry_after)
+                resp.close()
+                attempt += 1
+                time.sleep(delay)
+                continue
             resp.close()
             raise APIError(f"Error code: {resp.status_code} - {json.dumps(body) if body else msg}",
                            body=body, status_code=resp.status_code, request=req)
-        return resp
