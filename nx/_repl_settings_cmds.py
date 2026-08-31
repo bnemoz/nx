@@ -313,15 +313,19 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     # default: the report
     report = _messages_token_report(messages)
     rows = report["rows"]
+    cache = report.get("cache") or []
     print(f"{DIM}  context by message (est. tokens, {len(rows)} messages, "
-          f"~{report['total_est']}{RESET}{DIM} total est):{RESET}")
+          f"~{report['total_est']}{RESET}{DIM} total est · cache = that turn's"
+          f" model call's prompt-cache hit){RESET}")
     # Compact: show the top consumers fully, roll small turns into one line
     top = sorted(rows, key=lambda r: -r[2])[:12]
     top_idx = {r[0] for r in top if r[2] >= max(32, report["total_est"] // 40)}
     for i, role, t, preview, pinned in rows:
         if i in top_idx or pinned:
             mark = "📌" if pinned else " "
-            print(f"{DIM}  {mark}{i + 1:>4}  {role:<9} {t:>6}  {preview}{RESET}")
+            hit = cache[i] if i < len(cache) else None
+            hit_s = "—" if hit is None else f"{hit * 100:.0f}%"
+            print(f"{DIM}  {mark}{i + 1:>4}  {role:<9} {t:>6}  {hit_s:>4}  {preview}{RESET}")
     rolled = [r for r in rows if r[0] not in top_idx or r[2] < max(32, report["total_est"] // 40)]
     if rolled and len(rolled) < len(rows):
         print(f"{DIM}        … {len(rolled)} smaller turn(s), ~{sum(r[2] for r in rolled)} tokens "

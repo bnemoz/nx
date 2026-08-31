@@ -50,6 +50,13 @@ MODEL: str | None = None
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
 _LAST_PROMPT_TOKENS: int = 0
 
+# Last turn's prompt-cache hit fraction (0.0–1.0, or None when the server
+# didn't report cache numbers). Written by _capture_last_prompt_tokens();
+# read by the stats footer and /ctx so the user can see whether the KV/prompt
+# cache is actually hitting. A drop to ~0 after an edit to early history is
+# the tell-tale of a silently busted prompt prefix.
+_LAST_CACHE_HIT: float | None = None
+
 # --- approval gating ---------------------------------------------------------
 YOLO: bool = False
 APPROVE_LEVEL: str | None = None

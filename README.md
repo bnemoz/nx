@@ -96,7 +96,13 @@ pin the true lineup with `NX_SOURCE_<NAME>_MODELS` — see
 
 Each source's max context window is probed once and cached, shown in the
 `/source` list and the per-turn `ctx 12K/150K` footer (colorized green/yellow/red
-by fullness). At `NX_AUTOCOMPRESS_PERCENT` (default 85%) of the window, older
+by fullness). The footer also shows `cached: N%` — how much of that turn's
+prompt was served from the server's KV/prompt cache (llama.cpp `cache_n`,
+OpenAI `prompt_tokens_details.cached_tokens`) — green ≥75%, yellow ≥40%, red
+below. A steady high number is the append-only discipline working; a sudden
+collapse to ~0 means something rewrote early history and silently busted the
+prefix. `/ctx` shows the same fraction per turn in its cache column. At
+`NX_AUTOCOMPRESS_PERCENT` (default 85%) of the window, older
 turns fold into a summary automatically — see `/autocompress`.
 
 ### Built-in sources
@@ -395,7 +401,10 @@ commands remain for distilling a whole session at once.
 
 nx logs token usage (input/output/cache-read/reasoning, per the OpenAI usage
 convention, with a llama.cpp `timings` and a client-side character-estimate
-fallback) into each session's JSON, always on. Set `NX_METRICS_URL` to also
+fallback) into each session's JSON, always on. The cache-read numbers also
+surface live: `cached: N%` in the per-turn stats footer and a per-turn cache
+column in `/ctx` (approximate alignment — one row per message, one entry per
+model call). Set `NX_METRICS_URL` to also
 POST cumulative totals to a dashboard after each turn (fire-and-forget,
 disables itself on first failure — nothing leaves the machine unless you set
 this).

@@ -67,12 +67,42 @@ def _tokenize_total(messages: list[dict[str, Any]]) -> int | None:
         return None
 
 
+def _cache_hits_by_turn(n_messages: int) -> list[float | None]:
+    """Per-model-call prompt-cache hit fractions for /ctx's cache column.
+
+    Source of truth is the metrics ring buffer (st._METRICS.turns — one entry
+    per settled model call, newest last, capped at 64). Alignment with /ctx's
+    message rows is approximate by nature: several calls can serve one logical
+    turn (tool loops, reasoning retries), and a resumed session replays with
+    no per-call history at all. So the raw series is left-padded with None
+    (turns that predate the buffer → no data) then right-truncated to
+    n_messages. Each /ctx row renders its fraction as `N%` or `—` when the
+    server reported no cache numbers for that call (or there was none).
+    """
+    m = st._METRICS
+    if m is None:
+        return []
+    hits: list[float | None] = []
+    for t in getattr(m, "turns", []) or []:
+        p = int(t.get("prompt_tokens") or 0)
+        c = int(t.get("cache_read_tokens") or 0)
+        hits.append(min(1.0, c / p) if p else None)
+    if not hits:
+        return []
+    if len(hits) < n_messages:
+        hits = [None] * (n_messages - len(hits)) + hits
+    return hits[-n_messages:] if n_messages else []
+
+
 def _messages_token_report(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-message token estimates + role subtotals, for /ctx.
 
     Returns {"rows": [(idx, role, tokens, preview, pinned)], "total_est": int,
-             "total_exact": int|None, "by_role": {role: tokens}}.
-    Indexes are into `messages` itself (what /ctx pin N takes).
+             "total_exact": int|None, "by_role": {role: tokens},
+             "cache": [float|None per row]}.
+    Indexes are into `messages` itself (what /ctx pin N takes). `cache` is the
+    per-call prompt-cache hit fraction aligned to rows (see
+    _cache_hits_by_turn) — empty when nothing has run this session.
     """
     pinned = set(getattr(st, "_CTX_PINNED", []) or [])
     rows = []
@@ -90,7 +120,8 @@ def _messages_token_report(messages: list[dict[str, Any]]) -> dict[str, Any]:
         by_role[role] = by_role.get(role, 0) + t
         total += t
     return {"rows": rows, "total_est": total,
-            "total_exact": _tokenize_total(messages), "by_role": by_role}
+            "total_exact": _tokenize_total(messages), "by_role": by_role,
+            "cache": _cache_hits_by_turn(len(messages))}
 
 
 # --- pinned turns -----------------------------------------------------------

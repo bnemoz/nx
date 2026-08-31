@@ -160,7 +160,8 @@ def _ensure_ctx_probe(src: Any) -> None:
 
 
 def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
-    """Cache the just-seen prompt-token count in st._LAST_PROMPT_TOKENS.
+    """Cache the just-seen prompt-token count in st._LAST_PROMPT_TOKENS and the
+    prompt-cache hit fraction in st._LAST_CACHE_HIT.
 
     Split out of _print_stats_footer so it can run on EVERY settled stream —
     including the loop_cut give-up paths (collapse / exhausted reasoning-stall
@@ -169,12 +170,39 @@ def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
     left _maybe_autocompress() checking a stale, smaller token count right when
     autocompress was most needed.
     """
+    prompt_n = 0
+    cache_n = 0
     if timings and timings.get("predicted_n"):
-        prompt_n = timings.get("prompt_n", 0)
-        if prompt_n:
-            st._LAST_PROMPT_TOKENS = prompt_n
+        prompt_n = int(timings.get("prompt_n") or 0)
+        cache_n = int(timings.get("cache_n") or 0)
     elif usage and (usage.prompt_tokens or 0):
-        st._LAST_PROMPT_TOKENS = usage.prompt_tokens
+        prompt_n = int(usage.prompt_tokens or 0)
+        ptd = getattr(usage, "prompt_tokens_details", None)
+        cache_n = int(getattr(ptd, "cached_tokens", 0) or 0) if ptd else 0
+    if prompt_n:
+        st._LAST_PROMPT_TOKENS = prompt_n
+        # Fraction of the prompt served from the server's KV/prompt cache.
+        # A steady high value here is the regression signal for append-only
+        # discipline (memory_write cache keys, /undo-style message edits): a
+        # silent prefix bust shows up as this collapsing to ~0.
+        st._LAST_CACHE_HIT = min(1.0, cache_n / prompt_n) if cache_n else 0.0
+
+
+def _cache_hit_field(hit: Optional[float]) -> str:
+    """The colored `cached: N%` field for the stats footer. Hit-rate color:
+    green at/above 75%, yellow at/above 40%, red below — a cold (first-turn)
+    or busted prefix is exactly what you want to notice. None (server doesn't
+    report cache numbers) renders nothing."""
+    if hit is None:
+        return ""
+    pct = hit * 100.0
+    if pct >= 75:
+        color = C.GREEN
+    elif pct >= 40:
+        color = C.WARNING
+    else:
+        color = C.ERROR
+    return f"{color}{pct:.0f}%{RESET}{DIM} cached"
 
 
 def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
@@ -197,6 +225,9 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
         if st.MODEL:
             parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
+        cached = _cache_hit_field(st._LAST_CACHE_HIT)
+        if cached:
+            parts.append(cached)
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
@@ -210,6 +241,9 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
         if st.MODEL:
             parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
+        cached = _cache_hit_field(st._LAST_CACHE_HIT)
+        if cached:
+            parts.append(cached)
         if t_first:
             parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")

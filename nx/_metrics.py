@@ -124,6 +124,11 @@ def _record_usage(
         ))
 
 
+# Cap on the per-turn ring buffer _Metrics keeps for /ctx's cache column.
+# /ctx shows at most a dozen rows anyway; 64 turns of history is plenty.
+_TURN_RING_MAX = 64
+
+
 class _Metrics:
     """Cumulative token usage for the current session, plus an optional push.
 
@@ -153,6 +158,11 @@ class _Metrics:
         self.cache_read_tokens = 0
         self.reasoning_tokens = 0
         self.api_calls = 0
+        # Per-call ring buffer (newest last, capped) for /ctx's per-turn
+        # cache-read column: each entry is one settled model call with its
+        # prompt total (input + cache_read, per the OpenAI convention where
+        # input EXCLUDES cache) and the cached portion the server reported.
+        self.turns: list[dict[str, int]] = []
         # Per-source scoreboard for /cost: source name → totals dict. A /source
         # switch mid-session is exactly the comparison /cost exists for (local
         # vs hosted on the same task), so usage is bucketed by the ACTIVE
@@ -170,6 +180,12 @@ class _Metrics:
         self.cache_read_tokens += delta.get("cache_read_tokens") or 0
         self.reasoning_tokens += delta.get("reasoning_tokens") or 0
         self.api_calls += 1
+        self.turns.append({
+            "prompt_tokens": (delta.get("input_tokens") or 0)
+                              + (delta.get("cache_read_tokens") or 0),
+            "cache_read_tokens": delta.get("cache_read_tokens") or 0,
+        })
+        del self.turns[:-_TURN_RING_MAX]
         src = st.ACTIVE.name if st.ACTIVE is not None else (self.source or "unknown")
         bucket = self.by_source.setdefault(src, {
             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
