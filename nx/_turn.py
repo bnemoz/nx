@@ -218,13 +218,34 @@ def _cache_hit_field(hit: Optional[float]) -> str:
     return f"{color}{pct:.0f}%{RESET}{DIM} cached"
 
 
+def _tps_field(tps: float, trusted: bool) -> str:
+    """The colored `tok/s` footer field. Server-reported paces (llama.cpp
+    timings) render bare; client-side estimates render with a `~` whenever the
+    decode window was too short to trust, because five decimals of precision
+    on a 0.1s span is a lie about noise, not a measurement."""
+    num = f"{C.STATUS_BAR}~{tps:5.1f}" if not trusted else f"{C.STATUS_BAR}{tps:5.1f}"
+    return f"{num}{RESET}{DIM} tok/s"
+
+
+def _window_tps(gen_n: float, window: float) -> float:
+    """gen_n tokens over a decode window, 0.0-safe."""
+    return gen_n / window if window > 0 else 0.0
+
+
 def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
-                         elapsed: float, text: str, tcs: dict, messages: Optional[list[Message]] = None) -> None:
+                         elapsed: float, text: str, tcs: dict, messages: Optional[list[Message]] = None,
+                         parser: Optional[Any] = None) -> None:
     """Render the per-turn stats footer.
 
-    Prefers llama.cpp `timings` (real tok/s) when present; falls back to the
-    standard streaming `usage` object (OpenAI/Z.ai); then to a char-based
-    estimate; then to wall-clock only.
+    Prefers llama.cpp `timings` (server-measured, real tok/s) when present;
+    falls back to the standard streaming `usage` object (OpenAI/Z.ai/vLLM)
+    divided by the client-side generation window (parser.gen_window(): the
+    first→last token span, NOT wall-clock — wall-clock includes the prefill
+    head and the render/teardown tail, which is what made short turns and
+    just-read-a-file turns swing wildly); then to a char-based estimate; then
+    to wall-clock only. Untrustworthy windows (below _stream_parse's
+    _TPS_TRUST_WINDOW) render with a `~` so a burst-delivered short generation
+    doesn't masquerade as a precise measurement.
     Prompt-token caching itself lives in _capture_last_prompt_tokens(), called
     separately so it also runs on turns that never reach this footer.
     """
@@ -235,7 +256,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         ctx = _ctx_field(prompt_n)
         prompt_ms = timings.get("prompt_ms", 0)
         ttft = (prompt_ms / 1000.0) if prompt_ms else t_first
-        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
+        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", _tps_field(tps, True), ctx]
         if st.MODEL:
             parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
         cached = _cache_hit_field(st._LAST_CACHE_HIT)
@@ -248,10 +269,11 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0
         prompt_n = usage.prompt_tokens or 0
-        gen_elapsed = elapsed - t_first if t_first else elapsed
-        tps = gen_n / gen_elapsed if gen_elapsed > 0 else 0
+        window, trusted = (parser.gen_window(elapsed) if parser is not None
+                           else (max(0.0, (elapsed - t_first) if t_first else elapsed), False))
         ctx = _ctx_field(prompt_n)
-        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s", ctx]
+        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok",
+                 _tps_field(_window_tps(gen_n, window), trusted), ctx]
         if st.MODEL:
             parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
         cached = _cache_hit_field(st._LAST_CACHE_HIT)
@@ -263,11 +285,12 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
     elif streamed_chars > 0:
         gen_n = max(1, streamed_chars // 4)
-        gen_elapsed = elapsed - t_first if t_first else elapsed
-        tps = gen_n / gen_elapsed if gen_elapsed > 0 else 0
-        print(f"{DIM}  └ ≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok · "
-              f"{C.STATUS_BAR}{tps:5.1f}{RESET}{DIM} tok/s · "
-              f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall{RESET}")
+        window, trusted = (parser.gen_window(elapsed) if parser is not None
+                           else (max(0.0, (elapsed - t_first) if t_first else elapsed), False))
+        parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
+                 _tps_field(_window_tps(gen_n, window), trusted),
+                 f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall"]
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
     elif text or tcs:
         print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}")
 
@@ -988,13 +1011,15 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             parser.reasoning_only_chars, parser.reasoning_parts,
             malformed_stream_cut_count)
 
-    # stats footer — prefer llama.cpp timings if present; otherwise fall back
-    # to the standard streaming `usage` object (OpenAI, Z.ai, etc.); otherwise
-    # fall back to wall-clock only. TTFT (time to first token) is shown when
-    # available — for local it comes from llama.cpp timings, for remote we
-    # measure it client-side.
+    # stats footer — prefer llama.cpp timings if present (server-measured tok/s);
+    # otherwise divide the server's completion_tokens by the client-side
+    # generation window (parser.gen_window(): first→last token span, not
+    # wall-clock — the prefill head + render/teardown tail used to be included
+    # and made short turns and just-read-a-file turns swing wildly). TTFT is
+    # shown when available — for local it comes from llama.cpp timings, for
+    # remote we measure it client-side.
     _print_stats_footer(parser.usage, parser.timings, parser.streamed_chars, parser.t_first,
-                         elapsed, text, parser.tcs, messages=messages)
+                         elapsed, text, parser.tcs, messages=messages, parser=parser)
 
     if forced_final and parser.tcs:
         return _handle_forced_final_tool_call(messages, parser.tcs)

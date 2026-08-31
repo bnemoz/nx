@@ -28,6 +28,13 @@ from ._metrics import _abbr, _precise_abbr
 from . import _state as st
 from . import REASONING_ONLY_TIME_LIMIT
 
+# Below this many seconds of first→last-token span, a client-side tok/s figure
+# is pacing-free guessing (the whole generation can arrive in one or two SSE
+# reads) — the footer marks it approximate instead of asserting five decimals
+# of precision it doesn't have. Not an NX_* tunable: nothing here tunes it
+# usefully, it's just the resolution boundary of what the client can observe.
+_TPS_TRUST_WINDOW = 0.5
+
 
 def _fmt_think_duration(elapsed: float) -> str:
     """ms below 1s, seconds below 1min, else 'Xmin Ys'."""
@@ -79,6 +86,12 @@ class StreamParser:
     `process(chunk)` returns True when the stream should be cut short (a
     collapse was detected) — the caller is responsible for closing/breaking
     out of the actual SSE iterator, since only it holds that handle.
+
+    Token-arrival timestamps (t_first/t_last/t_usage, all relative to the
+    same t0 as TTFT) back gen_window(): a tok/s figure computed from the
+    first→last token span instead of wall-clock, so the head (connection +
+    prefill) and the tail (final renders, usage computation, teardown)
+    don't masquerade as slow decoding.
     """
 
     def __init__(self, say_console: Console, t0: float) -> None:
@@ -93,7 +106,9 @@ class StreamParser:
         self.timings = None
         self.usage = None
         self.streamed_chars = 0
-        self.t_first: float | None = None
+        self.t_first: float | None = None  # first token-bearing delta, rel. to _t0
+        self.t_last: float | None = None   # last token-bearing delta, rel. to _t0
+        self.t_usage: float | None = None  # the usage-bearing chunk, rel. to _t0
         self.loop_cut = False
         self.reasoning_only_chars = 0
         self.reasoning_only_start: float | None = None
@@ -150,12 +165,46 @@ class StreamParser:
             print(f"{DIM}  (thought for {dur}){RESET}")
         self.think_start = None
 
+    def gen_window(self, elapsed_total: float) -> tuple[float, bool]:
+        """Best client-side estimate of the generation-only window, in seconds,
+        as (window, trusted) for a tok/s figure.
+
+        The window runs first→last token-bearing delta — it excludes the TTFT
+        head (connection, queueing, prompt prefill) and the tail (final Rich
+        render, server usage computation, HTTP teardown) that `elapsed_total`
+        is stuck with, because `elapsed` is taken after all of those. On a
+        turn whose prompt just grew by a freshly-read file, the head alone can
+        dwarf the decode, and on a short tool-call turn the tail can dwarf it
+        from the other side — either one turns tok/s into noise. When the
+        usage chunk (some servers send it as a separate final event) lands
+        after the last delta, it extends the window so deferred usage isn't
+        silently dropped either.
+
+        trusted=False means the window is below the display floor
+        (_TPS_TRUST_WINDOW above): a whole short generation can arrive in
+        one or two SSE reads on a bursty client or a batching/speculating
+        server, and no client-side math can recover pacing it never saw.
+        Callers should still render a number but mark it approximate.
+        """
+        if self.t_first is None or self.t_last is None:
+            # No token ever arrived (empty turn) — nothing was paced.
+            return max(elapsed_total, 0.0), False
+        window = self.t_last - self.t_first
+        if self.t_usage is not None and self.t_usage - self.t_first > window:
+            window = self.t_usage - self.t_first
+        if window <= 0:
+            # Entire generation in a single event: zero pacing information.
+            return 0.0, False
+        return window, window >= _TPS_TRUST_WINDOW
+
     # --- per-chunk entry point ----------------------------------------------
     def process(self, chunk: Any) -> bool:
         """Consume one SSE chunk. Returns True if the stream should be cut
         (self.loop_cut is also set in that case)."""
+        now = time.time() - self._t0  # one clock read per chunk
         if chunk.usage:
             self.usage = chunk.usage
+            self.t_usage = now
         if not chunk.choices:
             return False
         choice = chunk.choices[0]
@@ -167,8 +216,12 @@ class StreamParser:
         d_extra = getattr(d, "model_extra", None) or {}
         rc = (getattr(d, "reasoning_content", None) or
               d_extra.get("reasoning_content") or d_extra.get("reasoning"))
-        if self.t_first is None and (d.content or d.tool_calls or rc):
-            self.t_first = time.time() - self._t0
+        if d.content or d.tool_calls or rc:
+            # Token-arrival bookkeeping for gen_window(): first sets TTFT,
+            # every one paces the decode window.
+            if self.t_first is None:
+                self.t_first = now
+            self.t_last = now
         extra = getattr(chunk, "model_extra", None) or {}
         if "timings" in extra:
             self.timings = extra["timings"]

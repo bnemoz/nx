@@ -425,6 +425,16 @@ POST cumulative totals to a dashboard after each turn (fire-and-forget,
 disables itself on first failure — nothing leaves the machine unless you set
 this).
 
+The footer's `tok/s` measures generation pace, not whole-turn wall-clock:
+client-side it divides the server's `completion_tokens` by the decode window
+(first→last token arrival, so the prefill head — huge on a turn that just
+read a big file into the prompt — and the render/teardown tail are excluded).
+llama.cpp servers report `timings.predicted_per_second` directly and that
+server-measured figure is shown as-is. When the window is under ~0.5s (a
+short tool call can arrive in one or two SSE reads) the figure is
+pacing-free guessing and renders as `~N.N tok/s` — treat those as order-of-
+magnitude only.
+
 ## Architecture
 
 `nx/` is a small package (`__init__.py` + focused submodules like `_turn.py`,
