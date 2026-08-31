@@ -45,7 +45,6 @@ from . import (
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
 )
 from concurrent.futures import ThreadPoolExecutor
-import os
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
 
@@ -343,7 +342,8 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
         cache_path = args.get("path", ".")
         if isinstance(cache_path, list):
             cache_path = cache_path[0] if cache_path else "."
-        st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(cache_path))
+        from ._tool_cache import cache_store_entry
+        st._TOOL_RESULT_CACHE[cache_key] = cache_store_entry(result, cache_path)
 
     with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
         list(ex.map(_run, jobs))

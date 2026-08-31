@@ -188,11 +188,14 @@ _NATIVE_TOOL_CALLS_CONFIRMED: bool = False
 _UNDO_STACK: list["Checkpoint"] = []
 
 # --- read-only tool result cache ----------------------------------------------
-# Keyed by (tool name, json.dumps(sorted args)) -> tool result string. Populated
+# Keyed by (tool name, json.dumps(sorted args)) -> _tool_cache._CacheEntry
+# (result, abspath, st_mtime_ns of the backing file at read time). Populated
 # and consulted only by run_tool() for idempotent reads (read_file/list_dir);
-# invalidated per-path on write_file/edit_file/multi_edit and cleared entirely
-# on run_bash (which can touch anything). See run_tool()'s docstring note.
-_TOOL_RESULT_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
+# a hit re-stats and is valid while the mtime is unchanged. Invalidated
+# per-path on write_file/edit_file/multi_edit; after run_bash only entries
+# whose backing file changed are dropped (was: whole-cache clear). See
+# _tool_cache.py and run_tool().
+_TOOL_RESULT_CACHE: dict = {}
 
 # --- todo list -----------------------------------------------------------------
 # Whole-list state for the todo_write tool (see _todo.py). Rewritten wholesale

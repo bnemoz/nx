@@ -19,6 +19,7 @@ from typing import Any
 
 from . import _state as st
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
+from ._tool_cache import cache_store_entry, cache_valid, drop_changed_entries
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
@@ -241,8 +242,8 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
         norm = os.path.abspath(path)
     except (TypeError, ValueError):
         return
-    for key, (_result, cached_path) in list(st._TOOL_RESULT_CACHE.items()):
-        if cached_path == norm:
+    for key, entry in list(st._TOOL_RESULT_CACHE.items()):
+        if entry.path == norm:
             del st._TOOL_RESULT_CACHE[key]
 
 
@@ -281,8 +282,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if name in _CACHEABLE_READ_TOOLS:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
-        if cached is not None:
-            return cached[0]
+        if cached is not None and cache_valid(cached):
+            return cached.result
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.
     undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit", "delete_file") else None
@@ -388,14 +389,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         cache_path = args.get("path", ".")
         if isinstance(cache_path, list):
             cache_path = cache_path[0] if cache_path else "."
-        st._TOOL_RESULT_CACHE[cache_key] = (result, os.path.abspath(cache_path))
+        st._TOOL_RESULT_CACHE[cache_key] = cache_store_entry(result, cache_path)
     elif name in ("write_file", "edit_file", "multi_edit", "delete_file") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
         if result != "DENIED by user":
             _undo_push(name, [undo_snapshot])
     elif name == "run_bash":
-        # bash can touch any path; cheaper to drop the whole cache than to parse the command.
-        st._TOOL_RESULT_CACHE.clear()
+        # bash can touch any path; entries whose backing file is unchanged
+        # (re-stat) stay valid — only mtime-changed/vanished entries are dropped.
+        drop_changed_entries(st._TOOL_RESULT_CACHE)
     elif name == "memory_write" and not result.startswith("ERROR") and result != "DENIED by user":
         # A new memory invalidates any cached memory_search index/snippets.
         for k in [k for k in st._TOOL_RESULT_CACHE if k[0] == "memory_search"]:
