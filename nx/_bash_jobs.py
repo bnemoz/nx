@@ -329,7 +329,17 @@ def _infer_timeout_from_sleep(command: str, default: int) -> int:
     block (the shell waits, then cats) but is itself launched detached (setsid), so
     it gets backgrounded after ~3 s just like anything else.  By recognising
     the sleep we make the "obvious" pattern work again.
+
+    The inferred window is capped at NX_BASH_SLEEP_CAP seconds (default 3600):
+    a sleep beyond the cap no longer blocks the turn — the command backgrounds
+    after the capped window and the caller gets a PID + log path, which is the
+    correct shape for an hour-long wait anyway.
     """
+    cap = _env_int("NX_BASH_SLEEP_CAP", 3600)
+    if cap <= 0:
+        # 0/negative = off: restore the old unbounded window (escape hatch for
+        # someone who really wants `sleep 1d && …` to block for a day).
+        cap = 999999999
     max_sleep = 0.0
     # `sleep` accepts an integer number of seconds, a fractional one (GNU/BSD
     # both take `sleep 0.5`), or a suffixed form (GNU coreutils ≥8.4: `s`, `m`,
@@ -349,7 +359,7 @@ def _infer_timeout_from_sleep(command: str, default: int) -> int:
         if n > max_sleep:
             max_sleep = n
     if max_sleep > 0:
-        return int(max_sleep) + 10
+        return int(min(max_sleep, cap)) + 10
     return default
 
 
@@ -413,7 +423,8 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     nx to wait synchronously (e.g. ``timeout=35`` for a ``sleep 30``
     command).  As a convenience, if your command *does* start with
     ``sleep N …`` the tool auto-extends its poll window to ``N+10`` s
-    so the "obvious" pattern still works.
+    so the "obvious" pattern still works (capped at NX_BASH_SLEEP_CAP,
+    default 3600 s — a longer sleep just backgrounds with a log path).
 
     Use ``timeout=0`` to wait *indefinitely* (the tool blocks until the
     command completes).  To wait for an **already-backgrounded** command,
@@ -432,8 +443,11 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
 
     With NX_BASH_PROMPT_SECRETS=1, a command that looks like it carries a
     credential (sk-…, ghp_…, AKIA…, a PEM block, …) always prompts, even in
-    YOLO mode — the prompt is the last chance to catch a secret before it
+    YOLO mode -- the prompt is the last chance to catch a secret before it
     lands in a log, a file, or a remote host.
+
+    NX_BASH_SLEEP_CAP (default 3600) bounds the sleep-inferred poll window so
+    "sleep 1d && cmd" cannot block the turn for a day; 0 disables the cap.
     """
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
     if secret is not None:

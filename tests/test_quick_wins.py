@@ -67,10 +67,11 @@ def test_sleep_inference_fractional_and_suffixed(nx_fresh):
     assert f("sleep 0.5; ls", 3) == 10
     # suffixed durations (GNU sleep) used to fall through too
     assert f("sleep 2m", 3) == 130
-    assert f("sleep 1h30m && echo done", 3) == 5410
+    # over-1h waits clamp to the default NX_BASH_SLEEP_CAP (3600) + slack
+    assert f("sleep 1h30m && echo done", 3) == 3610
     assert f("sleep 1h", 3) == 3610
     # trailing bare number is seconds (GNU semantics: 1h30 = 1h + 30s)
-    assert f("sleep 1h30", 3) == 3640
+    assert f("sleep 1h30", 3) == 3610
     # unchanged behaviors
     assert f("ls && sleep 5", 3) == 15
     assert f("echo x", 3) == 3
@@ -80,6 +81,21 @@ def test_sleep_inference_fractional_and_suffixed(nx_fresh):
     # non-duration junk still falls back (2M=2 megabytes is not a sleep unit)
     assert f("sleep 2M", 3) == 3
     assert f("sleep 1x", 3) == 3
+
+
+def test_sleep_inference_cap(nx_fresh, monkeypatch):
+    from nx._bash_jobs import _infer_timeout_from_sleep as f
+    monkeypatch.setenv("NX_BASH_SLEEP_CAP", "120")
+    # sleeps under the cap keep the old inferred window
+    assert f("sleep 30 && cat x", 3) == 40
+    # at the cap: cap + slack
+    assert f("sleep 5m", 3) == 130
+    # beyond the cap the turn no longer blocks for the full wait
+    for cmd in ("sleep 1h", "sleep 1d", "sleep 1h30m"):
+        assert f(cmd, 3) == 130
+    # cap = 0 disables the ceiling (old unbounded behavior)
+    monkeypatch.setenv("NX_BASH_SLEEP_CAP", "0")
+    assert f("sleep 1d", 3) == 86410
 
 
 def test_sleep_seconds_token_parser(nx_fresh):
