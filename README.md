@@ -152,7 +152,7 @@ sessions and exits without entering the REPL.
 | env var | what it does |
 | --- | --- |
 | `NX_APPROVAL` | persistent default approval mode: `all`/`low`/`medium`/`high`/`yolo` (`/approval set-default <level>` rewrites it from the REPL) |
-| `NX_ALLOWED_FILE` | the approval allowlist JSON (default `~/.nx/allowed.json`); rules are saved with `A` at an approval prompt or `/approval allow` and auto-allow matching actions before the risk classifier runs |
+| `NX_ALLOWED_FILE` | the approval allowlist JSON (default `~/.nx/allowed.json`); rules are saved with `A` at an approval prompt or `/approval allow` and auto-allow matching actions before the risk classifier runs — bash actions containing shell metacharacters (`&&`, `|`, `;`, redirects, …) always fall through to the normal risk check |
 | `NX_BASE_URL` / `NX_MODEL` / `NX_API_KEY` | single-source config |
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (`NX_SOURCE_<NAME>_MODELS` pins a source's model-id dropdown list when its `GET /v1/models` is stale) |
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
@@ -340,6 +340,10 @@ denies, **a** saves a persistent allow rule for this action's shape (an
 prompt blesses future pytest runs — reviewed with `/approval allow list`),
 **Esc** stops the turn and drops back to the prompt. Saved rules are checked
 before the risk classifier, so an allowed action costs no model round-trip.
+A saved rule never auto-allows a bash command containing shell control
+characters (`&&`, `;`, `|`, redirection, `$(…)`, globs, …) — such chains fall
+through to the normal risk check and prompt even when the prefix matches, so
+a blessed `run: pytest*` cannot be stretched into `run: pytest && <anything>`.
 
 Read-only tool calls in an all-read-only turn (e.g. three `read_file` calls
 plus a `search_files`) execute concurrently; anything mutating or
