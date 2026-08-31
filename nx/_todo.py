@@ -75,3 +75,20 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
         cleaned.append({"text": str(item.get("text", "")), "status": status})
     st._TODOS = cleaned
     return render_todos(cleaned)
+
+
+def _latest_todo_turn(body: list[dict[str, Any]]) -> int | None:
+    """Index of the latest todo_write call+result pair in `body` (a foldable
+    head slice, no system message), or None.
+
+    Returns the index of the assistant turn that called todo_write. compress()
+    expands pins to complete tool_call/tool-result pairs, so pinning this one
+    index carries the rendered list result along too — re-injecting the most
+    recent todo_write turn verbatim into the kept tail after every fold, so a
+    mid-flight multi-step plan survives auto-compression.
+    """
+    for i in range(len(body) - 1, -1, -1):
+        for tc in body[i].get("tool_calls") or []:
+            if isinstance(tc, dict) and (tc.get("function") or {}).get("name") == "todo_write":
+                return i
+    return None

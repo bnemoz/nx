@@ -222,6 +222,78 @@ assert fired is False, "should not fire with negative prompt tokens"
 print("  zero/negative prompt tokens → no fire → PASS")
 
 # ---------------------------------------------------------------------------
+# 2b. Auto-pin: the latest todo_write turn survives a fold verbatim.
+#     todo_write output lives in the message body, so without this a
+#     compression landing mid multi-step task folds the plan away and the
+#     model re-derives or forgets it. compress() re-injects the most recent
+#     todo_write call+result pair into the kept tail via the /ctx pin
+#     machinery.
+# ---------------------------------------------------------------------------
+print("TEST 2b: latest todo_write turn auto-pinned across a fold")
+
+m.compress = _real_compress  # Test 3 leaves a throw-stub installed
+m.ACTIVE = None  # and a _FakeSource without extra_request_kwargs()
+
+import nx._todo as _todo_mod  # noqa: E402
+_real_todo_fn = _todo_mod._latest_todo_turn
+
+msgs_todo = [{"role": "system", "content": m.SYSTEM}]
+for i in range(15):
+    msgs_todo.append({"role": "user", "content": f"turn {i}"})
+    if i == 3:  # a todo_write call + its rendered-list result, mid-history
+        msgs_todo.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-todo-1", "type": "function", "function": {
+                "name": "todo_write", "arguments": '{"todos": []}'}}]})
+        msgs_todo.append({"role": "tool", "tool_call_id": "call-todo-1",
+                          "content": "[ ] step one\n[~] step two\n[ ] step three"})
+    else:
+        msgs_todo.append({"role": "assistant", "content": f"reply {i}"})
+# 31 body messages (14 plain turns + one call+result pair); manual keep=2 →
+# tail = last 2 (user+assistant of turn 14), so the todo pair (body idx 7,8)
+# lands in the foldable head.
+result = m.compress(msgs_todo)
+assert result is not None
+kept_n, summarized_n, _ = result
+# pair moved into the tail → tail = 2 verbatim + 2 pinned
+assert kept_n == 4, f"todo pair should be re-injected into tail (2+2), got {kept_n}"
+assert summarized_n == 31 - 4, f"expected 27 summarized, got {summarized_n}"
+# verbatim: the todo_write call and its full rendered list survive the fold
+tail_pair = msgs_todo[-2:]
+assert tail_pair[0].get("tool_calls") and \
+    tail_pair[0]["tool_calls"][0]["function"]["name"] == "todo_write", tail_pair[0]
+assert "[~] step two" in tail_pair[1]["content"], tail_pair[1]
+print(f"  todo pair re-injected verbatim (kept {kept_n}, summarized {summarized_n}) → PASS")
+
+# A todo_write already inside the kept tail is left alone (no duplicate pin,
+# no pin-skipped warning).
+msgs_todo_tail = [{"role": "system", "content": m.SYSTEM}]
+for i in range(15):
+    msgs_todo_tail.append({"role": "user", "content": f"turn {i}"})
+    if i == 14:  # in the last 2 body messages → stays verbatim on its own
+        msgs_todo_tail.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-todo-2", "type": "function", "function": {
+                "name": "todo_write", "arguments": '{"todos": []}'}}]})
+        msgs_todo_tail.append({"role": "tool", "tool_call_id": "call-todo-2",
+                               "content": "[ ] only step"})
+    else:
+        msgs_todo_tail.append({"role": "assistant", "content": f"reply {i}"})
+result = m.compress(msgs_todo_tail)
+assert result is not None
+kept_n, summarized_n, _ = result
+assert kept_n == 2, f"tail-dwelling todo pair should not be re-pinned, got kept={kept_n}"
+assert msgs_todo_tail[-2]["tool_calls"][0]["function"]["name"] == "todo_write"
+print("  todo_write already in the kept tail → untouched (no double pin) → PASS")
+
+# No todo_write in the foldable head → nothing pinned, counts unchanged.
+msgs_no_todo = [{"role": "system", "content": m.SYSTEM}] + \
+    [{"role": "user" if j % 2 == 0 else "assistant", "content": f"turn {j // 2}"}
+     for j in range(60)]
+result = m.compress(msgs_no_todo)
+kept_n, summarized_n, _ = result
+assert kept_n == m.COMPRESS_KEEP, f"no todo → plain manual keep, got {kept_n}"
+print("  no todo_write anywhere → keep count unchanged → PASS")
+
+# ---------------------------------------------------------------------------
 # 4. /autocompress command: show, set, off, on, invalid.
 # ---------------------------------------------------------------------------
 print("TEST 4: /autocompress command parsing")

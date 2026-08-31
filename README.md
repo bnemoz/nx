@@ -270,7 +270,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive) |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown; pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
-| `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
+| `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold; every fold auto-pins the latest `todo_write` turn so the live task plan survives compression |
 | `/verify [cmd\|off\|run]` | show/set/clear or force-run the post-edit verify command (`NX_VERIFY_CMD`) — when set, every edited `.py` also gets an in-process `ast.parse` whose verdict rides on the edit's own tool result |
 | `/undo` | revert the last write/edit (LIFO) |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |

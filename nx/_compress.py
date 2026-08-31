@@ -24,6 +24,7 @@ from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
 from ._sessions_io import _prune_empty_assistant_messages, _drop_leading_dangling_tool_turns
 from ._ctxreport import _pinned_indexes
+from ._todo import _latest_todo_turn
 from ._metrics import _abbr, _record_usage
 from ._grammar import build_tool_call_grammar
 from . import _state as st
@@ -364,6 +365,12 @@ def compress(
         summarized_n += n_dropped
     tail = safe_tail
 
+    # Auto-pin the latest todo_write turn (if it's about to be folded): the
+    # todo list is the model's live task plan, so losing it mid multi-step
+    # work makes the model re-derive or forget what it was doing. Reuses the
+    # /ctx pin machinery (below) instead of a separate splice path.
+    todo_pin = _latest_todo_turn(head)
+
     # Pinned turns (/ctx pin N) survive every fold: pinned messages move into
     # the kept tail (appended in index order, AFTER the verbatim tail) instead
     # of being summarized away. A chat template can't render a tool result
@@ -372,6 +379,9 @@ def compress(
     # an incomplete pair is dropped from the pins with a note rather than
     # corrupting the tail.
     pins = _pinned_indexes()
+    if todo_pin is not None:
+        # pins are messages-indexes; todo_pin is a body index → shift it
+        pins = set(pins) | {todo_pin + (1 if sys_msg else 0)}
     if pins:
         body_start = 1 if sys_msg else 0  # index 0 of `messages` == system
         split = len(body) - keep           # body indexes < split are foldable
