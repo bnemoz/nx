@@ -576,7 +576,7 @@ from ._compress import (
     RECOVERY_MIN_P, RECOVERY_REPEAT_PENALTY, RECOVERY_REPEAT_LAST_N,
     RECOVERY_DRY_MULTIPLIER, RECOVERY_DRY_BASE, RECOVERY_DRY_ALLOWED_LENGTH,
     RECOVERY_DRY_SEQUENCE_BREAKERS, _recovery_sampling_opts, open_stream,
-    compress, _maybe_autocompress,
+    compress, _maybe_autocompress, _compress_for_overrun,
 )
 
 

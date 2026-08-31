@@ -103,7 +103,10 @@ below. A steady high number is the append-only discipline working; a sudden
 collapse to ~0 means something rewrote early history and silently busted the
 prefix. `/ctx` shows the same fraction per turn in its cache column. At
 `NX_AUTOCOMPRESS_PERCENT` (default 85%) of the window, older
-turns fold into a summary automatically — see `/autocompress`.
+turns fold into a summary automatically — see `/autocompress`. The guard runs
+inside long agentic tasks too, not just between user prompts, and if a server
+still refuses a request with a context-length 400, nx folds the older turns
+once and retries the same turn instead of reporting the task "done".
 
 ### Built-in sources
 
@@ -180,7 +183,7 @@ sessions and exits without entering the REPL.
 | `NX_BASH_MAX_SECONDS` | watchdog: reap a backgrounded `run_bash` job after N seconds (SIGTERM→SIGKILL; default 0 = off) |
 | `NX_BASH_PROMPT_SECRETS` | `1` forces the approval prompt when a `run_bash` command looks like it carries a credential (sk-/ghp_/AKIA/PEM…), even in yolo |
 | `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
-| `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
+| `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) — checked after every settled model turn, including mid-task; a context-length 400 folds once and retries the turn |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |

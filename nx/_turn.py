@@ -89,6 +89,7 @@ TURN_ESC = "esc"  # user pressed Esc at an approval prompt → drop to chat inpu
 TURN_REDIRECT = "redirect"  # user typed+submitted a new instruction right after Esc
 TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unparseable → one corrective retry
 TURN_API_ERROR = "api_error"  # request hard-failed before any chunk (endpoint down, 4xx/5xx) — never retried
+TURN_CONTEXT_OVERRUN = "context_overrun"  # 400: prompt exceeded the context window — recoverable via one compress+retry
 
 
 def _ctx_field(prompt_n: int) -> str:
@@ -876,6 +877,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # we start the clock, making TTFT look implausibly tiny.
     t0 = time.time()
     st._LAST_API_ERROR = None  # cleared before every open; set by open_stream() on a terminal failure
+    st._LAST_CONTEXT_OVERRUN = None  # ditto, for the context-length-400 branch of open_stream()
     quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"
@@ -908,6 +910,14 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     if stream is None:
         if not quiet:
             spinner.stop()
+        if st._LAST_CONTEXT_OVERRUN:
+            # Recoverable: _run_model_turn_loop() folds the older turns into a
+            # summary and re-runs this turn. Not an error line — say what is
+            # happening (once) so a long task doesn't just pause silently.
+            if not quiet:
+                print(f"{C.WARNING}  ✂ context window full — compressing and retrying"
+                      f"{RESET}")
+            return TURN_CONTEXT_OVERRUN
         if st._LAST_API_ERROR:
             # open_stream() already printed the friendly message; interactive
             # mode keeps the REPL alive below, but headless callers must NOT
@@ -1228,6 +1238,8 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     malformed_stream_cuts = 0
     empty_turn_cuts = 0
     malformed_call_cuts = 0
+    context_retries = 0  # compress+retry after a context-window overrun (once)
+    prev_prompt_tokens = -1  # last _LAST_PROMPT_TOKENS this loop has already evaluated
     # Go through the top-level package (not a bare same-module reference) so
     # a test that monkeypatches `nx.model_turn` (to avoid a real model
     # round-trip) takes effect on every call this loop makes.
@@ -1252,6 +1264,25 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input
+        if status == TURN_CONTEXT_OVERRUN:
+            # The server refused the prompt outright with a context-length 400:
+            # nothing was appended to `messages`, so the ONLY way forward is to
+            # shrink them. Fold the older turns into a summary (the same
+            # _drop_leading_dangling_tool_turns safety compress() already
+            # applies keeps the tail template-renderable) and re-run the turn.
+            # Once only: a second refusal means even the folded prompt doesn't
+            # fit (e.g. a task whose tail alone exceeds the window) — report
+            # the failure honestly instead of looping.
+            steps += 1
+            if context_retries < 1 and _m._compress_for_overrun(messages):
+                context_retries += 1
+                prev_prompt_tokens = -1  # the next settled reading is post-fold; re-evaluate
+                continue
+            return {"status": "error",
+                    "error": ("context window overflow: the prompt exceeded the "
+                              f"model's context window and auto-compression "
+                              f"could not free enough room ({st._LAST_CONTEXT_OVERRUN})"),
+                    "turns": steps}
         if status == TURN_API_ERROR:
             # Endpoint unreachable / API rejected the request outright. Unlike
             # every recovery path above this is terminal: the next open would
@@ -1260,6 +1291,21 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             return {"status": "error",
                     "error": f"API request failed: {st._LAST_API_ERROR}",
                     "turns": steps + 1}
+        # --- cheap in-loop context guard -----------------------------------
+        # Autocompression is not only a between-user-turns REPL mechanism:
+        # this loop can run up to MAX_MODEL_TURNS tool iterations, appending
+        # assistant + tool messages every time, with nothing to fold between
+        # them. A fresh prompt-token reading above the AUTOCOMPRESS_PERCENT
+        # threshold folds early — before the next request can be REFUSED with
+        # a 400 (the TURN_CONTEXT_OVERRUN path below). Evaluated only on a
+        # changed reading so a server that reports no usage can't trigger
+        # fold after fold on one stale number; _LAST_PROMPT_TOKENS grows
+        # monotonically here (append-only history), so equal readings mean
+        # no new data arrived.
+        cur_tokens = st._LAST_PROMPT_TOKENS
+        if cur_tokens > 0 and cur_tokens != prev_prompt_tokens:
+            _m._maybe_autocompress(messages, cur_tokens)
+        prev_prompt_tokens = cur_tokens
         if status == TURN_REDIRECT:
             # Esc-then-type: the user already supplied their next instruction
             # (appended to `messages` by model_turn()) — loop straight into
@@ -1323,6 +1369,22 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
                    recovery_sampling=recovery_sampling)
         if on_step is not None:
             on_step()
+        if final_status == TURN_CONTEXT_OVERRUN:
+            # The rescue prompt itself can overflow after a long run. One fold
+            # + retry, then give up honestly rather than mislabel a refused
+            # answer as a completed one.
+            if _m._compress_for_overrun(messages):
+                final_status = _m.model_turn(messages, reasoning_loop_cuts,
+                           malformed_stream_cuts, empty_turn_count=empty_turn_cuts,
+                           forced_final=True, recovery_sampling=recovery_sampling)
+                if on_step is not None:
+                    on_step()
+            if final_status == TURN_CONTEXT_OVERRUN:
+                return {"status": "error",
+                        "error": ("context window overflow: the prompt exceeded the "
+                                  f"model's context window and auto-compression "
+                                  f"could not free enough room ({st._LAST_CONTEXT_OVERRUN})"),
+                        "turns": steps + 1}
         if final_status == TURN_API_ERROR:
             return {"status": "error",
                     "error": f"API request failed: {st._LAST_API_ERROR}",

@@ -215,6 +215,45 @@ def _recovery_sampling_opts() -> dict[str, Any]:
     return opts
 
 
+# Match the context-length rejection wording the startup probe already relies
+# on (_sources._CTX_LIMIT_RE: OpenAI/Together-style "This model's maximum
+# context length is N tokens …"). Lowered/kept broad on purpose: llama.cpp,
+# vLLM and proxies vary the surrounding text ("maximum context length",
+# "context length exceeded", "reduce the length of the messages"); a relaxed
+# pattern over a 400 response is specific enough that false positives are
+# effectively limited to other genuine request-size rejections.
+_CTX_OVERFLOW_RE = re.compile(
+    r"(maximum context length|context length(?:\s+\w+)?\s+(?:is|exceed|exceeded)|"
+    r"reduce the (?:length|size) of)", re.IGNORECASE)
+
+
+def _is_context_overflow_error(e: BaseException) -> bool:
+    """True if exception `e` looks like a context-window-length rejection (an
+    HTTP 400 whose body/message matches the over-limit wording). Needs the
+    APIError.status_code added by nx's own client; any other error shape is
+    not an overrun (returns False → normal terminal-failure handling)."""
+    status = getattr(e, "status_code", None)
+    if not isinstance(status, int) or status != 400:
+        return False
+    text = " ".join(str(x) for x in (
+        getattr(e, "message", ""), getattr(e, "body", ""), str(e)) if x)
+    return bool(_CTX_OVERFLOW_RE.search(text))
+
+
+def _compress_for_overrun(messages: list[dict[str, Any]]) -> bool:
+    """Attempt to free context after a context-length rejection.
+
+    Fold the older turns into a summary (auto=True keeps ~1/3 verbatim) so the
+    SAME task can be retried on the same `messages` list. Returns True iff a
+    fold happened (messages mutated) — the caller retries the open once and
+    falls back to the terminal-error path when it was already tried.
+    """
+    # Via the top-level package so a test stubbing nx.compress takes effect,
+    # mirroring _maybe_autocompress below.
+    import nx as _m
+    return _m.compress(messages, auto=True) is not None
+
+
 def open_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] = TOOLS,
@@ -290,7 +329,15 @@ def open_stream(
             raise  # server unreachable — don't bother retrying without tools
         except httpx.HTTPError:
             raise  # transport failure — retrying without tools won't help
-        except Exception:  # reachable but rejected tools= → text-protocol fallback
+        except Exception as e:  # reachable but rejected tools= → text-protocol fallback
+            # Context-window overrun: the prompt + tools no longer fit. Retrying
+            # without tools (or without extra_body) only shrinks the request by
+            # a few KB of schema — it cannot fit an over-length prompt, and it
+            # would burn seconds on fallback attempts that must also 400.
+            # Signal the caller instead (TURN_CONTEXT_OVERRUN → compress+retry).
+            if _is_context_overflow_error(e):
+                st._LAST_CONTEXT_OVERRUN = str(e)
+                return None
             # If extra_body (e.g. min_p / repeat_penalty / dry_*) is also
             # rejected — vLLM's speculative decoder doesn't support min_p etc. —
             # strip it too.  Try no-tools first, then no-tools + no-extra.
@@ -319,6 +366,12 @@ def open_stream(
             print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — is the server up? "
                   f"Set NX_BASE_URL (and NX_MODEL) to point at it.{RESET}")
     except Exception as e:
+        # A context-length rejection can also surface on a fallback attempt
+        # (no-tools / no-tools-no-extra) or be re-raised by the ladder above
+        # once every level has been tried — same recovery signal as above.
+        if _is_context_overflow_error(e):
+            st._LAST_CONTEXT_OVERRUN = str(e)
+            return None
         st._LAST_API_ERROR = f"{type(e).__name__}: {e}"
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():

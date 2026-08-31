@@ -60,6 +60,16 @@ _LAST_PROMPT_TOKENS: int = 0
 # Cleared by model_turn() before every open and consumed on read.
 _LAST_API_ERROR: str | None = None
 
+# Context-window-overrun marker for the turn path. open_stream() latches the
+# server's verbatim rejection text here when a request is refused with a
+# context-length 400 (instead of latching _LAST_API_ERROR); model_turn() maps
+# that to TURN_CONTEXT_OVERRUN so _run_model_turn_loop() can auto-compress and
+# retry once instead of reporting a terminal error — and, worse, instead of the
+# pre-latch behavior where the failed open looked like a legit empty turn and
+# the long task was reported "done" with nothing done.
+# Cleared by model_turn() before every open and consumed on read.
+_LAST_CONTEXT_OVERRUN: str | None = None
+
 # Last turn's prompt-cache hit fraction (0.0–1.0, or None when the server
 # didn't report cache numbers). Written by _capture_last_prompt_tokens();
 # read by the stats footer and /ctx so the user can see whether the KV/prompt
