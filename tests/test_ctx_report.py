@@ -53,6 +53,39 @@ def test_token_report_shape_and_role_subtotals(nx_fresh):
     assert len(bigs) >= 3
 
 
+def test_total_includes_per_turn_tools_overhead(nx_fresh):
+    """The `tools=` payload is sent on every model call but lives outside the
+    message list — /ctx's total must count it (as its own overhead_est), or
+    the report undercounts the real per-turn floor (the bug where a fresh
+    session showed ~1331 est while --tokens said ~3x that)."""
+    import json as _json
+    from nx._ctxreport import _messages_token_report, _turn_overhead_est, _overhead_lines
+    from nx._dispatch import _active_tools
+    msgs = _msgs(4)
+    rep = _messages_token_report(msgs)
+    tools = _active_tools()
+    assert tools, "no active tool schemas — overhead would be vacuously 0"
+    expected = max(1, len(_json.dumps(tools)) // 4)
+    assert rep["overhead_est"] == expected
+    assert rep["total_est"] == expected + sum(r[2] for r in rep["rows"])
+    # by_role stays messages-only: the overhead has no message row
+    assert sum(rep["by_role"].values()) == sum(r[2] for r in rep["rows"]) < rep["total_est"]
+    # the footer names the overhead so "by role" summing low isn't confusing
+    lines = _overhead_lines(rep["total_est"], rep["overhead_est"])
+    assert len(lines) == 1 and "tools schema" in lines[0]
+    assert _overhead_lines(rep["total_est"], 0) == []
+
+
+def test_ctx_report_renders_overhead_line(nx_fresh, capsys):
+    from nx._repl_settings_cmds import _cmd_ctx
+    from nx._repl_state import _ReplState
+    state = _ReplState(_msgs(4), "t", False, [])
+    _cmd_ctx("/ctx", state)
+    out = capsys.readouterr().out
+    assert "tools schema" in out
+    assert "sent every turn" in out
+
+
 def test_pin_spec_parsing(nx_fresh):
     from nx._ctxreport import _parse_pin_spec
     assert _parse_pin_spec("3", 20) == [2]

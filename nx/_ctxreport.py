@@ -9,7 +9,14 @@ Two pieces:
    total (exact); per-message numbers stay estimated (tokenizing each message
    separately would round-trip the server N times).
 
-2. Pinned turns — `_ctx_pin(index_range)` marks message indexes that
+2. Per-turn overhead — `_turn_overhead_est()` / `_overhead_lines()`: the
+   tool schemas sent on every model call (`tools=`) live outside the message
+   list, so without this /ctx's total quietly misses them and undercounts
+   the real per-turn floor. Counted the same way `nx --tokens` counts its
+   floor: JSON-serialized schemas, chars/4. Rendered as a footer line, not a
+   message row (they aren't messages — pinning a tool schema makes no sense).
+
+3. Pinned turns — `_ctx_pin(index_range)` marks message indexes that
    compress() must keep verbatim (pinned turns move into the kept tail even
    when they're old). State is a list of indexes on st (session lifetime,
    persisted by the session save like todos — see _repl_state).
@@ -97,15 +104,43 @@ def _cache_hits_by_turn(n_messages: int) -> list[float | None]:
     return hits[-n_messages:] if n_messages else []
 
 
+# --- per-turn overhead (tool schemas live outside `messages`) ---------------
+
+def _turn_overhead_est() -> int:
+    """Estimated tokens of the per-turn `tools=` payload — the function schemas
+    the server renders into every prompt but which never appear in the message
+    list, so a messages-only sum undercounts the real context floor. Estimated
+    chars/4 over the JSON serialization, exactly how `nx --tokens` counts its
+    TOOLS line. Never raises: /ctx is a UX nicety, not a correctness path."""
+    try:
+        import nx as _m
+        from ._dispatch import _active_tools
+        import json as _json
+        return _estimate_tokens(_json.dumps(_active_tools()))
+    except Exception:
+        return 0
+
+
+def _overhead_lines(total_est: int, overhead: int) -> list[str]:
+    """Footer lines for /ctx naming the per-turn overhead the message rows
+    can't show. Suppressed when there's nothing to name."""
+    if overhead <= 0:
+        return []
+    pct = 100 * overhead // total_est if total_est > 0 else 0
+    return [f"  + tools schema (sent every turn, not shown as a row): ~{overhead} tok ({pct}% of total est)"]
+
+
 def _messages_token_report(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-message token estimates + role subtotals, for /ctx.
 
     Returns {"rows": [(idx, role, tokens, preview, pinned)], "total_est": int,
              "total_exact": int|None, "by_role": {role: tokens},
-             "cache": [float|None per row]}.
-    Indexes are into `messages` itself (what /ctx pin N takes). `cache` is the
-    per-call prompt-cache hit fraction aligned to rows (see
-    _cache_hits_by_turn) — empty when nothing has run this session.
+             "overhead_est": int, "cache": [float|None per row]}.
+    Indexes are into `messages` itself (what /ctx pin N takes). `total_est`
+    includes `overhead_est` (the per-turn tools= schemas — see
+    _turn_overhead_est), which by_role does NOT. `cache` is the per-call
+    prompt-cache hit fraction aligned to rows (see _cache_hits_by_turn) —
+    empty when nothing has run this session.
     """
     pinned = set(getattr(st, "_CTX_PINNED", []) or [])
     rows = []
@@ -122,8 +157,10 @@ def _messages_token_report(messages: list[dict[str, Any]]) -> dict[str, Any]:
         rows.append((i, role, t, preview, i in pinned))
         by_role[role] = by_role.get(role, 0) + t
         total += t
-    return {"rows": rows, "total_est": total,
+    overhead = _turn_overhead_est()
+    return {"rows": rows, "total_est": total + overhead,
             "total_exact": _tokenize_total(messages), "by_role": by_role,
+            "overhead_est": overhead,
             "cache": _cache_hits_by_turn(len(messages))}
 
 

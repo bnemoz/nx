@@ -151,10 +151,13 @@ def test_cache_hit_field_colors(nx_fresh):
 # --- /ctx cache column --------------------------------------------------------
 
 def _msgs(n=6):
+    # assistant rows are big enough to clear /ctx's top-consumer rollup
+    # threshold (which grows with total_est — the tools-schema overhead counts
+    # toward it) so their cache column still renders
     msgs = [{"role": "system", "content": "sys prompt"}]
     for i in range(n):
         msgs.append({"role": "user" if i % 2 == 0 else "assistant",
-                     "content": f"msg {i}: " + "x" * (200 if i % 2 else 40)})
+                     "content": f"msg {i}: " + "x" * (2000 if i % 2 else 40)})
     return msgs
 
 

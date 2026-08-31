@@ -286,7 +286,8 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     """/ctx — per-message token report; /ctx pin|unpin <spec> — pin turns so
     compress() keeps them verbatim; /ctx clear — drop all pins."""
     import nx as _m
-    from ._ctxreport import _messages_token_report, _ctx_pin, _ctx_unpin
+    from ._ctxreport import (_messages_token_report, _ctx_pin, _ctx_unpin,
+                             _overhead_lines)
     from ._metrics import _abbr
     parts = user.split()
     sub = parts[1].lower() if len(parts) >= 2 else ""
@@ -330,6 +331,11 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     if rolled and len(rolled) < len(rows):
         print(f"{DIM}        … {len(rolled)} smaller turn(s), ~{sum(r[2] for r in rolled)} tokens "
               f"(all messages: /ctx all){RESET}")
+    # Per-turn overhead (tools= schemas) is in total_est but has no message
+    # row — name it here so "by role" summing to less than the header isn't
+    # mistaken for lost tokens.
+    for line in _overhead_lines(report["total_est"], report.get("overhead_est", 0)):
+        print(f"{DIM}{line}{RESET}")
     by_role = report["by_role"]
     role_s = "  ".join(f"{r}:{_abbr(t)}" for r, t in sorted(by_role.items(), key=lambda kv: -kv[1]))
     print(f"{DIM}  by role: {role_s}{RESET}")
