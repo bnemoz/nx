@@ -270,6 +270,7 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
     watch = _watch_for_interrupts() if check_esc else nullcontext()
     with watch:
         last_tail = None
+        _last_label_at = time.monotonic()
         while time.time() < deadline:
             if not _pid_is_alive(pid_i, expected_start_time):
                 return "exited"
@@ -280,7 +281,14 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
                 if tail and tail != last_tail:
                     spinner = st._ACTIVE_SPINNER
                     if spinner is not None:
-                        spinner.label = f"running: {tail}"
+                        # throttle label updates to ~1/s: the spinner redraws
+                        # every tick, and a chatty command emitting lines every
+                        # 100ms must not turn the calm sweep back into a
+                        # flicker source (photosensitivity — see _ansi.py).
+                        now = time.monotonic()
+                        if now - _last_label_at >= 1.0 and tail != spinner.label:
+                            spinner.label = tail[:60]
+                            _last_label_at = now
                     last_tail = tail
             time.sleep(0.1)
     return "timeout"

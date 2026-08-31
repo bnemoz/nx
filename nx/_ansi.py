@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import os
-import random
 import re
 import sys
 import threading
-import time
 from typing import Literal
 
 from ._tty import raw_mode  # noqa: F401  re-exported for back-compat (callers do `from ._ansi import raw_mode`)
@@ -18,8 +16,6 @@ def _rgb(hex_color: str) -> str:
 
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 CLEAR_LINE = "\033[2K\r"   # erase entire line, return cursor to col 0
-HIDE_CURSOR = "\033[?25l"
-SHOW_CURSOR = "\033[?25h"
 
 # Strips CSI (\033[...<final byte>), OSC (\033]...BEL or \033\\), and other C0
 # control chars (except \t/\n) before untrusted content (tool output, resumed
@@ -207,85 +203,99 @@ def swatch(theme_name: str) -> str:
     return " ".join(f"{_rgb(hexes[k])}██{RESET}" for k in order)
 
 
-# --- waiting animation (tiny Conway's Game of Life) -------------------------
-# A spinner is boring. A 1-row toroidal Game of Life is the same shape on screen
-# (one line of cells) but actually does something — patterns glide, blinkers
-# flash, gliders crawl. Runs in a background thread; the main loop kills it
-# the instant the first token arrives.
-_GOL_W = 24
-_GOL_ALIVE = "█"
-_GOL_DEAD = "·"
-_GOL_GLIDER: set[tuple[int, int]] = {(0, 0), (1, 1), (2, 1), (0, 2), (1, 0)}  # 5-cell, period-4
-
-
+# --- waiting animation (calm sweep) ------------------------------------------
+# Replaces the old 24-cell Game-of-Life row: that animation redrew EVERY cell
+# at ~11 Hz in a high-contrast glyph pattern, which is both visually noisy and
+# a genuine photosensitive-epilepsy risk (large flashing contrast areas are
+# the classic trigger — generalized flashes above ~3 Hz with >10% screen area
+# are what safety guidelines flag). This one is designed to be safe:
+#   * a static-width bar — the SAME cells are "on" every frame except one
+#     head and one tail cell, so at most 2 of ~12 glyphs change per frame
+#     (the rest never blink);
+#   * slow (default 4 fps) — well under any photosensitivity threshold;
+#   * low contrast (dim gray track, one highlighted runner) and no color
+#     cycling;
+#   * NX_SPINNER=0 disables the animation entirely (label only).
 class LifeSpinner:
-    def __init__(self, width: int = _GOL_W, tick_ms: int = 90, label: str = "thinking") -> None:
-        self.w = width
-        self.tick = tick_ms / 1000
-        self.label = label  # shown before the cells ("thinking" / "running" / ...)
+    """A quiet, static-width activity line: `label [▪▪▪▪···]`.
+
+    Kept for API compat with the old name so call sites/tests stay as-is
+    (`start()`/`stop()`/`label`). The label is clamped and control-char
+    stripped on render — `_bash_jobs.py` streams raw log tails into it, which
+    previously injected ANSI/OSC straight into the terminal and broke the
+    line width, smearing the spinner over the tool box.
+    """
+
+    _WIDTH = 12       # total cells; runner covers TRACK+1 while sweeping
+    _TRACK = 4        # runner length in cells
+    _MIN_TICK = 0.12  # seconds per step — hard floor for a gentle pace
+
+    def __init__(self, label: str = "thinking", tick: float = 0.25) -> None:
+        self.label = label
+        self.tick = max(self._MIN_TICK, tick)
         self._stop = threading.Event()
+        self._done = threading.Event()
         self._t: threading.Thread | None = None
+        self._pos = 0
 
-    def _seed(self) -> list[int]:
-        row = [0] * self.w
-        x = random.randrange(self.w)
-        for dx, _ in _GOL_GLIDER:
-            row[(x + dx) % self.w] = 1
-        for _ in range(2):
-            x = random.randrange(self.w)
-            row[x] = row[(x + 1) % self.w] = row[(x + 2) % self.w] = 1
-        for _ in range(self.w // 6):
-            row[random.randrange(self.w)] = 1
-        return row
-
-    def _step(self, row: list[int]) -> list[int]:
-        # A 1-row GoL is degenerate (cells have only 2 neighbors). Cheat: treat
-        # the row as the middle of a 3-row toroidal world where the rows above
-        # and below mirror the current one. Gives every cell the standard 8
-        # neighbors, so gliders/blinkers/etc. actually work.
-        w, above, below, nxt = self.w, row, row, [0] * self.w
-        for x in range(w):
-            n = (above[(x - 1) % w] + above[x] + above[(x + 1) % w] +
-                 row[(x - 1) % w]                   + row[(x + 1) % w] +
-                 below[(x - 1) % w] + below[x] + below[(x + 1) % w])
-            cur = row[x]
-            nxt[x] = 1 if (cur and n in (2, 3)) or (not cur and n == 3) else 0
-        return nxt
-
-    def _render(self, row: list[int]) -> str:
-        return (CLEAR_LINE + "  " + DIM + f"{self.label} " + RESET +
-                "".join(_GOL_ALIVE if c else _GOL_DEAD for c in row))
+    def _render(self, pos: int) -> str:
+        # Clamp + sanitize the label: it may come from a live command's log
+        # tail (st._ACTIVE_SPINNER.label = ...), i.e. untrusted bytes. \n is
+        # NOT stripped by strip_ansi_for_display, so collapse whitespace
+        # explicitly — the spinner must stay exactly one line.
+        label = " ".join(strip_ansi_for_display(self.label or "").split())
+        if len(label) > 48:
+            label = label[:45] + "..."
+        cells = ["·"] * self._WIDTH
+        for i in range(self._TRACK):
+            cells[(pos + i) % self._WIDTH] = "▪"
+        bar = "".join(cells)
+        return f"{CLEAR_LINE}  {DIM}{label}{RESET} {DIM}[{bar}]{RESET}"
 
     def _run(self) -> None:
-        sys.stdout.write(HIDE_CURSOR)
         try:
-            row = self._seed()
-            # initial render — also reserve the line so subsequent prints don't shift things
-            sys.stdout.write(self._render(row))
+            sys.stdout.write(self._render(self._pos))
             sys.stdout.flush()
-            while not self._stop.is_set():
-                time.sleep(self.tick)
-                if self._stop.is_set():
-                    break
-                row = self._step(row)
-                sys.stdout.write(self._render(row))
+            while not self._stop.wait(self.tick):
+                self._pos = (self._pos + 1) % self._WIDTH
+                sys.stdout.write(self._render(self._pos))
                 sys.stdout.flush()
         finally:
-            # wipe the spinner line and restore cursor
-            sys.stdout.write(CLEAR_LINE + SHOW_CURSOR)
+            # wipe the spinner line deterministically before returning —
+            # _run always exits through here, so the caller's next print
+            # never lands on a half-drawn bar
+            sys.stdout.write(CLEAR_LINE)
             sys.stdout.flush()
+            self._done.set()
 
     def start(self) -> None:
         if not sys.stdout.isatty():
-            return  # headless (piped/redirected) — no spinner animation
+            return  # headless (piped/redirected) — no animation
         self._stop.clear()
+        self._done.clear()
+        if os.environ.get("NX_SPINNER", "1") == "0":
+            # animation disabled: draw the label ONCE, statically, and remember
+            # it so stop() can clear the same line. No thread, no redraws.
+            self._static_line = self._render(0)
+            sys.stdout.write(self._static_line)
+            sys.stdout.flush()
+            return
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._t:
-            self._t.join(timeout=0.5)
+            # join WITHOUT a timeout: the render loop is bounded (one write,
+            # one flush per tick) so it always finishes promptly, and an
+            # abandoned live thread (old join(timeout=0.5)) is exactly what
+            # smeared the bar over the tool box.
+            self._t.join()
             self._t = None
+            return
+        if getattr(self, "_static_line", None) is not None:
+            sys.stdout.write(CLEAR_LINE)
+            sys.stdout.flush()
+            self._static_line = None
 
 
