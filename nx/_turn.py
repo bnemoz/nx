@@ -44,6 +44,7 @@ from . import (
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
 )
+from ._subagent import _subagent_active
 from concurrent.futures import ThreadPoolExecutor
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
@@ -345,6 +346,29 @@ def _all_read_only(calls: list[tuple[str, dict[str, Any]]]) -> bool:
     return bool(calls) and all(n in _m._CACHEABLE_READ_TOOLS for n, _ in calls)
 
 
+def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
+    """True when this turn's 2+ calls may run concurrently on the thread pool.
+
+    Two shapes qualify:
+      • the original all-cacheable-read turn ('read 3 files + grep'), and
+      • a fan-out turn with spawn_agent calls — each agent is an independent
+        messages list, its toolset is restricted, and nothing it runs prompts,
+        so overlapping them is the whole point of delegating. Reads may ride
+        along in the same turn (all read-only, no ordering requirements).
+
+    Single calls, mutating/prompting tools, and any turn while already inside
+    a sub-agent (no nested fan-out) stay sequential."""
+    if len(calls) < 2:
+        return False
+    import nx as _m
+    if _subagent_active():
+        return False  # a sub-agent never fans out further
+    spawn = sum(1 for n, _ in calls if n == "spawn_agent")
+    if spawn:
+        return all(n in _m._CACHEABLE_READ_TOOLS or n == "spawn_agent" for n, _ in calls)
+    return _all_read_only(calls)
+
+
 def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> None:
     """Warm the read_file/list_dir cache concurrently for this turn's calls.
 
@@ -433,10 +457,11 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             "valid tool call with all required arguments. For large file "
             "writes, emit only the tool call and skip any explanatory prose.")
         return TURN_STREAM_CUT
-    # All-read-only turns dispatch concurrently (the 'read 3 files + grep'
-    # pattern); mixed turns keep the sequential contract and only prefetch.
+    # All-read-only turns and 2+ spawn_agent fan-outs dispatch concurrently
+    # (the 'read 3 files + grep' / 'investigate A and B at once' patterns);
+    # other turns keep the sequential contract and only prefetch.
     as_calls = [(c["name"], args) for c, args in zip(ordered, parsed_args)]
-    if _all_read_only(as_calls) and len(as_calls) >= 2:
+    if _should_parallelize(as_calls):
         parallel_results = _run_read_only_parallel(as_calls)
         messages.append({"role": "assistant", "content": text or None, "tool_calls": [
             {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
@@ -523,9 +548,10 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             return TURN_DONE
         return None
     messages.append({"role": "assistant", "content": text})
-    # All-read-only multi-call turns dispatch concurrently (same rationale as
-    # the native path); single calls and mixed turns stay sequential.
-    if _all_read_only(calls) and len(calls) >= 2:
+    # All-read-only multi-call turns and 2+ spawn_agent fan-outs dispatch
+    # concurrently (same rationale as the native path); single calls and
+    # other mixed turns stay sequential.
+    if _should_parallelize(calls):
         parallel_results = _run_read_only_parallel(calls)
         obs = [f"Observation ({calls[i][0]}): {parallel_results[i]}" for i in range(len(calls))]
         messages.append({"role": "user", "content": "\n".join(obs)})
@@ -1081,7 +1107,11 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
-            _launch_verify_if_settled()  # model went quiet — fire NX_VERIFY_CMD if its settle window passed
+            if not _subagent_active():
+                # Only the parent loop fires NX_VERIFY_CMD — concurrent
+                # sub-agents hitting this line together would race the
+                # settle log and double-launch the verify command.
+                _launch_verify_if_settled()  # model went quiet — fire NX_VERIFY_CMD if its settle window passed
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input

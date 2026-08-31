@@ -43,9 +43,11 @@ DISPATCH = {
     "spawn_agent": spawn_agent, "read_image": read_image,
 }
 
-# spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH:
-# read-only entries ONLY, so a sub-agent can never mutate state or run commands
-# even if it tries. run_tool() consults it before DISPATCH. None = normal dispatch.
+# spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH
+# (plus a per-thread copy in _subagent._SUBAGENT_TLS — concurrent agents each need
+# their own): read-only entries ONLY (run_bash wrapped in a read-only allowlist
+# gate), so a sub-agent can never mutate state or run an arbitrary command even if
+# it tries. run_tool() consults the TLS table before DISPATCH. None = normal dispatch.
 st._SUBAGENT_DISPATCH = None
 st._SUBAGENT_ACTIVE = False
 
@@ -248,13 +250,15 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
 
 
 def run_tool(name: str, args: dict[str, Any]) -> str:
-    # A spawn_agent() sub-loop installs a read-only table; the sub-agent's tool
-    # calls resolve against it (so "write_file" inside a subagent is simply an
+    # A spawn_agent() sub-loop installs a read-only table (per-thread, so 2+
+    # concurrent sub-agents each keep their own); the sub-agent's tool calls
+    # resolve against it (so "write_file" inside a subagent is simply an
     # unknown tool), and nested spawn_agent calls are refused by _subagent.py.
-    table = st._SUBAGENT_DISPATCH or DISPATCH
+    from ._subagent import _subagent_table, _subagent_active
+    table = _subagent_table() or DISPATCH
     fn = table.get(name)
     if not fn:
-        if st._SUBAGENT_ACTIVE:
+        if _subagent_active():
             return f"ERROR: {name} is not available to the read-only sub-agent (parent must do it)"
         return f"ERROR: unknown tool {name}"
     # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
