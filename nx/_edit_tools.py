@@ -40,13 +40,27 @@ def _atomic_write(path: str, content: str) -> None:
     """Write *content* to *path* without ever leaving a truncated file on
     disk: write to a sibling temp file first, then rename over the target.
     `os.replace` is atomic on POSIX, so a crash mid-write leaves either the
-    old file or the new one, never a half-written one."""
-    d = os.path.dirname(os.path.abspath(path)) or "."
+    old file or the new one, never a half-written one.
+
+    A symlink target is resolved first so the link is followed and the real
+    file rewritten in place (replacing the link itself would silently defeat
+    symlink-farm dotfile management). The existing file's permission bits are
+    carried over too — mkstemp creates 0600, which would otherwise strip e.g.
+    the executable bit off a script on every edit."""
+    # Follow symlinks: write through to the real file, never replace the link.
+    real = os.path.realpath(path)
+    d = os.path.dirname(real) or "."
     fd, tmp_path = tempfile.mkstemp(dir=d, prefix=".nx-tmp-")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(content)
-        os.replace(tmp_path, path)
+        try:
+            mode = os.stat(real).st_mode & 0o7777
+        except OSError:
+            pass  # new file: keep mkstemp's 0600
+        else:
+            os.chmod(tmp_path, mode)
+        os.replace(tmp_path, real)
     except BaseException:
         try:
             os.unlink(tmp_path)

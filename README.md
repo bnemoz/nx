@@ -438,7 +438,7 @@ go through the approval gate above.
 | tool | args | notes |
 | --- | --- | --- |
 | `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory |
-| `write_file` | `path`, `content` | overwrites; requires confirmation |
+| `write_file` | `path`, `content` | overwrites; requires confirmation; atomic (temp+rename), preserves the file's permission bits and writes through symlinks to the real file |
 | `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly; `new` passes the garble guard (see `NX_GARBLE_GUARD`) |
 | `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation; atomic — a garbled or unmatched edit rolls back the whole batch; each `new` passes the garble guard |
 | `delete_file` | `path` | delete one file; restorable via `/undo` (unlike `rm` via bash) |
