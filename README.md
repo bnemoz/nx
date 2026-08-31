@@ -482,7 +482,12 @@ before it can land:
   model;
 - repetition the file itself already contains (repeated decorators,
   boilerplate) is left alone, and swapped `old`/`new` arguments get a
-  targeted resubmit hint.
+  targeted resubmit hint;
+- repetition that is ordinary code shape is not flagged at all: a period-2
+  echo only counts when its two copies are whitespace-joined on one line (so
+  an attribute saved and then reassigned is untouched), and a suspected line
+  splice is ignored when trimming the shared words would leave an operator
+  behind (line 2 was continuing line 1's expression, not echoing it).
 
 The guard is passive — no extra tool schema, no tokens per turn — and
 `NX_GARBLE_GUARD=0` turns it off.

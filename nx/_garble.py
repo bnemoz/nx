@@ -63,10 +63,15 @@ _DUP_LINE_GAP = 3
 _GRAM_N = 5
 _GRAM_GAP = 40
 
-# Immediate word-echo (period-2 stutter, "fast-path fast-path fast-path"): a
+# Immediate word-echo (period-2 stutter, a token repeated thrice): a
 # 5-gram check is blind to period 2 (odd/even gram positions never align), so
 # a repeated word PAIR is checked separately. Four echo words minimum.
 _STUTTER_ECHO_WORDS = 4
+# ...and the two copies must be whitespace-joined on one line. Identifiers
+# repeating across an assignment (`saved = m._confirm` then `m._confirm =
+# ...`) or a line break (`return fast_path` above `fast_path = True`) are
+# ordinary code, not echoes.
+_ECHO_JOIN_RE = re.compile(r"[ \t]*\Z")
 
 # Line-boundary overlap: max shared tail/head words considered, and the
 # minimum that counts as a splice (2+ shared words is rarely coincidence).
@@ -147,17 +152,25 @@ def garble_signature(new: str) -> list[str]:
 
     # 2b. immediate word-echo: w[i:i+2] == w[i+2:i+4] (period-2 run)
     seen_bigram: set[str] = set()
+    spans = _word_spans(new)
     for i in range(len(words) - _STUTTER_ECHO_WORDS + 1):
         if words[i] == words[i + 2] and words[i + 1] == words[i + 3]:
+            gap = new[spans[i + 1].end():spans[i + 2].start()]
+            if not _ECHO_JOIN_RE.fullmatch(gap):
+                continue  # copies not whitespace-joined on one line -> code
             bg = f"{words[i]} {words[i + 1]}"
             if bg not in seen_bigram:
                 seen_bigram.add(bg)
                 sigs.append(f"stuttered words: '{bg}'")
 
-    # 3. line-boundary splice: tail words of one line == head words of the next
+    # 3. line-boundary splice: tail words of one line == head words of the
+    # next. Also requires the residue left on line 2 after trimming the
+    # shared head to still read as code (word or opening bracket); when it
+    # starts with an operator instead, the shared words are the second
+    # line's own operand and there was no splice.
     for i in range(len(lines) - 1):
         k = _boundary_overlap(lines[i], lines[i + 1])
-        if k:
+        if k and _splice_residue(lines[i + 1], k):
             shared = " ".join(_WORD_RE.findall(lines[i])[-k:])
             sigs.append(f"spliced line boundary at line {i + 2}: {shared!r}")
 
@@ -176,6 +189,20 @@ def garble_signature(new: str) -> list[str]:
         lineno = new.count("\n", 0, m.start()) + 1
         sigs.append(f"abandoned rewrite at line {lineno}: '{frag}'")
     return sigs
+
+
+def _splice_residue(second: str, k: int) -> bool:
+    """True when trimming the *k* shared words off line 2's head leaves a
+    plausible continuation: a word, an opening bracket, or nothing at all
+    (line 2 was nothing but the echo). A residue starting with an operator
+    (an assignment equals, a comma, a closing bracket) means the shared
+    words were line 2's own operand — one line saving ``m._confirm`` above
+    another reassigning it — so there was no splice."""
+    spans = _word_spans(second)
+    if len(spans) < k:
+        return True
+    rest = second[spans[k - 1].end():].lstrip(" \t")
+    return not rest or bool(re.match(r"[\w(\[{\"']", rest))
 
 
 def _boundary_overlap(a: str, b: str) -> int:

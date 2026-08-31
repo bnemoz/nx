@@ -254,3 +254,33 @@ def test_env_kill_switch():
             os.environ.pop("NX_GARBLE_GUARD", None)
         else:
             os.environ["NX_GARBLE_GUARD"] = old_env
+
+
+# --- ordinary code shape must never be flagged (0.16.0 regression) ------------
+
+def test_attribute_saved_then_reassigned_is_not_garble():
+    # the field-reported misfire: two legit adjacent tokens separated by an
+    # equals on the next line; the guard must not flag, repair, or error
+    code = "        saved = m._confirm\n        m._confirm = lambda *a, **k: True\n"
+    assert _garble.garble_signature(code) == [], _garble.garble_signature(code)
+    status, msg, out = _garble.garble_check(code, "def f():\n    pass\n", "        m._confirm\n")
+    assert status == "clean" and msg is None and out == code, (status, msg)
+
+
+def test_echo_across_line_break_is_not_garble():
+    # a word pair repeating across a newline is code shape, not an echo
+    assert _garble.garble_signature("return fast_path\nfast_path = True\n") == []
+
+
+def test_operator_residue_is_not_a_splice():
+    # line 2 merely continues line 1's identifier with an operator: trimming
+    # the shared head would leave an assignment equals, so no doubled boundary
+    assert _garble.garble_signature(
+        "        saved = m._confirm\n        m._confirm = 1\n") == []
+
+
+def test_one_line_echo_still_caught():
+    # a genuine period-2 echo on a single line is still repaired
+    status, _msg, repaired = _garble.garble_check(
+        "keep the fast-path fast-path fast-path here\n", "unrelated source\n", "")
+    assert status == "repaired" and repaired == "keep the fast-path here\n", (status, repaired)
