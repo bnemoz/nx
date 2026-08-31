@@ -370,7 +370,7 @@ go through the approval gate above.
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |
 | `memory_delete` | `target`, `scope?` | delete one memory by exact title, filename, or unique prefix; requires confirmation |
-| `spawn_agent` | `instruction`, `max_turns?` | delegate a read-only investigation to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log) but cannot write; send several in one turn to run them concurrently |
+| `spawn_agent` | `instruction`, `max_turns?` | delegate a read-only investigation to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log) but cannot write; send several in one turn to run them concurrently. Flash-tier models sometimes narrate "I'll spawn…" instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes

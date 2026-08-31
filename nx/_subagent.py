@@ -197,7 +197,13 @@ def _subagent_bash(command: str, **_: Any) -> str:
 def spawn_agent(instruction: str, max_turns: int = 12, **_: Any) -> str:
     """Run a read-only sub-agent on `instruction`; return its final answer."""
     if not isinstance(instruction, str) or not instruction.strip():
-        return "ERROR: instruction is empty"
+        # flash-tier models keep sending {"prompt": ...} instead of the
+        # documented `instruction` key; without a hint they burn a whole
+        # sub-turn learning the schema by trial and error (seen live on
+        # glm-5.3-flash).
+        return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
+                "\"...\"} — you may have used a different key, e.g. `prompt`; "
+                "retry with `instruction`)")
     try:
         max_turns = max(1, min(40, int(max_turns)))
     except (TypeError, ValueError):
