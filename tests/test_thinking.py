@@ -245,12 +245,12 @@ try:
     assert len(cli.requests) == n_req, "re-probing an already-cached model"
     assert n_req == 2, f"probe should have made 2 requests, made {n_req}"
     # A different model id on the SAME source is probed separately.
-    th.ensure_thinking_probe(src, "glm-5.2")
+    th.ensure_thinking_probe(src, "glm-5.3")
     for _ in range(100):
-        if "glm-5.2" in src._thinking_kwargs:
+        if "glm-5.3" in src._thinking_kwargs:
             break
         time.sleep(0.05)
-    assert src._thinking_kwargs.get("glm-5.2") == {"chat_template_kwargs": {"thinking": True}}
+    assert src._thinking_kwargs.get("glm-5.3") == {"chat_template_kwargs": {"thinking": True}}
 finally:
     _cap.STARTUP_PROBE_LOCK = _real_lock
     m.st.MODEL = None

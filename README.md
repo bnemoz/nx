@@ -113,8 +113,8 @@ source so you can `/source together` or `/source openrouter` without defining
 
 | key | source | default model |
 | --- | --- | --- |
-| `TOGETHER_API_KEY` | `together` | `zai-org/GLM-5.2` |
-| `OPENROUTER_API_KEY` | `openrouter` | `z-ai/glm-5.2` (routed to `parasail/fp8`) |
+| `TOGETHER_API_KEY` | `together` | `zai-org/GLM-5.3` |
+| `OPENROUTER_API_KEY` | `openrouter` | `z-ai/glm-5.3` (routed to `io-net/fp8`) |
 
 Override either source's model with `/source <name> <model>`, and OpenRouter's
 provider routing with `/provider` or `NX_SOURCE_OPENROUTER_EXTRA_BODY`.

@@ -47,9 +47,9 @@ Env:   NX_APPROVAL=<all|low|medium|high|yolo>  (persistent default approval mode
        NX_BACKEND=vllm  (disables llama.cpp-only recovery knobs like min_p /
                              repeat_penalty / DRY that vLLM's speculative decoder
                              rejects; omits them from extra_body on retries)
-       TOGETHER_API_KEY  (auto-registers a built-in `together` source; default model zai-org/GLM-5.2)
-       OPENROUTER_API_KEY  (auto-registers a built-in `openrouter` source; default model z-ai/glm-5.2,
-            routed to parasail/fp8 — override with /provider or NX_SOURCE_OPENROUTER_EXTRA_BODY)
+       TOGETHER_API_KEY  (auto-registers a built-in `together` source; default model zai-org/GLM-5.3)
+       OPENROUTER_API_KEY  (auto-registers a built-in `openrouter` source; default model z-ai/glm-5.3,
+            routed to io-net/fp8 — override with /provider or NX_SOURCE_OPENROUTER_EXTRA_BODY)
 """
 from __future__ import annotations
 

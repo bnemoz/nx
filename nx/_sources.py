@@ -109,7 +109,7 @@ class Source:
         # picks which upstream serves a given model id (different providers back
         # the same endpoint at different prices / precisions / latencies):
         #
-        #   {"provider": {"order": ["parasail/fp8"], "allow_fallbacks": false,
+        #   {"provider": {"order": ["io-net/fp8"], "allow_fallbacks": false,
         #                 "require_parameters": true, "data_collection": "deny"}}
         #
         # For local servers (llama.cpp) this is empty and contributes nothing;
@@ -156,12 +156,12 @@ class Source:
 
         Only touches local-server ids that look like file paths (llama.cpp,
         Ollama, …) where /v1/models returns the full GGUF/HF file path. Remote
-        API ids in org/model form (e.g. "zai-org/GLM-5.2") are returned
+        API ids in org/model form (e.g. "zai-org/GLM-5.3") are returned
         unchanged.
 
         Examples:
-          /media/h/.../GLM-5.2-GGUF/UD-IQ4_NL/GLM-5.2-UD-IQ4_NL-00001-of-00009.gguf
-            → GLM-5.2-UD-IQ4_NL
+          /media/h/.../GLM-5.3-GGUF/UD-IQ4_NL/GLM-5.3-UD-IQ4_NL-00001-of-00009.gguf
+            → GLM-5.3-UD-IQ4_NL
           /models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf
             → Meta-Llama-3-8B-Instruct-Q4_K_M
         Anything that doesn't look like a local model file path is returned
@@ -380,7 +380,7 @@ class Source:
             return None
         # Prefer the entry whose id matches the active model (multi-model
         # hosts), else the first. Match loosely on a trailing token so a full
-        # path id ("…/GLM-5.2-…gguf") still hits a short alias ("GLM-5.2").
+        # path id ("…/GLM-5.3-…gguf") still hits a short alias ("GLM-5.3").
         pick = None
         if mid:
             mtail = mid.rsplit("/", 1)[-1].lower()
@@ -524,7 +524,7 @@ def _parse_extra_body(raw: str | None) -> dict[str, Any] | None:
     bad JSON) so a typo never silently drops routing — it fails loudly at load.
 
     Example:
-        NX_SOURCE_OR_EXTRA_BODY={"provider":{"order":["parasail/fp8"],"allow_fallbacks":false}}
+        NX_SOURCE_OR_EXTRA_BODY={"provider":{"order":["io-net/fp8"],"allow_fallbacks":false}}
     """
     if not raw or not raw.strip():
         return None
@@ -631,7 +631,7 @@ def _discover_sources() -> None:
         "together",
         "https://api.together.xyz/v1",
         api_key=_resolve_api_key(os.environ.get("TOGETHER_API_KEY", "")),
-        model="zai-org/GLM-5.2",  # default model; override per-switch via /source together <model>
+        model="zai-org/GLM-5.3",  # default model; override per-switch via /source together <model>
     )
 
     # Built-in convenience source: OpenRouter. Like Together it's a multi-model
@@ -647,18 +647,18 @@ def _discover_sources() -> None:
     # `provider` object (extra_body), so the built-in seeds it from
     # NX_SOURCE_OPENROUTER_EXTRA_BODY (a JSON string) if present, and the
     # ephemeral /provider command can override it per-session. The default model
-    # is z-ai/glm-5.2; the default routing pins parasail/fp8 — cheap, fast, and a
+    # is z-ai/glm-5.3; the default routing pins io-net/fp8 — cheap, fast, and a
     # deliberate single-provider choice so you know exactly what's serving you.
     or_body = _parse_extra_body(
         os.environ.get("NX_SOURCE_OPENROUTER_EXTRA_BODY", ""))
     if or_body is None:
-        or_body = {"provider": {"order": ["parasail/fp8"],
+        or_body = {"provider": {"order": ["io-net/fp8"],
                                 "allow_fallbacks": False}}
     _register_builtin(
         "openrouter",
         "https://openrouter.ai/api/v1",
         api_key=_resolve_api_key(os.environ.get("OPENROUTER_API_KEY", "")),
-        model="z-ai/glm-5.2",  # default model; override via /source openrouter <model>
+        model="z-ai/glm-5.3",  # default model; override via /source openrouter <model>
         extra_body=or_body,
         http_headers=_build_http_headers(
             os.environ.get("NX_SOURCE_OPENROUTER_APP_NAME", "Nx"),
@@ -697,7 +697,7 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     `/source <name> <model>` so a multi-model host (e.g. Together) can be
     pointed at any of its models without a config edit. A bare switch (no
     override) always falls back to the source's configured/default model,
-    so `/source together` returns to GLM-5.2 even after an override."""
+    so `/source together` returns to GLM-5.3 even after an override."""
     src = st.SOURCES.get(name)
     if not src:
         print(f"{C.ERROR}  ✗ unknown source {name!r}{RESET}")
@@ -725,7 +725,7 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     # Probe for a thinking-separation toggle (nx/_thinking.py). Uses st.MODEL
     # (the possibly-overridden active id), not src.model — a /source <name>
     # <model> override can point at a thinking model the source default
-    # isn't (e.g. bubbles' glm-5.2 default vs a glm-5.3-flash override).
+    # isn't (e.g. bubbles' glm-5.3 default vs a glm-5.3-flash override).
     from ._thinking import ensure_thinking_probe
     ensure_thinking_probe(src)
     return True
@@ -752,7 +752,7 @@ def _set_provider_order(src: Source, order: list[str],
                          allow_fallbacks: bool | None = None) -> None:
     """Set the OpenRouter `provider.order` routing for `src` in place.
 
-    `order` is a list of provider names (e.g. ["parasail/fp8", "Together"]); a
+    `order` is a list of provider names (e.g. ["io-net/fp8", "Together"]); a
     deliberate, non-empty list pins routing to exactly those providers and —
     unless `allow_fallbacks` is explicitly True — disables OpenRouter's usual
     fallback to other upstreams, so you know precisely what's serving the model.

@@ -105,7 +105,7 @@ def _cmd_source(user: str, state: _ReplState) -> None:
     target = sp[1]
     # Optional second token: a model id to pin for this switch.
     # Useful for multi-model hosts (e.g. Together) so you can do
-    #   /source together                    → default (GLM-5.2)
+    #   /source together                    → default (GLM-5.3)
     #   /source together zai-org/GLM-4.6     → that model, same host
     # The override is non-sticky: a later bare /source <name>
     # always falls back to the source's configured default.
@@ -234,10 +234,10 @@ def _cmd_provider(user: str, state: _ReplState) -> None:
     #
     #   /provider                       show the active source's routing
     #   /provider openrouter           show routing for <source>
-    #   /provider parasail/fp8         pin to that provider (active src)
+    #   /provider io-net/fp8           pin to that provider (active src)
     #   /provider Together,DeepInfra    ordered: try Together, then DeepInfra
     #   /provider off                   clear routing (let OpenRouter pick)
-    #   /provider openrouter parasail   set routing on <source>, not active
+    #   /provider openrouter io-net    set routing on <source>, not active
     if st.ACTIVE is None:
         print(f"{C.ERROR}  ✗ no active source{RESET}")
         return

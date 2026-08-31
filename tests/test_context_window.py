@@ -256,7 +256,7 @@ remote_err = ("Error code: 400 - " + json.dumps({
 remote_page = _FakeModelsPage([_FakeModel("test-model",
                                           {"context_length": 999999})])
 src = m.Source("together", "https://api.together.xyz/v1", "sk-noop",
-               "zai-org/GLM-5.2")
+               "zai-org/GLM-5.3")
 src.client = _FakeClient(_CountingModels(remote_page),
                          _FakeChat(_FakeChatCompletions(msg=remote_err)))
 src._context_window = None

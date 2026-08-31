@@ -46,16 +46,16 @@ def _make_source(name: str, ids: list[str], pinned: str | None = None):
 
 
 def test_unpinned_list_is_served_sorted():
-    src = _make_source("bubbles", ["qwen3.8-27b", "glm-5.3", "glm-5.2"])
-    assert src.list_model_ids() == ["glm-5.2", "glm-5.3", "qwen3.8-27b"]
+    src = _make_source("bubbles", ["qwen3.8-27b", "glm-5.3", "glm-4.7"])
+    assert src.list_model_ids() == ["glm-4.7", "glm-5.3", "qwen3.8-27b"]
 
 
 def test_pinned_models_replaces_the_server_list():
-    # The bubbles lineup as of 2026-09: glm-5.3 replaces glm-5.2, and the
+    # The bubbles lineup as of 2026-09: glm-4.7 is retired, and the
     # qwen3.8 models are new. The server still lists retired ids.
     src = _make_source(
         "bubbles",
-        ["glm-5.2", "deepseek-v4-flash", "deepseek-v4-flash-dspark",
+        ["glm-4.7", "deepseek-v4-flash", "deepseek-v4-flash-dspark",
          "deepseek-v4-pro", "qwen3-embedding-8b", "glm-5.3",
          "glm-5.3-flash", "qwen3.8-flash-next", "qwen3.8-27b"],
         pinned="glm-5.3,glm-5.3-flash,qwen3.8-flash-next,qwen3.8-27b,"
@@ -65,7 +65,7 @@ def test_pinned_models_replaces_the_server_list():
                    "qwen3-embedding-8b", "qwen3.8-27b",
                    "qwen3.8-flash-next"]
     # Retired ids are gone from the dropdown source of truth.
-    assert "glm-5.2" not in ids
+    assert "glm-4.7" not in ids
     assert "deepseek-v4-flash" not in ids
     assert "deepseek-v4-flash-dspark" not in ids
     # No network call is made when pinned (client.models is the fake;
@@ -131,7 +131,7 @@ def test_dropdown_window_scrolls_to_keep_selection_visible():
 def test_fuzzy_filter_finds_the_new_qwen_models():
     # Typing "qwen" must surface the previously-hidden ids.
     ids = ["deepseek-v4-flash", "deepseek-v4-flash-dspark", "deepseek-v4-pro",
-           "glm-5.2", "glm-5.3", "glm-5.3-flash", "qwen3-embedding-8b",
+           "glm-4.7", "glm-5.3", "glm-5.3-flash", "qwen3-embedding-8b",
            "qwen3.8-27b", "qwen3.8-flash-next"]
     got = _chatbox._fuzzy_filter(ids, "qwen")
     assert "qwen3.8-27b" in got

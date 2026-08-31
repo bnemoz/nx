@@ -137,7 +137,7 @@ print(f"  together.model: {nx.SOURCES['together'].model}")
 print(f"  together.api_key: {nx.SOURCES['together'].api_key}")
 assert "together" in nx.SOURCES, "together source should auto-register with a key"
 assert nx.SOURCES["together"].base_url == "https://api.together.xyz/v1"
-assert nx.SOURCES["together"].model == "zai-org/GLM-5.2", "default model should be GLM-5.2"
+assert nx.SOURCES["together"].model == "zai-org/GLM-5.3", "default model should be GLM-5.3"
 assert nx.SOURCES["together"].api_key == "fake-together-key"
 # Registered last, so the first-defined source stays the startup default.
 assert nx.SOURCE_ORDER[0] == "local"
@@ -178,17 +178,17 @@ sys.argv = ["nx.py"]
 os.environ["NX_SOURCES"] = "together"
 os.environ["NX_SOURCE_TOGETHER_BASE_URL"] = "https://api.together.xyz/v1"
 os.environ["NX_SOURCE_TOGETHER_API_KEY"] = "k"
-os.environ["NX_SOURCE_TOGETHER_MODEL"] = "zai-org/GLM-5.2"
+os.environ["NX_SOURCE_TOGETHER_MODEL"] = "zai-org/GLM-5.3"
 importlib.reload(nx)
 print("TEST 12: switch_source model_override")
 nx.switch_source("together")
-assert nx.MODEL == "zai-org/GLM-5.2", "bare switch → source default"
+assert nx.MODEL == "zai-org/GLM-5.3", "bare switch → source default"
 # Override pins a different model for this switch.
 nx.switch_source("together", model_override="zai-org/GLM-4.6")
 assert nx.MODEL == "zai-org/GLM-4.6", "override should pin MODEL"
 # A bare switch afterward falls back to the configured default (non-sticky).
 nx.switch_source("together")
-assert nx.MODEL == "zai-org/GLM-5.2", "bare switch should restore default"
+assert nx.MODEL == "zai-org/GLM-5.3", "bare switch should restore default"
 print("  PASS\n")
 
 # --- Test 13: built-in `openrouter` source auto-registers with a key ---
@@ -202,12 +202,12 @@ print(f"  SOURCE_ORDER: {nx.SOURCE_ORDER}")
 or_src = nx.SOURCES.get("openrouter")
 assert or_src is not None, "openrouter source should auto-register with a key"
 assert or_src.base_url == "https://openrouter.ai/api/v1"
-assert or_src.model == "z-ai/glm-5.2", "default model should be z-ai/glm-5.2"
+assert or_src.model == "z-ai/glm-5.3", "default model should be z-ai/glm-5.3"
 assert or_src.api_key == "fake-or-key"
-# Default routing pins parasail/fp8 with no fallback.
-assert or_src.extra_body == {"provider": {"order": ["parasail/fp8"],
+# Default routing pins io-net/fp8 with no fallback.
+assert or_src.extra_body == {"provider": {"order": ["io-net/fp8"],
                                           "allow_fallbacks": False}}, \
-    f"default routing should pin parasail/fp8, got {or_src.extra_body!r}"
+    f"default routing should pin io-net/fp8, got {or_src.extra_body!r}"
 # Registered last, so the first-defined source stays the startup default.
 assert nx.SOURCE_ORDER[0] == "local"
 assert nx.SOURCE_ORDER[-1] == "openrouter"
@@ -251,7 +251,7 @@ sys.argv = ["nx.py"]
 os.environ["NX_SOURCES"] = "openrouter"
 os.environ["NX_SOURCE_OPENROUTER_BASE_URL"] = "https://openrouter.ai/api/v1"
 os.environ["NX_SOURCE_OPENROUTER_API_KEY"] = "k"
-os.environ["NX_SOURCE_OPENROUTER_MODEL"] = "z-ai/glm-5.2"
+os.environ["NX_SOURCE_OPENROUTER_MODEL"] = "z-ai/glm-5.3"
 os.environ["NX_SOURCE_OPENROUTER_EXTRA_BODY"] = "not json{"
 importlib.reload(nx)
 print("TEST 16: bad EXTRA_BODY JSON ignored")
@@ -266,7 +266,7 @@ print("  PASS\n")
 clear_nx_env()
 sys.argv = ["nx.py"]
 # Auto-register the built-in openrouter source (the path that seeds the
-# parasail/fp8 default routing). An explicit NX_SOURCES=openrouter without
+# io-net/fp8 default routing). An explicit NX_SOURCES=openrouter without
 # EXTRA_BODY would NOT inject the default — explicit config means user-control.
 os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
 os.environ["OPENROUTER_API_KEY"] = "k"
@@ -274,7 +274,7 @@ importlib.reload(nx)
 print("TEST 17: _set_provider_order / _provider_order")
 src = nx.SOURCES["openrouter"]
 # Starts with the built-in default routing.
-assert nx._provider_order(src) == ["parasail/fp8"]
+assert nx._provider_order(src) == ["io-net/fp8"]
 # Pin a new ordered list — defaults to no fallback (deliberate choice).
 nx._set_provider_order(src, ["Together", "DeepInfra"])
 assert nx._provider_order(src) == ["Together", "DeepInfra"]
@@ -298,16 +298,16 @@ print("TEST 18: extra_request_kwargs plumbing")
 src = nx.SOURCES["openrouter"]
 # Routed source yields an extra_body kwarg.
 kw = src.extra_request_kwargs()
-assert kw == {"extra_body": {"provider": {"order": ["parasail/fp8"],
+assert kw == {"extra_body": {"provider": {"order": ["io-net/fp8"],
                                           "allow_fallbacks": False}}}, kw
 # Clearing routing yields nothing — non-routing sources contribute no kwarg.
 nx._set_provider_order(src, [])
 assert src.extra_request_kwargs() == {}
 # Re-pin and confirm the active source's kwarg matches.
-nx._set_provider_order(src, ["parasail/fp8"])
+nx._set_provider_order(src, ["io-net/fp8"])
 nx.switch_source("openrouter")
 assert nx.ACTIVE.extra_request_kwargs() == \
-    {"extra_body": {"provider": {"order": ["parasail/fp8"],
+    {"extra_body": {"provider": {"order": ["io-net/fp8"],
                                  "allow_fallbacks": False}}}
 print("  PASS\n")
 
