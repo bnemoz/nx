@@ -82,12 +82,20 @@ def fake_loop(nx_fresh, monkeypatch):
     def fake_run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
                                  on_step=None, max_turns_override=None):
         task = nx._batch._batch_task()
+        # batch workers install their recorder on the per-thread slot; resolve
+        # the ACTIVE recorder the way _record_usage does
+        metrics = nx.st._active_metrics()
+        sid = None
+        mname = None
+        if metrics is not None:
+            sid = metrics.session_id
+            mname = type(metrics).__name__
         calls.append({
             "messages": [dict(m) for m in messages],
             "max_turns": max_turns_override,
-            "metrics": type(nx.st._METRICS).__name__,
-            "metrics_obj": nx.st._METRICS,
-            "session_id": nx.st._METRICS.session_id,
+            "metrics": mname,
+            "metrics_obj": metrics,
+            "session_id": sid,
             "task_active": nx._batch._batch_active(),
             "quiet": __import__("nx._subagent", fromlist=["_subagent_quiet"])._subagent_quiet(),
             "instruction": messages[-1]["content"],
@@ -424,6 +432,114 @@ def test_result_exit_code_mapping(nx_fresh):
     assert f("esc") == 4
     assert f(None) == 4
     assert f("error") == 4
+
+
+# --- per-task metrics under --parallel > 1 ------------------------------------
+# _record_usage() resolves the recorder from the worker thread's metrics slot
+# (st._METRICS_TLS → st._active_metrics()), not the process-global st._METRICS:
+# a swap-and-restore of the global races every sibling worker and silently
+# misattributes (or loses) each task's token totals on the JSONL result lines.
+
+def test_record_usage_lands_in_thread_metrics_not_global(fake_loop):
+    """A batch worker's usage goes to ITS metrics even though another thread
+    (or the REPL parent) has installed a different recorder on st._METRICS."""
+    nx, calls, holder = fake_loop
+    from types import SimpleNamespace
+
+    from nx._metrics import _record_usage
+    global_metrics = nx._metrics._Metrics("repl-session")
+    nx.st._METRICS = global_metrics
+    nx.st._METRICS_TLS.metrics = nx._metrics._Metrics("task-session")
+    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=3,
+                            prompt_tokens_details=None,
+                            output_tokens_details=None)
+    try:
+        _record_usage(usage)
+    finally:
+        nx.st._METRICS_TLS.metrics = None
+        nx.st._METRICS = None
+    assert global_metrics.api_calls == 0
+    assert global_metrics.input_tokens == 0
+    assert global_metrics.output_tokens == 0
+
+
+def test_parallel_task_token_totals_are_per_task(fake_loop, tmp_path, monkeypatch):
+    """End-to-end: N overlapping tasks, each _record_usage'ing its own volume.
+    Every result line's tokens must equal what that task recorded — under the
+    old global swap-and-restore, task A's calls landed in whichever metrics
+    task B had last installed on st._METRICS, so lines came back zeroed,
+    swapped, or double-counted (nondeterministically)."""
+    nx, calls, holder = fake_loop
+    n = 6
+    barrier = threading.Barrier(n, timeout=10)
+    from types import SimpleNamespace
+
+    from nx._metrics import _record_usage
+
+    def loop_with_usage(messages, **kw):
+        task = nx._batch._batch_task()
+        tid = int(task["id"].lstrip("p"))  # "p3" -> 3
+        barrier.wait()                     # force real overlap
+        _record_usage(SimpleNamespace(prompt_tokens=100 + tid,
+                                      completion_tokens=10 + tid,
+                                      prompt_tokens_details=None,
+                                      output_tokens_details=None))
+        return {"status": "done", "turns": 1}
+
+    nx._run_model_turn_loop = loop_with_usage
+    f = _write_tasks(tmp_path, [json.dumps({"instruction": f"t{i}", "id": f"p{i}"})
+                                for i in range(n)])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--parallel", str(n), "--continue-on-error"])
+    assert code == 0, f"exit={code}, stderr={err.getvalue()!r}, lines={buf.getvalue()!r}"
+    lines = [json.loads(l) for l in buf.getvalue().strip().splitlines()]
+    by_id = {l["id"]: l for l in lines}
+    assert len(by_id) == n
+    for i in range(n):
+        line = by_id[f"p{i}"]
+        # exact per-task attribution: no sibling's tokens, none lost
+        assert line["tokens"] == {"input": 100 + i, "output": 10 + i,
+                                  "cache_read": 0, "reasoning": 0,
+                                  "api_calls": 1}
+    # and the REPL's global recorder was never touched by any worker
+    assert nx.st._METRICS is None or nx.st._METRICS.api_calls == 0
+
+
+def test_parallel_task_sessions_carry_own_totals(fake_loop, tmp_path, monkeypatch):
+    """The per-task session JSONs are what a dashboard/resume reads back: each
+    must carry its own task's totals, not a sibling's (parallel workers used
+    to merge whatever st._METRICS happened to hold at save time)."""
+    nx, calls, holder = fake_loop
+    n = 4
+    barrier = threading.Barrier(n, timeout=10)
+    from types import SimpleNamespace
+
+    from nx._metrics import _record_usage
+
+    def loop_with_usage(messages, **kw):
+        task = nx._batch._batch_task()
+        tid = int(task["id"].lstrip("p"))
+        barrier.wait()
+        _record_usage(SimpleNamespace(prompt_tokens=7,
+                                      completion_tokens=tid,
+                                      prompt_tokens_details=None,
+                                      output_tokens_details=None))
+        return {"status": "done", "turns": 1}
+
+    nx._run_model_turn_loop = loop_with_usage
+    f = _write_tasks(tmp_path, [json.dumps({"instruction": f"t{i}", "id": f"p{i}"})
+                                for i in range(n)])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--parallel", str(n), "--continue-on-error"])
+    assert code == 0, f"exit={code}, stderr={err.getvalue()!r}"
+    # one saved session per task; each carries its own totals — match the
+    # sessions back to tasks by their distinct output-token value
+    sessions_dir = tmp_path / "nxhome" / "sessions"
+    files = list(sessions_dir.glob("*.json"))
+    assert len(files) == n
+    totals = sorted(json.loads(p.read_text(encoding="utf-8"))["output_tokens"]
+                    for p in files)
+    assert totals == [0, 1, 2, 3]
 
 
 # --- quiet render-path regressions ---------------------------------------------

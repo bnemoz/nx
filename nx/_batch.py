@@ -4,8 +4,10 @@ Each line of the input file is ONE task: either a bare JSON string (the
 instruction) or a JSON object `{"instruction": "...", "id": "t1",
 "session": "my-session"}` (id/session optional). Tasks run through the same
 `_run_model_turn_loop` machinery as `nx --prompt-file` one-shot mode — a
-fresh messages list, fresh per-task `_Metrics`, a per-task session id — but
-N of them per process, with JSONL results on stdout and a process exit code
+fresh messages list, fresh per-task `_Metrics` (installed on the worker
+thread's metrics slot — see _state.py — so --parallel workers never race the
+process-global recorder), a per-task session id — but N of them per process,
+with JSONL results on stdout and a process exit code
 that summarizes the whole run:
 
   0   every task reported status "done"
@@ -235,6 +237,7 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     result dict (the JSONL line's content). Never raises — a raise is an
     exit_code=4 result."""
     import nx as _m  # lazy: the package re-exports what the loop needs
+    from ._repl_state import _fresh_metrics
     from ._subagent import _ASYNC_QUIET_SLOTS
     from ._turn import _ensure_ctx_probe
 
@@ -270,23 +273,25 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     with _QUIET_GUARD:
         _QUIET_HOLDERS += 1
     _TASK_TLS.task = task
-    prev_metrics = st._METRICS
+    # Per-task recorder on THIS thread's slot — never the process-global
+    # `st._METRICS`: with --parallel > 1 a swap-and-restore of the global
+    # races every sibling worker's _record_usage and silently misattributes
+    # their token totals (the metrics TLS slot is per thread, like the quiet
+    # slot and _TASK_TLS). prev is None except for a nested installation.
+    prev_metrics = None
     try:
+        prev_metrics = st._set_thread_metrics(_fresh_metrics(session_id))
         if st.ACTIVE is None:
             raise RuntimeError("no active model source — set NX_BASE_URL/NX_SOURCE_* or use --source")
         _ensure_ctx_probe(st.ACTIVE)
-        # Fresh per-task metrics so the result's token totals are per task
-        # (the REPL's recorder is process-global; parallel workers would
-        # otherwise race it).
-        from ._repl_state import _fresh_metrics
-        st._METRICS = _fresh_metrics(session_id)
+        task_metrics = st._active_metrics()
         messages = _m._initial_messages() + [{"role": "user", "content": instruction}]
         start_idx = len(messages)
         summary = _m._run_model_turn_loop(messages, on_step=None,
                                           max_turns_override=max_turns)
         result.update(_m._one_shot_result(messages, start_idx, summary,
                                           time.time() - started,
-                                          metrics=st._METRICS))
+                                          metrics=task_metrics))
         result["exit_code"] = _result_exit_code(result.get("status"))
         # Persist the transcript exactly like the REPL would — a benchmark
         # task is a real, resumable session.
@@ -301,7 +306,7 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         result["exit_code"] = EXIT_ERROR
         result["elapsed_seconds"] = round(time.time() - started, 2)
     finally:
-        st._METRICS = prev_metrics
+        st._set_thread_metrics(prev_metrics)
         _TASK_TLS.task = None
         with _QUIET_GUARD:
             _QUIET_HOLDERS -= 1
@@ -311,10 +316,16 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
 
 
 def _save_task_session(session_id: str, messages: list[dict[str, Any]]) -> None:
-    """Persist a finished task's transcript (best-effort; never raises)."""
+    """Persist a finished task's transcript (best-effort; never raises).
+
+    Reads the task's own recorder via _active_metrics(): with --parallel > 1
+    the process-global `st._METRICS` still belongs to whichever REPL (or
+    parent process entry point) built it, so merging its totals into this
+    task's session JSON would misattribute tokens across sibling tasks."""
     try:
         import nx as _m
-        m = dict(st._METRICS.as_meta()) if st._METRICS is not None else {}
+        m_obj = st._active_metrics()
+        m = dict(m_obj.as_meta()) if m_obj is not None else {}
         m["source"] = st.ACTIVE.name if st.ACTIVE else None
         m["model"] = st.MODEL
         import os

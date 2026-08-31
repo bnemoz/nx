@@ -193,7 +193,34 @@ AUTOCOMPRESS_DEFAULT: float = 85
 COMPRESS_KEEP: int = 2
 
 # --- usage metrics -------------------------------------------------------------
+# `_METRICS` is the REPL's recorder (set in main() / /reset / /resume; see
+# _metrics.py). Batch workers must not swap it in place: with --parallel > 1
+# each worker's assignment and `finally` restore race every sibling's
+# _record_usage, silently misattributing token totals. Instead a worker
+# installs ITS OWN recorder on `_METRICS_TLS` (below) — per thread, like the
+# quiet slot and the batch task slot — and `_active_metrics()` resolves that
+# per-thread recorder first, falling back to the process-global for the REPL.
+# Everything outside _metrics.py/_batch.py keeps reading/writing `_METRICS`
+# exactly as before.
 _METRICS: "_Metrics | None" = None  # set to a _Metrics() instance in _metrics.py
+_METRICS_TLS: threading.local = threading.local()
+
+
+def _active_metrics() -> "_Metrics | None":
+    """The recorder THIS thread's usage should accumulate into: the batch
+    worker's per-task metrics when one is installed on this thread, else the
+    process-global REPL recorder."""
+    m = getattr(_METRICS_TLS, "metrics", None)
+    return m if m is not None else _METRICS
+
+
+def _set_thread_metrics(m: "_Metrics | None") -> "_Metrics | None":
+    """Install (and return the previously installed) per-thread recorder.
+    Batch workers bracket their turn loop with this so parallel tasks each
+    own their totals; the previous value is restored in `finally`."""
+    prev = getattr(_METRICS_TLS, "metrics", None)
+    _METRICS_TLS.metrics = m
+    return prev
 
 # --- native tool-calling confirmation ------------------------------------------
 # Set True by _handle_native_tool_calls() the first time a turn actually comes

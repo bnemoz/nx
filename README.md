@@ -384,8 +384,10 @@ Each input line is a bare JSON string (the instruction) or an object:
 ```
 
 Blank lines and `#` comments are skipped. Flags: `--parallel <N>` runs up to N
-tasks concurrently (each on its own thread with per-task state), `--max-turns
-<N>` caps each task's turns, `--continue-on-error` keeps scheduling after a
+tasks concurrently (each on its own thread with per-task state — including
+per-task token accounting, so a benchmark's per-task token totals stay exact
+under `--parallel > 1`), `--max-turns <N>` caps each task's turns,
+`--continue-on-error` keeps scheduling after a
 task fails (default: stop scheduling new tasks at the first error),
 `--source <name>` picks the endpoint. stdout carries ONLY the JSONL result
 lines — every human-facing render is suppressed; progress and the summary go

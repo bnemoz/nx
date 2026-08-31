@@ -122,8 +122,9 @@ def _record_usage(
     recovery/error path that intentionally skips the stats footer, and a few
     inexpensive maintenance calls are non-streaming altogether.
     """
-    if st._METRICS is not None:
-        st._METRICS.add(_normalize_usage(
+    m = st._active_metrics()
+    if m is not None:
+        m.add(_normalize_usage(
             usage, timings,
             fallback_chars=fallback_chars,
             fallback_prompt_chars=fallback_prompt_chars,
@@ -139,7 +140,9 @@ class _Metrics:
     """Cumulative token usage for the current session, plus an optional push.
 
     A single module-global instance, `st._METRICS`, is created in main() when a
-    session starts (and recreated on /reset, reloaded on /resume). When
+    session starts (and recreated on /reset, reloaded on /resume) — or a
+    per-task instance rides the thread-local slot in batch mode (see
+    _state.py's _active_metrics()). When
     NX_METRICS_URL is unset it's just an in-memory accumulator that feeds
     the session-JSON totals — no network, no threads, no dependency. When the
     URL is set, each flush() also fires off a fire-and-forget POST so a live
@@ -244,9 +247,12 @@ class _Metrics:
             self._push_disabled = True
 
 
-# Module-global recorder. None until main() builds one for the session.
-# It's threaded down into the model-turn path so each API call's usage is
-# accumulated; the REPL merges its .as_meta() into the session JSON on save.
+# Recorder binding. The REPL's recorder is the module-global `st._METRICS`
+# (None until main() builds one for the session); it's threaded down into the
+# model-turn path so each API call's usage is accumulated, and the REPL merges
+# its .as_meta() into the session JSON on save. Batch workers install a
+# per-task recorder on the thread-local `st._METRICS_TLS` slot instead (see
+# _state.py's _active_metrics) so parallel workers never race the global.
 st._METRICS = None
 
 
