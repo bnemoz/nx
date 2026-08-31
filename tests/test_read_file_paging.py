@@ -96,6 +96,31 @@ def test_empty_file_clear_marker():
     assert m.read_file(path, offset=5) == f"[{path}: empty file]"
 
 
+def test_window_total_stays_exact_without_buffering_whole_file():
+    # The header total comes from a bounded streaming tail scan, so a file far
+    # bigger than the window still reports its true line count (while only the
+    # window itself is held in memory).
+    path = _write("big5.txt", "".join(f"l{i}\n" for i in range(1, 2001)))
+    out = m.read_file(path, limit=5)
+    assert out.startswith(f"[{path}: lines 1-5 of 2000;")
+
+
+def test_total_scan_bounded_by_env_cap(monkeypatch):
+    # Past the NX_READ_FILE_SCAN_LINES cap the header degrades to a lower
+    # bound "N+" instead of scanning an unbounded file.
+    monkeypatch.setenv("NX_READ_FILE_SCAN_LINES", "10")
+    path = _write("big6.txt", "".join(f"l{i}\n" for i in range(1, 31)))
+    out = m.read_file(path, limit=5)
+    assert out.startswith(f"[{path}: lines 1-5 of 15+;")
+
+
+def test_offset_past_eof_after_limit_window():
+    # offset>limit window on the last page: no bogus "N+", total stays exact.
+    path = _write("big7.txt", "".join(f"l{i}\n" for i in range(1, 31)))
+    out = m.read_file(path, offset=28, limit=5)
+    assert out.startswith(f"[{path}: lines 28-30 of 30;")
+
+
 def test_limit_zero_reads_to_end():
     path = _write("big4.txt", "".join(f"line{i}\n" for i in range(1, 51)))
     out = m.read_file(path, limit=0)

@@ -16,12 +16,38 @@ from typing import Any
 from ._env import _env_int
 
 
+def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:
+    """Count the lines of `path` after the first `skip` lines, streaming and
+    O(1) memory. Returns (count, exact): exact=False means the count was cut
+    short (cap reached, or the file became unreadable), so `count` is only a
+    lower bound. Used to total the line count in read_file's paging header
+    without ever buffering the whole file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for _ in range(skip):
+                if not f.readline():
+                    return 0, True
+            n = 0
+            for _ in f:
+                n += 1
+                if n > cap:
+                    return cap, False
+            return n, True
+    except (OSError, UnicodeDecodeError):
+        return 0, False
+
+
 def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, **_: Any) -> str:
     """Read a file as numbered lines (1-based, `cat -n` style: right-aligned
     line number, a tab, then the line). Large files return only a window — pass
     offset (start line) and limit (max lines) to page through the rest. A header
     announces the visible range + total line count so the model can ask for more
     instead of being head/tail-capped by _sanitize_tool_result.
+
+    Only the requested window is held in memory; the file is streamed, never
+    read whole. The header's total comes from a bounded streaming tail scan
+    (NX_READ_FILE_SCAN_LINES lines, default 200000) — beyond it the header
+    reports a lower bound as "N+" rather than reading an unbounded file.
 
     path may also be a list of paths; each is read with the same offset/limit
     and the results are concatenated under a "==> path <==" header per file."""
@@ -30,40 +56,63 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
             f"==> {p} <==\n{read_file(p, offset=offset, limit=limit)}" for p in path
         )
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        return f"ERROR: {type(e).__name__}: {e}"
-    except UnicodeDecodeError:
-        return f"ERROR: {path} is not a valid UTF-8 text file (binary or wrong encoding)"
-    total = len(lines)
-    try:
         start = max(1, int(offset)) - 1
     except (TypeError, ValueError):
         start = 0
-    if total == 0:
-        return f"[{path}: empty file]"
-    if start >= total:
-        return f"[{path}: {total} lines; offset {start + 1} is past end of file]"
     if limit is None:
         limit = _env_int("NX_READ_FILE_LINES", 400)
     try:
         limit = int(limit)
     except (TypeError, ValueError):
         limit = 400
-    end = total if limit <= 0 else min(total, start + limit)
-    body = "".join(f"{i + 1:6d}\t{lines[i]}" for i in range(start, end))
-    if body and not body.endswith("\n"):
+    out: list[str] = []
+    skipped = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            while skipped < start and f.readline():
+                skipped += 1
+            if skipped == start:
+                for line in f:  # one line in memory at a time
+                    out.append(f"{start + len(out) + 1:6d}\t{line}")
+                    if 0 < limit <= len(out):
+                        break
+    except OSError as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+    except UnicodeDecodeError:
+        return f"ERROR: {path} is not a valid UTF-8 text file (binary or wrong encoding)"
+    if not out:
+        if skipped == 0:  # any nonempty file skips >= 1 line
+            return f"[{path}: empty file]"
+        return f"[{path}: {skipped} lines; offset {start + 1} is past end of file]"
+    body = "".join(out)
+    if not body.endswith("\n"):
         body += "\n"
-    if start > 0 or end < total:
-        tip = ""
-        if start == 0 and end < total:
-            tip = (" Looking for one function/section rather than the whole "
-                   "file? STOP paging -- call search_files(pattern, context=N) "
-                   "instead, it finds it in one shot.")
-        return (f"[{path}: lines {start + 1}-{end} of {total}; "
-                f"call read_file with offset/limit to page.{tip}]\n" + body)
-    return body
+    end = start + len(out)
+    truncated = 0 < limit <= len(out)  # stopped at limit, EOF not yet seen
+    total: int | None = None
+    plus = ""
+    if truncated:
+        cap = _env_int("NX_READ_FILE_SCAN_LINES", 200000)
+        tail, exact = _count_tail_lines(path, end, cap)
+        if exact:
+            if tail == 0:
+                truncated = False  # the window was the whole rest of the file
+            else:
+                total = end + tail
+        else:
+            total = end + cap  # lower bound only
+            plus = "+"
+    if start == 0 and not truncated:
+        return body  # whole file (or whole rest of file) — no header
+    if total is None:
+        total = end  # window with start>0 reached EOF
+    tip = ""
+    if start == 0:
+        tip = (" Looking for one function/section rather than the whole "
+               "file? STOP paging -- call search_files(pattern, context=N) "
+               "instead, it finds it in one shot.")
+    return (f"[{path}: lines {start + 1}-{end} of {total}{plus}; "
+            f"call read_file with offset/limit to page.{tip}]\n" + body)
 
 
 _LINE_NUM_PREFIX = re.compile(r"^ *\d+\t")

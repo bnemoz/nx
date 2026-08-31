@@ -167,6 +167,8 @@ sessions and exits without entering the REPL.
 | `NX_OVERFLOW_TTL_DAYS` | purge spill files older than N days (default 7, like bg-logs) |
 | `NX_OVERFLOW_ECHO_CHARS` | max chars of head/tail content echoed back alongside the spill path (default 2000; `0` = path note only) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
+| `NX_READ_FILE_LINES` | default `read_file` window size in lines (default 400; `limit<=0` reads to end) |
+| `NX_READ_FILE_SCAN_LINES` | how far past a windowed `read_file` the header's exact line-count scan may reach (default 200000); beyond it the header reports a lower bound as `N+` instead of scanning an unbounded file |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
 | `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
@@ -422,7 +424,7 @@ go through the approval gate above.
 
 | tool | args | notes |
 | --- | --- | --- |
-| `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list |
+| `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory |
 | `write_file` | `path`, `content` | overwrites; requires confirmation |
 | `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly |
 | `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation |
