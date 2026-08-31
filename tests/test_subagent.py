@@ -111,7 +111,12 @@ def test_subagent_empty_answer_and_cap(nx_fresh, monkeypatch):
 
 def test_subagent_rejects_bad_args_and_nested(nx_fresh, monkeypatch):
     from nx._subagent import spawn_agent
-    assert spawn_agent("").startswith("ERROR")
+    # empty instruction still errors, but now names the right key so a
+    # mis-keyed model call (prompt/description instead of instruction)
+    # self-corrects next turn instead of trial-and-erroring
+    out = spawn_agent("")
+    assert out.startswith("ERROR")
+    assert "instruction" in out
     assert spawn_agent("   ").startswith("ERROR")
     # max_turns clamped to sane bounds
     seen = {}
@@ -343,3 +348,59 @@ def test_subagent_system_and_toolset(nx_fresh):
     forbidden = {"write_file", "edit_file", "multi_edit", "sed_edit", "apply_patch",
                  "wait_background", "memory_write", "spawn_agent"}
     assert not (names & forbidden)
+
+
+# --- headless --json trace pairing ------------------------------------------
+
+def test_one_shot_result_pairs_multi_tool_results(nx_fresh):
+    """_one_shot_result must attach each tool result to ITS call. A fan-out
+    turn (2+ spawn_agent) emits one tool message per call — pairing on
+    trace[-1] kept only the last sub-agent's answer."""
+    from nx._cli import _one_shot_result
+    messages = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "a1", "type": "function",
+             "function": {"name": "spawn_agent", "arguments": '{"instruction": "A"}'}},
+            {"id": "a2", "type": "function",
+             "function": {"name": "spawn_agent", "arguments": '{"instruction": "B"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "a1", "content": "answer A"},
+        {"role": "tool", "tool_call_id": "a2", "content": "answer B"},
+        {"role": "assistant", "content": "merged"},
+    ]
+    out = _one_shot_result(messages, 2, {"status": "done", "turns": 2}, 1.0)
+    assert [t["result"] for t in out["tool_calls"]] == ["answer A", "answer B"]
+    assert out["final_answer"] == "merged"
+
+
+def test_one_shot_result_text_protocol_observations(nx_fresh):
+    """Text-protocol fan-outs fold every observation into one user message of
+    'Observation (name): result' blocks — pair them back to each call."""
+    from nx._cli import _one_shot_result
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content":
+         '<tool_call>{"name": "spawn_agent", "arguments": {"instruction": "A"}}</tool_call>'
+         '<tool_call>{"name": "spawn_agent", "arguments": {"instruction": "B"}}</tool_call>'},
+        {"role": "user", "content":
+         "Observation (spawn_agent): answer A\nObservation (spawn_agent): answer B"},
+    ]
+    out = _one_shot_result(messages, 0, {"status": "done", "turns": 1}, 1.0)
+    assert [t["result"] for t in out["tool_calls"]] == ["answer A", "answer B"]
+
+
+def test_one_shot_result_single_tool_still_pairs(nx_fresh):
+    from nx._cli import _one_shot_result
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "x1", "type": "function",
+             "function": {"name": "read_file", "arguments": '{"path": "f"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "x1", "content": "file body"},
+    ]
+    out = _one_shot_result(messages, 0, {"status": "done", "turns": 1}, 1.0)
+    assert out["tool_calls"][0]["result"] == "file body"
+    assert out["final_answer"] is None

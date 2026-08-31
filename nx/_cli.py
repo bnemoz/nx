@@ -19,6 +19,7 @@ from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl, _cli_sessions, _cli_tokens
 from ._repl_state import _fresh_metrics
+from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
 
 _HELP_TEXT = """\
 usage: nx [flags]
@@ -127,19 +128,60 @@ def _run_one_shot() -> bool:
 
 def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: float) -> dict:
     """Build the --json result payload from the messages this run appended
-    (everything from start_idx on) plus the turn-loop's status summary."""
+    (everything from start_idx on) plus the turn-loop's status summary.
+
+    Native tool_call turns pair each result by tool_call_id (a fan-out turn
+    emits N results — pairing on trace[-1] used to keep only the last).
+    Text-protocol turns append one user message of "Observation (name): ..."
+    blocks, one per call, in call order."""
     trace = []
     final_answer = None
+    pending_by_id: dict[str, int] = {}
     for m in messages[start_idx:]:
         role = m.get("role")
         if role == "assistant":
-            for tc in (m.get("tool_calls") or []):
+            calls = m.get("tool_calls") or []
+            for tc in calls:
                 fn = tc.get("function", {})
+                pending_by_id[tc.get("id", "")] = len(trace)
                 trace.append({"tool": fn.get("name"), "args": fn.get("arguments")})
-            if m.get("content") and not m.get("tool_calls"):
-                final_answer = m["content"]
+            text = m.get("content") or ""
+            if not calls and text:
+                # text-protocol turns keep the calls inside the content; parse
+                # them so the JSON trace isn't empty on fallback-path models
+                parsed, _errs = parse_text_calls_with_errors(text)
+                for name, a in parsed:
+                    trace.append({"tool": name,
+                                  "args": a if isinstance(a, str) else json.dumps(a)})
+                if not parsed and not TOOL_PROTOCOL_TAG_RE.search(text):
+                    final_answer = text
         elif role == "tool" and trace:
-            trace[-1]["result"] = m.get("content")
+            idx = pending_by_id.get(m.get("tool_call_id", ""))
+            if idx is not None:
+                trace[idx]["result"] = m.get("content")
+            else:
+                trace[-1]["result"] = m.get("content")
+        elif role == "user" and trace:
+            # text-protocol observations: one user message holding an
+            # "Observation (tool): result" block per call, in call order;
+            # repeated tool names take their k-th block in turn
+            obs_text = m.get("content") or ""
+            taken: dict[str, int] = {}
+            for t in trace:
+                if "result" in t or not t.get("tool"):
+                    continue
+                marker = "Observation (%s): " % t["tool"]
+                j = -1
+                for _ in range(taken.get(t["tool"], 0) + 1):
+                    j = obs_text.find(marker, j + 1)
+                    if j == -1:
+                        break
+                if j == -1:
+                    continue
+                taken[t["tool"]] = taken.get(t["tool"], 0) + 1
+                rest = obs_text[j + len(marker):]
+                nxt = rest.find("\nObservation (")
+                t["result"] = rest[:nxt] if nxt != -1 else rest
     m = st._METRICS
     tokens = ({"input": m.input_tokens, "output": m.output_tokens,
                "cache_read": m.cache_read_tokens, "reasoning": m.reasoning_tokens,
