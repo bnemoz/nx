@@ -190,6 +190,7 @@ def _scan_background_completions() -> str | None:
     announce itself. Returns the note text (or None): lists finished jobs with
     exit codes once, then marks them seen — no repeated noise."""
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
+    from ._verify import _is_verify_job  # verify jobs report via _stage_verify_outcome instead
     try:
         jobs = list_bg_jobs()
     except Exception:
@@ -207,6 +208,8 @@ def _scan_background_completions() -> str | None:
         # only jobs this nx process launched — never another session's strays
         if j.get("owner_pid") != mine:
             continue
+        if _is_verify_job(j):
+            continue  # NX_VERIFY_CMD outcome has its own dedicated note path
         if j.get("alive"):
             continue  # still running — the existing [background] flow covers it
         if pid in seen:
@@ -268,6 +271,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         note = _scan_background_completions()
         if note:
             st._PENDING_BG_COMPLETION_NOTICE = note
+        # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
+        # pending notice (independent of the generic bg-completion note).
+        from ._verify import _stage_verify_outcome
+        try:
+            _stage_verify_outcome()
+        except Exception:
+            pass
     if name in _CACHEABLE_READ_TOOLS:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
@@ -313,6 +323,24 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     finally:
         st._ACTIVE_SPINNER = None
         spinner.stop()
+    # Post-edit structural check: for a successful .py write/edit, parse the
+    # new contents in-process (~1ms) and append the verdict to the result, so
+    # a broken edit is surfaced on the turn that caused it. Also records the
+    # edit for the NX_VERIFY_CMD settle log. Best-effort — never raises.
+    if (name in ("write_file", "edit_file", "multi_edit")
+            and isinstance(result, str) and not result.startswith(("ERROR", "DENIED"))):
+        from ._verify import record_py_edit, _py_path
+        vp = _py_path(args.get("path"))
+        if vp:
+            problem = None
+            checked = False
+            try:
+                problem = record_py_edit(vp)
+                checked = True
+            except Exception:
+                pass  # verification is best-effort — never fail the edit
+            if checked:
+                result = f"{result}\n{problem or os.path.basename(vp) + ' — py_compile OK'}"
     # Dedup + cap the result BEFORE it enters the message history (the model and
     # the on-screen preview both get this sanitized form). Bounding repetitive
     # tool output is the cheapest defense against context-copying collapse.

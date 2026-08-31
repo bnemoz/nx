@@ -41,6 +41,9 @@ Toggles in-session: /source [name] [model]  /provider [source] [a,b,…|off]  /y
 Flags: --yolo  --approval <all|low|medium|high|yolo>  --source <name>  --resume <target>  --session <id>
 Env:   NX_APPROVAL=<all|low|medium|high|yolo>  (persistent default approval mode; ~/.env or shell)
        NX_AUTOCOMPRESS_PERCENT=<0-100>  (auto-compress threshold; 0=off; default 85)
+       NX_VERIFY_CMD=<cmd>  (post-edit verify command, e.g. `uv run pytest -q`;
+                             auto-runs ~20s after the last .py edit settles —
+                             set with /verify, force one run with /verify run)
        NX_BACKEND=vllm  (disables llama.cpp-only recovery knobs like min_p /
                              repeat_penalty / DRY that vLLM's speculative decoder
                              rejects; omits them from extra_body on retries)
@@ -76,7 +79,8 @@ _STATE_NAMES = frozenset((
     "YOLO", "APPROVE_LEVEL", "DEFAULT_APPROVE_LEVEL", "PROJECT_ROOT",
     "_ACTIVE_SPINNER", "RISK_CONNECTION_RETRIES", "RISK_CONNECTION_RETRY_SECONDS",
     "_INTERRUPT_THREAD", "_SESSION_HAS_BACKGROUNDED", "_PENDING_BACKGROUND_NOTICE",
-    "_PENDING_MULTI_EDIT_NOTICE",
+    "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE", "_VERIFY_SEEN",
+    "_VERIFY_EDIT_LOG", "_VERIFY_INFLIGHT",
     "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
     "REASONING_ONLY_RETRY_LIMIT", "MALFORMED_STREAM_RETRY_LIMIT",
     "FORCED_FINAL_MAX_TOKENS", "EMPTY_TURN_RETRY_LIMIT", "REASONING_ONLY_CHAR_LIMIT",
@@ -544,6 +548,18 @@ from ._compress import (
     RECOVERY_DRY_MULTIPLIER, RECOVERY_DRY_BASE, RECOVERY_DRY_ALLOWED_LENGTH,
     RECOVERY_DRY_SEQUENCE_BREAKERS, _recovery_sampling_opts, open_stream,
     compress, _maybe_autocompress,
+)
+
+
+# --- post-edit verification --------------------------------------------------
+# (a) a free in-process ast.parse after every successful .py write/edit, whose
+#     verdict rides on the edit's own tool result; (b) opt-in NX_VERIFY_CMD
+#     (e.g. `uv run pytest -q`) launched detached ~NX_VERIFY_SETTLE_SECS after
+#     the last edit settles, with pass/fail reported back as a [Runtime note].
+#     See nx/_verify.py; user-facing control via /verify.
+from ._verify import (
+    _ast_check, _launch_verify_if_settled, record_py_edit, verify_enabled,
+    _stage_verify_outcome, _is_verify_job,
 )
 
 

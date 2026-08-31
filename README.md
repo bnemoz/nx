@@ -165,6 +165,8 @@ sessions and exits without entering the REPL.
 | `NX_BASH_PROMPT_SECRETS` | `1` forces the approval prompt when a `run_bash` command looks like it carries a credential (sk-/ghp_/AKIA/PEM…), even in yolo |
 | `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) |
+| `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
+| `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 200) |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
@@ -268,6 +270,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown; pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
+| `/verify [cmd\|off\|run]` | show/set/clear or force-run the post-edit verify command (`NX_VERIFY_CMD`) — when set, every edited `.py` also gets an in-process `ast.parse` whose verdict rides on the edit's own tool result |
 | `/undo` | revert the last write/edit (LIFO) |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
 | `/bg [kill <pid>]` | list background `run_bash` jobs, or kill one |

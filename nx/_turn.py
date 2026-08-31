@@ -36,6 +36,7 @@ from ._compress import (
     _flush_pending_background_notice, _last_is_dangling_tool,
 )
 from ._env import _env_int
+from ._verify import _launch_verify_if_settled
 from . import _state as st
 from . import (
     FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
@@ -1046,6 +1047,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
+            _launch_verify_if_settled()  # model went quiet — fire NX_VERIFY_CMD if its settle window passed
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input

@@ -48,6 +48,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/memory", "manage persistent memory"),
     ("/delete", "delete a saved session"),
     ("/todo", "show the model's current todo_write list"),
+    ("/verify", "set / clear / force-run the post-edit verify command (NX_VERIFY_CMD)"),
     ("/compress", "summarize older turns into one, keep last 2 verbatim"),
     ("/compact", "alias for /compress"),
     ("/autocompress", "show or set the auto-compress threshold"),
@@ -76,6 +77,7 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/tools": ["on", "off", "last"],  # legacy alias arg dropdown
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
+    "/verify": ["off", "run"],
     "/ctx": ["pin", "unpin", "clear"],
     "/export": ["md"],
     "/source": lambda: list(st.SOURCE_ORDER),

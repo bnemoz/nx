@@ -57,6 +57,11 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if st._PENDING_MULTI_EDIT_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_MULTI_EDIT_NOTICE})
         st._PENDING_MULTI_EDIT_NOTICE = None
+    if getattr(st, "_PENDING_VERIFY_NOTICE", None):
+        # NX_VERIFY_CMD outcome staged by _dispatch._scan_background_completions
+        # — flushed here with the other runtime notes.
+        messages.append({"role": "user", "content": st._PENDING_VERIFY_NOTICE})
+        st._PENDING_VERIFY_NOTICE = None
 
 
 def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:

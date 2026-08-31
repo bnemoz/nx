@@ -63,6 +63,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/memory [...]", "memory-related subcommands"),
     ("/delete [target]", "delete a session"),
     ("/todo", "show the model's current todo_write list"),
+    ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
 ]
 
 
@@ -609,6 +610,54 @@ def _cmd_autocompress(user: str, state: _ReplState) -> None:
     st.AUTOCOMPRESS_PERCENT = val
     print(f"{DIM}  auto-compress: {val}% "
           f"(auto-compress when context ≥ {val}% full){RESET}")
+
+
+def _cmd_verify(user: str, state: _ReplState) -> None:
+    """/verify — show / set / clear / force-run the post-edit verify command.
+
+        /verify                  show the current NX_VERIFY_CMD (or "off")
+        /verify <cmd...>         set it (e.g. /verify uv run pytest -q), saved to ~/.env
+        /verify off              clear it
+        /verify run              run it now, detached; the outcome arrives
+                                 as a [Runtime note] when it finishes
+
+    When set, nx also runs it automatically ~NX_VERIFY_SETTLE_SECS (default 20)
+    after the last .py edit goes quiet, and an in-process ast.parse of every
+    edited .py file reports 'py_compile OK' / 'SYNTAX ERROR at line N' on the
+    edit's own tool result.
+    """
+    from ._verify import _launch_verify_if_settled, verify_enabled
+    arg = user[len("/verify"):].strip()
+    if not arg:
+        cmd = os.environ.get("NX_VERIFY_CMD", "").strip()
+        if cmd:
+            print(f"{DIM}  verify: {cmd}{RESET}")
+            print(f"{DIM}  (auto-runs ~NX_VERIFY_SETTLE_SECS after the last .py edit; "
+                  f"/verify run to force, /verify off to disable){RESET}")
+        else:
+            print(f"{DIM}  verify: off — set one with /verify <command>, e.g. /verify uv run pytest -q{RESET}")
+        return
+    if arg in ("off", "disable", "0"):
+        os.environ.pop("NX_VERIFY_CMD", None)
+        _set_env_var("NX_VERIFY_CMD", "")
+        st._VERIFY_EDIT_LOG.clear()
+        print(f"{DIM}  verify: off{RESET}")
+        return
+    if arg in ("run", "force", "now"):
+        if not verify_enabled():
+            print(f"{C.WARNING}  no verify command set — /verify <command> first{RESET}")
+            return
+        st._VERIFY_EDIT_LOG.append(0.0)  # ancient timestamp → settled immediately
+        _launch_verify_if_settled(force=True)
+        print(f"{DIM}  ↳ verify command launched in background — its result will "
+              f"surface as a runtime note when it finishes{RESET}")
+        return
+    # anything else: the whole remainder is the command
+    _set_env_var("NX_VERIFY_CMD", arg)
+    os.environ["NX_VERIFY_CMD"] = arg
+    st._VERIFY_INFLIGHT = False  # a changed command must not stay "in flight"
+    st._VERIFY_SEEN.clear()  # old command's finished jobs are no longer ours
+    print(f"{BOLD}{C.WARNING}  → verify: {arg}{RESET} {DIM}(saved to ~/.env){RESET}")
 
 
 def _cmd_todo(user: str, state: _ReplState) -> None:

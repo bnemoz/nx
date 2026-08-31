@@ -54,7 +54,7 @@ from ._repl_settings_cmds import (
     _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
-    _cmd_ctx, _cmd_cost,
+    _cmd_ctx, _cmd_cost, _cmd_verify,
 )
 
 
@@ -115,6 +115,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/memory": _cmd_memory_handler,
     "/delete": _cmd_delete_handler,
     "/todo": _cmd_todo,
+    "/verify": _cmd_verify,
 }
 
 
