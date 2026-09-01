@@ -215,6 +215,13 @@ sessions and exits without entering the REPL.
 `nx/`) has the full env var list — dozens more knobs tune recovery samplers,
 stall detection, undo depth, log size, etc., all with sane defaults.
 
+When repeated reasoning-only stalls exhaust the rescue ladder and nx forces a
+final answer, the forced turn is a nudge rather than a straitjacket: a
+`final_answer` call still ends the turn, but if the model emits a real tool
+call instead, nx runs it (through the normal approval gate) and keeps the
+turn going — the counter stays pinned at the last rung so any fresh stall
+escalates straight back to forced-final instead of re-climbing the ladder.
+
 ### Themes
 
 Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,

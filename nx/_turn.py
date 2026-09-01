@@ -326,10 +326,16 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}")
 
 
-def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
+def _handle_forced_final_tool_call(messages: list[Message], tcs: dict, text: str,
+                                   finish_reasons: Any,
+                                   malformed_stream_cut_count: int) -> str:
     """Under forced-final mode, extract the `final_answer` tool call (if any) the
-    model emitted and render its answer as visible assistant text. Returns a
-    TURN_* status to bubble up from model_turn."""
+    model emitted and render its answer as visible assistant text. Any OTHER
+    tool call is executed through the normal native path (its approval flow
+    still gates mutations) and TURN_TOOL is returned so the loop keeps going —
+    the forced-final request is a nudge, not a straitjacket, and discarding a
+    real tool call here threw away the very action the stall ladder had finally
+    coaxed out of the model and dropped the user to the prompt mid-task."""
     quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
     for c in ordered:
@@ -340,47 +346,54 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict) -> str:
         except json.JSONDecodeError:
             args = {}
         answer = str(args.get("answer") or "").strip()
-        status = str(args.get("status") or "answered").strip()
         if answer:
             if not quiet:
                 print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
             messages.append({"role": "assistant", "content": answer})
             return TURN_DONE
+    actionable = {i: c for i, c in tcs.items() if c["name"] != "final_answer"}
+    if actionable:
+        names = ", ".join(c["name"] or "tool" for c in actionable.values())
         if not quiet:
-            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
-                  f"returning to chat input{RESET}")
-        return TURN_DONE
-    names = ", ".join(c["name"] or "tool" for c in ordered)
+            print(f"{C.WARNING}  ✂ FORCED FINAL — model emitted {names} instead of "
+                  f"final_answer; executing and continuing the turn{RESET}")
+        return _handle_native_tool_calls(messages, actionable, text, finish_reasons,
+                                         malformed_stream_cut_count)
     if not quiet:
-        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
-              f"returning to chat input{RESET}")
+        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")
     return TURN_DONE
 
 
-def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[str, dict]]) -> str:
+def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[str, dict]],
+                                    text: str, malformed_call_count: int = 0) -> str:
     """Text-fallback counterpart to _handle_forced_final_tool_call(): under forced-final
-    mode a text-protocol model can still emit <tool_call> blocks, so corral it into
-    final_answer-only here instead of letting _handle_text_tool_calls execute arbitrary
-    tools (which would defeat the stall-recovery safety valve for non-native backends)."""
+    mode a text-protocol model can still emit tool_call blocks. A final_answer block
+    is rendered as visible text; any OTHER tool call runs through the normal text-protocol
+    path (whose approval flow still gates arbitrary tools) instead of being discarded —
+    discarding it threw away the action the stall ladder had just coaxed out of the model
+    and dropped the user to the prompt mid-task."""
     quiet = _subagent_quiet()
     for n, a in calls:
         if n != "final_answer":
             continue
         answer = str(a.get("answer") or "").strip()
-        status = str(a.get("status") or "answered").strip()
         if answer:
             if not quiet:
                 print(f"{C.TEXT}{strip_ansi_for_display(answer)}{RESET}")
             messages.append({"role": "assistant", "content": answer})
             return TURN_DONE
+        break  # empty final_answer — let any remaining actionable calls decide
+    actionable = [(n, a) for n, a in calls if n != "final_answer"]
+    if actionable:
+        names = ", ".join(n or "tool" for n, _ in actionable)
         if not quiet:
-            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — status={status or 'unknown'}; "
-                  f"returning to chat input{RESET}")
-        return TURN_DONE
-    names = ", ".join(n or "tool" for n, _ in calls)
+            print(f"{C.WARNING}  ✂ FORCED FINAL — model emitted {names} instead of "
+                  f"final_answer; executing and continuing the turn{RESET}")
+        delegated = _handle_text_tool_calls(messages, text, malformed_call_count,
+                                            exclude={"final_answer"})
+        return delegated if delegated is not None else TURN_DONE
     if not quiet:
-        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — model emitted {names}; "
-              f"returning to chat input{RESET}")
+        print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")
     return TURN_DONE
 
 
@@ -668,7 +681,8 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
     return TURN_TOOL
 
 
-def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_count: int = 0) -> Optional[str]:
+def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_count: int = 0,
+                            exclude: frozenset = frozenset()) -> Optional[str]:
     """Execute the text-protocol fallback tool-calling path for one streamed turn.
 
     Parses <tool_call>... blocks (or legacy [nx_tool_call]...) from the model's text, records the
@@ -687,6 +701,8 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     tag on every future turn.
     """
     calls, errors = parse_text_calls_with_errors(text)
+    if exclude:
+        calls = [(n, a) for n, a in calls if n not in exclude]
     quiet = _subagent_quiet()
     if not calls:
         if errors and malformed_call_count < 1:
@@ -1219,7 +1235,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                          quiet=_subagent_quiet())
 
     if forced_final and parser.tcs:
-        return _handle_forced_final_tool_call(messages, parser.tcs)
+        return _handle_forced_final_tool_call(messages, parser.tcs, text,
+                                              parser.finish_reasons,
+                                              malformed_stream_cut_count)
 
     if parser.tcs:  # native tool-calling path
         return _handle_native_tool_calls(messages, parser.tcs, text, parser.finish_reasons,
@@ -1228,7 +1246,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     if forced_final:
         calls, _errors = parse_text_calls_with_errors(text)
         if calls:
-            return _handle_forced_final_text_calls(messages, calls)
+            return _handle_forced_final_text_calls(messages, calls, text,
+                                                   malformed_call_count)
     else:
         status = _handle_text_tool_calls(messages, text, malformed_call_count)  # text-fallback path
         if status is not None:
@@ -1443,6 +1462,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             on_step()
         if _task_deadline_exceeded():
             return _task_timeout_summary(steps + 1)
+        was_forced = force_final  # TURN_TOOL after a forced-final turn is special-cased below
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
@@ -1568,6 +1588,17 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             # forever, and the forced-final-answer safety net (attempt 2/2)
             # never fires.  In headless mode (benchmarks) this burns the
             # entire timeout.  Keep the counter so cumulative stalls escalate.
+            if was_forced:
+                # The forced-final turn didn't wrap up — the model emitted an
+                # actionable tool call instead and it just ran (see
+                # _handle_forced_final_tool_call). That call is the escape
+                # from the stall, but don't full-reset the stall counter:
+                # leave it on the last rung so a fresh reasoning-only stall
+                # goes straight back to forced-final (which just demonstrably
+                # worked for this model) instead of re-climbing the nudge
+                # ladder from attempt 1.
+                reasoning_loop_cuts = max(
+                    0, _subagent_scoped_retry(st.REASONING_ONLY_RETRY_LIMIT) - 1)
             malformed_stream_cuts = 0
             empty_turn_cuts = 0
             continue

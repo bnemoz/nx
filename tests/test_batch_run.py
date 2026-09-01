@@ -581,7 +581,8 @@ def test_quiet_forced_final_handler_is_silent(nx_fresh):
     _ASYNC_QUIET_SLOTS.quiet = True
     sys.stdout = buf
     try:
-        status = nx._turn._handle_forced_final_tool_call(messages, tcs)
+        status = nx._turn._handle_forced_final_tool_call(
+            messages, tcs, "", [], 0)
     finally:
         sys.stdout = old
         _ASYNC_QUIET_SLOTS.quiet = False
