@@ -187,7 +187,7 @@ _LAST_PARTIAL_TEXT: str = ""
 REASONING_ONLY_CHAR_LIMIT: int = 36000
 RECOVERY_TEMPERATURE: float = 1.0
 RECOVERY_TOP_P: float = 0.95
-MAX_MODEL_TURNS: int = 200
+MAX_MODEL_TURNS: int = 500
 
 # --- reasoning display ---------------------------------------------------
 # Whether live reasoning_content is streamed to the terminal as it arrives.

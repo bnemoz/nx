@@ -70,8 +70,8 @@ def test_budget_line_in_subagent_user_message(nx_fresh, monkeypatch):
 
 
 def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
-    """The un-specified budget is 50 (the old 12 left real investigations
-    capping out — the 0.19 failure pattern), the hard ceiling 100, and both
+    """The un-specified budget is 100 (the old 12 left real investigations
+    capping out — the 0.19 failure pattern), the hard ceiling 200, and both
     are env-tunable via NX_SUBAGENT_DEFAULT_TURNS / NX_SUBAGENT_MAX_TURNS."""
     from nx._subagent import spawn_agent
     seen = []
@@ -83,12 +83,12 @@ def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("q")
-    assert seen[-1] == 50  # schema default, no explicit max_turns
+    assert seen[-1] == 100  # schema default, no explicit max_turns
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 30)
     spawn_agent("q")
     assert seen[-1] == 30
     spawn_agent("q", max_turns=9999)
-    assert seen[-1] == 100  # ceiling
+    assert seen[-1] == 200  # ceiling
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_MAX_TURNS", 15)
     spawn_agent("q", max_turns=9999)
     assert seen[-1] == 15
@@ -96,13 +96,13 @@ def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
     assert seen[-1] == 30  # nonsense → the (tunable) default
 
 
-def test_schema_advertises_default_50(nx_fresh):
+def test_schema_advertises_default_100(nx_fresh):
     """The schema text is what the parent model reads to pick max_turns — it
     must name the new default or the parent keeps passing 12."""
     schema = next(t for t in nx_fresh.TOOLS
                   if t["function"]["name"] == "spawn_agent")
     desc = schema["function"]["parameters"]["properties"]["max_turns"]["description"]
-    assert "default 50" in desc
+    assert "default 100" in desc
 
 
 # --- recovery failsafe clamp -------------------------------------------------
@@ -176,7 +176,7 @@ def test_stall_escapes_after_one_rescue_inside_subagent(nx_fresh, monkeypatch):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     assert spawn_agent("q") == "ok"
-    assert calls == [50]
+    assert calls == [100]
 
 
 # --- last-sub-turn force-final ----------------------------------------------

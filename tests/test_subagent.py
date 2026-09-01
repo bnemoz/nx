@@ -129,7 +129,7 @@ def test_subagent_rejects_bad_args_and_nested(nx_fresh, monkeypatch):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("q", max_turns=9999)
-    assert seen["max_turns"] == 100
+    assert seen["max_turns"] == 200
     spawn_agent("q", max_turns=0)
     assert seen["max_turns"] == 1
 

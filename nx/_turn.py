@@ -1348,12 +1348,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 # timeout (nx/_batch.py: --timeout / NX_TASK_TIMEOUT_SECONDS, enforced at
 # this loop's step boundaries); each turn costs at minimum a few seconds
 # (API round-trip + generation + tool
-# exec), so even 200 turns in a 900s budget means turns averaging <4.5s — that's
+# exec), so even 500 turns in a 900s budget means turns averaging <1.8s — that's
 # fast spinning, not productive work.  Individual pathologies (reasoning stalls,
 # empty turns, malformed streams) already have their own retry limits.  This cap
 # is just a total-work backstop so the loop can't run away *inside* the timeout.
 # Overridable via env var.  Set very high (e.g. 99999) to effectively disable.
-st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 200)
+st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 500)
 
 # --- per-task wall-clock deadline (batch) -------------------------------------
 # The batch harness arms this per worker thread just before its turn loop and

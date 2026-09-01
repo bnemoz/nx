@@ -156,9 +156,9 @@ def _add_delegation_note_if_absent(messages: list) -> None:
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
 # was the other half of the 0.19 cap-outs: real investigations (orient, read
 # 3-4 files, search, verify, answer) need ~15-20 turns, and the parent model
-# kept passing the schema default through unexamined. 50 gives a read-heavy
+# kept passing the schema default through unexamined. 100 gives a read-heavy
 # investigation plenty of room, recovery cycles included; the ceiling is
-# env-tunable (NX_SUBAGENT_MAX_TURNS) instead of hard-coded. Resolved through
+# env-tunable (NX_SUBAGENT_MAX_TURNS, 200) instead of hard-coded. Resolved through
 # the top-level module attributes (NX_SUBAGENT_DEFAULT_TURNS /
 # NX_SUBAGENT_MAX_TURNS in nx/__init__.py) so tests/REPL can flip them live.
 
@@ -168,7 +168,7 @@ def _subagent_default_turns() -> int:
     try:
         return max(1, int(_m.NX_SUBAGENT_DEFAULT_TURNS))
     except (AttributeError, TypeError, ValueError):
-        return _env_int("NX_SUBAGENT_DEFAULT_TURNS", 50)
+        return _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 
 
 def _subagent_max_turns() -> int:
@@ -176,14 +176,14 @@ def _subagent_max_turns() -> int:
     try:
         return max(1, int(_m.NX_SUBAGENT_MAX_TURNS))
     except (AttributeError, TypeError, ValueError):
-        return _env_int("NX_SUBAGENT_MAX_TURNS", 100)
+        return _env_int("NX_SUBAGENT_MAX_TURNS", 200)
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
     "description": "Delegate a focused investigation to a read-only sub-agent that returns only its findings — your default tool for multi-file work you haven't read yet. PROACTIVELY spawn one per independent area: map an unfamiliar codebase, trace a behavior through several modules, list callers/uses of a symbol, investigate 2+ unrelated questions (issue ONE CALL PER QUESTION in the same turn — they run concurrently). Do it yourself: edits you're already making, one known file, one targeted search. One question per agent; never re-spawn an instruction already delegated (its answer is arriving). Background by default: job id now, answer later as a [Runtime note] + report path.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
-        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 50; 1-100). Don't set it low for broad questions."},
+        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 100; 1-200). Don't set it low for broad questions."},
         "async": {"type": "boolean", "description": "Background (the default); pass false for a foreground spawn that renders live and blocks until done."},
     }, "required": ["instruction"]},
 }}
