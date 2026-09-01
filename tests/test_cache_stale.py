@@ -8,6 +8,7 @@ unchanged survives bash; only changed files are dropped. That also fixes a
 staleness bug for files edited outside nx (user's editor) mid-session.
 """
 import importlib
+import json
 import os
 import sys
 import time
@@ -163,18 +164,24 @@ def test_write_file_invalidates_its_own_path(nx_fresh):
 
 
 def test_prefetch_and_store_shape(nx_fresh):
-    """_prefetch_cacheable_tools stores the same mtime-aware entry shape."""
+    """A mixed turn (2 reads + a write) stores the same mtime-aware entry
+    shape the all-read-only path does — the prefetch dispatches through
+    run_tool(), which is the cache's single writer."""
     nx, tmp = nx_fresh
-    a = tmp / "a.txt"
-    a.write_text("A\n")
-    b = tmp / "b.txt"
-    b.write_text("B\n")
-    from nx._turn import _prefetch_cacheable_tools
-
-    _prefetch_cacheable_tools(
-        [{"name": "read_file"}, {"name": "read_file"}],
-        [{"path": str(a)}, {"path": str(b)}],
-    )
+    paths = []
+    for tag in ("a", "b"):
+        p = tmp / f"{tag}.txt"
+        p.write_text(f"{tag.upper()}\n")
+        paths.append(p)
+    calls = [{"id": f"c{i}", "name": "read_file", "args": {"path": str(p)}}
+             for i, p in enumerate(paths)]
+    calls.append({"id": "c2", "name": "write_file",
+                  "args": {"path": "w.txt", "content": "x"}})
+    tcs = {i: {**c, "args": json.dumps(c["args"])} for i, c in enumerate(calls)}
+    messages = [{"role": "system", "content": "s"}]
+    from nx._turn import _handle_native_tool_calls
+    status = _handle_native_tool_calls(messages, tcs, "", ["tool_calls"], 0)
+    assert status == nx.TURN_TOOL
     cache = nx._state._TOOL_RESULT_CACHE
     assert len(cache) == 2
     for entry in cache.values():

@@ -124,9 +124,10 @@ def store_cacheable_result(
     args: dict,
     result: str,
 ) -> None:
-    """Build and store the right entry shape for a cacheable read. Shared by
-    run_tool()'s post-call store and _turn._prefetch_cacheable_tools so both
-    paths always produce identical entries (notably: git_* get a stamp)."""
+    """Build and store the right entry shape for a cacheable read. run_tool()
+    is the single writer — the mixed-turn prefetch (_turn._prefetch_cacheable_tools)
+    dispatches through run_tool() too, so every entry (stamped git_* included)
+    comes from here and both paths produce identical entries by construction."""
     cache_path = args.get("path", ".")
     if isinstance(cache_path, list):
         cache_path = cache_path[0] if cache_path else "."

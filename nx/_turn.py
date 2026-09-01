@@ -29,7 +29,7 @@ from ._special_tokens import (
 )
 from ._stream_parse import StreamParser
 from ._text_fallback import (
-    parse_text_calls_with_errors, _sanitize_tool_result, repair_json_candidates,
+    parse_text_calls_with_errors, repair_json_candidates,
 )
 from ._compress import (
     _nudge_current_user_turn,
@@ -42,7 +42,7 @@ from . import (
     FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
     REASONING_STALL_NUDGE, FORCED_FINAL_NUDGE, EMPTY_TURN_NUDGE,
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
-    _CACHEABLE_READ_TOOLS, _tool_cache_key, DISPATCH,
+    _CACHEABLE_READ_TOOLS, _tool_cache_key,
 )
 from ._subagent import _subagent_active, _subagent_quiet
 from ._batch import _batch_active
@@ -453,7 +453,15 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
     calls, reads still run sequentially inside run_tool(), so warming the
     cache in parallel here keeps those hits instant. When EVERY call is a
     cacheable read, _run_read_only_parallel() handles dispatch directly and
-    this prefetch is skipped (it would double-execute the reads)."""
+    this prefetch is skipped (it would double-execute the reads).
+
+    Each job dispatches through run_tool() — NOT the tool body directly — so a
+    mixed turn's prefetched reads cross the same gates as every other call:
+    the plan-mode gate, the NX_PRE_TOOL_HOOK veto (a blocked read is never
+    opened, and its vetoed args never enter st._TOOL_RESULT_CACHE), and the
+    NX_POST_TOOL_HOOK audit record. run_tool() populates the cache itself for
+    cacheable reads, so this helper no longer stores entries by hand; the
+    sequential run_tool() later in the turn is then a cache hit."""
     jobs = []
     seen_keys = set()
     for c, args in zip(ordered, parsed_args):
@@ -463,19 +471,33 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
         if cache_key in seen_keys or cache_key in st._TOOL_RESULT_CACHE:
             continue
         seen_keys.add(cache_key)
-        jobs.append((c["name"], args, cache_key))
+        jobs.append((c["name"], args))
     if len(jobs) < 2:
         return
 
-    def _run(job: tuple[str, dict, tuple[str, str]]) -> None:
-        name, args, cache_key = job
+    # The sequential run_tool() pass later in this turn renders each call's tool
+    # box itself (cache hits included), so the prefetch stays invisible: force
+    # the quiet slot in every pool worker, exactly as _run_read_only_parallel
+    # does for a quiet loop, so a pool thread never prints a box / spinner /
+    # pre-hook veto line onto the shared terminal (thread-local quiet is not
+    # inherited — it must be re-applied here).
+    from ._subagent import _ASYNC_QUIET_SLOTS
+
+    def _run(job: tuple[str, dict[str, Any]]) -> None:
+        name, args = job
+        _ASYNC_QUIET_SLOTS.quiet = True
         try:
-            result = DISPATCH[name](**args)
+            # Applies the plan gate, the pre-hook veto, both hooks, and stores
+            # the cache entry itself for cacheable reads. A veto/error simply
+            # returns the message string; the sequential run_tool() call later
+            # in the turn re-evaluates from the same state and surfaces it.
+            run_tool(name, args)
+        except _EscToChat:
+            raise  # read-only tools can't prompt, but propagate defensively
         except Exception:
             return  # let the normal run_tool() call surface/report the error
-        result = _sanitize_tool_result(result)
-        from ._tool_cache import store_cacheable_result
-        store_cacheable_result(st._TOOL_RESULT_CACHE, cache_key, name, args, result)
+        finally:
+            _ASYNC_QUIET_SLOTS.quiet = False
 
     with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
         list(ex.map(_run, jobs))

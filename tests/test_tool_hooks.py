@@ -41,6 +41,22 @@ def _script(tmp_path, body, name="hook.sh"):
     return str(p)
 
 
+def _mixed_turn(nx, tmp, read_paths, write_name="w.txt"):
+    """Run one native mixed turn (read-only calls + one write_file) through
+    the sequential dispatch path, exactly as model_turn would for a turn whose
+    tool-call batch combines reads with a mutating call."""
+    tcs = {i: {"id": f"c{i}", "name": "read_file", "args": json.dumps({"path": p})}
+           for i, p in enumerate(read_paths)}
+    tcs[len(read_paths)] = {
+        "id": f"c{len(read_paths)}", "name": "write_file",
+        "args": json.dumps({"path": write_name, "content": "x"})}
+    messages = [{"role": "system", "content": "s"}]
+    from nx._turn import _handle_native_tool_calls
+    status = _handle_native_tool_calls(messages, tcs, "", ["tool_calls"], 0)
+    assert status == nx.TURN_TOOL
+    return messages
+
+
 def test_no_hooks_configured_zero_path(nx_fresh):
     nx, tmp = nx_fresh
     from nx._dispatch import run_tool

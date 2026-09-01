@@ -237,13 +237,13 @@ def test_read_file_entries_never_call_git_state_stamp(nx_fresh, monkeypatch):
 
 
 def test_prefetch_stamps_git_entries(nx_fresh):
-    """_prefetch_cacheable_tools must store the same shape as run_tool: git_*
-    jobs get a stamp, read_file jobs keep git_stamp None."""
+    """The mixed-turn prefetch dispatches through run_tool(), so its git_*
+    entries carry the same stamp run_tool stores (read_file keep git_stamp
+    None) — one store path for both."""
     nx, tmp = nx_fresh
     repo = _git_repo(tmp)
     f = tmp / "a.txt"
     f.write_text("A\n")
-    from nx._dispatch import _tool_cache_key
     from nx._turn import _prefetch_cacheable_tools
 
     _prefetch_cacheable_tools(
@@ -251,8 +251,8 @@ def test_prefetch_stamps_git_entries(nx_fresh):
         [{"path": str(f)}, {"path": str(repo)}],
     )
     cache = nx._state._TOOL_RESULT_CACHE
-    read_entry = cache[_tool_cache_key("read_file", {"path": str(f)})]
-    git_entry = cache[_tool_cache_key("git_status", {"path": str(repo)})]
+    read_entry = cache[("read_file", '{"path": "%s"}' % f)]
+    git_entry = cache[("git_status", '{"path": "%s"}' % repo)]
     assert read_entry.git_stamp is None
     assert git_entry.git_stamp is not None
     assert read_entry.mtime_ns == os.stat(str(f)).st_mtime_ns
