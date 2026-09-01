@@ -141,6 +141,15 @@ _CONSECUTIVE_EDITS: int = 0
 _MULTI_EDIT_NUDGED: bool = False
 _PENDING_MULTI_EDIT_NOTICE: str | None = None
 
+# --- delegation (spawn_agent) nudge -------------------------------------------
+# How many consecutive self-performed exploration calls (read_file/list_dir/
+# search_files) since the last spawn_agent. Crossing the threshold stages the
+# one-time DELEGATION_STREAK_NOTICE: the observed failure mode is a model that
+# has the tool and never uses it, reading the repo one file per turn forever.
+_READ_STREAK: int = 0
+_DELEGATION_NUDGED: bool = False
+_PENDING_DELEGATION_NOTICE: str | None = None
+
 # --- native tool-call malformed-args circuit breaker --------------------------
 # An endpoint that reliably truncates one tool's JSON args (observed: a local
 # server dying right before multi_edit's `[` array literal, 7+ retries in a

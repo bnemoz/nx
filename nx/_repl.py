@@ -32,7 +32,7 @@ from . import (
     SYSTEM, _initial_messages,
     _load_session, _list_sessions,
     _resolve_session, _new_session_id, _messages_show_prior_backgrounding,
-    _messages_show_prior_multi_edit_nudge,
+    _messages_show_prior_multi_edit_nudge, _messages_show_prior_delegation_nudge,
     _maybe_refresh_description,
 )
 from ._sources import restore_source, _set_provider_order
@@ -179,6 +179,9 @@ def _repl() -> None:
             _add_memory_note_if_absent(messages)
             st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(messages)
             st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(messages)
+            from ._subagent import _add_delegation_note_if_absent
+            _add_delegation_note_if_absent(messages)
+            st._DELEGATION_NUDGED = _messages_show_prior_delegation_nudge(messages)
             n_msgs = len([m for m in messages if m.get("role") != "system"])
             title = data.get("title") or "(untitled)"
             print(f"{DIM}  ↻ resumed session {session_id} ({title!r}, "

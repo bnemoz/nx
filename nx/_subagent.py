@@ -95,6 +95,64 @@ SUBAGENT_WRITE_SYSTEM = (
     "must finish itself — no preamble, no plan narration."
 )
 
+# Session-start delegation guidance, injected ONLY when the spawn_agent schema
+# is actually offered (NX_SUBAGENTS=1) — see _dispatch._initial_messages().
+# The tool description alone wasn't enough: models left spawn_agent unused and
+# ground through dozens of sequential read_file/search_files calls themselves
+# unless the user explicitly asked for a fan-out. A schema description reads as
+# a *permission*, this reads as an *expectation*, and it's the layer that
+# carries the trigger list (unfamiliar codebase, cross-module trace, callers of
+# a symbol, 2+ unrelated questions). Kept out of the static SYSTEM string so a
+# sub-agents-disabled session (the default) pays nothing for it.
+DELEGATION_GUIDANCE = (
+    "[Delegation note: the spawn_agent tool is available this session — reach "
+    "for it PROACTIVELY, without being asked.\n"
+    "- Answering or editing about code you haven't read, when the question "
+    "spans 2+ files or modules? Spawn one read-only agent per independent area "
+    "instead of reading them yourself, then work from their findings.\n"
+    "- Independent/unrelated questions go in ONE turn as separate spawn_agent "
+    "calls — they run concurrently, and their intermediate greps/reads never "
+    "enter your context (that's the whole point: delegation without bloat).\n"
+    "- Map an unfamiliar repo, trace a behavior across modules, or enumerate a "
+    "symbol's callers: delegate the sweep, keep the answer.\n"
+    "- Do it yourself for a file you've already read, one targeted "
+    "search_files/read_file, and every edit you're making.]"
+)
+
+
+def _delegation_enabled() -> bool:
+    """True when the spawn_agent schema is being offered this session.
+    Resolved through the top-level module attribute (NX_SUBAGENTS) so
+    tests/REPL can flip it live; falls back to the env var."""
+    import nx as _m
+    try:
+        return bool(_m.NX_SUBAGENTS)
+    except AttributeError:
+        return bool(_env_int("NX_SUBAGENTS", 0))
+
+
+def _load_delegation_note() -> dict[str, str] | None:
+    """User-role session-start note with the delegation triggers, or None when
+    sub-agents are disabled (nothing to steer toward)."""
+    if not _delegation_enabled():
+        return None
+    return {"role": "user", "content": DELEGATION_GUIDANCE}
+
+
+def _add_delegation_note_if_absent(messages: list) -> None:
+    """Give a resumed session the same note a fresh one gets (its saved
+    transcript may predate the feature). Mirrors
+    _memory_cmd._add_memory_note_if_absent's marker-scan contract."""
+    for m in messages:
+        if (m.get("role") == "user" and isinstance(m.get("content"), str)
+                and "[Delegation note:" in m["content"]):
+            return
+    note = _load_delegation_note()
+    if note is not None:
+        at = 1 if (messages and messages[0].get("role") == "system") else 0
+        messages.insert(at, note)
+
+
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
 # was the other half of the 0.19 cap-outs: real investigations (orient, read
 # 3-4 files, search, verify, answer) need ~15-20 turns, and the parent model
@@ -122,7 +180,7 @@ def _subagent_max_turns() -> int:
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused investigation to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Runs in the background by default (answer arrives later as a [Runtime note] + report path); several calls in one turn run concurrently. Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
+    "description": "Delegate a focused investigation to a read-only sub-agent that returns only its findings — your default tool for multi-file work you haven't read yet. PROACTIVELY spawn one per independent area: map an unfamiliar codebase, trace a behavior through several modules, list callers/uses of a symbol, investigate 2+ unrelated questions (issue ONE CALL PER QUESTION in the same turn — they run concurrently). Do it yourself: edits you're already making, one known file, one targeted search. One question per agent; never re-spawn an instruction already delegated (its answer is arriving). Background by default: job id now, answer later as a [Runtime note] + report path.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
         "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 50; 1-100). Don't set it low for broad questions."},

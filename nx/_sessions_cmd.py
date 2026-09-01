@@ -470,9 +470,12 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
         _save_current(state)
     state.session_id = new_sid
     state.messages[:] = _session_messages(new_sid)
-    from . import _messages_show_prior_backgrounding, _messages_show_prior_multi_edit_nudge
+    from . import _messages_show_prior_backgrounding, _messages_show_prior_multi_edit_nudge, _messages_show_prior_delegation_nudge
     st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(state.messages)
     st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(state.messages)
+    from ._subagent import _add_delegation_note_if_absent
+    _add_delegation_note_if_absent(state.messages)
+    st._DELEGATION_NUDGED = _messages_show_prior_delegation_nudge(state.messages)
     state.session_dirty = False
     # Reload the cumulative-token recorder from the resumed
     # session's saved totals so they keep climbing from here.

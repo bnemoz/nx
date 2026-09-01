@@ -18,6 +18,7 @@ import os
 from typing import Any
 
 from . import _state as st
+from ._env import _env_int
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._tool_cache import (
     cache_valid, drop_changed_entries,
@@ -32,7 +33,7 @@ from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, plan_active, check_gate
-from ._subagent import spawn_agent
+from ._subagent import spawn_agent, _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
@@ -71,6 +72,18 @@ st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired th
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
 
 _MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires
+
+# Delegation nudge (see DELEGATION_STREAK_NOTICE below): streak counter, once
+# flag and staged notice — same three-piece shape as the multi_edit nudge.
+st._READ_STREAK = 0  # how many exploration reads in a row with no spawn_agent
+st._DELEGATION_NUDGED = False  # flips True once the delegation nudge has fired this session
+st._PENDING_DELEGATION_NOTICE = None  # staged notice, flushed with the other runtime notes
+
+# ≥ this many such reads before the nudge fires. Deliberately above any
+# legitimate single-task read count (an edit usually touches 1-3 files) and far
+# below the 20-40-read sweeps models grind through when they never think to
+# delegate. NX_DELEGATION_NUDGE_READS=0 disables the nudge.
+_DELEGATION_NUDGE_THRESHOLD = _env_int("NX_DELEGATION_NUDGE_READS", 8)
 
 
 def _active_tools() -> list[dict[str, Any]]:
@@ -128,6 +141,21 @@ def _messages_show_prior_multi_edit_nudge(messages: list[dict[str, Any]]) -> boo
     return False
 
 
+def _messages_show_prior_delegation_nudge(messages: list[dict[str, Any]]) -> bool:
+    """True if a loaded transcript already spawned an agent or already received
+    the delegation nudge, so resuming doesn't re-nudge a model that has already
+    shown it delegates (or was already told once this session)."""
+    for msg in messages:
+        for call in (msg.get("tool_calls") or []):
+            if (call.get("function") or {}).get("name") == "spawn_agent":
+                return True
+        content = msg.get("content")
+        if isinstance(content, str) and ("[Delegation note:" in content
+                                         or "without using spawn_agent" in content):
+            return True
+    return False
+
+
 def _initial_messages() -> list[dict[str, Any]]:
     """Fresh-session message list: SYSTEM, plus a one-time AGENTS.md note
     (project-root convention, same idea as CLAUDE.md) if one exists. Kept out
@@ -153,6 +181,13 @@ def _initial_messages() -> list[dict[str, Any]]:
     orient_note = _load_orientation_note()
     if orient_note is not None:
         messages.append(orient_note)
+    # Delegation guidance note: only paid when the spawn_agent schema is
+    # actually offered (NX_SUBAGENTS=1), so the default (sub-agents off)
+    # session still costs nothing. See _subagent.DELEGATION_GUIDANCE.
+    from ._subagent import _load_delegation_note
+    deleg_note = _load_delegation_note()
+    if deleg_note is not None:
+        messages.append(deleg_note)
     return messages
 
 
@@ -200,6 +235,20 @@ MULTI_EDIT_GUIDANCE = (
     "more), batch them into ONE multi_edit call (edits=[{old,new},...]) "
     "instead of continuing with separate edit_file calls — it's one approval "
     "instead of several, and applies atomically.]"
+)
+
+# Third instance of the same paid-once pattern: staged when the model has made
+# _DELEGATION_NUDGE_THRESHOLD exploration calls itself without ever spawning a
+# sub-agent. Only staged while the spawn_agent schema is actually offered
+# (NX_SUBAGENTS=1) — see run_tool()'s counter and _subagent._delegation_enabled.
+DELEGATION_STREAK_NOTICE = (
+    "[Runtime note: you've read or searched many files yourself without using "
+    "spawn_agent. The remaining investigation is exactly what sub-agents are "
+    "for: issue one spawn_agent call per remaining independent question in a "
+    "single turn (they run concurrently, return only their findings, and keep "
+    "their intermediate reads out of this context), then work from their "
+    "answers. If the files you're reading are the exact ones an edit already "
+    "in hand needs, ignore this and continue.]"
 )
 
 
@@ -324,6 +373,26 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             _stage_subagent_completions()
         except Exception:
             pass
+    # Delegation streak counter (runs BEFORE the cache lookup so a cache-hit
+    # read still counts): exploration calls accumulate, a spawn_agent resets,
+    # anything else (an edit, a bash run, a todo) breaks the streak — those
+    # mean the model is acting on what it read, not surveying. Skipped inside
+    # a sub-agent/batch loop: those threads don't own the parent's notice
+    # channel and a sub-agent can't fan out anyway.
+    if name == "spawn_agent":
+        st._READ_STREAK = 0
+    else:
+        from ._subagent import _subagent_ctx as _dc_ctx
+        from ._batch import _batch_active as _dc_batch
+        if name in ("read_file", "list_dir", "search_files"):
+            if _dc_ctx() is None and not _dc_batch() and _DELEGATION_NUDGE_THRESHOLD > 0:
+                st._READ_STREAK += 1
+                if (st._READ_STREAK >= _DELEGATION_NUDGE_THRESHOLD
+                        and not st._DELEGATION_NUDGED and _delegation_enabled()):
+                    st._DELEGATION_NUDGED = True
+                    st._PENDING_DELEGATION_NOTICE = DELEGATION_STREAK_NOTICE
+        else:
+            st._READ_STREAK = 0
     if name in _CACHEABLE_READ_TOOLS:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)

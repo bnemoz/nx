@@ -572,8 +572,10 @@ from ._text_fallback import (
 
 from ._dispatch import (
     DISPATCH, _active_tools, _messages_show_prior_backgrounding,
-    _messages_show_prior_multi_edit_nudge, _initial_messages,
-    BACKGROUND_GUIDANCE, MULTI_EDIT_GUIDANCE, _MULTI_EDIT_NUDGE_THRESHOLD,
+    _messages_show_prior_multi_edit_nudge, _messages_show_prior_delegation_nudge,
+    _initial_messages,
+    BACKGROUND_GUIDANCE, MULTI_EDIT_GUIDANCE, DELEGATION_STREAK_NOTICE,
+    _MULTI_EDIT_NUDGE_THRESHOLD, _DELEGATION_NUDGE_THRESHOLD,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, _invalidate_tool_cache_path,
     run_tool, _tool_args_parse_error,
 )

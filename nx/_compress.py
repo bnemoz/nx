@@ -63,14 +63,16 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if subagent_note:
         messages.append({"role": "user", "content": subagent_note})
         st._PENDING_SUBAGENT_NOTICE = None
-    if st._PENDING_MULTI_EDIT_NOTICE:
-        messages.append({"role": "user", "content": st._PENDING_MULTI_EDIT_NOTICE})
-        st._PENDING_MULTI_EDIT_NOTICE = None
-    if getattr(st, "_PENDING_VERIFY_NOTICE", None):
-        # NX_VERIFY_CMD outcome staged by _dispatch._scan_background_completions
-        # — flushed here with the other runtime notes.
-        messages.append({"role": "user", "content": st._PENDING_VERIFY_NOTICE})
-        st._PENDING_VERIFY_NOTICE = None
+    # The remaining staged notices all share one shape (a runtime-note string
+    # on an st slot, consumed once), so they flush in a loop. The delegation
+    # streak notice is staged by run_tool(); NX_VERIFY_CMD's outcome by
+    # _dispatch._scan_background_completions.
+    for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
+                  "_PENDING_DELEGATION_NOTICE"):
+        _text = getattr(st, _slot, None)
+        if _text:
+            messages.append({"role": "user", "content": _text})
+            setattr(st, _slot, None)
 
 
 def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:
