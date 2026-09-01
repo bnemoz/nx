@@ -25,6 +25,9 @@ import nx as m  # noqa: E402
 def _reset_background_state():
     m._SESSION_HAS_BACKGROUNDED = False
     m._PENDING_BACKGROUND_NOTICE = None
+    # This file's assertions assume the default opt-in posture; an exported
+    # NX_SUBAGENTS/NX_VISION must not fold extra tools into _active_tools().
+    m.NX_SUBAGENTS = m.NX_VISION = False
 
 
 # _SESSION_HAS_BACKGROUNDED / _PENDING_BACKGROUND_NOTICE are module-level

@@ -94,11 +94,11 @@ SUBAGENT_WRITE_SYSTEM = (
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Spawns run in the background by default (answer arrives as a later [Runtime note] + report path); several calls in one turn run concurrently (write-capable ones one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
+    "description": "Delegate a focused investigation to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Runs in the background by default (answer arrives later as a [Runtime note] + report path); several calls in one turn run concurrently. Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
-        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40). The agent sees its remaining budget and answers in the last turn — don't set it low for broad questions."},
-        "async": {"type": "boolean", "description": "Run in the background (the default): job id now; the answer arrives later as a [Runtime note] with a path to the full report. Pass false for a foreground spawn (renders live, blocks until done)."},
+        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40). Don't set it low for broad questions."},
+        "async": {"type": "boolean", "description": "Background (the default); pass false for a foreground spawn that renders live and blocks until done."},
     }, "required": ["instruction"]},
 }}
 

@@ -39,6 +39,10 @@ import warnings
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
 os.environ["NX_HOME"] = _tmp
+# Standard isolation (AGENTS.md): a local env file must not change what we
+# measure. Exported NX_SUBAGENTS/NX_VISION are handled at call time below
+# (nx resolves them at import, which may happen in another test module first).
+os.environ["NX_ENV_FILE"] = "/dev/null"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
@@ -47,14 +51,15 @@ import nx as m  # noqa: E402
 # With the active schema gated by _active_tools() (wait_background excluded
 # until a command backgrounds — currently read_file, write_file, edit_file,
 # list_dir, run_bash, search_files, git_status, git_diff, git_log, multi_edit,
-# sed_edit, apply_patch, todo_write, memory_write, memory_search) the
-# chars/3.5 content floor is ~2492; the README's figure adds ~50 of
-# server-side framing. git_log + apply_patch (two new tools) plus
+# sed_edit, apply_patch, todo_write, memory_write, memory_search, memory_delete,
+# delete_file) the chars/3.5 content floor is ~2680; the README's figure adds
+# ~50 of server-side framing. git_log + apply_patch (two new tools) plus
 # read_file/search_files list-argument params pushed the floor up from
 # ~1990; memory_write + memory_search (model-driven memory, two more tools)
 # plus the SYSTEM memory line raised it again from ~2263; a 0.3.1 pass that
-# trimmed verbose tool descriptions brought it back under 2500; the
-# thresholds track that, still flagging further bloat.
+# trimmed verbose tool descriptions brought it back under 2500; a 0.18.9 pass
+# re-streamlined the fattest descriptions (edit_file, search_files, multi_edit,
+# sed_edit, run_bash, spawn_agent) which had crept back past the warn line.
 WARN_TOKENS = 2500  # soft: warn (don't fail) — check the README still holds
 FAIL_TOKENS = 2900  # hard: the floor has roughly grown again; README is fiction
 
@@ -83,10 +88,19 @@ def test_initial_context_floor():
     # _SESSION_HAS_BACKGROUNDED) + a one-token user message. FINAL_ANSWER_TOOL
     # is intentionally excluded — it's only injected on a forced-final retry
     # (nx.py:1847), not on turn 1, so it's not part of the README's ~625.
-    active_tools = m._active_tools()
-    system_tokens, method = _count_tokens(m.SYSTEM)
-    tools_tokens, _ = _count_tokens(json.dumps(active_tools))
-    user_tokens, _ = _count_tokens("hey")
+    # Opt-in tools are forced OFF for the measurement: a developer shell with
+    # NX_SUBAGENTS=1/NX_VISION=1 must not change the guarded baseline (nx
+    # resolves those at import, possibly in another test module, so set the
+    # module attributes rather than the env vars).
+    saved = (m.NX_SUBAGENTS, m.NX_VISION)
+    m.NX_SUBAGENTS = m.NX_VISION = False
+    try:
+        active_tools = m._active_tools()
+        system_tokens, method = _count_tokens(m.SYSTEM)
+        tools_tokens, _ = _count_tokens(json.dumps(active_tools))
+        user_tokens, _ = _count_tokens("hey")
+    finally:
+        m.NX_SUBAGENTS, m.NX_VISION = saved
     total = system_tokens + tools_tokens + user_tokens
 
     breakdown = (

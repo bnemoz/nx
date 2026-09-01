@@ -303,40 +303,40 @@ from ._bash_jobs import (
 )
 
 TOOLS: list[dict[str, Any]] = [
-    {"type": "function", "function": {"name": "read_file", "description": "Read file(s), cat -n style (1-based); path may be a list. Windowed: offset/limit (default 400 lines); header shows range+total.",
-        "parameters": {"type": "object", "properties": {"path": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}, "offset": {"type": "integer", "description": "1-based start line (default 1)"}, "limit": {"type": "integer", "description": "max lines (default 400; <=0 = to end)"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file(s), cat -n style (1-based); path may be a list. Windowed: offset (1-based start, default 1) / limit (default 400 lines; <=0 = to end); header shows range+total.",
+        "parameters": {"type": "object", "properties": {"path": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Overwrite file (new file, or full rewrite). Editing an existing file? Use edit_file/multi_edit instead.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Replace old->new in an EXISTING file (errors if missing -- use write_file for new). old must match exactly once unless replace_all=true. Raw text (not regex); read_file's `<n>\\t` prefixes auto-stripped if pasted. Prefer over sed_edit for literal text (even across multiple lines). Alternative: pass old_lines=\"10-14\" (1-based range from read_file numbering) instead of old to replace those lines with new. If old fails to match only because of indentation, the edit applies whitespace-tolerantly and says so.",
+    {"type": "function", "function": {"name": "edit_file", "description": "Literal old->new replace in an EXISTING file (use write_file for new files). old must match exactly once unless replace_all=true. Or pass old_lines=\"10-14\" (1-based range from read_file numbering) instead of old. read_file's `<n>\\t` prefixes are auto-stripped from pasted old/new; an indentation-only mismatch falls back to whitespace-tolerant matching and says so.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "replace_all": {"type": "boolean", "description": "replace every occurrence (default false)"}, "old_lines": {"type": "string", "description": "1-based line range 'N' or 'N-M' replacing old — mutually exclusive with old"}}, "required": ["path", "new"]}}},
     {"type": "function", "function": {"name": "delete_file", "description": "Delete one file. Restorable via /undo (unlike run_bash rm). Refuses directories and dotfiles. Requires approval.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "list_dir", "description": "List directory (flat). Pass `pattern` e.g. \"**/*.py\" for recursive glob, newest-first.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string", "description": "recursive glob e.g. \"**/*.py\""}}}}},
-    {"type": "function", "function": {"name": "search_files", "description": "Regex content search (ripgrep/grep) -> path:line:match hits; pattern may be a list (OR'd). Read-only, no approval.",
-        "parameters": {"type": "object", "properties": {"pattern": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "regex, not glob"}, "path": {"type": "string", "description": "file/dir to search (default \".\")"}, "glob": {"type": "string", "description": "include filter e.g. \"*.py\""}, "max_results": {"type": "integer", "description": "cap (default 100; <=0 -> 1000)"}, "context": {"type": "integer", "description": "context lines (default 0)"}, "ignore_case": {"type": "boolean", "description": "case-insensitive (default false)"}, "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "default content"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "search_files", "description": "Regex content search (ripgrep/grep; pattern is a regex, not glob) -> path:line:match hits. Read-only, no approval.",
+        "parameters": {"type": "object", "properties": {"pattern": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}], "description": "a list is OR'd"}, "path": {"type": "string", "description": "file/dir (default \".\")"}, "glob": {"type": "string", "description": "include filter e.g. \"*.py\""}, "max_results": {"type": "integer", "description": "cap (default 100; <=0 -> 1000)"}, "context": {"type": "integer", "description": "context lines (default 0)"}, "ignore_case": {"type": "boolean"}, "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"]}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "git_status", "description": "git status --short -b. Read-only, no approval.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}}}}},
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "git_diff", "description": "git diff (unstaged by default). Read-only, no approval.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}, "staged": {"type": "boolean", "description": "true = git diff --staged"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "staged": {"type": "boolean", "description": "true = git diff --staged"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
     {"type": "function", "function": {"name": "git_log", "description": "git log --oneline. Read-only, no approval.",
-        "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "repo/dir (default \".\")"}, "max_count": {"type": "integer", "description": "cap, default 20"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
-    {"type": "function", "function": {"name": "multi_edit", "description": "Atomic multi find/replace on one file (literal old->new, not regex), all-or-nothing. edits=[{old,new},...], each old matches exactly once, in order. One approval. Use for several literal changes at once instead of sed_edit.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "max_count": {"type": "integer", "description": "cap, default 20"}, "file": {"type": "string", "description": "restrict to this file"}}}}},
+    {"type": "function", "function": {"name": "multi_edit", "description": "Several literal edit_file-style replacements on one file, applied atomically (all-or-nothing), each old matching exactly once, in order. One approval instead of several.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "description": "list of {old,new} objects (JSON array, not string)", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
-    {"type": "function", "function": {"name": "sed_edit", "description": "Regex find/replace (Python re) over file or glob (e.g. \"src/**/*.py\"). For regex/glob needs only; literal text in one file -> edit_file/multi_edit. flags: i/m/s = IGNORECASE/MULTILINE/DOTALL. count caps PER FILE (0=unlimited). Binary-looking files skipped.",
+    {"type": "function", "function": {"name": "sed_edit", "description": "Regex (Python re) find/replace over one file or a glob (e.g. \"src/**/*.py\"). Prefer edit_file/multi_edit for literal text. Binary-looking files skipped.",
         "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "replacement": {"type": "string"}, "path": {"type": "string"}, "count": {"type": "integer", "description": "max per file (0=unlimited)"}, "flags": {"type": "string", "description": "i/m/s = IGNORECASE/MULTILINE/DOTALL"}}, "required": ["pattern", "replacement", "path"]}}},
-    {"type": "function", "function": {"name": "apply_patch", "description": "Apply a unified diff (diff -u/git diff format) to the file(s) it touches, atomically. Prefer edit_file/multi_edit for literal text in known files; use this for a multi-file restructure.",
+    {"type": "function", "function": {"name": "apply_patch", "description": "Apply a unified diff (git diff format) atomically to the file(s) it touches. Use for a multi-file restructure; prefer edit_file/multi_edit for literal text in known files.",
         "parameters": {"type": "object", "properties": {"diff": {"type": "string", "description": "unified diff, --- a/x / +++ b/x headers"}, "path": {"type": "string", "description": "dir patch paths are relative to (default \".\")"}}, "required": ["diff"]}}},
-    {"type": "function", "function": {"name": "run_bash", "description": "Real shell cmd (pipes/`&&`/`cd x && ...` all work), detached (setsid), non-blocking (see above). Never use `sleep N` as chain trick (whole cmd backgrounds). timeout=N if cmd KNOWN to finish in ~Ns; leading `sleep N` auto-extends poll to N+10s. Logs at ~/.nx/bg-logs/, auto-cleaned (~50 files/7d).",
+    {"type": "function", "function": {"name": "run_bash", "description": "Real shell cmd (pipes and `&&` chains work), detached (setsid). timeout=N waits ~N secs when the finish time is KNOWN; a leading `sleep N` auto-extends the poll to N+10s. Background logs at ~/.nx/bg-logs/, auto-cleaned.",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "description": "sync wait secs (default unset=~3s poll; 0=wait indefinitely)"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "todo_write", "description": "Replace whole todo list. Track multi-step tasks.",
         "parameters": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"enum": ["pending", "in_progress", "done"]}}}}}, "required": ["todos"]}}},
-    {"type": "function", "function": {"name": "memory_write", "description": "Save a durable memory note for recall via memory_search. scope=project (default) or global. Requires approval.",
-        "parameters": {"type": "object", "properties": {"title": {"type": "string", "description": "short topic title"}, "body": {"type": "string", "description": "markdown: facts, paths, commands, why-it-works reasoning"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project = this repo; global = cross-project"}}, "required": ["title", "body"]}}},
-    {"type": "function", "function": {"name": "memory_search", "description": "Keyword-search saved memories (project+global); title hits rank first. Read-only. Empty query lists newest titles.",
+    {"type": "function", "function": {"name": "memory_write", "description": "Save a durable memory note for recall via memory_search. Requires approval.",
+        "parameters": {"type": "object", "properties": {"title": {"type": "string", "description": "short topic title"}, "body": {"type": "string", "description": "markdown: facts, paths, commands, why-it-works reasoning"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) = this repo; global = cross-project"}}, "required": ["title", "body"]}}},
+    {"type": "function", "function": {"name": "memory_search", "description": "Keyword-search saved memories (project+global); title hits rank first; empty query lists newest titles. Read-only.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search terms; empty = list newest"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) searches both; global only global"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "memory_delete", "description": "Delete one saved memory note by exact title, filename, or unique prefix. Requires approval.",
-        "parameters": {"type": "object", "properties": {"target": {"type": "string", "description": "exact title, filename, or unique title prefix"}, "scope": {"type": "string", "enum": ["project", "global"], "description": "project (default) searches both; global only global"}}, "required": ["target"]}}},
+        "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "scope": {"type": "string", "enum": ["project", "global"]}}, "required": ["target"]}}},
 ]
 
 # Only offered once a run_bash call has actually backgrounded this session
@@ -359,7 +359,7 @@ from ._plan import (plan_edit, PLAN_GATE_TOOLS, PLAN_READONLY_TOOLS,
 # can't carry a content-parts array).
 from ._images import read_image, IMAGE_VISION_TOOL
 
-_WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for backgrounded run_bash cmd, return its output. Waits indefinitely until done or Esc (Esc cancels WAIT only, not process). Locates log via pid automatically; polls only (kill -0) — never signals, cannot kill.",
+_WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for a backgrounded run_bash command and return its output, until it finishes or Esc (Esc cancels the wait, not the process). Polls only (kill -0) — cannot kill.",
     "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "PID to wait for"}, "timeout": {"type": "integer", "description": "max wait secs (default 0=indefinite; rarely set — Esc cancels)"}}, "required": ["pid"]}}}
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
 TOOLS.append(SUBAGENT_TOOL)
@@ -371,7 +371,7 @@ TOOLS.append(PLAN_EDIT_TOOL)
 
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
-    "description": "Return complete, concise visible answer. Use when no more tool calls needed.",
+    "description": "Return the complete, concise visible answer. Use when no more tool calls are needed.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -379,7 +379,7 @@ FINAL_ANSWER_TOOL = {"type": "function", "function": {
                 "type": "string",
                 "description": "Complete concise answer to show user. Short, no trail-off.",
             },
-            "status": {"type": "string", "enum": ["answered", "blocked"], "description": "Optional, omit unless you cannot proceed without more info from the user -- then set \"blocked\"."},
+            "status": {"type": "string", "enum": ["answered", "blocked"], "description": "Set \"blocked\" only when you cannot proceed without more user info; otherwise omit."},
         },
         "required": ["answer"],
     },
