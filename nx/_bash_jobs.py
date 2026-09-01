@@ -67,21 +67,29 @@ def _run_bash(command: str) -> tuple[str, str]:
                f"echo $!")
     r = subprocess.run(wrapped, shell=True, capture_output=True, text=True)
     pid = r.stdout.strip()
+    # The launcher must echo exactly the PID of the setsid'd job ($!) — an
+    # integer. Anything else (empty output when setsid/sh died before the
+    # echo, a banner, a multi-line error) means there is no real PID: refuse
+    # to mint a ``bg-pid-<garbage>.map`` file for it, so pid→log resolution
+    # can never be pointed at a log this process didn't start.
+    if not pid.isdigit() or int(pid) <= 1:
+        pid = ""
     # Write a tiny pid→logpath map file so wait_background can find it.
     # Also stash the command + start time so /bg can render a dashboard
     # without needing to re-derive anything from the log itself. `owner` is
     # this process's pid: the completion scan only announces jobs this nx
     # process started, never another session's strays (or jobs from an old
     # ~/.nx shared by every session on the machine).
-    try:
-        map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
-        with open(map_path, "w") as f:
-            json.dump({"log_path": log_path, "command": command,
-                       "started": time.time(),
-                       "pid_start_time": _pid_start_time(pid),
-                       "owner_pid": os.getpid()}, f)
-    except OSError:
-        pass
+    if pid:
+        try:
+            map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
+            with open(map_path, "w") as f:
+                json.dump({"log_path": log_path, "command": command,
+                           "started": time.time(),
+                           "pid_start_time": _pid_start_time(pid),
+                           "owner_pid": os.getpid()}, f)
+        except OSError:
+            pass
     return pid, log_path
 
 
@@ -602,7 +610,12 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
         Max seconds to wait (default 0 = wait indefinitely until the command
         finishes or Esc is pressed).
     """
-    pid = int(pid)
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        # Don't let a malformed pid turn into an unhandled ValueError; a
+        # garbage pid resolves to no map file below anyway, but say why.
+        return "[error] wait_background: pid must be the integer PID run_bash returned."
     # Never trust a caller-supplied log_path: always resolve it ourselves from
     # the pid->log map written by _run_bash, so a model-supplied path/pid pair
     # can't be used to read arbitrary files outside the run_bash pipeline.
@@ -641,9 +654,11 @@ def _read_bg_exit_status(pid: int | str) -> tuple[bool, int | None, str]:
 
 def _find_bg_start_time_for_pid(pid: int | str) -> str | None:
     """Return the recorded process identity for a background PID, if any."""
-    map_path = os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")
+    pid = str(pid)
+    if not pid.isdigit():
+        return None
     try:
-        with open(map_path) as f:
+        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
             return json.load(f).get("pid_start_time")
     except (OSError, IOError, json.JSONDecodeError):
         return None
@@ -651,29 +666,19 @@ def _find_bg_start_time_for_pid(pid: int | str) -> str | None:
 
 def _find_bg_log_for_pid(pid: int | str) -> str | None:
     """Look up the log path for a background PID via the pid→log map files
-    written by ``_run_bash``.  Returns the log path, or None if not found."""
+    written by ``_run_bash``.  Returns the log path, or None if not found.
+
+    Deliberately no content-scanning fallback ("does some log mention this
+    pid in its first 1K?"): a pid substring matches plenty of unrelated
+    output, so a model-supplied pid could be resolved to *another* job's log
+    and wait_background would then return that other command's output as
+    authoritative. A pid without a map file simply has no log.
+    """
     pid = str(pid)
-    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
-    map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
+    if not pid.isdigit():
+        return None
     try:
-        with open(map_path) as f:
-            data = json.load(f)
-        return data.get("log_path")
+        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
+            return json.load(f).get("log_path")
     except (OSError, IOError, json.JSONDecodeError):
-        pass
-    # Fallback: try to find a log file that mentions this PID in the first 1K
-    try:
-        for name in os.listdir(bg_dir):
-            if not name.startswith("bg-") or ".map" in name:
-                continue
-            p = os.path.join(bg_dir, name)
-            try:
-                with open(p, "rb") as f:
-                    head = f.read(1024).decode("utf-8", errors="replace")
-                if pid in head:
-                    return p
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return None
+        return None
