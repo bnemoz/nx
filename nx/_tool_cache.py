@@ -13,7 +13,8 @@ VCS-backed entries (git_status/git_diff/git_log) need a second signal: the
 backing path is usually the repo root directory, and nothing git does — commit,
 checkout, reset — mutates that directory's own mtime (git writes under .git/).
 So their entries additionally carry a git_state_stamp fingerprint (mtimes of
-.git/HEAD, .git/index, ORIG_HEAD) and are valid only while it matches, plus
+.git/HEAD, index, ORIG_HEAD, the resolved branch ref, packed-refs and the HEAD
+reflog) and are valid only while it matches, plus
 they are dropped outright by any write_file/edit_file/multi_edit/delete_file
 and by any successful run_bash (git state can change without a stamp change —
 e.g. worktree edits alter status, and `rm -rf .git` makes the stamp None).
@@ -53,9 +54,31 @@ def _mtime_ns_of(path: str) -> int | None:
 
 
 def _git_dir_stamp(git_dir: str) -> str:
-    """mtimes of HEAD/index/ORIG_HEAD inside one git dir, joined."""
+    """mtimes of the state files git writes, joined. A plain commit never
+    rewrites HEAD (a symref, only rewritten on branch switches) nor the index
+    (an empty commit rewrites nothing there), so the stamp also covers the
+    files that DO move: the resolved branch ref (loose file under the shared
+    commondir, or packed-refs) and the HEAD reflog (commit/checkout/reset all
+    append to logs/HEAD when reflogs are on, the default outside bare repos)."""
     parts = []
-    for rel in ("HEAD", "index", "ORIG_HEAD"):
+    watched = ["HEAD", "index", "ORIG_HEAD", "logs/HEAD", "packed-refs"]
+    try:
+        with open(os.path.join(git_dir, "HEAD")) as fh:
+            line = fh.readline().strip()
+        if line.startswith("ref:"):
+            ref = line[len("ref:"):].strip()
+            # A linked worktree's HEAD symrefs a branch whose loose ref lives in
+            # the shared commondir (the main .git), not the per-worktree dir.
+            shared = git_dir
+            try:
+                with open(os.path.join(git_dir, "commondir")) as cfh:
+                    shared = os.path.normpath(os.path.join(git_dir, cfh.readline().strip()))
+            except OSError:
+                pass
+            watched.append(os.path.relpath(os.path.join(shared, ref), git_dir))
+    except OSError:
+        pass  # unreadable HEAD: the base files still get fingerprinted
+    for rel in watched:
         try:
             parts.append(f"{rel}:{os.stat(os.path.join(git_dir, rel)).st_mtime_ns}")
         except OSError:
@@ -65,7 +88,8 @@ def _git_dir_stamp(git_dir: str) -> str:
 
 def git_state_stamp(path: str) -> str | None:
     """A cheap fingerprint of git state under *path*: mtime_ns of .git/HEAD,
-    index and ORIG_HEAD (whatever exists), joined. Returns None when no .git
+    index, ORIG_HEAD, the resolved branch ref, packed-refs and the HEAD reflog
+    (whatever exists), joined. Returns None when no .git
     is reachable, in which case the entry keeps whole-result validity."""
     real = os.path.realpath(path)
     for _ in range(6):  # walk up like git does
