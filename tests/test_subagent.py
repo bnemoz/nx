@@ -247,7 +247,10 @@ def test_concurrent_spawn_agents_overlap(nx_fresh, monkeypatch, tmp_path):
             pass  # scheduler starved one worker; state["max"] check below still fails the test
         with lock:
             state["cur"] -= 1
-        messages.append({"role": "assistant", "content": "answer:" + messages[1]["content"]})
+        # messages[1] is the sub-agent's instruction, now suffixed with the
+        # budget line — match on the instruction itself
+        inst = messages[1]["content"].split("\n\n[Budget:")[0]
+        messages.append({"role": "assistant", "content": "answer:" + inst})
         return {"status": "done", "turns": 1}
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)

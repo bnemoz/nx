@@ -62,6 +62,7 @@ import time
 from typing import Any
 
 from . import _state as st
+from ._env import _env_int
 
 SUBAGENT_SYSTEM = (
     "You are a focused read-only sub-agent answering ONE question about this "
@@ -85,10 +86,10 @@ SUBAGENT_WRITE_SYSTEM = (
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Multiple spawn_agent calls in one turn run concurrently (write-capable ones run one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
+    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Multiple spawn_agent calls in one turn run concurrently (write-capable ones run one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
-        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40)."},
+        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40). The agent sees its remaining budget and answers in the last turn — don't set it low for broad questions."},
         "async": {"type": "boolean", "description": "Run in the background: returns a job id immediately, and the answer arrives as a [Runtime note] on a later turn. Use only for investigations that genuinely take a while; don't declare the task done until the note lands."},
     }, "required": ["instruction"]},
 }}
@@ -121,6 +122,27 @@ _WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit")
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
 _SPAWN_LOCK = threading.Lock()
+
+# Recovery-failsafe retries (reasoning-only stalls, empty turns) inside a
+# sub-agent loop. The parent's defaults (NX_REASONING_ONLY_RETRIES=3,
+# NX_EMPTY_TURN_RETRIES=3) assume a 200-turn budget; a 12-turn sub-agent
+# burning half of it on stall rescues is the main way spawn_agent wastes its
+# allowance — so inside a sub-loop both collapse to this (default 1).
+_SUBAGENT_RECOVERY_RETRIES = _env_int("NX_SUBAGENT_RECOVERY_RETRIES", 1)
+
+
+def _subagent_scoped_retry(default: int) -> int:
+    """The retry limit THIS thread's loop should use for a stall/empty-turn
+    failsafe: the clamp inside a sub-agent, the parent's own setting outside
+    it. Batch workers keep the parent values (they already have a wall-clock
+    deadline as their budget guard). A parent that DISABLED a failsafe
+    (<= 0 — e.g. benchmark mode's "let the model think") keeps it disabled
+    inside sub-agents too: the clamp narrows budgets, never widens them."""
+    if default <= 0:
+        return default
+    if _subagent_ctx() is not None and _SUBAGENT_RECOVERY_RETRIES >= 0:
+        return _SUBAGENT_RECOVERY_RETRIES
+    return default
 
 
 class _SubagentContext:
@@ -386,6 +408,19 @@ def list_async_agents() -> list[dict[str, Any]]:
     return out
 
 
+def _async_duplicate_running(instruction: str) -> str | None:
+    """Job id of a still-running async agent with the SAME instruction, or
+    None. Flash-tier parents re-spawn an investigation while the original is
+    still in flight, doubling the spend and arriving at the same answer twice."""
+    norm = " ".join(instruction.split())
+    with _ASYNC_LOCK:
+        for jid, rec in _ASYNC_AGENTS.items():
+            if rec.get("status") == "running" and \
+                    " ".join(str(rec.get("instruction", "")).split()) == norm:
+                return jid
+    return None
+
+
 def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
     """Worker body: run the sub-loop, then stage the parent's notice.
 
@@ -431,10 +466,16 @@ def _stage_subagent_answer(job_id: str) -> None:
                 body += "\n…[truncated]"
             note = (f"[Runtime note: background sub-agent {job_id} finished. "
                     f"Its answer:\n{body}]")
+        elif answer.startswith("ERROR: an identical async agent"):
+            # duplicate-in-flight refusal: nothing ran, nothing to wait for —
+            # the parent must retry later, so don't announce a [Runtime note]
+            # with an answer that will never come
+            note = "[Runtime note: background sub-agent " + job_id + \
+                " was NOT started — refusal: " + answer[:300] + "]"
         else:
-            note = (f"[Runtime note: background sub-agent {job_id} FAILED — "
-                    f"{answer[:600]}\n"
-                    "Retry the task inline (async=false) if it still matters.]")
+            note = "[Runtime note: background sub-agent " + job_id + \
+                " FAILED — " + answer[:600] + "\n" + \
+                "Retry the task inline (async=false) if it still matters.]"
         setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
 
 
@@ -488,7 +529,11 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
     messages = [{"role": "system", "content": SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM},
-                {"role": "user", "content": instruction.strip()}]
+                {"role": "user", "content":
+                 f"{instruction.strip()}\n\n[Budget: at most {max_turns} tool turns. "
+                 "Plan within that; spend the last one answering, not starting "
+                 "another search. In your final answer, state what you verified "
+                 "and what you did not finish.]"}]
     # Force the sub-loop through the restricted dispatch table. run_tool() and
     # model_turn() consult the per-thread sub-agent context first (so two
     # concurrent agents never clobber each other's restricted table). The
@@ -537,6 +582,15 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     status = summary.get("status") if isinstance(summary, dict) else "done"
     turns = summary.get("turns", 0) if isinstance(summary, dict) else 0
     if not answer:
+        # The agent died mid-exploration (hit the cap while its final turn
+        # still called a search tool, or the backend never emitted text). The
+        # last tool observation is still signal the parent can act on — hand
+        # it up instead of "produced no answer".
+        for msg in reversed(messages):
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) \
+                    and msg["content"].strip():
+                return (f"[sub-agent hit its {max_turns}-turn cap before writing an "
+                        f"answer; last observation]\n{msg['content'].strip()[:2000]}")
         return (f"[sub-agent produced no answer after {turns} turn(s); "
                 f"status={status} — try a narrower instruction]")
     if status == "cap":
@@ -579,6 +633,10 @@ def spawn_agent(instruction: str, max_turns: int = 12, async_: bool = False,
             return "ERROR: no active model source"
         if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent
             return "ERROR: nested spawn_agent refused — sub-agents cannot delegate"
+        dup = _async_duplicate_running(instruction)
+        if dup is not None:
+            return (f"ERROR: an identical async agent is already running as job {dup} "
+                    "— its answer will arrive as a [Runtime note]; do not re-spawn it")
         return _spawn_async(instruction, max_turns)
     return _run_sync_agent(instruction, max_turns)
 

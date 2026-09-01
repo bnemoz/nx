@@ -186,7 +186,7 @@ def test_async_string_boolean_and_gating(nx_fresh):
     # text-protocol models send booleans as strings — accepted
     out = spawn_agent("q", async_="true")
     assert out.startswith("[background sub-agent] job agent-")
-    out2 = spawn_agent("q", async_="1")
+    out2 = spawn_agent("q2", async_="1")  # different instruction: not a duplicate
     assert out2.startswith("[background sub-agent] job agent-")
     # ...but "false"/"0"/None stay synchronous (real model turn, no job id)
     def fake_loop(messages, *a, **kw):

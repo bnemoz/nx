@@ -44,7 +44,7 @@ from . import (
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key,
 )
-from ._subagent import _subagent_active, _subagent_quiet
+from ._subagent import _subagent_active, _subagent_quiet, _subagent_scoped_retry
 from ._batch import _batch_active
 from ._plan import plan_active
 from concurrent.futures import ThreadPoolExecutor
@@ -757,7 +757,7 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                 "continue the previous stream. Start fresh.")
         _nudge_current_user_turn(messages, nudge)
         return TURN_STREAM_CUT
-    retry_limit = max(0, st.REASONING_ONLY_RETRY_LIMIT)
+    retry_limit = _subagent_scoped_retry(max(0, st.REASONING_ONLY_RETRY_LIMIT))
     cut_count = reasoning_loop_cut_count
     reasoning_secs = (time.time() - reasoning_only_start) if reasoning_only_start else 0
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
@@ -1192,13 +1192,13 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         #   • recovery already exhausted the budget — escalate to a forced answer
         #     (mirrors the reasoning-loop path) instead of spinning forever.
         if (not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0
-                and empty_turn_count < st.EMPTY_TURN_RETRY_LIMIT):
+                and empty_turn_count < _subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)):
             dangling = _last_is_dangling_tool(messages)
             if not quiet:
                 print(f"{C.WARNING}  ✂ EMPTY TURN — no content and no tool call"
                       f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
                       f"; nudging the model to continue "
-                      f"({empty_turn_count + 1}/{st.EMPTY_TURN_RETRY_LIMIT}){RESET}")
+                      f"({empty_turn_count + 1}/{_subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)}){RESET}")
             _nudge_current_user_turn(messages, EMPTY_TURN_NUDGE)
             return TURN_EMPTY
         if not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0:
@@ -1230,7 +1230,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         if not quiet:
             print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
                   f"intent but made no tool call; nudging to act "
-                  f"(attempt {reasoning_loop_cut_count + 1}/{st.REASONING_ONLY_RETRY_LIMIT}){RESET}")
+                  f"(attempt {reasoning_loop_cut_count + 1}/"
+                  f"{_subagent_scoped_retry(st.REASONING_ONLY_RETRY_LIMIT)}){RESET}")
         messages.append({"role": "assistant", "content": text})
         _nudge_current_user_turn(
             messages,
@@ -1318,7 +1319,15 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     # a test that monkeypatches `nx.model_turn` (to avoid a real model
     # round-trip) takes effect on every call this loop makes.
     import nx as _m
+    # Sub-agents: make the LAST permitted turn a forced-final one. Otherwise a
+    # model that never learned to stop spends the entire budget exploring —
+    # and the cap rescue below then asks it to answer from scratch (or
+    # salvages nothing). With the final turn opened as final_answer + forced
+    # tool_choice, the agent writes its answer INSIDE the budget.
+    sub_loop = _subagent_active()
     while steps < max_turns:  # cap runaway tool/retry loops (scoped override for sub-agents)
+        if sub_loop and steps == max_turns - 1 and not force_final:
+            force_final = True
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
