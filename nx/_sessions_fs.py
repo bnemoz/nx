@@ -21,6 +21,7 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -181,6 +182,47 @@ def _update_index(session_id: str, data: dict[str, Any]) -> None:
     _write_index_entry(session_id, _summarize_session_data(session_id, data))
 
 
+_SUMMARY_HEADER_RE = re.compile(
+    r"^\[Compressed context — \d+ earlier turns summarized")
+
+
+def _is_compaction_rewrite(
+    existing: list[dict[str, Any]], incoming: list[dict[str, Any]],
+) -> bool:
+    """True when ``incoming`` is the same conversation after compress() folded
+    older turns into a summary turn: shorter, same system-prompt shape, and a
+    compress() header at the top of the body. In that shape ``incoming`` is
+    authoritative — the dropped turns were deliberately summarized away, not
+    written by another writer — so merging must not resurrect them (the
+    prefix/fork logic below assumes both writers only ever append, and would
+    splice the pre-compression history back in front of the summary).
+
+    Detected structurally so no caller flag is trusted: incoming must be
+    strictly shorter, carry the same system-prompt shape, start its body with
+    the compress() header, and every turn after that summary must be an exact
+    tail of ``existing`` — exactly the shape ``messages[:] = sys + [summary]
+    + tail`` in _compress.compress() produces.
+    """
+    if not existing or not incoming or len(incoming) >= len(existing):
+        return False
+
+    def _is_sys(m: dict[str, Any]) -> bool:
+        return m.get("role") == "system"
+
+    off_e = 1 if _is_sys(existing[0]) else 0
+    off_i = 1 if _is_sys(incoming[0]) else 0
+    if bool(off_e) != bool(off_i) or len(incoming) <= off_i:
+        return False
+    first_body = incoming[off_i].get("content")
+    if not (isinstance(first_body, str) and _SUMMARY_HEADER_RE.match(first_body)):
+        return False
+    # every incoming turn after the summary must be a verbatim tail of existing
+    tail = incoming[off_i + 1:]
+    if not tail or len(tail) > len(existing) - off_e:
+        return False
+    return existing[-len(tail):] == tail
+
+
 def _merge_session_messages(
     existing: list[dict[str, Any]], incoming: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -190,9 +232,16 @@ def _merge_session_messages(
     to that session, replacing the file with the stale snapshot would lose
     those turns. Both snapshots normally share a prefix, so retain the
     committed transcript and append the other writer's divergent suffix.
+
+    The one non-append rewrite is a context fold (compress() or the
+    overrun path): incoming is then the *shortened* authoritative transcript,
+    and the merge must not treat it as a stale fork that resurrects the
+    summarized-away history — see _is_compaction_rewrite().
     """
     if existing == incoming:
         return incoming
+    if _is_compaction_rewrite(existing, incoming):
+        return incoming  # compress() folded turns away on purpose; incoming wins
     if len(existing) <= len(incoming) and existing == incoming[:len(existing)]:
         return incoming
     if len(incoming) <= len(existing) and incoming == existing[:len(incoming)]:

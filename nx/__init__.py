@@ -131,6 +131,7 @@ from ._sessions_fs import (
     _load_index, _write_index, _update_index, _write_session, _load_session,
     _session_files_newest, _session_summary_from_file, _list_sessions,
     _delete_session, _maybe_refresh_description, _resolve_session,
+    _merge_session_messages, _is_compaction_rewrite,
 )
 from ._input_history import (
     _load_input_history, _record_input, INPUT_HISTORY_LINES_DEFAULT,
