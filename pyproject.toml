@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.24.1"
+version = "0.25.0"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -24,7 +24,7 @@ nx = "nx:main"
 packages = ["nx"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pytest-xdist>=3.8"]
 
 [tool.ruff.lint.per-file-ignores]
 # nx/__init__.py re-exports names from submodules (consumed as `nx.X` by tests

@@ -14,10 +14,12 @@ Use `uv` for local development:
 
 ```bash
 uv pip install -e .                 # install the CLI and runtime dependencies
-uv run pytest tests/                # run pytest-style tests
+uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~10s; workers capped at 32)
 uv run python3 tests/test_sources.py # run a standalone assertion-style test
 nx --help                           # inspect the installed CLI
 ```
+
+`-n auto` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~27s) works too and is the fallback if xdist is unavailable.
 
 Target a single pytest test during development with `uv run pytest tests/test_risk_context.py -k test_name`. The suite is designed to run offline; do not depend on a live model endpoint.
 
@@ -27,7 +29,7 @@ Use standard Python conventions: four-space indentation, `snake_case` functions 
 
 ## Testing Guidelines
 
-Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it.
+Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it. The suite is xdist-safe by construction: `tests/conftest.py` rewinds `NX_*` env vars and all `nx.*` module state around every test, so a new test file must not rely on state left behind by other files — set up what it needs (module scope or a fixture) instead of depending on execution order.
 
 ## Commit & Pull Request Guidelines
 

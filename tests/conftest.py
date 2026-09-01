@@ -1,6 +1,6 @@
 """Shared pytest bootstrap for nx's test suite.
 
-Two jobs, both about keeping the suite fast and hermetic:
+Three jobs, all about keeping the suite fast, hermetic, and xdist-safe:
 
 1. OFFLINE BY DEFAULT — NX_SKIP_STARTUP_PROBES=1 makes every `import nx` /
    `importlib.reload(nx)` skip nx's startup probes (resolve_model()'s
@@ -18,8 +18,23 @@ Two jobs, both about keeping the suite fast and hermetic:
    the hung-hook timeout). The default budget is correct for interactive use;
    tests shrink each via its NX_* tunable (read at call time, so these
    setdefaults apply even to the standalone files that reload nx).
+
+3. PER-TEST STATE RESTORE (xdist-safe) — `pytest -n auto` runs files in
+   arbitrary order per worker, so cross-file leakage of NX_* env vars and of
+   process-global `nx` module state (the interrupt-watcher singleton, session
+   caches, ...) makes the suite order-dependent. Before every test we rewind
+   (a) all NX_* env vars to a scrubbed baseline, and (b) every `nx.*` module
+   dict to its post-import snapshot. Files that set NX_* at module scope are
+   honored: each module's import-time env assignments are captured (against a
+   clean env, see pytest_collectstart) and re-applied for that module's tests.
 """
 import os
+import sys
+import threading
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _DEFAULTS = {
     # --- 1. no startup probes at import --------------------------------------
@@ -37,19 +52,202 @@ _DEFAULTS = {
     # a `sleep 30` script and only needs the veto message
     "NX_HOOK_TIMEOUT": "1",
 }
+# Baseline every test's env is rewound to (AGENTS.md: tests must be immune to
+# the developer's real NX_* credentials).
+_SAFE_NX = dict(_DEFAULTS)
+_SAFE_NX["NX_ENV_FILE"] = "/dev/null"
 
-for _k, _v in _DEFAULTS.items():
-    os.environ.setdefault(_k, _v)
+# Under xdist, workers share the real $HOME — tests that touch ~/.nx (the
+# overflow spill dir, session files, logs) would race each other across
+# processes. Give each worker its own NX_HOME tempdir; serial runs unchanged.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    import atexit
+    import shutil
+    import tempfile
+
+    _worker_home = tempfile.mkdtemp(
+        prefix="nx-test-%s-" % os.environ["PYTEST_XDIST_WORKER"])
+    atexit.register(shutil.rmtree, _worker_home, ignore_errors=True)
+    _SAFE_NX["NX_HOME"] = _worker_home
 
 
-def pytest_runtest_setup(item):
-    """Re-assert the defaults before every test.
+def _scrub_env():
+    """Drop every NX_* var, then lay down the safe baseline."""
+    for _k in [k for k in os.environ if k.startswith("NX_")]:
+        del os.environ[_k]
+    os.environ.update(_SAFE_NX)
 
-    Several standalone test files scrub ALL NX_* vars at module scope while
-    pytest is still collecting (e.g. test_sources.py's clear_nx_env()), which
-    would silently undo the setdefaults above for the whole execution phase.
-    setdefault keeps any value a test deliberately set (test_context_window
-    opts back into the overrun probe).
+
+# ---------------------------------------------------------------------------
+# 3. pristine baseline + per-module import-time env intents
+# ---------------------------------------------------------------------------
+_scrub_env()
+
+import nx  # noqa: E402,F401  (baseline import; probes skipped)
+
+
+def _is_nx(name):
+    return name == "nx" or name.startswith("nx.")
+
+
+# env baseline (NX_* only) and nx.* module dicts, both taken before any test
+# module has been imported — the pristine state each test rewinds to. Module
+# dicts are copied one level deep so tests mutating module-level containers
+# in place (st._TOOL_RESULT_CACHE.clear() etc.) can't corrupt the baseline.
+
+def _copy_val(v):
+    if isinstance(v, dict):
+        return dict(v)
+    if isinstance(v, list):
+        return list(v)
+    if isinstance(v, set):
+        return set(v)
+    return v
+
+
+_BASELINE_ENV = {k: v for k, v in os.environ.items() if k.startswith("NX_")}
+_BASELINE_MODS = {
+    name: {k: _copy_val(v) for k, v in mod.__dict__.items()}
+    for name, mod in sys.modules.items()
+    if _is_nx(name)
+}
+
+# module file path -> {NX_* var: value} assigned while that module was being
+# imported (its module-scope `os.environ[...] = ...` lines).
+_INTENTS = {}
+
+
+def pytest_collectstart(collector):
+    """Import each test module against a scrubbed NX_* env.
+
+    pytest imports a test file when its Module node starts collecting, so
+    scrubbing here means the module-scope env assignments we later read back
+    in pytest_collectreport are exactly that module's own intents — never
+    dirt inherited from a file collected earlier on the same worker.
     """
+    if isinstance(collector, pytest.Module):
+        _scrub_env()
+
+
+def pytest_collectreport(report):
+    if report.when != "collect" or "::" in report.nodeid:
+        return  # only the Module-level report carries import-time state
+    # Module-scope env *deletions* are intents too: files that scrub all NX_*
+    # at import (test_tool_hooks.py, test_sources.py) must not silently erase
+    # the conftest defaults (NX_HOOK_TIMEOUT etc.) for every later test.
+    intents = {
+        k: v
+        for k, v in os.environ.items()
+        if k.startswith("NX_") and _BASELINE_ENV.get(k) != v
+    }
+    intents.update({k: None for k in _BASELINE_ENV if k not in os.environ})
+    _INTENTS[os.path.abspath(report.nodeid)] = intents
+    _scrub_env()  # next module's import starts clean too
+
+
+def _restore(fspath):
+    """Rewind NX_* env and nx.* module state to the pristine baseline.
+
+    Runs before every test's setup (so no state leaks in from earlier tests,
+    whether serial or xdist-scrambled) and after every test's teardown (so a
+    test that forgets to clean up can't poison its neighbors).
+    """
+    # NOTE: do NOT set _INTERRUPT_ARMED/_INTERRUPT_EXIT here. Setting ARMED
+    # wakes a parked watcher thread, whose wake path pays the interrupt-restore
+    # handshake — doing that 2x per test added ~2 minutes to the serial run.
+    # Events are snapshotted/restored as plain state below instead.
+
+    # env: NX_* -> baseline, then this module's own import-time deltas
+    # (value None = the module deleted it at import)
+    for _k in [k for k in os.environ if k.startswith("NX_")]:
+        del os.environ[_k]
+    os.environ.update(_BASELINE_ENV)
+    for _k, _v in _INTENTS.get(str(fspath).split("::")[0], {}).items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
+
+    # module state: rewind each snapshotted nx.* module. Mutable containers
+    # are cleared+refilled IN PLACE so identity shared across nx modules
+    # (e.g. nx._state._TOOL_RESULT_CACHE re-exported by nx/__init__) survives;
+    # names a test added that weren't in the baseline are dropped.
+    for _name, _mod in list(sys.modules.items()):
+        if not _is_nx(_name):
+            continue
+        _snap = _BASELINE_MODS.get(_name)
+        if _snap is None:
+            del sys.modules[_name]
+            continue
+        _d = _mod.__dict__
+        for _k in [k for k in _d if k not in _snap]:
+            del _d[_k]
+        for _k, _tmpl in _snap.items():
+            _cur = _d.get(_k)
+            if isinstance(_tmpl, dict):
+                if isinstance(_cur, dict):
+                    _cur.clear()
+                    _cur.update(_tmpl)
+                else:
+                    _d[_k] = dict(_tmpl)
+            elif isinstance(_tmpl, list):
+                if isinstance(_cur, list):
+                    _cur[:] = _tmpl
+                else:
+                    _d[_k] = list(_tmpl)
+            elif isinstance(_tmpl, set):
+                if isinstance(_cur, set):
+                    _cur.clear()
+                    _cur.update(_tmpl)
+                else:
+                    _d[_k] = set(_tmpl)
+            elif isinstance(_tmpl, threading.Event):
+                if isinstance(_cur, threading.Event):
+                    (_cur.set if _tmpl.is_set() else _cur.clear)()
+                else:
+                    _d[_k] = threading.Event()
+                    if _tmpl.is_set():
+                        _d[_k].set()
+            else:
+                _d[_k] = _tmpl
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item):
+    """Rewind state, then re-assert the timing/probe defaults.
+
+    Hookwrapper so the rewind lands before *all* of the item's setup (both
+    autouse fixtures and xunit setup_function), not interleaved with it.
+    Several standalone test files scrub ALL NX_* vars at module scope (e.g.
+    test_sources.py's clear_nx_env()), which would silently undo the
+    setdefaults above; setdefault keeps any value a test deliberately set
+    (test_context_window opts back into the overrun probe).
+    """
+    _restore(str(item.fspath))
     for _k, _v in _DEFAULTS.items():
         os.environ.setdefault(_k, _v)
+    yield
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    yield
+    # post-yield: after fixture finalization (monkeypatch.undo et al.) has
+    # restored what it patched, wipe whatever the test left behind.
+    _restore(str(item.fspath))
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_xdist_auto_num_workers(config):
+    """Cap `-n auto` at 32 workers.
+
+    Each xdist worker re-imports all ~70 test modules during collection
+    (~0.25s of nx import + module scope), so past ~32 workers the wall time
+    *rises* — 17s at 128 workers vs 9.6s at 32 on this 128-core box.
+    Firstresult: returning non-None here beats xdist's cpu_count(); returning
+    None (explicit PYTEST_XDIST_AUTO_NUM_WORKERS set) defers to it. Only
+    consulted for -n auto; explicit -n N bypasses this hook entirely.
+    """
+    if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS"):
+        return None
+    return 32

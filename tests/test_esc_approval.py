@@ -198,7 +198,7 @@ def test_model_turn_native_esc():
 def test_model_turn_malformed_native_tool_args_retries_cleanly():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_run_tool = m.run_tool
     m._interrupt_watcher = lambda: None
     m.LifeSpinner = type("NoSpinner", (), {
@@ -228,7 +228,10 @@ def test_model_turn_malformed_native_tool_args_retries_cleanly():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.run_tool = saved_run_tool
         builtins.print = _REAL_PRINT
     print("PASS — malformed native tool args retry cleanly without executing {}")
@@ -242,7 +245,7 @@ def test_model_turn_malformed_native_tool_args_retries_cleanly():
 def test_model_turn_repeated_malformed_native_args_nudge_escalates():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_run_tool = m.run_tool
     m._interrupt_watcher = lambda: None
     m.LifeSpinner = type("NoSpinner", (), {
@@ -279,7 +282,10 @@ def test_model_turn_repeated_malformed_native_args_nudge_escalates():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.run_tool = saved_run_tool
         builtins.print = _REAL_PRINT
     print("PASS — repeated malformed native args escalate to a change-tactics nudge")
@@ -293,7 +299,7 @@ def test_model_turn_repeated_malformed_native_args_nudge_escalates():
 def test_malformed_args_circuit_breaker_drops_tool():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_run_tool = m.run_tool
     saved_limit = m.MALFORMED_TOOL_BREAKER_LIMIT
     saved_failures = dict(m._MALFORMED_TOOL_FAILURES)
@@ -338,7 +344,10 @@ def test_malformed_args_circuit_breaker_drops_tool():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.run_tool = saved_run_tool
         m.MALFORMED_TOOL_BREAKER_LIMIT = saved_limit
         m._MALFORMED_TOOL_FAILURES = saved_failures
@@ -400,7 +409,7 @@ def test_reasoning_only_stall_requests_forced_final():
     # act" tier tested separately below.
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_limit = m.REASONING_ONLY_CHAR_LIMIT
     saved_retries = m.REASONING_ONLY_RETRY_LIMIT
     m._interrupt_watcher = lambda: None
@@ -424,7 +433,10 @@ def test_reasoning_only_stall_requests_forced_final():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.REASONING_ONLY_CHAR_LIMIT = saved_limit
         m.REASONING_ONLY_RETRY_LIMIT = saved_retries
         builtins.print = _REAL_PRINT
@@ -438,7 +450,7 @@ def test_reasoning_only_stall_nudges_to_act_before_forcing_final():
     # cut_count=0 is NOT the last retry (that's index 1).
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_limit = m.REASONING_ONLY_CHAR_LIMIT
     saved_retries = m.REASONING_ONLY_RETRY_LIMIT
     m._interrupt_watcher = lambda: None
@@ -469,7 +481,10 @@ def test_reasoning_only_stall_nudges_to_act_before_forcing_final():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.REASONING_ONLY_CHAR_LIMIT = saved_limit
         m.REASONING_ONLY_RETRY_LIMIT = saved_retries
         builtins.print = _REAL_PRINT
@@ -482,7 +497,7 @@ def test_reasoning_only_stall_nudges_to_act_before_forcing_final():
 def test_forced_final_tool_call_becomes_assistant_text():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     m._interrupt_watcher = lambda: None
     m.LifeSpinner = type("NoSpinner", (), {
         "__init__": lambda self, **kw: None,
@@ -513,7 +528,10 @@ def test_forced_final_tool_call_becomes_assistant_text():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         builtins.print = _REAL_PRINT
     print("PASS — forced final_answer tool call becomes assistant text")
 
@@ -521,7 +539,7 @@ def test_forced_final_tool_call_becomes_assistant_text():
 def test_forced_final_length_marks_partial_answer():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     m._interrupt_watcher = lambda: None
     m.LifeSpinner = type("NoSpinner", (), {
         "__init__": lambda self, **kw: None,
@@ -546,7 +564,10 @@ def test_forced_final_length_marks_partial_answer():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         builtins.print = _REAL_PRINT
     print("PASS — forced final length stop is marked in history")
 
@@ -554,7 +575,7 @@ def test_forced_final_length_marks_partial_answer():
 def test_reasoning_only_empty_completion_forces_final_without_empty_assistant():
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_limit = m.REASONING_ONLY_CHAR_LIMIT
     saved_retries = m.REASONING_ONLY_RETRY_LIMIT
     m._interrupt_watcher = lambda: None
@@ -589,7 +610,10 @@ def test_reasoning_only_empty_completion_forces_final_without_empty_assistant():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.REASONING_ONLY_CHAR_LIMIT = saved_limit
         m.REASONING_ONLY_RETRY_LIMIT = saved_retries
         builtins.print = _REAL_PRINT
@@ -646,7 +670,7 @@ def test_text_only_after_stall_accepts_final_summary_after_toolwork():
     # must suppress the nudge here: the summary is a real final answer.
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_retries = m.REASONING_ONLY_RETRY_LIMIT
     m._interrupt_watcher = lambda: None
     m.REASONING_ONLY_RETRY_LIMIT = 3
@@ -680,7 +704,10 @@ def test_text_only_after_stall_accepts_final_summary_after_toolwork():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.REASONING_ONLY_RETRY_LIMIT = saved_retries
         builtins.print = _REAL_PRINT
     print("PASS — text-only summary after toolwork accepted, not re-nudged")
@@ -693,7 +720,7 @@ def test_text_only_after_stall_nudges_when_nudge_is_last_message():
     # (a user/runtime-note), so the guard must still fire and re-nudge.
     saved_open_stream = m.open_stream
     saved_watcher = m._interrupt_watcher
-    saved_spinner = m.LifeSpinner
+    saved_spinner = getattr(m, "LifeSpinner", None)
     saved_retries = m.REASONING_ONLY_RETRY_LIMIT
     m._interrupt_watcher = lambda: None
     m.REASONING_ONLY_RETRY_LIMIT = 3
@@ -722,7 +749,10 @@ def test_text_only_after_stall_nudges_when_nudge_is_last_message():
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher
-        m.LifeSpinner = saved_spinner
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
         m.REASONING_ONLY_RETRY_LIMIT = saved_retries
         builtins.print = _REAL_PRINT
     print("PASS — text-only intent after nudge (no tool) still re-nudged")

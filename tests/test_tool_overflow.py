@@ -89,6 +89,7 @@ def test_spill_io_failure_falls_back_to_plain_elision(monkeypatch):
 
 def test_spill_file_is_content_addressed_and_deduped(monkeypatch):
     _set_n(monkeypatch, 200)
+    os.makedirs(ov.overflow_dir(), exist_ok=True)  # fresh xdist NX_HOME has none
     for n in os.listdir(ov.overflow_dir()):  # isolate from earlier tests' spills
         os.remove(ov._path_for(n))
     body = _body()
