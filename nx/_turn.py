@@ -474,11 +474,8 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
         except Exception:
             return  # let the normal run_tool() call surface/report the error
         result = _sanitize_tool_result(result)
-        cache_path = args.get("path", ".")
-        if isinstance(cache_path, list):
-            cache_path = cache_path[0] if cache_path else "."
-        from ._tool_cache import cache_store_entry
-        st._TOOL_RESULT_CACHE[cache_key] = cache_store_entry(result, cache_path)
+        from ._tool_cache import store_cacheable_result
+        store_cacheable_result(st._TOOL_RESULT_CACHE, cache_key, name, args, result)
 
     with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as ex:
         list(ex.map(_run, jobs))

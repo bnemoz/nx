@@ -19,7 +19,10 @@ from typing import Any
 
 from . import _state as st
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
-from ._tool_cache import cache_store_entry, cache_valid, drop_changed_entries
+from ._tool_cache import (
+    cache_valid, drop_changed_entries,
+    drop_vcs_entries, store_cacheable_result,
+)
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
@@ -448,18 +451,25 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if not quiet:
         print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
-        cache_path = args.get("path", ".")
-        if isinstance(cache_path, list):
-            cache_path = cache_path[0] if cache_path else "."
-        st._TOOL_RESULT_CACHE[cache_key] = cache_store_entry(result, cache_path)
+        # git_* results reflect .git/ state, which the root dir's mtime never
+        # tracks (commits write under .git/ only) — store_cacheable_result
+        # stamps them so a hit can detect a commit/checkout that happened
+        # behind the cache's back.
+        store_cacheable_result(st._TOOL_RESULT_CACHE, cache_key, name, args, result)
     elif name in ("write_file", "edit_file", "multi_edit", "delete_file") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
+        # an edit changes git state (status/diff at least) — git_* entries are
+        # keyed on the repo root dir, which the path-based drop never matches.
+        drop_vcs_entries(st._TOOL_RESULT_CACHE)
         if result != "DENIED by user":
             _undo_push(name, [undo_snapshot])
     elif name == "run_bash":
         # bash can touch any path; entries whose backing file is unchanged
         # (re-stat) stay valid — only mtime-changed/vanished entries are dropped.
+        # Git state can change (commit/reset/status via worktree edit, or .git
+        # removed) in ways no stamp or mtime sees, so git_* entries always go.
         drop_changed_entries(st._TOOL_RESULT_CACHE)
+        drop_vcs_entries(st._TOOL_RESULT_CACHE)
     elif name in ("memory_write", "memory_delete") and not result.startswith("ERROR") and result != "DENIED by user":
         # A new (or removed) memory invalidates any cached memory_search
         # index/snippets — regardless of the scope the write/delete targeted.

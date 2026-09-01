@@ -469,7 +469,11 @@ go through the approval gate above.
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
-or any `run_bash`. `wait_background` is omitted from the tool schemas sent to
+or any `run_bash`. The `git_status`/`git_diff`/`git_log` cache entries carry a
+fingerprint of `.git` state (HEAD/index/`ORIG_HEAD` mtimes) and are dropped by
+any edit tool or `run_bash` too — a commit in another terminal, or `git reset`
+via `run_bash`, is never served stale. `wait_background` is omitted from the
+tool schemas sent to
 the model until a `run_bash` has actually backgrounded, so a session where
 nothing ever backgrounds doesn't pay tokens for a tool it will never call.
 

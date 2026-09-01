@@ -561,7 +561,13 @@ from ._dispatch import (
     _CACHEABLE_READ_TOOLS, _tool_cache_key, _invalidate_tool_cache_path,
     run_tool, _tool_args_parse_error,
 )
-from ._tool_cache import cache_store_entry as _tool_cache_store_entry  # noqa: F401 (re-export for tests)
+from ._tool_cache import (  # noqa: F401 (re-export for tests)
+    cache_store_entry as _tool_cache_store_entry,
+    cache_valid as _tool_cache_valid,
+    git_state_stamp as _tool_cache_git_state_stamp,
+    drop_vcs_entries as _tool_cache_drop_vcs_entries,
+    store_cacheable_result as _tool_cache_store_result,
+)
 
 
 # --- read-only sub-agent delegation -----------------------------------------
