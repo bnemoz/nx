@@ -77,8 +77,11 @@ SUBAGENT_SYSTEM = (
     "codebase for a parent agent. Read files, search, and inspect; then reply "
     "in plain prose with exactly what was asked (key facts, paths, line "
     "numbers) and nothing else — no preamble, no plan narration, no "
-    "next-steps. You cannot write or edit; run_bash is limited to a "
-    "read-only allowlist (grep, ls, du, ps, git log, ...)."
+    "next-steps. Keep the investigation tight: the fewest reads that answer "
+    "the question, batching independent lookups into parallel tool calls in "
+    "one turn. Answer from what you have rather than exhausting every lead. "
+    "You cannot write or edit; run_bash is limited to a read-only allowlist "
+    "(grep, ls, du, ps, git log, ...)."
 )
 
 SUBAGENT_WRITE_SYSTEM = (
@@ -92,12 +95,37 @@ SUBAGENT_WRITE_SYSTEM = (
     "must finish itself — no preamble, no plan narration."
 )
 
+# The default sub-agent budget and its hard ceiling. A default of 12 turns
+# was the other half of the 0.19 cap-outs: real investigations (orient, read
+# 3-4 files, search, verify, answer) need ~15-20 turns, and the parent model
+# kept passing the schema default through unexamined. 50 gives a read-heavy
+# investigation plenty of room, recovery cycles included; the ceiling is
+# env-tunable (NX_SUBAGENT_MAX_TURNS) instead of hard-coded. Resolved through
+# the top-level module attributes (NX_SUBAGENT_DEFAULT_TURNS /
+# NX_SUBAGENT_MAX_TURNS in nx/__init__.py) so tests/REPL can flip them live.
+
+
+def _subagent_default_turns() -> int:
+    import nx as _m
+    try:
+        return max(1, int(_m.NX_SUBAGENT_DEFAULT_TURNS))
+    except (AttributeError, TypeError, ValueError):
+        return _env_int("NX_SUBAGENT_DEFAULT_TURNS", 50)
+
+
+def _subagent_max_turns() -> int:
+    import nx as _m
+    try:
+        return max(1, int(_m.NX_SUBAGENT_MAX_TURNS))
+    except (AttributeError, TypeError, ValueError):
+        return _env_int("NX_SUBAGENT_MAX_TURNS", 100)
+
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
     "description": "Delegate a focused investigation to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Runs in the background by default (answer arrives later as a [Runtime note] + report path); several calls in one turn run concurrently. Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
-        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40). Don't set it low for broad questions."},
+        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 50; 1-100). Don't set it low for broad questions."},
         "async": {"type": "boolean", "description": "Background (the default); pass false for a foreground spawn that renders live and blocks until done."},
     }, "required": ["instruction"]},
 }}
@@ -135,7 +163,8 @@ _SPAWN_LOCK = threading.Lock()
 # sub-agent loop. The parent's defaults (NX_REASONING_ONLY_RETRIES=3,
 # NX_EMPTY_TURN_RETRIES=3) assume a 200-turn budget; a 12-turn sub-agent
 # burning half of it on stall rescues is the main way spawn_agent wastes its
-# allowance — so inside a sub-loop both collapse to this (default 1).
+# allowance — so inside a sub-loop all recovery cycles (stalls, empty turns,
+# malformed streams/collapses) collapse to this (default 1).
 _SUBAGENT_RECOVERY_RETRIES = _env_int("NX_SUBAGENT_RECOVERY_RETRIES", 1)
 
 
@@ -146,6 +175,24 @@ def _subagent_scoped_retry(default: int) -> int:
     deadline as their budget guard). A parent that DISABLED a failsafe
     (<= 0 — e.g. benchmark mode's "let the model think") keeps it disabled
     inside sub-agents too: the clamp narrows budgets, never widens them."""
+    if default <= 0:
+        return default
+    if _subagent_ctx() is not None and _SUBAGENT_RECOVERY_RETRIES >= 0:
+        return _SUBAGENT_RECOVERY_RETRIES
+    return default
+
+
+def _subagent_stream_cut_limit(default: int) -> int:
+    """The malformed-stream / collapse retry limit for THIS thread's loop.
+
+    Same clamp philosophy as _subagent_scoped_retry, but for the retry budget
+    that WASN'T clamped: the parent's NX_MALFORMED_STREAM_RETRIES (default 2)
+    governs malformed tool-call args and repetition/special-token collapses,
+    and each cut burns a full sub-agent turn (model_turn returns, the loop
+    re-opens the stream). Two cuts + one reasoning rescue = 3 of 12 turns
+    spent re-sampling before the agent ever acted — the 0.19 failure pattern.
+    A sub-loop with the recovery clamp at 0 (disabled) gets 0 here too: the
+    clamp narrows, never widens."""
     if default <= 0:
         return default
     if _subagent_ctx() is not None and _SUBAGENT_RECOVERY_RETRIES >= 0:
@@ -614,9 +661,11 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     messages = [{"role": "system", "content": SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM},
                 {"role": "user", "content":
                  f"{instruction.strip()}\n\n[Budget: at most {max_turns} tool turns. "
-                 "Plan within that; spend the last one answering, not starting "
-                 "another search. In your final answer, state what you verified "
-                 "and what you did not finish.]"}]
+                 "Spend them answering, not exploring: batch independent lookups "
+                 "into parallel tool calls within one turn, and wrap up as soon as "
+                 "you can support the answer — do not exhaust every lead. Reserve "
+                 "the final turn for the answer itself. In your final answer, "
+                 "state what you verified and what you did not finish.]"}]
     # Force the sub-loop through the restricted dispatch table. run_tool() and
     # model_turn() consult the per-thread sub-agent context first (so two
     # concurrent agents never clobber each other's restricted table). The
@@ -696,7 +745,7 @@ def _async_default() -> bool:
         return bool(_env_int("NX_SUBAGENT_ASYNC", 1))
 
 
-def spawn_agent(instruction: str, max_turns: int = 12, async_: Any = None,
+def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
                 **extra: Any) -> str:
     """Run a sub-agent on `instruction`; return its final answer. Read-only by
     default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
@@ -713,10 +762,12 @@ def spawn_agent(instruction: str, max_turns: int = 12, async_: Any = None,
         return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
                 "\"...\"} — you may have used a different key, e.g. `prompt`; "
                 "retry with `instruction`)")
+    if max_turns is None:  # the schema default: NX_SUBAGENT_DEFAULT_TURNS
+        max_turns = _subagent_default_turns()
     try:
-        max_turns = max(1, min(40, int(max_turns)))
+        max_turns = max(1, min(_subagent_max_turns(), int(max_turns)))
     except (TypeError, ValueError):
-        max_turns = 12
+        max_turns = _subagent_default_turns()
     # Models send booleans as real booleans through native tool calls but as
     # "true"/"1" strings through the text-protocol fallback — accept both.
     # The schema key is `async` — a Python keyword, so it can never bind to a

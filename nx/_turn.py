@@ -44,7 +44,8 @@ from . import (
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key,
 )
-from ._subagent import _subagent_active, _subagent_quiet, _subagent_scoped_retry
+from ._subagent import (_subagent_active, _subagent_quiet, _subagent_scoped_retry,
+                        _subagent_stream_cut_limit)
 from ._batch import _batch_active
 from ._plan import plan_active
 from concurrent.futures import ThreadPoolExecutor
@@ -568,7 +569,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
                 st._MALFORMED_TOOL_BROKEN.add(tool_name)
         broken_now = tool_name in st._MALFORMED_TOOL_BROKEN
-        retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
+        retry_limit = _subagent_stream_cut_limit(max(0, st.MALFORMED_STREAM_RETRY_LIMIT))
         if malformed_stream_cut_count >= retry_limit:
             if not quiet:
                 print(f"{C.ERROR}  ✗ malformed tool call after "
@@ -763,7 +764,7 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     if is_leak_collapse and not forced_final:
         collapse_type = ("special-token collapse" if leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
                          else "repetition collapse")
-        retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
+        retry_limit = _subagent_stream_cut_limit(max(0, st.MALFORMED_STREAM_RETRY_LIMIT))
         if malformed_stream_cut_count >= retry_limit:
             if not quiet:
                 print(f"{C.ERROR}  ✗ {collapse_type} after "
@@ -1366,9 +1367,19 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     # salvages nothing). With the final turn opened as final_answer + forced
     # tool_choice, the agent writes its answer INSIDE the budget.
     sub_loop = _subagent_active()
+    # Rescue turns actually consumed inside a sub-loop (stalls, empty turns,
+    # malformed streams, collapses). Their budget is clamped to
+    # NX_SUBAGENT_RECOVERY_RETRIES, but the clamp only counts WITHIN one
+    # failure family — a sub-agent that stalls once AND cuts its stream once
+    # still burns 2 of its turns on rescues. If a rescue has already eaten
+    # most of a small budget, pre-force the final answer EARLIER so the last
+    # remaining turns produce a real answer instead of more recovery re-sampling.
+    sub_rescue_turns = 0
     while steps < max_turns:  # cap runaway tool/retry loops (scoped override for sub-agents)
-        if sub_loop and steps == max_turns - 1 and not force_final:
-            force_final = True
+        if sub_loop and not force_final:
+            if steps >= max_turns - 1 or (sub_rescue_turns >= max(0, _subagent_scoped_retry(1))
+                                          and steps >= max_turns - 2):
+                force_final = True
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
@@ -1441,17 +1452,21 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         steps += 1
         if status == TURN_STREAM_CUT:
             malformed_stream_cuts += 1
+            sub_rescue_turns += sub_loop
             recovery_sampling = True
             continue
         if status == TURN_EMPTY:
             empty_turn_cuts += 1
+            sub_rescue_turns += sub_loop
             recovery_sampling = True  # more entropy to escape the empty-output attractor
             continue
         if status == TURN_MALFORMED_CALL:
             malformed_call_cuts += 1
+            sub_rescue_turns += sub_loop
             continue
         if status == TURN_STALL:
             reasoning_loop_cuts += 1
+            sub_rescue_turns += sub_loop
             recovery_sampling = True
             # Full tools retained — the model was nudged to ACT (emit a tool
             # call / write a file) rather than produce a premature final
@@ -1462,6 +1477,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             reasoning_loop_cuts += 1
             empty_turn_cuts = 0  # handed off to the forced-final path; reset
             force_final = True
+            sub_rescue_turns += sub_loop
             recovery_sampling = True
             continue
         if status == TURN_TOOL:

@@ -599,6 +599,13 @@ NX_SUBAGENT_ASYNC = _env_int("NX_SUBAGENT_ASYNC", 1)
 # every sub-agent write still crosses the parent's own _confirm() (risk gate +
 # Y/n prompt with a diff preview), tagged (sub-agent) in the tool box.
 NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
+# Sub-agent budget knobs (read in nx/_subagent.py at spawn time): the default
+# turn budget the schema advertises (NX_SUBAGENT_DEFAULT_TURNS, 50 — the old
+# 12 left real investigations capping out with no answer) and the hard ceiling
+# for a requested max_turns (NX_SUBAGENT_MAX_TURNS, 100). Kept here alongside
+# the other NX_SUBAGENT_* resolution points so tests/REPL can flip them live.
+NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 50)
+NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 100)
 NX_VISION = _env_int("NX_VISION", 0)
 # Slug length cap for /plan <goal> → .nx/<slug>.md (see _plan.py).
 NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)

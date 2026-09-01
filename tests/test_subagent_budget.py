@@ -1,10 +1,12 @@
 """Sub-agent turn-budget effectiveness: the 0.18.7 fixes for spawn_agent
-burning its whole max_turns budget without answering.
+burning its whole max_turns budget without answering, plus the 0.20.0
+anti-cap-out changes (bigger default budget, all rescue families clamped
+inside a sub-loop, rescue-aware early force-final).
 
 Covers: the budget line in the sub-agent's user message, the recovery
 failsafe clamp (NX_SUBAGENT_RECOVERY_RETRIES), the last-sub-turn force-final,
-the last-observation fallback when the agent dies mid-exploration, and the
-async duplicate-in-flight refusal.
+the rescue-aware early force-final, the last-observation fallback when the
+agent dies mid-exploration, and the async duplicate-in-flight refusal.
 """
 import importlib
 import os
@@ -64,6 +66,43 @@ def test_budget_line_in_subagent_user_message(nx_fresh, monkeypatch):
     assert "[Budget: at most 7 tool turns" in seen["user"]
     assert seen["user"].startswith("where is X?")
     assert "state what you verified" in seen["user"]
+    assert "parallel tool calls" in seen["user"]  # 0.20.0: batch, don't trickle
+
+
+def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
+    """The un-specified budget is 50 (the old 12 left real investigations
+    capping out — the 0.19 failure pattern), the hard ceiling 100, and both
+    are env-tunable via NX_SUBAGENT_DEFAULT_TURNS / NX_SUBAGENT_MAX_TURNS."""
+    from nx._subagent import spawn_agent
+    seen = []
+
+    def fake_loop(messages, *a, **kw):
+        seen.append(kw.get("max_turns_override"))
+        messages.append({"role": "assistant", "content": "ok"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    spawn_agent("q")
+    assert seen[-1] == 50  # schema default, no explicit max_turns
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 30)
+    spawn_agent("q")
+    assert seen[-1] == 30
+    spawn_agent("q", max_turns=9999)
+    assert seen[-1] == 100  # ceiling
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_MAX_TURNS", 15)
+    spawn_agent("q", max_turns=9999)
+    assert seen[-1] == 15
+    spawn_agent("q", max_turns="not-a-number")
+    assert seen[-1] == 30  # nonsense → the (tunable) default
+
+
+def test_schema_advertises_default_50(nx_fresh):
+    """The schema text is what the parent model reads to pick max_turns — it
+    must name the new default or the parent keeps passing 12."""
+    schema = next(t for t in nx_fresh.TOOLS
+                  if t["function"]["name"] == "spawn_agent")
+    desc = schema["function"]["parameters"]["properties"]["max_turns"]["description"]
+    assert "default 50" in desc
 
 
 # --- recovery failsafe clamp -------------------------------------------------
@@ -73,23 +112,49 @@ def test_recovery_retry_clamp_inside_subagent(nx_fresh, monkeypatch):
     NX_SUBAGENT_RECOVERY_RETRIES (default 1); outside it they keep the
     parent's limits. A parent that disabled a failsafe entirely (<= 0,
     e.g. benchmark mode) is NOT re-enabled inside sub-agents."""
-    from nx._subagent import _subagent_scoped_retry, _SUBAGENT_TLS
+    from nx._subagent import _subagent_scoped_retry, _subagent_stream_cut_limit
     from nx._dispatch import DISPATCH
     nx_fresh._state.REASONING_ONLY_RETRY_LIMIT = 3
     nx_fresh._state.EMPTY_TURN_RETRY_LIMIT = 3
+    nx_fresh._state.MALFORMED_STREAM_RETRY_LIMIT = 2
     assert _subagent_scoped_retry(3) == 3  # outside: parent values
-    prev = _SUBAGENT_TLS.ctx
+    assert _subagent_stream_cut_limit(2) == 2
+    prev = _subagent_tls_ctx()
+    prev_recovery = nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES
     try:
-        _SUBAGENT_TLS.ctx = type("C", (), {"table": DISPATCH, "active": True,
-                                           "write": False, "quiet": True})()
+        install_ctx(DISPATCH)
         assert _subagent_scoped_retry(3) == 1  # clamped inside a sub-loop
+        assert _subagent_stream_cut_limit(2) == 1  # stream cuts clamp too (0.20.0)
         assert _subagent_scoped_retry(0) == 0  # disabled stays disabled
+        assert _subagent_stream_cut_limit(0) == 0
         nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES = 0
         assert _subagent_scoped_retry(3) == 0  # 0 = failsafes fully disabled
+        assert _subagent_stream_cut_limit(2) == 0
         nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES = 2
         assert _subagent_scoped_retry(3) == 2
+        assert _subagent_stream_cut_limit(2) == 2
     finally:
-        _SUBAGENT_TLS.ctx = prev
+        restore_ctx(prev)
+        nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES = prev_recovery
+
+
+def _subagent_tls_ctx():
+    from nx._subagent import _SUBAGENT_TLS
+    return getattr(_SUBAGENT_TLS, "ctx", None)
+
+
+def _install_ctx(table):
+    from nx._subagent import _SUBAGENT_TLS, _SubagentContext
+    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=False, quiet=True)
+
+
+def install_ctx(table):
+    _install_ctx(table)
+
+
+def restore_ctx(prev):
+    from nx._subagent import _SUBAGENT_TLS
+    _SUBAGENT_TLS.ctx = prev
 
 
 def test_stall_escapes_after_one_rescue_inside_subagent(nx_fresh, monkeypatch):
@@ -111,7 +176,7 @@ def test_stall_escapes_after_one_rescue_inside_subagent(nx_fresh, monkeypatch):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     assert spawn_agent("q") == "ok"
-    assert calls == [12]
+    assert calls == [50]
 
 
 # --- last-sub-turn force-final ----------------------------------------------
@@ -137,6 +202,50 @@ def test_last_sub_turn_is_forced_final(nx_fresh, monkeypatch):
     out = spawn_agent("q", max_turns=3)
     assert forced == [False, False, True]  # only the LAST sub-turn is forced
     assert "answer" in out or out  # the loop still returns the sub-agent's text
+
+
+def test_rescue_eaten_budget_preforces_final(nx_fresh, monkeypatch):
+    """A sub-agent whose rescues already consumed the recovery budget gets its
+    final answer pre-forced one turn early: with max_turns=4 and one stall
+    rescue burned, turn 3 (not just turn 4) opens forced — the rescue-budget
+    guard in _run_model_turn_loop."""
+    import nx as m
+    from nx._subagent import spawn_agent
+    forced = []
+    statuses = [m.TURN_STALL, m.TURN_TOOL, m.TURN_TOOL, m.TURN_DONE]
+
+    def fake_turn(messages, reasoning_loop_cuts=0, malformed_stream_cuts=0,
+                  empty_turn_count=0, forced_final=False, **kw):
+        forced.append(forced_final)
+        messages.append({"role": "assistant", "tool_calls": []})
+        return statuses[len(forced) - 1]
+
+    monkeypatch.setattr(m, "model_turn", fake_turn)
+    spawn_agent("q", max_turns=4)
+    assert forced == [False, False, True, True]
+
+
+def test_rescue_eaten_budget_never_touches_parent(nx_fresh, monkeypatch):
+    """The early pre-force only applies inside a sub-loop: a parent loop with
+    the same stall shape keeps its full budget and only gets the post-loop
+    cap rescue."""
+    import nx as m
+    from nx._turn import _run_model_turn_loop
+    forced = []
+
+    def fake_turn(messages, reasoning_loop_cuts=0, malformed_stream_cuts=0,
+                  empty_turn_count=0, forced_final=False, **kw):
+        forced.append(forced_final)
+        if len(forced) < 5:
+            messages.append({"role": "assistant", "tool_calls": []})
+            return m.TURN_STALL
+        return m.TURN_DONE
+
+    monkeypatch.setattr(m, "model_turn", fake_turn)
+    summary = _run_model_turn_loop([{"role": "user", "content": "q"}],
+                                   max_turns_override=4)
+    assert forced == [False, False, False, False, True]  # rescue stays post-budget
+    assert summary["status"] == "cap"
 
 
 def test_parent_rescue_comes_after_budget_not_inside_it(nx_fresh, monkeypatch):
