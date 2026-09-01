@@ -362,7 +362,11 @@ def _infer_timeout_from_sleep(command: str, default: int) -> int:
     # parses to 0.0 and falls back to the default poll window. (GNU sums
     # multiple `sleep 30 5` args — we take the first, which covers the
     # overwhelming case of a single wait.)
-    for m in re.finditer(r'(?:^|[;&|]\s*)sleep\s+([^\s;&|]+)', command):
+    # A `sleep` can also legitimately start a line after a newline or open a
+    # subshell — `cmd\nsleep 30 && x`, `(sleep 30 && x)` — and those used to
+    # fall through to the 3 s default and background. Treat newline and `(` as
+    # boundaries too; `\s*` after them spans the following blank lines.
+    for m in re.finditer(r'(?:^|[;&|(]|\n)\s*sleep\s+([^\s;&|]+)', command):
         n = _sleep_seconds(m.group(1))
         if n > max_sleep:
             max_sleep = n

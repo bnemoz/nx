@@ -81,6 +81,16 @@ def test_sleep_inference_fractional_and_suffixed(nx_fresh):
     # non-duration junk still falls back (2M=2 megabytes is not a sleep unit)
     assert f("sleep 2M", 3) == 3
     assert f("sleep 1x", 3) == 3
+    # newline and subshell boundaries used to fall through to the 3 s default;
+    # quoted sleeps are not boundaries (just an echo argument) and must not match
+    boundary_cmds = {
+        "cmd\nsleep 30 && x": 40,
+        "(sleep 30 && x)": 40,
+        "x\n\nsleep 30": 40,        # blank line still counts
+        "echo 'sleep 30'": 3,
+    }
+    for cmd, want in boundary_cmds.items():
+        assert f(cmd, 3) == want, cmd
 
 
 def test_sleep_inference_cap(nx_fresh, monkeypatch):
