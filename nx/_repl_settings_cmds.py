@@ -509,6 +509,10 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     st._SESSION_HAS_BACKGROUNDED = False
     st._MULTI_EDIT_NUDGED = False
     st._CONSECUTIVE_EDITS = 0
+    # Fresh tool list too: a /reset implies a new conversation, and an
+    # endpoint-level tool-args quirk may have been transient.
+    st._MALFORMED_TOOL_FAILURES = {}
+    st._MALFORMED_TOOL_BROKEN = set()
     print(f"{DIM}  context cleared{RESET}")
     # A reset forks a new session id so the fresh chat isn't written
     # over the old one (mirrors Hermes's "new session on /new").

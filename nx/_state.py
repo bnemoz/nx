@@ -141,6 +141,17 @@ _CONSECUTIVE_EDITS: int = 0
 _MULTI_EDIT_NUDGED: bool = False
 _PENDING_MULTI_EDIT_NOTICE: str | None = None
 
+# --- native tool-call malformed-args circuit breaker --------------------------
+# An endpoint that reliably truncates one tool's JSON args (observed: a local
+# server dying right before multi_edit's `[` array literal, 7+ retries in a
+# row) keeps poisoning every retry while the tool stays advertised. After
+# MALFORMED_TOOL_BREAKER_LIMIT malformed-args failures naming the SAME tool,
+# it is dropped from _active_tools() for the rest of the session and the
+# retry nudge says to use the plain alternative instead. 0 disables.
+MALFORMED_TOOL_BREAKER_LIMIT: int = 2
+_MALFORMED_TOOL_FAILURES: dict[str, int] = {}
+_MALFORMED_TOOL_BROKEN: set[str] = set()
+
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time
 # by the module that owns each setting (_turn.py, _compress.py) — this is

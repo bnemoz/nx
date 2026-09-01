@@ -28,6 +28,10 @@ def _reset_background_state():
     # This file's assertions assume the default opt-in posture; an exported
     # NX_SUBAGENTS/NX_VISION must not fold extra tools into _active_tools().
     m.NX_SUBAGENTS = m.NX_VISION = False
+    # Same for the malformed-args circuit breaker: an earlier test file's
+    # malformed tool call must not shrink this file's expected tool list.
+    m._MALFORMED_TOOL_FAILURES = {}
+    m._MALFORMED_TOOL_BROKEN = set()
 
 
 # _SESSION_HAS_BACKGROUNDED / _PENDING_BACKGROUND_NOTICE are module-level

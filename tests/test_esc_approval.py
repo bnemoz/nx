@@ -235,6 +235,119 @@ def test_model_turn_malformed_native_tool_args_retries_cleanly():
 
 
 # ---------------------------------------------------------------------------
+# 5b. Repeated malformed native tool calls escalate the nudge (change tactics,
+#     not "retry the same call") — the generic nudge produced 7 identical
+#     re-emits of a truncated multi_edit in one observed session.
+# ---------------------------------------------------------------------------
+def test_model_turn_repeated_malformed_native_args_nudge_escalates():
+    saved_open_stream = m.open_stream
+    saved_watcher = m._interrupt_watcher
+    saved_spinner = m.LifeSpinner
+    saved_run_tool = m.run_tool
+    m._interrupt_watcher = lambda: None
+    m.LifeSpinner = type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+    builtins.print = lambda *a, **k: None
+    # Each stream dies with truncated args; the second call passes
+    # malformed_stream_cut_count=1 to simulate the repeat.
+    chunks = [
+        _FakeChunk(_FakeDelta(tool_calls=[
+            _FakeTC(0, "call_bad", "multi_edit", '{"edits": ')
+        ]), finish_reason="tool_calls"),
+    ]
+    m.open_stream = lambda messages, **kw: iter(chunks)
+    m.run_tool = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("malformed tool args must not execute"))
+    try:
+        messages = [{"role": "system", "content": m.SYSTEM},
+                    {"role": "user", "content": "batch those edits"}]
+        status = m.model_turn(messages)
+        assert status == m.TURN_STREAM_CUT, f"first status: {status!r}"
+        assert "malformed or truncated JSON arguments" in messages[-1]["content"]
+        assert "different way" not in messages[-1]["content"]
+
+        status2 = m.model_turn(messages, malformed_stream_cut_count=1)
+        assert status2 == m.TURN_STREAM_CUT, f"second status: {status2!r}"
+        escalated = messages[-1]["content"]
+        assert messages[-1]["role"] == "user"
+        assert "malformed or truncated JSON arguments again" in escalated
+        assert "edit_file" in escalated and "different way" in escalated
+    finally:
+        m.open_stream = saved_open_stream
+        m._interrupt_watcher = saved_watcher
+        m.LifeSpinner = saved_spinner
+        m.run_tool = saved_run_tool
+        builtins.print = _REAL_PRINT
+    print("PASS — repeated malformed native args escalate to a change-tactics nudge")
+
+
+# ---------------------------------------------------------------------------
+# 5c. Malformed-args circuit breaker: after MALFORMED_TOOL_BREAKER_LIMIT
+#     malformed payloads naming the same tool, it is dropped from
+#     _active_tools() and the nudge tells the model it was removed.
+# ---------------------------------------------------------------------------
+def test_malformed_args_circuit_breaker_drops_tool():
+    saved_open_stream = m.open_stream
+    saved_watcher = m._interrupt_watcher
+    saved_spinner = m.LifeSpinner
+    saved_run_tool = m.run_tool
+    saved_limit = m.MALFORMED_TOOL_BREAKER_LIMIT
+    saved_failures = dict(m._MALFORMED_TOOL_FAILURES)
+    saved_broken = set(m._MALFORMED_TOOL_BROKEN)
+    m._interrupt_watcher = lambda: None
+    m.LifeSpinner = type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+    builtins.print = lambda *a, **k: None
+    m.MALFORMED_TOOL_BREAKER_LIMIT = 2
+    m._MALFORMED_TOOL_FAILURES = {}
+    m._MALFORMED_TOOL_BROKEN = set()
+    chunks = [
+        _FakeChunk(_FakeDelta(tool_calls=[
+            _FakeTC(0, "call_bad", "multi_edit", '{"edits": ')
+        ]), finish_reason="tool_calls"),
+    ]
+    m.open_stream = lambda messages, **kw: iter(chunks)
+    m.run_tool = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("malformed tool args must not execute"))
+
+    def _names():
+        return [t["function"]["name"] for t in m._active_tools()]
+    try:
+        messages = [{"role": "system", "content": m.SYSTEM},
+                    {"role": "user", "content": "batch those edits"}]
+        # 1st failure: recorded, tool still advertised
+        assert m.model_turn(messages) == m.TURN_STREAM_CUT
+        assert m._MALFORMED_TOOL_FAILURES == {"multi_edit": 1}
+        assert m._MALFORMED_TOOL_BROKEN == set()
+        assert "multi_edit" in _names()
+        # 2nd failure: breaker opens — dropped from the tool list
+        assert m.model_turn(messages, malformed_stream_cut_count=1) == m.TURN_STREAM_CUT
+        assert m._MALFORMED_TOOL_BROKEN == {"multi_edit"}
+        assert "multi_edit" not in _names()
+        nudge = messages[-1]["content"]
+        assert "multi_edit has now been removed from the tool list" in nudge
+        assert "edit_file" in nudge
+    finally:
+        m.open_stream = saved_open_stream
+        m._interrupt_watcher = saved_watcher
+        m.LifeSpinner = saved_spinner
+        m.run_tool = saved_run_tool
+        m.MALFORMED_TOOL_BREAKER_LIMIT = saved_limit
+        m._MALFORMED_TOOL_FAILURES = saved_failures
+        m._MALFORMED_TOOL_BROKEN = saved_broken
+        builtins.print = _REAL_PRINT
+    print("PASS — malformed-args circuit breaker drops the repeat offender from the tool list")
+
+
+# ---------------------------------------------------------------------------
 # 6. REPL drops back to chat input on TURN_ESC (no extra model turn)
 # ---------------------------------------------------------------------------
 def test_repl_breaks_on_esc():

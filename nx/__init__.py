@@ -85,6 +85,8 @@ _STATE_NAMES = frozenset((
     "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
     "_PLAN_ACTIVE", "_PLAN_GOAL", "_PLAN_SLUG", "_PLAN_STARTED",
     "REASONING_ONLY_RETRY_LIMIT", "MALFORMED_STREAM_RETRY_LIMIT",
+    "MALFORMED_TOOL_BREAKER_LIMIT", "_MALFORMED_TOOL_FAILURES",
+    "_MALFORMED_TOOL_BROKEN",
     "FORCED_FINAL_MAX_TOKENS", "REASONING_BUDGET_TOKENS", "EMPTY_TURN_RETRY_LIMIT",
     "REASONING_ONLY_CHAR_LIMIT",
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
@@ -480,6 +482,12 @@ HISTORY_LINES = _env_int("NX_HISTORY_LINES", INPUT_HISTORY_LINES_DEFAULT)
 
 st.REASONING_ONLY_RETRY_LIMIT = _env_int("NX_REASONING_ONLY_RETRIES", 3)
 st.MALFORMED_STREAM_RETRY_LIMIT = _env_int("NX_MALFORMED_STREAM_RETRIES", 2)
+# Malformed-args circuit breaker: after this many malformed-args failures for
+# the SAME tool name (native tool_calls path), that tool is dropped from
+# _active_tools() for the rest of the session — an endpoint that reliably
+# truncates one tool's JSON args stops being offered it (see nx/_turn.py).
+# 0 disables the breaker.
+st.MALFORMED_TOOL_BREAKER_LIMIT = _env_int("NX_MALFORMED_TOOL_BREAKER", 2)
 st.FORCED_FINAL_MAX_TOKENS = _env_int("NX_FORCED_FINAL_MAX_TOKENS", 2048)
 # Reasoning token budget: cap on the model's thinking phase, sent as
 # {"reasoning": {"max_tokens": N}} in the request body. 0 = off (the default —

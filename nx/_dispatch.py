@@ -86,6 +86,12 @@ def _active_tools() -> list[dict[str, Any]]:
         tools = [t for t in tools if t["function"]["name"] != "wait_background"]
     if not _m.NX_SUBAGENTS:
         tools = [t for t in tools if t["function"]["name"] != "spawn_agent"]
+    # Malformed-args circuit breaker: an endpoint that keeps truncating one
+    # tool's JSON args stops being offered that tool for the session (see
+    # st._MALFORMED_TOOL_BROKEN — armed in _turn.py's native parse path).
+    if st._MALFORMED_TOOL_BROKEN:
+        broken = st._MALFORMED_TOOL_BROKEN
+        tools = [t for t in tools if t["function"]["name"] not in broken]
     if not _m.NX_VISION or not st._NATIVE_TOOL_CALLS_CONFIRMED:
         tools = [t for t in tools if t["function"]["name"] != "read_image"]
     if not plan_active():

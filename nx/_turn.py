@@ -503,12 +503,35 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
         list(ex.map(_run, jobs))
 
 
+def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
+    """Retry nudge for a malformed/truncated native tool-call args turn.
+
+    broken_now=True means the circuit breaker just dropped the tool from the
+    session's tool list (this endpoint keeps truncating that tool's args), so
+    the model must switch tactics instead of re-emitting the doomed call."""
+    head = "Your previous native tool call had malformed or truncated JSON arguments"
+    if broken_now:
+        return (head + f" again. {tool_name} has now been removed from the tool "
+                "list for the rest of this session because this endpoint keeps "
+                "truncating its arguments. Accomplish the same step a different "
+                "way: plain edit_file calls (one per edit) instead of "
+                "multi_edit, or write_file, and emit only that one complete "
+                "tool call with no surrounding prose.")
+    return (head + " again. Repeating the identical call has failed twice now, "
+            "so the tool call itself is the problem — pick a different way to "
+            "accomplish the same step: a single edit_file call instead of "
+            "multi_edit, write_file, or a smaller edit, and emit only that one "
+            "complete tool call with no surrounding prose.")
+
+
 def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, finish_reasons: Any,
                               malformed_stream_cut_count: int) -> str:
     """Execute the native tool-calling path for one streamed turn.
 
     Parses each call's JSON args (retrying cleanly on malformed args rather
-    than executing `{}`), records the assistant(tool_calls) turn, runs each
+    than executing `{}`; after repeated malformed args for the same tool, a
+    circuit breaker drops that tool from the session's tool list), records
+    the assistant(tool_calls) turn, runs each
     tool, and appends matching tool results. If the user presses Esc at an
     approval, the remaining calls are marked CANCELLED/SKIPPED so the message
     history stays valid. Returns a TURN_* status for model_turn.
@@ -537,6 +560,14 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         if err is None:
             err = json.JSONDecodeError("no candidates", "", 0)
         detail = _tool_args_parse_error(c, err, finish_reasons)
+        tool_name = c.get("name") or ""
+        count = 0
+        if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name:
+            count = st._MALFORMED_TOOL_FAILURES.get(tool_name, 0) + 1
+            st._MALFORMED_TOOL_FAILURES[tool_name] = count
+            if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
+                st._MALFORMED_TOOL_BROKEN.add(tool_name)
+        broken_now = tool_name in st._MALFORMED_TOOL_BROKEN
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
             if not quiet:
@@ -547,14 +578,24 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         if not quiet:
             print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {detail}; "
                   f"discarded partial tool args and retrying cleanly "
-                  f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
-        _nudge_current_user_turn(
-            messages,
-            "Your previous native tool call had malformed or truncated JSON "
-            "arguments, so it was discarded before execution. Retry the same "
-            "task from the current conversation state, but emit a complete, "
-            "valid tool call with all required arguments. For large file "
-            "writes, emit only the tool call and skip any explanatory prose.")
+                  f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}"
+                  + (f"\n  ⚡ {tool_name} dropped from the tool list for this "
+                     f"session — {count} malformed attempts; the endpoint keeps "
+                     f"truncating its arguments" if broken_now else ""))
+        if malformed_stream_cut_count > 0 or broken_now:
+            # A repeat is evidence the same tool call keeps dying the same way
+            # (the original failure was truncated at the same spot again). The
+            # generic "retry cleanly" nudge produced 7 identical re-emits in
+            # one observed session — say instead to change the action.
+            nudge = _malformed_args_nudge(tool_name, broken_now)
+        else:
+            nudge = (
+                "Your previous native tool call had malformed or truncated JSON "
+                "arguments, so it was discarded before execution. Retry the same "
+                "task from the current conversation state, but emit a complete, "
+                "valid tool call with all required arguments. For large file "
+                "writes, emit only the tool call and skip any explanatory prose.")
+        _nudge_current_user_turn(messages, nudge)
         return TURN_STREAM_CUT
     # All-read-only turns and 2+ spawn_agent fan-outs dispatch concurrently
     # (the 'read 3 files + grep' / 'investigate A and B at once' patterns);
