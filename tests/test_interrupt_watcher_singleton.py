@@ -327,6 +327,250 @@ def test_drain_redirect_text_survives_armed_clearing_immediately():
     print("PASS — drain keeps capturing after ARMED clears, stops only on its own deadline")
 
 
+# ---------------------------------------------------------------------------
+# Quiet (async-agent / batch) threads and the _INTERRUPT_RESTORED handshake
+# ---------------------------------------------------------------------------
+# model_turn runs the arm->clear->wait handshake on the model-turn thread, but
+# only the thread that owns stdin (the interactive parent) may do so. A quiet
+# thread never sets or waits on _INTERRUPT_RESTORED, so it must not clear it
+# either: an unguarded clear strands the PARENT's post-disarm wait (2.5s stall
+# plus a spurious "did not confirm input-mode restore" warning) and can let
+# the parent proceed before cooked mode is confirmed.
+
+from nx._subagent import _ASYNC_QUIET_SLOTS  # noqa: E402
+
+
+class _FakeDelta:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+        self.model_extra = {}
+        self._reasoning = None
+
+    @property
+    def reasoning_content(self):
+        return self._reasoning
+
+
+class _FakeChoice:
+    def __init__(self, delta, finish_reason="stop"):
+        self.delta = delta
+        self.finish_reason = finish_reason
+
+
+class _FakeChunk:
+    def __init__(self, delta=None, finish_reason="stop"):
+        self.choices = [_FakeChoice(delta, finish_reason)] if delta is not None else []
+        self.usage = None
+        self.model_extra = {}
+
+
+def _no_spinner():
+    return type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+
+
+def _stop_watcher():
+    """Tear down the singleton watcher thread and reset the handshake events."""
+    m._INTERRUPT_EXIT.set()
+    m._INTERRUPT_ARMED.set()  # unblock any park so the thread can exit
+    t = m._INTERRUPT_THREAD
+    if t is not None:
+        t.join(timeout=2.0)
+    m._INTERRUPT_EXIT.clear()
+    m._INTERRUPT_THREAD = None
+    m._INTERRUPT_ARMED.clear()
+    m._INTERRUPT_RESTORED.set()  # initial state: nothing to restore
+    m._USER_INTERRUPTED.clear()
+
+
+def _restore_wait_env(saved):
+    if saved is None:
+        os.environ.pop("NX_INTERRUPT_RESTORE_WAIT", None)
+    else:
+        os.environ["NX_INTERRUPT_RESTORE_WAIT"] = saved
+
+
+class _TurnHarness:
+    """Stub open_stream + watcher + spinner around one or more model_turns."""
+
+    def __init__(self, open_stream, watcher=lambda: None, quiet=True):
+        self._open = open_stream
+        self._watcher = watcher
+        self._quiet = quiet
+        self._saved = None
+        self._prev_quiet = None
+
+    def __enter__(self):
+        # getattr fallback: nx is a proxy module — reading m.LifeSpinner before
+        # anything set it raises AttributeError.
+        self._saved = (m.open_stream, m._interrupt_watcher,
+                       getattr(m, "LifeSpinner", None))
+        m.open_stream = self._open
+        m._interrupt_watcher = self._watcher
+        m.LifeSpinner = _no_spinner()
+        if self._quiet:
+            self._prev_quiet = getattr(_ASYNC_QUIET_SLOTS, "quiet", False)
+            _ASYNC_QUIET_SLOTS.quiet = True
+        return self
+
+    def __exit__(self, *exc):
+        if self._prev_quiet is not None:
+            _ASYNC_QUIET_SLOTS.quiet = self._prev_quiet
+            self._prev_quiet = None
+        m.open_stream, m._interrupt_watcher, m.LifeSpinner = self._saved
+        _stop_watcher()
+        return False
+
+
+def _parking_watcher():
+    """Mimic the real singleton: park until armed, signal the restore exactly
+    once, then park again. Set-once semantics make a stranding regression
+    observable instead of masked by a fresh restore signal."""
+    if m._INTERRUPT_ARMED.wait(2.0):
+        m._INTERRUPT_RESTORED.set()
+    while not m._INTERRUPT_EXIT.is_set():
+        m._INTERRUPT_ARMED.wait(0.05)
+
+
+def test_quiet_turn_leaves_interrupt_restored_untouched():
+    """A quiet model_turn must not clear _INTERRUPT_RESTORED at all.
+
+    Regression: model_turn cleared the shared event unconditionally. A quiet
+    (async sub-agent / batch worker) turn never sets or waits on the event, so
+    its clear could land on the parent's freshly-confirmed restore and strand
+    the parent's next disarm wait. With the flag in its initial "restored"
+    state, a quiet turn must leave it set.
+    """
+    with _TurnHarness(lambda *a, **k: iter([])):  # empty stream: turn ends fast
+        m._INTERRUPT_RESTORED.set()
+        status = m.model_turn([{"role": "user", "content": "quiet sub-agent turn"}])
+        assert m._INTERRUPT_RESTORED.is_set(), (
+            "quiet model_turn wiped the parent's restore flag — it strands the "
+            "parent's post-disarm wait")
+        assert status in (m.TURN_DONE, m.TURN_EMPTY), f"unexpected status {status!r}"
+    print("PASS — quiet turn leaves _INTERRUPT_RESTORED untouched")
+
+
+def test_quiet_turn_never_arms_watcher():
+    """A quiet turn must never set _INTERRUPT_ARMED (and never steal the
+    restore flag): the singleton watcher belongs to the owning parent turn."""
+    with _TurnHarness(lambda *a, **k: iter([])):
+        assert not m._INTERRUPT_ARMED.is_set(), "expected disarmed pre-state"
+        status = m.model_turn([{"role": "user", "content": "quiet sub-agent turn"}])
+        assert not m._INTERRUPT_ARMED.is_set(), "quiet turn armed the singleton watcher"
+        assert m._INTERRUPT_RESTORED.is_set(), "quiet turn stole the restore flag"
+        assert status in (m.TURN_DONE, m.TURN_EMPTY), f"unexpected status {status!r}"
+    print("PASS — quiet turn never arms the watcher")
+
+
+def test_quiet_turn_does_not_strand_parent_restore_wait():
+    """A quiet turn overlapping the parent's stream must not strand the
+    parent's post-disarm wait.
+
+    Regression: the quiet turn's unguarded clear landed after the watcher's
+    restore signal (while the parent was still mid-stream), so the parent's
+    disarm wait saw a cleared event and stalled for the full
+    NX_INTERRUPT_RESTORE_WAIT, printing the spurious restore warning. Runs at
+    a 1.0s restore budget so a regression fails fast instead of sleeping the
+    production 2.5s.
+    """
+    saved_wait = os.environ.get("NX_INTERRUPT_RESTORE_WAIT")
+    os.environ["NX_INTERRUPT_RESTORE_WAIT"] = "1.0"
+
+    q_go, q_done = threading.Event(), threading.Event()
+    released = [False]
+
+    def quiet_worker():
+        q_go.wait(2.0)
+        _ASYNC_QUIET_SLOTS.quiet = True
+        try:
+            m.model_turn([{"role": "user", "content": "quiet worker turn"}])
+        finally:
+            _ASYNC_QUIET_SLOTS.quiet = False
+            q_done.set()
+
+    def fake_open(messages, **kw):
+        def gen():
+            # First chunk pull happens AFTER model_turn's clear+arm — exactly
+            # the window a buggy quiet clear would poison.
+            if not released[0]:
+                released[0] = True
+                t = threading.Thread(target=quiet_worker, daemon=True)
+                t.start()
+                q_go.set()
+                q_done.wait(2.0)
+                t.join(timeout=1.0)
+            yield _FakeChunk(_FakeDelta(content="hello"))
+        return gen()
+
+    try:
+        with _TurnHarness(fake_open, watcher=_parking_watcher, quiet=False):
+            m._INTERRUPT_RESTORED.set()
+            t0 = time.monotonic()
+            status = m.model_turn([{"role": "user", "content": "parent turn"}])
+            elapsed = time.monotonic() - t0
+    finally:
+        _restore_wait_env(saved_wait)
+
+    assert status == m.TURN_DONE, f"parent turn ended {status!r}"
+    assert released[0], "fake stream never released the quiet worker"
+    assert elapsed < 0.5, (
+        f"parent turn blocked {elapsed:.2f}s — the quiet turn's clear stranded "
+        f"the disarm wait (NX_INTERRUPT_RESTORE_WAIT=1.0s)")
+    print("PASS — overlapping quiet turn does not strand the parent's restore wait")
+
+
+def test_non_quiet_turn_still_clears_and_waits_for_restore():
+    """Ownership regression guard: a normal (stdin-owning) model_turn must
+    still run the full handshake — clear _INTERRUPT_RESTORED before arming and
+    wait on it after disarming with the NX_INTERRUPT_RESTORE_WAIT-derived
+    timeout."""
+    saved_wait = os.environ.get("NX_INTERRUPT_RESTORE_WAIT")
+    os.environ["NX_INTERRUPT_RESTORE_WAIT"] = "0.77"
+
+    orig_wait = threading.Event.wait
+    waits, seen_state = [], []
+
+    def spy_wait(self, timeout=None):
+        if self is m._INTERRUPT_RESTORED:
+            waits.append(timeout)
+            seen_state.append(self.is_set())
+        return orig_wait(self, timeout)
+
+    def parent_open(messages, **kw):
+        def gen():
+            # Let the fake watcher confirm its restore before the stream
+            # produces anything, so the disarm-time state is deterministic.
+            deadline = time.time() + 1.0
+            while not m._INTERRUPT_RESTORED.is_set() and time.time() < deadline:
+                time.sleep(0.01)
+            yield _FakeChunk(_FakeDelta(content="hi"))
+        return gen()
+
+    try:
+        with _TurnHarness(parent_open, watcher=_parking_watcher, quiet=False):
+            threading.Event.wait = spy_wait
+            try:
+                m._INTERRUPT_RESTORED.set()
+                status = m.model_turn([{"role": "user", "content": "normal turn"}])
+            finally:
+                threading.Event.wait = orig_wait
+    finally:
+        _restore_wait_env(saved_wait)
+
+    assert status == m.TURN_DONE, f"unexpected status {status!r}"
+    assert waits == [0.77], (
+        f"disarm wait must be called once with the env-derived timeout; got {waits!r}")
+    assert seen_state == [True], "watcher had not re-set the restore flag at disarm time"
+    assert m._INTERRUPT_RESTORED.is_set(), "handshake must end with the flag restored"
+    print("PASS — normal model_turn still clears, arms, and waits on restore")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

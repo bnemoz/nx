@@ -951,6 +951,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # while to arrive. A quiet (async-agent) loop NEVER touches it: the watcher
     # is a process singleton — the parent's stream owns it right now, and an
     # agent thread clearing/restoring it would eat keystrokes or break Esc.
+    # Idempotent and event-neutral when the thread is already alive: only the
+    # non-quiet path below arms it (a quiet thread must not touch the handshake).
     _ensure_interrupt_watcher()
     if not quiet:
         _USER_INTERRUPTED.clear()
@@ -970,8 +972,16 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # return), and the chatbox can capture the watcher's raw-mode termios
     # as its "old" state — leaving the terminal stuck in VMIN=0
     # with broken Enter and garbled typing.
-    _INTERRUPT_RESTORED.clear()
+    # The whole handshake — clear, arm, and the wait in the finally — belongs
+    # to the thread that owns stdin. A quiet (async-agent / batch) thread must
+    # not touch _INTERRUPT_RESTORED at all: it never sets or waits on the
+    # event, so clearing it here strands the PARENT's post-disarm wait (the
+    # parent stalls for the full NX_INTERRUPT_RESTORE_WAIT and emits a spurious
+    # "did not confirm input-mode restore" warning), and in the worst
+    # interleaving lets the parent proceed before cooked mode is confirmed.
+    # Mirrors _watch_for_interrupts ownership and _poll_pid's check_esc gating.
     if not quiet:
+        _INTERRUPT_RESTORED.clear()
         _INTERRUPT_ARMED.set()
     parser = StreamParser(_say_console, t0, quiet=quiet)
     stream_error = None
