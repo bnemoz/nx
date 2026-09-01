@@ -40,6 +40,7 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_BASE_URL"] = "http://127.0.0.1:9/v1"
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
+    os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
     importlib.reload(nx)
@@ -47,7 +48,7 @@ def nx_fresh(tmp_path, monkeypatch):
     from nx import _subagent
     with _subagent._ASYNC_LOCK:
         _subagent._ASYNC_AGENTS.clear()
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS"):
+    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS", "NX_SUBAGENT_ASYNC"):
         os.environ.pop(k, None)
 
 
@@ -359,3 +360,140 @@ def test_concurrent_async_agents_merge_into_one_note(nx_fresh, monkeypatch):
         time.sleep(0.02)
     assert note and "ans:task A" in note and "ans:task B" in note
     assert note.count("[Runtime note: background sub-agent") == 2
+
+
+# --- 0.18.8: background by default + report files -----------------------------
+
+def test_spawn_defaults_to_background(nx_fresh, monkeypatch):
+    """With no `async` argument at all, a spawn goes to the background
+    (NX_SUBAGENT_ASYNC defaults to 1): job id now, [Runtime note] later."""
+    from nx._subagent import spawn_agent
+
+    def fake_loop(messages, *a, **kw):
+        messages.append({"role": "assistant", "content": "findings"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    # the fixture pins the knob to 0; restore the SHIPPED default for this test
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_ASYNC", 1)
+    out = spawn_agent("what changed?")  # no async kwarg
+    assert out.startswith("[background sub-agent] job agent-")
+    deadline = time.time() + 5
+    note = None
+    while time.time() < deadline:
+        note = _drain(nx_fresh)
+        if note:
+            break
+        time.sleep(0.02)
+    assert note and "findings" in note
+
+
+def test_explicit_async_false_stays_foreground(nx_fresh, monkeypatch):
+    """The documented foreground escape hatch survives the new default: an
+    explicit async=false runs synchronously even with the knob at 1."""
+    from nx._subagent import spawn_agent
+
+    def fake_loop(messages, *a, **kw):
+        messages.append({"role": "assistant", "content": "sync answer"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    assert spawn_agent("q", async_=False) == "sync answer"
+    assert spawn_agent("q", async_="false") == "sync answer"
+    assert _drain(nx_fresh) is None  # nothing was backgrounded
+
+
+def test_async_default_respects_nx_subagent_async_0(nx_fresh, monkeypatch):
+    """NX_SUBAGENT_ASYNC=0 restores the foreground default: an omitted `async`
+    runs synchronously (explicit true still backgrounds)."""
+    from nx._subagent import spawn_agent
+
+    def fake_loop(messages, *a, **kw):
+        messages.append({"role": "assistant", "content": "fg"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_ASYNC", 0)
+    assert spawn_agent("q") == "fg"  # omitted -> knob -> foreground
+    out = spawn_agent("bg q", async_=True)  # explicit true still wins
+    assert out.startswith("[background sub-agent] job agent-")
+
+
+def test_finished_agent_writes_report_and_note_carries_path(nx_fresh, monkeypatch):
+    """The worker writes SESSION_HOME/agents/<job>.md (full answer) and the
+    runtime note carries a short head + the report path instead of the whole
+    answer."""
+    from nx import _state as st
+    from nx._subagent import _agents_report_dir, spawn_agent
+    long_answer = "HEAD-PART. " + ("detail " * 400)  # > _ASYNC_REPORT_CHARS
+
+    def fake_loop(messages, *a, **kw):
+        messages.append({"role": "assistant", "content": long_answer})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("big investigation", async_=True)
+    jid = out.split("job ")[1].split("\n")[0]
+    deadline = time.time() + 5
+    note = None
+    while time.time() < deadline:
+        note = _drain(nx_fresh)
+        if note:
+            break
+        time.sleep(0.02)
+    assert note is not None
+    assert long_answer.strip() not in note  # full answer is NOT in context
+    assert note.count(long_answer[:20]) <= 1  # head appears at most once
+    assert "Full report: " in note
+    report = os.path.join(_agents_report_dir(), jid + ".md")
+    assert report in note  # the note names the report path
+    body = open(report, encoding="utf-8").read()
+    assert "# Sub-agent report" in body
+    assert "- status: done" in body
+    assert "## Instruction" in body and "big investigation" in body
+    assert "detail detail" in body  # the FULL answer is on disk
+
+
+def test_failed_agent_writes_error_report(nx_fresh, monkeypatch):
+    """A failed agent's report is written too (status: error) — it is what the
+    parent reads to decide whether an inline retry is worth it."""
+    from nx._subagent import _agents_report_dir, spawn_agent
+
+    def boom(messages, *a, **kw):
+        raise RuntimeError("model socket exploded")
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", boom)
+    out = spawn_agent("doomed task", async_=True)
+    jid = out.split("job ")[1].split("\n")[0]
+    deadline = time.time() + 5
+    note = None
+    while time.time() < deadline:
+        note = _drain(nx_fresh)
+        if note:
+            break
+        time.sleep(0.02)
+    assert note and "FAILED" in note
+    report = os.path.join(_agents_report_dir(), jid + ".md")
+    body = open(report, encoding="utf-8").read()
+    assert "- status: error" in body
+    assert "model socket exploded" in body
+
+
+def test_bg_lists_report_path(nx_fresh, monkeypatch, capsys):
+    """/bg shows a finished agent's report path (and omits it while running)."""
+    from nx._repl_settings_cmds import _cmd_bg
+    from nx._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+    with _ASYNC_LOCK:
+        _ASYNC_AGENTS["agent-1-cccccc"] = {
+            "instruction": "explore", "status": "done", "answer": "found",
+            "started": time.time(), "announced": True,
+            "report": "/tmp/fake/agents/agent-1-cccccc.md",
+        }
+        _ASYNC_AGENTS["agent-2-dddddd"] = {
+            "instruction": "still running", "status": "running",
+            "answer": None, "started": time.time() + 1, "announced": False,
+        }
+    _cmd_bg("/bg", None)
+    out = capsys.readouterr().out
+    assert "report: /tmp/fake/agents/agent-1-cccccc.md" in out
+    assert out.count("report:") == 1  # the running agent has no report yet

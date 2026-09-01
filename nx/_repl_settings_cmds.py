@@ -396,6 +396,8 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
             print(f"  {DIM}{a['id']:>12}{RESET}  {status:<18}  {instr}")
             if a["tail"]:
                 print(f"           {DIM}└ {a['tail']}{RESET}")
+            if a.get("report"):
+                print(f"           {DIM}└ report: {a['report']}{RESET}")
         print(f"{DIM}  answers arrive as [Runtime note] on a later turn{RESET}")
     if not jobs:
         return

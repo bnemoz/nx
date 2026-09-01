@@ -177,7 +177,8 @@ sessions and exits without entering the REPL.
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
 | `NX_GARBLE_GUARD` | scan every edit's `new` text for model-garble signatures — duplicated lines, stuttered words/phrases, line-boundary splices, mid-sentence abandoned rewrites (default `1`; `0` disables). Unambiguous garble is repaired before the write (the tool result says so); ambiguous garble is refused once, then written as-is if the model resubmits the byte-identical edit |
 | `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
-| `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and `async: true` runs one in the background (job id now, answer as a `[Runtime note]` on a later turn; `/bg` lists them) |
+| `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and spawns run in the background by default (job id now, answer as a short `[Runtime note]` + report path on a later turn; `/bg` lists them; full answer in `~/.nx/agents/<job>.md`) |
+| `NX_SUBAGENT_ASYNC` | sub-agent execution default (`1` = background, the default): a spawn returns a job id immediately and its answer arrives as a head + report-path `[Runtime note]`, so the parent TUI stays quiet during a fan-out. `0` restores the old foreground default, which renders the sub-agent's search/tool activity live and returns its answer inline |
 | `NX_SUBAGENT_WRITE` | opt-in write tier for sub-agents (`NX_SUBAGENT_WRITE=1`): `spawn_agent` additionally gets `write_file`/`edit_file`/`multi_edit`/`sed_edit`, each still confirmed by you through the normal approval gate (risk classification + Y/n with a diff preview) and tagged `(sub-agent)` in the tool box. Write-capable agents never run concurrently and cannot delete files or spawn other agents |
 | `NX_SUBAGENT_RECOVERY_RETRIES` | stall/empty-turn rescue attempts allowed INSIDE a sub-agent loop (default `1`; the parent keeps its own `NX_REASONING_ONLY_RETRIES`/`NX_EMPTY_TURN_RETRIES`). Keeps a flash-tier sub-agent from burning half its `max_turns` on recovery cycles; `0` disables the failsafes inside sub-agents entirely |
 | `NX_VISION` | offer the `read_image` tool on native-tool-call sources (default off; requires the backend to accept image content parts) |
@@ -434,10 +435,11 @@ Result-line shape (one JSON object per task):
 ```
 
 Tasks compose with sub-agents: a task's model may call `spawn_agent`
-(read-only by default, write tier with `NX_SUBAGENT_WRITE=1`), including
-`async: true` — the finished agent's answer arrives in that task's transcript
-as a `[Runtime note]`. With `--parallel > 1` the async-note channel is
-process-global, so prefer `--parallel 1` when a task relies on async agents.
+(read-only by default, write tier with `NX_SUBAGENT_WRITE=1`) — spawns run in
+the background by default, so the finished agent's answer arrives in that
+task's transcript as a `[Runtime note]`. With `--parallel > 1` the
+async-note channel is process-global, so prefer `--parallel 1` when a task
+relies on background agents.
 `NX_VERIFY_CMD` and the interactive background-completion scan stay off for
 batch workers (they're parent-loop machinery).
 
@@ -466,7 +468,7 @@ go through the approval gate above.
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |
 | `memory_delete` | `target`, `scope?` | delete one memory by exact title, filename, or unique prefix; requires confirmation |
-| `spawn_agent` | `instruction`, `max_turns?`, `async?` | delegate an investigation or task to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log). The agent sees its turn budget and spends its last turn answering, not searching; an agent that dies at the cap still returns its last observation. Write-capable only with `NX_SUBAGENT_WRITE=1` (write_file/edit_file/multi_edit/sed_edit, each confirmed by the user with a diff preview, tagged `(sub-agent)`; run sequentially, no delete/no nested spawn). Send several read-only ones in one turn to run them concurrently — one question per agent; re-spawning an instruction whose async job is still running is refused. `async: true` returns a job id immediately and delivers the answer as a one-time `[Runtime note]` on a later turn — for long investigations that would otherwise block the parent loop; async agents are always read-only, and a failed agent still announces (FAILED note). `/bg` lists running/finished agents. Flash-tier models sometimes narrate delegation instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
+| `spawn_agent` | `instruction`, `max_turns?`, `async?` | delegate an investigation or task to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log). The agent sees its turn budget and spends its last turn answering, not searching; an agent that dies at the cap still returns its last observation. Write-capable only with `NX_SUBAGENT_WRITE=1` (write_file/edit_file/multi_edit/sed_edit, each confirmed by the user with a diff preview, tagged `(sub-agent)`; run sequentially, no delete/no nested spawn). Send several read-only ones in one turn to run them concurrently — one question per agent; re-spawning an instruction whose background job is still running is refused. Background is the default (`NX_SUBAGENT_ASYNC=0` for foreground): a background spawn returns a job id immediately and delivers a short answer head + the path of its full markdown report (`~/.nx/agents/<job>.md`) as a one-time `[Runtime note]` on a later turn — the parent reads the file when the head isn't enough. Foreground renders the agent's search activity live and returns the answer inline. Async/background agents are always read-only, and a failed agent still announces (FAILED note). `/bg` lists running/finished agents with their report paths. Flash-tier models sometimes narrate delegation instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes

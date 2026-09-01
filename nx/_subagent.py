@@ -31,7 +31,14 @@ Async (background) sub-agents: `spawn_agent(async=true)` returns a job id
 immediately and runs the same turn loop on a daemon thread. The finished
 answer is announced exactly like a finished bash job — a one-time [Runtime
 note] appended to the parent's messages on a later turn — so long
-investigations stop blocking the parent loop. Async is read-only even when
+investigations stop blocking the parent loop. The note carries only a short
+head of the answer plus the path of a full markdown report the worker wrote
+under SESSION_HOME/agents/<job_id>.md (same head+path contract as
+_overflow.py's spill), so a fan-out of agents costs a few hundred chars of
+parent context, not their whole answers. Since 0.18.8 the background mode is
+the DEFAULT (NX_SUBAGENT_ASYNC=0 restores the synchronous default): the old
+foreground behavior rendered every sub-agent's spinner, reasoning collapses
+and stats footers inside the parent TUI. Async stays read-only even when
 the write tier is on (nobody is watching a Y/n prompt on a detached thread).
 
 Deliberately NOT offered to the sub-agent: final_answer's forced-final mode
@@ -56,6 +63,7 @@ result the sub-loop continues from.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import threading
 import time
@@ -86,11 +94,11 @@ SUBAGENT_WRITE_SYSTEM = (
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Multiple spawn_agent calls in one turn run concurrently (write-capable ones run one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
+    "description": "Delegate a focused investigation or task to a sub-agent that returns only its findings. One question per agent — never re-spawn an instruction already delegated (the answer is coming). Read/search tools plus a read-only bash allowlist (grep/ls/du/ps/git log). It can WRITE only when the user opted in via NX_SUBAGENT_WRITE=1 (write_file/edit_file/multi_edit/sed_edit, each still confirmed by the user with a diff preview); otherwise it cannot write — report what to change and let the parent do it. Spawns run in the background by default (answer arrives as a later [Runtime note] + report path); several calls in one turn run concurrently (write-capable ones one at a time). Use it when the work's output would bloat this conversation; do it yourself when the answer is one read_file away.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
         "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 12; 1-40). The agent sees its remaining budget and answers in the last turn — don't set it low for broad questions."},
-        "async": {"type": "boolean", "description": "Run in the background: returns a job id immediately, and the answer arrives as a [Runtime note] on a later turn. Use only for investigations that genuinely take a while; don't declare the task done until the note lands."},
+        "async": {"type": "boolean", "description": "Run in the background (the default): job id now; the answer arrives later as a [Runtime note] with a path to the full report. Pass false for a foreground spawn (renders live, blocks until done)."},
     }, "required": ["instruction"]},
 }}
 
@@ -361,7 +369,69 @@ def _subagent_quiet() -> bool:
 # prompt to, and it must not inherit the process-global YOLO/APPROVE_LEVEL
 # swap while the parent turn is mid-flight (a leaked YOLO=True would silently
 # disable the parent's approval gate — see _SPAWN_LOCK).
-_ASYNC_ANSWER_CHARS = 4000  # cap on an async answer's size inside the [Runtime note]
+# Async answers go to disk: the worker writes a markdown report per job and the
+# [Runtime note] carries a short inline head + the report path — the model
+# read_file's the full report only when the head isn't enough. Same shape as
+# _overflow.py's spill (head + path, full text on disk), minus the tail (the
+# report is prose with its conclusion up front, not a grep dump).
+_ASYNC_REPORT_CHARS = 600   # inline head of the answer carried in the [Runtime note]
+_ASYNC_REPORT_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
+
+
+def _agents_report_dir() -> str:
+    """Directory holding sub-agent reports (st.SESSION_HOME/agents)."""
+    return os.path.join(st.SESSION_HOME, "agents")
+
+
+def _write_agent_report(job_id: str, instruction: str, status: str,
+                        answer: str) -> str | None:
+    """Write one agent's full answer as markdown; return the path, or None.
+
+    Written for BOTH done and error finalizations — a failed agent's report is
+    what the parent reads to decide whether retrying inline is worth it. Runs
+    on the worker thread after the sub-loop finishes; never raises (the note
+    must go out even if the disk write fails). Temp file + os.replace so a
+    concurrent reader never sees a half-written report.
+    """
+    try:
+        d = _agents_report_dir()
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{job_id}.md")
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        body = (
+            f"# Sub-agent report — {job_id}\n\n"
+            f"- status: {status}\n- finished: {now}\n\n"
+            "## Instruction\n\n"
+            f"{instruction.strip()}\n\n"
+            "## Answer\n\n"
+            f"{answer.strip()}\n"
+        )
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+            f.write(body)
+        os.replace(tmp, path)
+        _purge_old_agent_reports()
+        return path
+    except OSError:
+        return None
+
+
+def _purge_old_agent_reports(max_age_days: int = _ASYNC_REPORT_TTL_DAYS) -> None:
+    """Remove agent reports older than max_age_days (best-effort, mirrors
+    _purge_old_overflow)."""
+    d = _agents_report_dir()
+    try:
+        now = time.time()
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                if (now - os.path.getmtime(p)) > max_age_days * 86400:
+                    os.remove(p)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
 
 # Job id → agent record. Only agents from this process are tracked/announced
 # (same posture as the bg map files' owner_pid check). `announced` marks a
@@ -389,8 +459,8 @@ def _new_job_id() -> str:
 
 def list_async_agents() -> list[dict[str, Any]]:
     """Dashboard-ready view of this process's async sub-agents (newest first):
-    {"id", "alive", "instruction", "status", "tail"}. Used by /bg, which
-    renders them alongside the _bash_jobs registry entries."""
+    {"id", "alive", "instruction", "status", "tail", "report"}. Used by
+    /bg, which renders them alongside the _bash_jobs registry entries."""
     with _ASYNC_LOCK:
         recs = sorted(_ASYNC_AGENTS.items(),
                       key=lambda kv: kv[1].get("started") or 0, reverse=True)
@@ -404,6 +474,7 @@ def list_async_agents() -> list[dict[str, Any]]:
             "instruction": rec.get("instruction", ""),
             "status": status,
             "tail": answer[-160:] if answer else "",
+            "report": rec.get("report"),
         })
     return out
 
@@ -442,6 +513,15 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
             rec["answer"] = answer
             rec["status"] = status
             rec["finished"] = time.time()
+    # Full answer to disk first (both done and error), so the runtime note can
+    # stay a short head + path instead of dumping thousands of chars of
+    # exploration into the parent's context.
+    try:
+        path = _write_agent_report(job_id, instruction, status, answer)
+    except Exception:  # noqa: BLE001 - the report is best-effort; the note is not
+        path = None
+    if rec is not None:
+        rec["report"] = path
     _stage_subagent_answer(job_id)
 
 
@@ -459,13 +539,16 @@ def _stage_subagent_answer(job_id: str) -> None:
             return
         rec["announced"] = True
         status, answer = rec.get("status", "done"), rec.get("answer") or ""
+        report = rec.get("report")
         prev = getattr(st, _PENDING_NOTICE_KEY, None)
         if status == "done":
-            body = answer[:_ASYNC_ANSWER_CHARS]
-            if len(answer) > _ASYNC_ANSWER_CHARS:
-                body += "\n…[truncated]"
-            note = (f"[Runtime note: background sub-agent {job_id} finished. "
-                    f"Its answer:\n{body}]")
+            head = answer[:_ASYNC_REPORT_CHARS]
+            marker = " ...[truncated]" if len(answer) > _ASYNC_REPORT_CHARS else ""
+            report_line = ""
+            if report:
+                report_line = "\nFull report: " + report + " — read_file it for the rest."
+            note = ("[Runtime note: background sub-agent " + job_id +
+                    " finished. Its answer:\n" + head + marker + report_line + "]")
         elif answer.startswith("ERROR: an identical async agent"):
             # duplicate-in-flight refusal: nothing ran, nothing to wait for —
             # the parent must retry later, so don't announce a [Runtime note]
@@ -505,8 +588,8 @@ def _spawn_async(instruction: str, max_turns: int) -> str:
             f"instruction: {instruction[:200]}\n"
             "The agent is running in the background; continue other work in "
             "the meantime. Its answer will arrive automatically as a "
-            "[Runtime note] on a later turn — do not declare the task done "
-            "until then.")
+            "[Runtime note] on a later turn (short head + path to its full "
+            "markdown report) — do not declare the task done until then.")
 
 
 def _run_sync_agent(instruction: str, max_turns: int) -> str:
@@ -598,14 +681,30 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     return answer
 
 
-def spawn_agent(instruction: str, max_turns: int = 12, async_: bool = False,
+def _async_default() -> bool:
+    """True when an unspecified spawn defaults to the background. Reads the
+    top-level module attribute first (so tests/REPL can flip it live), env as
+    fallback. Default is 1 (background): the old synchronous default rendered
+    every sub-agent's spinner, reasoning collapses and stats footers inside the
+    parent TUI — the main complaint this knob answers. NX_SUBAGENT_ASYNC=0
+    restores the foreground default."""
+    import nx as _m
+    try:
+        return bool(int(_m.NX_SUBAGENT_ASYNC))
+    except (AttributeError, TypeError, ValueError):
+        from ._env import _env_int
+        return bool(_env_int("NX_SUBAGENT_ASYNC", 1))
+
+
+def spawn_agent(instruction: str, max_turns: int = 12, async_: Any = None,
                 **extra: Any) -> str:
     """Run a sub-agent on `instruction`; return its final answer. Read-only by
     default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
     four file-mutation tools, each still gated by the parent's _confirm()).
-    async_=True (the tool schema's `async` key — a keyword, so run_tool() can
-    only deliver it via **extra) returns a job id immediately and delivers
-    the answer as a [Runtime note] on a later turn."""
+    The tool schema's `async` key (a keyword, so run_tool() can only deliver
+    it via **extra) defaults to NX_SUBAGENT_ASYNC (default: background) — a
+    background spawn returns a job id immediately and delivers its answer as a
+    head + report-path [Runtime note] on a later turn."""
     if not isinstance(instruction, str) or not instruction.strip():
         # flash-tier models keep sending {"prompt": ...} instead of the
         # documented `instruction` key; without a hint they burn a whole
@@ -624,8 +723,14 @@ def spawn_agent(instruction: str, max_turns: int = 12, async_: bool = False,
     # named parameter; run_tool() dispatches fn(**args) and it would silently
     # land in **extra and be dropped (the agent would run synchronously).
     raw_async = extra.pop("async", None)
-    if async_ is False and raw_async is not None:
+    if raw_async is not None:
         async_ = raw_async
+    # None = the model (or a direct caller) omitted `async` - fall to
+    # NX_SUBAGENT_ASYNC (background by default since 0.18.8). An explicit
+    # false - bool or "false"/"0" string - must WIN over the knob: it is the
+    # documented foreground escape hatch.
+    if async_ is None:
+        async_ = _async_default()
     want_async = async_ is True or (
         isinstance(async_, str) and async_.strip().lower() in ("1", "true", "yes", "on"))
     if want_async:

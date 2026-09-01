@@ -33,11 +33,12 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_BASE_URL"] = "http://127.0.0.1:9/v1"
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
+    os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
     monkeypatch.setattr(nx_fresh if False else sys, "argv", ["nx"])
     import nx
     importlib.reload(nx)
     yield nx
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS"):
+    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS", "NX_SUBAGENT_ASYNC"):
         os.environ.pop(k, None)
 
 

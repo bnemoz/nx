@@ -577,6 +577,14 @@ from ._tool_cache import (  # noqa: F401 (re-export for tests)
 # nx/_subagent.py. OFF by default (NX_SUBAGENTS=1 to enable) — it adds a tool
 # schema to every turn's floor, so it's opt-in like NX_GRAMMAR/NX_NATIVE_TOOLS.
 NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
+# Sub-agent default execution mode (NX_SUBAGENT_ASYNC, default 1): a spawn runs
+# in the background by default — quiet worker thread, answer lands as a short
+# head + report-path [Runtime note] on a later turn (full answer on disk under
+# SESSION_HOME/agents/) — so a fan-out no longer renders every sub-agent's
+# spinner/footers in the parent TUI. NX_SUBAGENT_ASYNC=0 restores the old
+# foreground (synchronous) default, which still shows the sub-agent's tool
+# boxes and reasoning live.
+NX_SUBAGENT_ASYNC = _env_int("NX_SUBAGENT_ASYNC", 1)
 # Opt-in write tier for sub-agents (NX_SUBAGENT_WRITE=1): the four file-mutation
 # tools (write_file/edit_file/multi_edit/sed_edit) are additionally offered
 # inside a sub-agent, bound to wrappers that run the parent's real bodies — so
