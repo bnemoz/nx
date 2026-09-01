@@ -59,7 +59,10 @@ import nx as m  # noqa: E402
 # plus the SYSTEM memory line raised it again from ~2263; a 0.3.1 pass that
 # trimmed verbose tool descriptions brought it back under 2500; a 0.18.9 pass
 # re-streamlined the fattest descriptions (edit_file, search_files, multi_edit,
-# sed_edit, run_bash, spawn_agent) which had crept back past the warn line.
+# sed_edit, run_bash, spawn_agent) which had crept back past the warn line; the
+# 0.26 schema rewrite moved characters from terse abbreviation blobs into
+# per-PROPERTY guidance (an undocumented `old_lines`/`timeout`/`scope` is a
+# guessed-at argument), landing ~2835 — still warning, still under the ceiling.
 WARN_TOKENS = 2500  # soft: warn (don't fail) — check the README still holds
 FAIL_TOKENS = 2900  # hard: the floor has roughly grown again; README is fiction
 

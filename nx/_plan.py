@@ -159,12 +159,12 @@ def check_gate(name: str) -> str | None:
 # --- plan_edit tool ----------------------------------------------------------
 PLAN_EDIT_TOOL = {"type": "function", "function": {
     "name": "plan_edit",
-    "description": "Edit the active plan file (.nx/<slug>.md) while plan mode is active. literal old->new like edit_file (or old_lines, or write to replace the whole plan). The ONLY mutation allowed under plan mode.",
+    "description": "Edit the active plan file (.nx/<slug>.md) while plan mode is active -- the only mutation plan mode allows. Target it one of three ways: `write`, `old`, or `old_lines`.",
     "parameters": {"type": "object", "properties": {
-        "old": {"type": "string", "description": "text to replace (must match exactly once; omit with `write` to replace the whole plan)"},
-        "new": {"type": "string", "description": "replacement text (required)"},
-        "old_lines": {"type": "string", "description": "1-based line range 'N' or 'N-M' replacing old — mutually exclusive with old"},
-        "write": {"type": "string", "description": "full replacement plan body (replaces the file); omit with old/old_lines for a literal splice"},
+        "new": {"type": "string", "description": "The text to put in place (required for every target except `write`)"},
+        "old": {"type": "string", "description": "Literal passage to replace, matching exactly once. Omit when using `write` or `old_lines`"},
+        "old_lines": {"type": "string", "description": "Line range to replace, 'N' or 'N-M', as numbered by read_file. Exclusive with `old`"},
+        "write": {"type": "string", "description": "Full replacement plan body; when set, omit `old`/`old_lines`"},
     }, "required": ["new"]},
 }}
 

@@ -72,6 +72,12 @@ CLAUDE.md. Beyond the schema itself:
 - `SYSTEM` prompt: if behavior needs explaining to the model (e.g. the
   background/foreground contract for `run_bash`), keep that docstring in
   sync with the tool's actual behavior.
+- Schema wording: every property the model can pass gets a `description` (an
+  undocumented argument is a guessed-at one), required properties are declared
+  before optional ones, and overlapping tools name each other (write_file vs
+  edit_file, edit_file vs multi_edit). `tests/test_tool_schema_invariants.py`
+  enforces all three, including the `UNDOCUMENTED_OK` exemption list — add to
+  it only when the property name really is the whole contract.
 
 ## Adding a new env var
 

@@ -475,7 +475,7 @@ go through the approval gate above.
 | `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only |
 | `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only |
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands |
-| `wait_background` | `pid`, `log_path?`, `timeout?` | only offered after a `run_bash` call has backgrounded |
+| `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |

@@ -180,11 +180,11 @@ def _subagent_max_turns() -> int:
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Delegate a focused investigation to a read-only sub-agent that returns only its findings — your default tool for multi-file work you haven't read yet. PROACTIVELY spawn one per independent area: map an unfamiliar codebase, trace a behavior through several modules, list callers/uses of a symbol, investigate 2+ unrelated questions (issue ONE CALL PER QUESTION in the same turn — they run concurrently). Do it yourself: edits you're already making, one known file, one targeted search. One question per agent; never re-spawn an instruction already delegated (its answer is arriving). Background by default: job id now, answer later as a [Runtime note] + report path.",
+    "description": "Hand one investigation to a read-only sub-agent that searches and reads on its own and returns only its findings (it changes no files). Your default for multi-file work you haven't read: PROACTIVELY spawn one per independent area -- map an unfamiliar codebase, trace behavior across modules, list callers/uses of a symbol, or split unrelated questions (issue ONE CALL PER QUESTION in the same turn; they run concurrently). Keep to yourself: edits already under way, one known file, one targeted search. Backgrounded by default -- job id now, answer as a [Runtime note] plus report path on a later turn.",
     "parameters": {"type": "object", "properties": {
-        "instruction": {"type": "string", "description": "The exact question or task for the sub-agent, with any needed paths/context."},
-        "max_turns": {"type": "integer", "description": "Cap on sub-agent tool turns (default 100; 1-200). Don't set it low for broad questions."},
-        "async": {"type": "boolean", "description": "Background (the default); pass false for a foreground spawn that renders live and blocks until done."},
+        "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
+        "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100; 1-200). Leave the default for broad questions: an agent that runs out spends its last turn answering instead of searching."},
+        "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
     }, "required": ["instruction"]},
 }}
 
