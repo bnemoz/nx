@@ -91,6 +91,30 @@ TURN_REDIRECT = "redirect"  # user typed+submitted a new instruction right after
 TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unparseable → one corrective retry
 TURN_API_ERROR = "api_error"  # request hard-failed before any chunk (endpoint down, 4xx/5xx) — never retried
 TURN_CONTEXT_OVERRUN = "context_overrun"  # 400: prompt exceeded the context window — recoverable via one compress+retry
+TURN_LENGTH_CUT = "length_cut"  # finish_reason=length: the model's response budget ran out mid-stream — auto-continue it
+TRUNCATION_MARKER = "\n\n[Truncated by token limit before completion.]"
+
+
+def _close_out_partial(messages: list[Message], partial: str) -> None:
+    """Record a length-cut partial answer, closed out with the truncation marker.
+
+    Used when the answer can't be continued: a forced-final turn was cut, or
+    the auto-continuation budget (st.MAX_CONTINUATIONS) is exhausted. One
+    constant + one helper keep the transcript's truncation spelling uniform."""
+    messages.append({"role": "assistant", "content": partial.rstrip() + TRUNCATION_MARKER})
+
+# Note appended after a partial answer when finish_reason="length" fired: the
+# model exhausted its response budget (NX_MAX_TOKENS, or a server-side cap on
+# qwen3.8-flash-next et al.) and stopped mid-sentence. Continuation keeps the
+# partial text as a real assistant turn, so the model resumes from its own
+# exact tail instead of restarting the answer. "If the reply was actually
+# complete, say (done)" bounds a model that wants to emit something anyway.
+CONTINUATION_NUDGE = (
+    "Your previous reply was cut off by the per-response token limit — it ended "
+    "mid-stream. Resume your reply from the exact point it stopped. Do not repeat "
+    "or summarize what you already wrote; just continue the text seamlessly. "
+    "If the previous reply was actually complete, reply with the single word "
+    "(done) and nothing else.")
 
 
 def _ctx_field(prompt_n: int) -> str:
@@ -1214,11 +1238,25 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         if not quiet:
             print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
                   f"with truncation marker{RESET}")
-        messages.append({
-            "role": "assistant",
-            "content": text.rstrip() + "\n\n[Truncated by token limit before completion.]",
-        })
+        _close_out_partial(messages, text)
         return TURN_DONE
+
+    # finish_reason="length" on a normal text turn: the response budget
+    # (NX_MAX_TOKENS, or a server-side cap on some models) ran out mid-answer.
+    # That's not a finished reply and not an error — it's a continuation
+    # opportunity. The loop appends the partial text as a real assistant turn
+    # and asks the model to resume from its exact tail; st.MAX_CONTINUATIONS
+    # (counted in continuation_cuts) budgets this so a model that never
+    # converges eventually lands at the truncation-marker close-out instead.
+    # Native tool_calls cuts never reach here (handled above with their own
+    # malformed-args recovery); a text-protocol tag cut mid-args is handled by
+    # the malformed-call correction path above for the same reason.
+    if not forced_final and "length" in parser.finish_reasons and text.strip():
+        # Hand the partial text to the loop without appending it here — the
+        # loop decides between continuing (assistant turn + resume note) and
+        # closing the partial out with the truncation marker.
+        st._LAST_PARTIAL_TEXT = text
+        return TURN_LENGTH_CUT
 
     if not text.strip():
         # Silent stall: the model emitted nothing. In a real agentic loop this is
@@ -1336,6 +1374,20 @@ def _task_timeout_summary(turns: int) -> dict:
             "timed_out": True}
 
 
+def _report_length_cut(quiet: bool, used: int, limit: int) -> None:
+    """Status line after appending a continuation resume note."""
+    if not quiet:
+        print(f"{C.WARNING}  ✂ RESPONSE CUT BY TOKEN LIMIT — continuing ({used}/{limit}){RESET}")
+
+
+def _report_length_exhausted(quiet: bool, used: int) -> None:
+    """Status line when the continuation budget ran out and the partial was closed out."""
+    if not quiet:
+        suffix = "s" if used != 1 else ""
+        print(f"{C.WARNING}  ✂ RESPONSE STILL HIT TOKEN LIMIT after {used} continuation{suffix} "
+              f"— saved partial answer with truncation marker{RESET}")
+
+
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
                          on_step: Optional[Callable[[], None]] = None,
                          max_turns_override: Optional[int] = None) -> dict:
@@ -1355,6 +1407,8 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
     malformed_stream_cuts = 0
     empty_turn_cuts = 0
     malformed_call_cuts = 0
+    continuation_cuts = 0  # finish_reason="length" auto-continues (st.MAX_CONTINUATIONS budget)
+    _last_partial_text = ""  # partial answer of the most recent TURN_LENGTH_CUT
     context_retries = 0  # compress+retry after a context-window overrun (once)
     prev_prompt_tokens = -1  # last _LAST_PROMPT_TOKENS this loop has already evaluated
     # Go through the top-level package (not a bare same-module reference) so
@@ -1464,6 +1518,28 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             malformed_call_cuts += 1
             sub_rescue_turns += sub_loop
             continue
+        if status == TURN_LENGTH_CUT:
+            # The response budget (NX_MAX_TOKENS, or a server-side cap) ran out
+            # mid-answer. model_turn() appended nothing; it handed the partial
+            # text back in st._LAST_PARTIAL_TEXT, mirrored here first.
+            # Budgeted by _subagent_scoped_retry(st.MAX_CONTINUATIONS) so
+            # a sub-agent's continuation spend narrows with its recovery clamp;
+            # once the budget runs out the partial is closed out with the same
+            # truncation marker the forced-final path uses, so the transcript
+            # never shows a silently-truncated answer. Message order mirrors the
+            # text-protocol tool flow: partial assistant text, then a user-side
+            # runtime note (see _nudge_current_user_turn).
+            _last_partial_text = st._LAST_PARTIAL_TEXT
+            limit = max(0, _subagent_scoped_retry(st.MAX_CONTINUATIONS))
+            if continuation_cuts < limit:
+                continuation_cuts += 1
+                messages.append({"role": "assistant", "content": _last_partial_text})
+                _nudge_current_user_turn(messages, CONTINUATION_NUDGE)
+                _report_length_cut(_subagent_quiet(), continuation_cuts, limit)
+                continue
+            _close_out_partial(messages, _last_partial_text)
+            _report_length_exhausted(_subagent_quiet(), continuation_cuts)
+            return {"status": "done", "turns": steps + 1}
         if status == TURN_STALL:
             reasoning_loop_cuts += 1
             sub_rescue_turns += sub_loop

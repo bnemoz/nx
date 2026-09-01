@@ -164,6 +164,17 @@ FORCED_FINAL_MAX_TOKENS: int = 2048
 # (nx/__init__.py) and the /budget command (nx/_repl_settings_cmds.py).
 REASONING_BUDGET_TOKENS: int | None = None
 EMPTY_TURN_RETRY_LIMIT: int = 3
+# Auto-continue budget when a turn ends with finish_reason="length" — the model
+# hit the per-request token cap (NX_MAX_TOKENS, or the server's own limit) and
+# the answer was cut mid-stream. Each continuation appends the partial text as
+# a real assistant turn plus a short "continue exactly where you stopped"
+# user note and re-opens the stream, so a long answer arrives in seamless
+# pieces instead of ending mid-sentence. 0 disables (turn just ends, as before).
+MAX_CONTINUATIONS: int = 2
+# Partial answer text of the most recent TURN_LENGTH_CUT, handed from
+# model_turn() to _run_model_turn_loop() (which appends it as an assistant
+# turn when continuing, or closes it out with the truncation marker).
+_LAST_PARTIAL_TEXT: str = ""
 REASONING_ONLY_CHAR_LIMIT: int = 36000
 RECOVERY_TEMPERATURE: float = 1.0
 RECOVERY_TOP_P: float = 0.95

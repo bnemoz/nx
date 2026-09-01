@@ -88,6 +88,7 @@ _STATE_NAMES = frozenset((
     "MALFORMED_TOOL_BREAKER_LIMIT", "_MALFORMED_TOOL_FAILURES",
     "_MALFORMED_TOOL_BROKEN",
     "FORCED_FINAL_MAX_TOKENS", "REASONING_BUDGET_TOKENS", "EMPTY_TURN_RETRY_LIMIT",
+    "MAX_CONTINUATIONS",
     "REASONING_ONLY_CHAR_LIMIT",
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
     "AUTOCOMPRESS_PERCENT", "AUTOCOMPRESS_DEFAULT", "COMPRESS_KEEP", "_METRICS",
@@ -501,6 +502,13 @@ st.REASONING_BUDGET_TOKENS = _env_int("NX_REASONING_BUDGET", 0) or None
 # it back into producing either a tool call or a visible answer. 0 disables the
 # auto-continue (an empty turn then drops to chat as before).
 st.EMPTY_TURN_RETRY_LIMIT = _env_int("NX_EMPTY_TURN_RETRIES", 3)
+# A turn cut off by finish_reason="length" (the per-request token cap hit —
+# NX_MAX_TOKENS, or the server's own cap) ends mid-answer. Auto-continue it:
+# keep the partial text as a real assistant turn, append a "continue exactly
+# where you stopped" note, and re-open the stream. Budgeted by this many
+# continuations per user request; beyond that the partial answer is closed out
+# with a truncation marker (as before). 0 disables the auto-continue.
+st.MAX_CONTINUATIONS = _env_int("NX_MAX_CONTINUATIONS", 2)
 
 # --- auto context-compression -----------------------------------------------
 # When the context window fills past this fraction (default 85%), the next
@@ -637,7 +645,8 @@ from ._verify import (
 from ._turn import (
     _LoggingStream, TURN_DONE, TURN_TOOL, TURN_STREAM_CUT,
     TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL,
-    TURN_API_ERROR, _ctx_field,
+    TURN_API_ERROR, TURN_LENGTH_CUT, CONTINUATION_NUDGE, TRUNCATION_MARKER,
+    _ctx_field,
     _ensure_ctx_probe, _print_stats_footer, _handle_forced_final_tool_call,
     _handle_native_tool_calls, _handle_text_tool_calls, _handle_loop_cut,
     model_turn, _run_model_turn_loop,
