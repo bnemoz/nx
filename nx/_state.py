@@ -149,6 +149,9 @@ _PENDING_MULTI_EDIT_NOTICE: str | None = None
 REASONING_ONLY_RETRY_LIMIT: int = 3
 MALFORMED_STREAM_RETRY_LIMIT: int = 2
 FORCED_FINAL_MAX_TOKENS: int = 2048
+# Reasoning token budget (None = no cap). Shared home for env resolution
+# (nx/__init__.py) and the /budget command (nx/_repl_settings_cmds.py).
+REASONING_BUDGET_TOKENS: int | None = None
 EMPTY_TURN_RETRY_LIMIT: int = 3
 REASONING_ONLY_CHAR_LIMIT: int = 36000
 RECOVERY_TEMPERATURE: float = 1.0

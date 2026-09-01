@@ -141,6 +141,14 @@ class Source:
                     body[k].update(v)
                 else:
                     body[k] = v
+        # Reasoning token budget (NX_REASONING_BUDGET_TOKENS / /budget) rides
+        # as the nested body {"reasoning": {"max_tokens": N}} — the shape
+        # OpenRouter documents. Non-consumers ignore unknown body keys, and a
+        # backend wanting a different shape takes it verbatim via
+        # NX_SOURCE_<NAME>_EXTRA_BODY. setdefault: a source's own EXTRA_BODY
+        # "reasoning" object always wins over the global budget.
+        if st.REASONING_BUDGET_TOKENS and st.REASONING_BUDGET_TOKENS > 0:
+            body.setdefault("reasoning", {"max_tokens": int(st.REASONING_BUDGET_TOKENS)})
         if not body:
             return {}
         return {"extra_body": body}

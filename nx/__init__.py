@@ -85,7 +85,8 @@ _STATE_NAMES = frozenset((
     "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
     "_PLAN_ACTIVE", "_PLAN_GOAL", "_PLAN_SLUG", "_PLAN_STARTED",
     "REASONING_ONLY_RETRY_LIMIT", "MALFORMED_STREAM_RETRY_LIMIT",
-    "FORCED_FINAL_MAX_TOKENS", "EMPTY_TURN_RETRY_LIMIT", "REASONING_ONLY_CHAR_LIMIT",
+    "FORCED_FINAL_MAX_TOKENS", "REASONING_BUDGET_TOKENS", "EMPTY_TURN_RETRY_LIMIT",
+    "REASONING_ONLY_CHAR_LIMIT",
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
     "AUTOCOMPRESS_PERCENT", "AUTOCOMPRESS_DEFAULT", "COMPRESS_KEEP", "_METRICS",
     "_TOOL_RESULT_CACHE",
@@ -479,6 +480,10 @@ HISTORY_LINES = _env_int("NX_HISTORY_LINES", INPUT_HISTORY_LINES_DEFAULT)
 st.REASONING_ONLY_RETRY_LIMIT = _env_int("NX_REASONING_ONLY_RETRIES", 3)
 st.MALFORMED_STREAM_RETRY_LIMIT = _env_int("NX_MALFORMED_STREAM_RETRIES", 2)
 st.FORCED_FINAL_MAX_TOKENS = _env_int("NX_FORCED_FINAL_MAX_TOKENS", 2048)
+# Reasoning token budget: cap on the model's thinking phase, sent as
+# {"reasoning": {"max_tokens": N}} in the request body. 0 = off (the default —
+# let the model self-terminate its thinking). /budget changes it live.
+st.REASONING_BUDGET_TOKENS = _env_int("NX_REASONING_BUDGET", 0) or None
 # An empty assistant turn (no content, no tool calls) is a silent stall: the model
 # produced nothing and the loop would otherwise return TURN_DONE, dropping the user
 # to the chat prompt mid-task. That's confusing — it looks like the agent finished

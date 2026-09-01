@@ -35,6 +35,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/source", "list sources, switch to one, or override its model"),
     ("/theme", "list color themes, or switch to one"),
     ("/provider", "show or set OpenRouter provider-routing order"),
+    ("/budget", "show or set the reasoning token budget"),
     ("/yolo", "toggle auto-approve for writes and bash"),
     ("/resources", "show this nx process's CPU% and RSS memory"),
     ("/ctx", "context breakdown by message; pin/unpin turns against /compress"),
@@ -78,6 +79,7 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/tools": ["on", "off", "last"],  # legacy alias arg dropdown
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
+    "/budget": ["off"],
     "/verify": ["off", "run"],
     "/ctx": ["pin", "unpin", "clear"],
     "/plan": ["done", "off", "discard"],

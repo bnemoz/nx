@@ -1,6 +1,7 @@
 """Slash-command handlers for REPL settings/session-context toggles that
 don't touch the saved-session list: `/source`, `/theme`, `/reasoning`,
-`/tools` (legacy alias of `/tooloutput`), `/provider`, `/resources`, `/bg`, `/yolo`, `/approval`, `/reset`,
+`/tools` (legacy alias of `/tooloutput`), `/provider`, `/budget`, `/resources`,
+`/bg`, `/yolo`, `/approval`, `/reset`,
 `/help`, `/init`, `/recover`, `/undo`, `/compress`, `/autocompress`.
 
 Each handler takes (user_input, state) and returns "break" to end the REPL
@@ -56,6 +57,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/compress, /compact", "fold older turns into a summary"),
     ("/ctx [pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
     ("/cost", "session usage + per-source cost scoreboard"),
+    ("/budget [<tokens|off>]", "cap the model's reasoning phase (reasoning token budget)"),
     ("/autocompress [percent|on|off]", "configure automatic compression threshold"),
     ("/sessions [...]", "list/manage sessions (non-title query → full-text body search)"),
     ("/export [md] [path]", "write the current session to a markdown file"),
@@ -608,6 +610,39 @@ def _cmd_compress(user: str, state: _ReplState) -> None:
     # Compression itself is a model call; save now so its usage is visible in
     # the session JSON even before another conversational turn or /quit.
     _save_current(state)
+
+
+def _cmd_budget(user: str, state: _ReplState) -> None:
+    # /budget — cap the model's reasoning (thinking) phase in tokens. Rides in
+    # the request body as a nested "reasoning" object (see nx/_sources.py),
+    # the same channel as /provider routing — so backends that ignore unknown
+    # body keys are unaffected, and a source with its own "reasoning" object
+    # in EXTRA_BODY keeps winning over this global cap.
+    arg = user[len("/budget"):].strip().lower()
+    if not arg:
+        cur = st.REASONING_BUDGET_TOKENS or "off"
+        print(f"{DIM}  reasoning budget: {cur}{RESET}")
+        print(f"{DIM}  /budget <tokens> caps the thinking phase"
+              f" (e.g. /budget 4096) · /budget off clears it{RESET}")
+        return
+    if arg in ("off", "none", "clear"):
+        st.REASONING_BUDGET_TOKENS = None
+        os.environ.pop("NX_REASONING_BUDGET", None)
+        print(f"{DIM}  reasoning budget: off{RESET}")
+        return
+    try:
+        val = int(arg)
+    except ValueError:
+        print(f"{C.WARNING}  usage: /budget [<tokens|off>] — "
+              f"current: {st.REASONING_BUDGET_TOKENS or 'off'}{RESET}")
+        return
+    if val <= 0:
+        print(f"{C.WARNING}  {val} is out of range — want a positive token"
+              f" count (or off){RESET}")
+        return
+    st.REASONING_BUDGET_TOKENS = val
+    os.environ["NX_REASONING_BUDGET"] = str(val)
+    print(f"{DIM}  reasoning budget: {val} tokens{RESET}")
 
 
 def _cmd_autocompress(user: str, state: _ReplState) -> None:
