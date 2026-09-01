@@ -73,6 +73,51 @@ def test_far_apart_repetition_is_not_garble():
                    for s in _garble.garble_signature(text)), "adjacency guard failed"
 
 
+# --- loop/guard bodies legitimately repeat (0.23.0 regression) ---------------
+# (fixtures build the repeated blocks at run time so this test module never
+# itself carries a repeated-phrase shape)
+
+def test_loop_body_phrase_repeat_is_not_garble():
+    # the field-reported FP: parallel guard blocks repeat a phrase a few words
+    # apart with NO overlap - loop shape, not a mid-stream restart. Must not
+    # be flagged, repaired, or errored.
+    guard = "    if not quiet:\n"
+    new = (guard
+           + '        print(f"kept {len(kept)}")\n'
+           + guard
+           + '        print(f"dropped {len(dropped)}")\n')
+    assert _garble.garble_signature(new) == [], _garble.garble_signature(new)
+    status, msg, out = _garble.garble_check(new, "def f():\n    pass\n", "")
+    assert status == "clean" and msg is None and out == new, (status, msg)
+
+
+def test_identical_loop_body_is_not_garble():
+    # harsher variant: two adjacent loop bodies word-for-word the same (a
+    # 5-gram echo across the line break) - still ordinary code
+    body = "        for k in partners:\n            flush(k)\n"
+    new = body + body
+    assert _garble.garble_signature(new) == [], _garble.garble_signature(new)
+    assert _garble.garble_check(new, "def f():\n    pass\n", "")[0] == "clean"
+
+
+def test_code_line_between_dup_lines_is_not_garble():
+    # one real line between two identical loop headers is scaffolding,
+    # not a stutter
+    body = "        for k in partners:\n            flush(k)\n"
+    code = body + body.replace("flush", "reap")
+    assert _garble.garble_signature(code) == [], _garble.garble_signature(code)
+
+
+def test_blank_line_between_dup_lines_still_repaired():
+    # a blank line between the copies is still a stutter (a paragraph
+    # re-decoded), and collapsing it is safe
+    line = "bravo two with words"
+    new = "alpha one\n" + line + "\n\n" + line + "\ncharlie three\n"
+    status, msg, repaired = _garble.garble_check(new, "unrelated source", "")
+    assert status == "repaired", (status, msg)
+    assert repaired == "alpha one\n" + line + "\n\ncharlie three\n"
+
+
 # --- novelty veto ------------------------------------------------------------
 
 def test_novelty_veto_spares_repetition_the_file_already_has():
@@ -175,14 +220,15 @@ def test_edit_file_repairs_garbled_new():
         assert fh.read() == "def f():\n    return 2\n"
 
 
-def test_edit_file_errors_on_unrepairable_splice_with_conflicting_repeat():
+def test_edit_file_errors_on_unrepairable_abandoned_rewrite():
     _allow()
     path = _write("g2.py", "def f():\n    return 1\n")
-    # two independent signatures whose repairs can't both hold: a duplicated
-    # line AND a splice sharing text with it -> realign fails -> hard ERROR
-    garbled = ("alpha beta gamma delta epsilon\n"
-               "alpha beta gamma delta epsilon\n"
-               "zeta eta alpha beta gamma delta epsilon\n")
+    # a detect-only signature (abandoned rewrite - no repairer exists) is the
+    # hard-ERROR path: nothing may be written. Built indirectly so this test
+    # module itself never carries the repeated-phrase shape.
+    ell = "." * 3
+    garbled = ("    return 2  # tuple short-circuiting" + ell
+               + " we rely on identity here\n")
     res = m.edit_file(path, old="def f():\n    return 1\n", new=garbled)
     assert res.startswith("ERROR") and "textually corrupted" in res
     with open(path) as fh:
@@ -206,10 +252,11 @@ def test_multi_edit_repairs_one_edit_and_reports_once():
 def test_multi_edit_garbled_edit_rolls_back_batch():
     _allow()
     path = _write("g4.py", "A = 1\nB = 2\n")
-    # a 5-word phrase echoing twice with a gap no repairer may bridge —
-    # nothing was written
-    garbled = ("B = 20 alpha beta gamma delta epsilon and then more words\n"
-               "alpha beta gamma delta epsilon follow here\n")
+    # a detect-only signature on edit #2 (abandoned rewrite, no repairer)
+    # -> hard ERROR, and the whole batch rolls back - nothing was written
+    ell = "." * 3
+    garbled = ("B = 20  # the timer pauses" + ell
+               + " the timer resets on write\n")
     res = m.multi_edit(path, [
         {"old": "A = 1", "new": "A = 10"},
         {"old": "B = 2", "new": garbled},

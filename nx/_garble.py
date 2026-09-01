@@ -25,9 +25,10 @@ itself — "``==`` via tuple ``==`` short-circuiting... we rely on identity here
 The guard runs on the `new` payload once `old` has already matched (so it
 never interferes with ordinary failed-match retries) and only flags when the
 repeated text is NOT part of the surrounding file — a line the file itself
-legitimately repeats is left alone. Repairs additionally require locality
-(the two copies within a few lines/words), because legitimate repetition (the
-same decorator on two routes) is almost always far apart. Two outcomes:
+legitimately repeats is left alone. Both detection and repair demand real
+locality: the two copies must be adjacent or overlapping (a restart, not two
+separate mentions — loop bodies and parallel guard blocks legitimately repeat
+a phrase a few words apart). Two outcomes:
 
   - repairable (duplicate line / near-duplicate phrase / splice): the
     duplicate copy is dropped, the edit proceeds, and the result says so;
@@ -54,14 +55,17 @@ _WORD_RE = re.compile(r"\w+")
 # legitimate than garble.
 _MIN_DUP_LINE = 12
 
-# The two copies of a duplicated line must be within this many lines of each
-# other; model stutters are adjacent, legit repetition is far apart.
-_DUP_LINE_GAP = 3
+# A duplicated line only counts when nothing separates the copies but a line
+# break (or one blank line): model stutters are adjacent; one code line between
+# them is loop scaffolding, ordinary code. Repairs delete a copy, so only
+# true adjacency is safe to touch.
 
-# Gram window for mid-line restart detection, and the max word distance
-# between the two occurrences.
+# Gram length for mid-line restart detection. The two occurrences must
+# OVERLAP — the restart happens within the gram itself (gap <= _GRAM_N words),
+# which is what makes the repair a safe single-period collapse. A phrase
+# repeating a few words apart with no overlap is loop/parallel-block shape,
+# not corruption.
 _GRAM_N = 5
-_GRAM_GAP = 40
 
 # Immediate word-echo (period-2 stutter, a token repeated thrice): a
 # 5-gram check is blind to period 2 (odd/even gram positions never align), so
@@ -134,25 +138,33 @@ def garble_signature(new: str) -> list[str]:
         if len(key) < _MIN_DUP_LINE:
             continue
         j = seen_at.get(key)
-        if j is not None and i - j <= _DUP_LINE_GAP:
+        if j is not None and (i - j == 1
+                              or (i - j == 2 and not lines[j + 1].strip())):
             sigs.append(f"duplicated line {j + 1}->{i + 1}: {key[:70]!r}")
         seen_at[key] = i
 
     # 2. repeated 5-word gram within a small window (mid-line restarts);
-    #    blind to period-2 stutters, which 2b catches
+    #    blind to period-2 stutters, which 2b catches. The restart is a
+    #    same-line event — the stream re-emits text it just finished — so the
+    #    copies must be whitespace-joined on ONE line. The same 5 words a few
+    #    words apart across a line break is a loop/guard body repeating, not
+    #    corruption (0.23.0: this false positive broke repeated `if not
+    #    quiet:`-style blocks and forced models into contortions).
     words = _WORD_RE.findall(new)
+    spans = _word_spans(new)
     if len(words) >= _GRAM_N:
         grams: dict[tuple, int] = {}
         for i in range(len(words) - _GRAM_N + 1):
             g = tuple(words[i:i + _GRAM_N])
             j = grams.get(g)
-            if j is not None and i - j <= _GRAM_GAP:
+            if j is not None and i - j <= _GRAM_N \
+                    and _ECHO_JOIN_RE.fullmatch(
+                        new[spans[j + _GRAM_N - 1].end():spans[i].start()]):
                 sigs.append(f"repeated phrase: {' '.join(g)!r}")
             grams[g] = i
 
     # 2b. immediate word-echo: w[i:i+2] == w[i+2:i+4] (period-2 run)
     seen_bigram: set[str] = set()
-    spans = _word_spans(new)
     for i in range(len(words) - _STUTTER_ECHO_WORDS + 1):
         if words[i] == words[i + 2] and words[i + 1] == words[i + 3]:
             gap = new[spans[i + 1].end():spans[i + 2].start()]

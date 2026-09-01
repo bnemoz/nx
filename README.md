@@ -501,7 +501,7 @@ written twice, or a half-abandoned rewrite left behind an ellipsis. Every
 before it can land:
 
 - **unambiguous** duplicates (adjacent duplicated lines, period-2 word
-  stutters, adjacent repeated phrases, line-boundary splices where the shared
+  stutters, same-line repeated phrases, line-boundary splices where the shared
   words appear nowhere in the file) are repaired automatically — the diff you
   approve already shows the repaired text, and the tool result says what was
   fixed;
@@ -514,9 +514,13 @@ before it can land:
   targeted resubmit hint;
 - repetition that is ordinary code shape is not flagged at all: a period-2
   echo only counts when its two copies are whitespace-joined on one line (so
-  an attribute saved and then reassigned is untouched), and a suspected line
+  an attribute saved and then reassigned is untouched), a suspected line
   splice is ignored when trimming the shared words would leave an operator
-  behind (line 2 was continuing line 1's expression, not echoing it).
+  behind (line 2 was continuing line 1's expression, not echoing it), and
+  loop/guard bodies that legitimately repeat (`if not quiet:` + print twice,
+  two identical `for` loops) are spared — a repeated phrase counts only when
+  its copies sit on one line, and a duplicated line only when nothing but a
+  blank line separates the copies.
 
 The guard is passive — no extra tool schema, no tokens per turn — and
 `NX_GARBLE_GUARD=0` turns it off.
