@@ -29,7 +29,7 @@ from ._special_tokens import (
 )
 from ._stream_parse import StreamParser
 from ._text_fallback import (
-    parse_text_calls_with_errors, repair_json_candidates,
+    parse_text_calls_with_errors, repair_json_candidates, normalize_tool_args,
 )
 from ._compress import (
     _nudge_current_user_turn,
@@ -589,6 +589,18 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
                 break
             except json.JSONDecodeError as e:
                 err = e
+        if obj is not None:
+            # 0.29.5: servers occasionally double-encode the arguments object
+            # (a JSON string) or emit a list of {name, value} pairs — both die
+            # with "argument after ** must be a mapping" in run_tool. Fold
+            # them here; anything else stays a parse failure (nudge+breaker).
+            folded = normalize_tool_args(obj)
+            if isinstance(folded, dict):
+                obj = folded
+            elif obj is not None:
+                err = json.JSONDecodeError(
+                    f"arguments must be a JSON object, got {type(obj).__name__}", "", 0)
+                obj = None
         if obj is None:
             parse_error = (c, err)
             break

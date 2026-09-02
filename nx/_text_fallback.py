@@ -138,6 +138,39 @@ def _xml_unescape(raw: str) -> str:
     return raw
 
 
+def normalize_tool_args(obj: Any) -> Any:
+    """Fold degenerate `arguments` payloads into a plain mapping, or return the
+    input unchanged when it isn't recoverable.
+
+    Servers and small models occasionally wrap the whole arguments object one
+    more time than the schema wants: a JSON-encoded STRING (double-encoded),
+    or a LIST of name/value pair objects. Left as-is, run_tool dies with
+    "TypeError: argument after ** must be a mapping", which reads to the model
+    as a harness bug rather than its own fixable formatting. One extra
+    json.loads for strings, one fold for pair-lists; anything else (scalars,
+    nested junk) is NOT recoverable and is returned untouched so the caller
+    treats it as a parse failure. Never raises."""
+    if isinstance(obj, str):
+        try:
+            decoded = json.loads(obj)
+        except (json.JSONDecodeError, ValueError):
+            return obj  # not JSON: a parse failure for the caller to report
+        if isinstance(decoded, dict):
+            return decoded
+        return obj  # decoded to a scalar/list: still not a mapping
+    if isinstance(obj, list):
+        out: dict[str, Any] = {}
+        for item in obj:
+            if not isinstance(item, dict):
+                return obj  # heterogeneous list: not recoverable, don't guess
+            name = item.get("name") or item.get("key") or item.get("arg")
+            if not isinstance(name, str) or ("value" not in item and "val" not in item):
+                return obj
+            out[name] = item.get("value", item.get("val"))
+        return out  # [] folds to {} (an arguments-less call)
+    return obj
+
+
 def _parse_xml_arg_value(raw: str) -> Any:
     """A bare XML tag body has no type info -- try JSON first (covers numbers,
     booleans, and models that still emit a list/object for a single arg),
@@ -167,6 +200,11 @@ def _parse_xml_tool_call(body: str):
         if args_m:
             for arg_m in XML_ARG_RE.finditer(args_m.group(1)):
                 arguments[arg_m.group(1)] = _parse_xml_arg_value(arg_m.group(2))
+        # 0.29.5: a value that is itself a JSON-encoded mapping (double-encoded
+        # args) or a list of {name,value} pairs folds to a plain mapping.
+        folded = normalize_tool_args(arguments)
+        if isinstance(folded, dict):
+            arguments = folded
         return name, arguments
     bare_m = XML_BARE_NAME_RE.match(body)
     if not bare_m:
@@ -174,6 +212,9 @@ def _parse_xml_tool_call(body: str):
     name = bare_m.group(1).strip()
     for kv_m in XML_ARG_KV_RE.finditer(body):
         arguments[kv_m.group(1).strip()] = _parse_xml_arg_value(kv_m.group(2))
+    folded = normalize_tool_args(arguments)
+    if isinstance(folded, dict):
+        arguments = folded
     return name, arguments
 
 
@@ -266,7 +307,7 @@ def parse_text_calls_with_errors(
                 errors.append(f"invalid JSON ({parse_exc}): {raw_body[:120]!r}")
             else:
                 try:
-                    calls.append((obj["name"], obj.get("arguments", {})))
+                    calls.append((obj["name"], normalize_tool_args(obj.get("arguments", {}))))
                 except KeyError:
                     errors.append(f"missing \"name\" field: {raw_body[:120]!r}")
             pos = body_end

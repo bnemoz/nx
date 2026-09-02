@@ -419,29 +419,32 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             name, fn = resolved, table[resolved]
         else:
             return _unknown_tool_error(name)
-    # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
-    # exit vetoes the call. Checked before any cache/approval machinery so a
-    # policy can block even cached reads.
-    from ._hooks import pre_tool_hook
-    veto = pre_tool_hook(name, args)
-    if veto:
-        return f"ERROR: {veto}"
-    # Schema-level arg repair (NX_ARG_REPAIR, nx/_argrepair.py): coerce
-    # wrong-typed args and rename near-miss keys against the tool's declared
-    # schema BEFORE anything downstream (cache key, args preview, body)
-    # sees them; the note rides the result so the model learns what was
-    # normalized. Disabled / unknown tool / malformed args = pass-through.
+    # Schema-level arg repair (NX_ARG_REPAIR, nx/_argrepair.py) runs BEFORE
+    # the pre-hook (0.29.5 reorder, was after): a policy keyed on `path` must
+    # see the repaired `path`, not the model's `pth`. Coerces wrong-typed args
+    # and renames near-miss keys against the tool's declared schema BEFORE
+    # anything downstream (hook, cache key, args preview, body) sees them; the
+    # note rides the result so the model learns what was normalized. Disabled /
+    # unknown tool / malformed args = pass-through.
     from ._argrepair import repair_args
     args, arg_notes = repair_args(name, args)
     if name_note:
         arg_notes = [name_note] + arg_notes
     # Required-args pre-check (0.29.0): after repair (a renamed key counts as
-    # present), before cache/dispatch — the body would otherwise die with a
-    # TypeError the model can't act on. Never fabricates the missing value.
+    # present), before hook/cache/dispatch — the body would otherwise die with
+    # a TypeError the model can't act on. Never fabricates the missing value.
     from ._argrepair import check_required
     req_err = check_required(name, args)
     if req_err:
         return f"[arg repair: {', '.join(arg_notes)}] {req_err}" if arg_notes else req_err
+    # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
+    # exit vetoes the call. Checked before any cache/approval machinery so a
+    # policy can block even cached reads — and (since 0.29.5) AFTER arg repair,
+    # so the payload carries the same normalized args the body will receive.
+    from ._hooks import pre_tool_hook
+    veto = pre_tool_hook(name, args)
+    if veto:
+        return f"ERROR: {veto}"
     # Background-completion notice: on the first tool call of a turn, check
     # whether any tracked bg job finished since the model last looked, and
     # stage a one-time runtime note (flushed with the other pending notices).
