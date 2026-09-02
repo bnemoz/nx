@@ -79,6 +79,14 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "ff6ec7", "magenta": "d183ff", "gray": "9a86b3",
         "blue": "7aa2f7", "orange": "ff9e64",
     },
+    "amethyst": {   # monochrome purple — every hue is a violet/orchid/pink
+        # shade, so roles stay distinguishable by lightness and by position in
+        # the violet→pink band rather than by hue. "gray" stays a true neutral
+        # gray: reasoning text is the one thing that shouldn't go purple.
+        "cyan": "b581f8", "green": "dfccff", "yellow": "b433ff",
+        "red": "f65aa3", "magenta": "ec8fff", "gray": "9e9eaa",
+        "blue": "6655fc", "orange": "fa47cd",
+    },
 }
 DEFAULT_THEME = "mocha"
 _PALETTE_KEYS: tuple[str, ...] = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")

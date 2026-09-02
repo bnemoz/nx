@@ -160,7 +160,7 @@ sessions and exits without entering the REPL.
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (`NX_SOURCE_<NAME>_MODELS` pins a source's model-id dropdown list when its `GET /v1/models` is stale) |
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
-| `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` |
+| `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
 | `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
@@ -249,6 +249,12 @@ eight hues above, resolved against the *active* theme so it tracks
 `NX_ACCENT_COLOR=magenta` makes borders/prompt magenta in every theme, while
 `NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
 theme. Invalid values are ignored with a warning.
+
+`amethyst` is a monochrome purple theme: every hue is a violet/orchid/pink
+shade, so the ten roles stay separable by lightness and by position in the
+violet→pink band instead of by hue. `gray` (`REASONING_TEXT`) deliberately
+stays a neutral gray — reasoning text is the one thing that doesn't go purple.
+If you want it purple too, `NX_REASONING_TEXT_COLOR=magenta` does that.
 
 ### Tool-calling protocols
 

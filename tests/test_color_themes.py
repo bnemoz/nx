@@ -8,6 +8,8 @@ cyan, indistinguishable from STATUS_BAR; LABEL (source/session badges) was
 magenta, indistinguishable from TOOL_OUTPUT. blue/orange now back them.
 """
 
+import colorsys
+import itertools
 import os
 import sys
 import tempfile
@@ -139,3 +141,62 @@ def test_swatch_renders_all_eight_hues():
     s = _ansi.swatch("mocha")
     assert s.count(_ansi.RESET) == len(PALETTE)
     assert _ansi.swatch("latte") != s, "latte swatch should differ from mocha"
+
+
+# --- the monochrome `amethyst` theme ------------------------------------------
+# Its whole point is that every non-gray hue is a shade of purple, while the
+# roles stay *legible*: with hue pinned to one band, the only remaining
+# separations are lightness and position within the violet→pink band, so assert
+# both explicitly rather than trusting the hexes.
+
+def _hls(hexv: str) -> tuple[float, float, float]:
+    r, g, b = (int(hexv[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    return colorsys.rgb_to_hls(r, g, b)
+
+
+def _rgb_tuple(hexv: str) -> tuple[int, int, int]:
+    return tuple(int(hexv[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def test_amethyst_hues_are_all_purple():
+    assert "amethyst" in _ansi.THEMES
+    hexes = _ansi.THEMES["amethyst"]
+    for key in PALETTE:
+        if key == "gray":
+            continue  # reasoning text stays a neutral gray by design
+        h, _l, s = _hls(hexes[key])
+        assert s > 0.45, f"amethyst {key} is washed out (sat={s:.2f})"
+        deg = h * 360 % 360
+        # violet (≈246°) through pink/magenta (≈335°), wrapping nowhere else
+        assert 240 <= deg <= 340, f"amethyst {key} is not purple (hue={deg:.0f}°)"
+
+
+def test_amethyst_gray_stays_neutral():
+    # "everything purple EXCEPT the gray/white stuff": REASONING_TEXT must not
+    # pick up a purple cast — max/min channel spread is what reads as gray.
+    r, g, b = _rgb_tuple(_ansi.THEMES["amethyst"]["gray"])
+    assert max(r, g, b) - min(r, g, b) <= 24, "amethyst gray is tinted"
+
+
+def test_amethyst_roles_stay_distinguishable():
+    # With one hue family, roles separate by distance in RGB space. Every role
+    # pair must be far enough apart to read as different colors.
+    _apply_with_no_overrides("amethyst")
+    hues = {k: _rgb_tuple(_ansi.THEMES["amethyst"][k]) for k in PALETTE}
+    for a, b in itertools.combinations(PALETTE, 2):
+        d = sum((hues[a][i] - hues[b][i]) ** 2 for i in range(3)) ** 0.5
+        assert d >= 35, f"amethyst {a}/{b} too similar to tell apart ({d:.0f})"
+    _apply_with_no_overrides(_ansi.DEFAULT_THEME)
+
+
+def test_amethyst_switches_via_set_theme():
+    orig = m.C.name
+    try:
+        assert _ansi.set_theme("amethyst")
+        assert m.C.name == "amethyst"
+        assert m.C.ACCENT == _ansi._rgb(_ansi.THEMES["amethyst"]["blue"])
+        assert m.C.TOOL_OUTPUT == _ansi._rgb(_ansi.THEMES["amethyst"]["magenta"])
+        assert _ansi.set_theme("amethyst-not-a-theme") is False
+    finally:
+        _ansi.set_theme(orig)
+
