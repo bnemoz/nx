@@ -526,6 +526,39 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     print(_m._banner())
 
 
+def _cmd_toolcalls(user: str, state: _ReplState) -> None:
+    """0.29.9 /toolcalls: inspect or reset the malformed-args circuit breaker.
+
+    Bare: show each tool's failure streak and what's currently dropped.
+    `reset [tool]`: clear the streak(s) and re-arm — a mid-session escape
+    hatch for a flaky local endpoint whose truncations were transient, or for
+    handing the tool back to the model after fixing the cause. (The new
+    decay-on-success usually re-arms on its own; this forces it.)"""
+    import nx as _m
+    failures = getattr(st, "_MALFORMED_TOOL_FAILURES", {}) or {}
+    broken = getattr(st, "_MALFORMED_TOOL_BROKEN", set()) or set()
+    if user.strip().startswith("reset"):
+        target = user.strip()[len("reset"):].strip()
+        if target:
+            st._MALFORMED_TOOL_FAILURES.pop(target, None)
+            st._MALFORMED_TOOL_BROKEN.discard(target)
+            print(f"{DIM}  {target}: streak cleared, tool re-offered{RESET}")
+        else:
+            st._MALFORMED_TOOL_FAILURES = {}
+            st._MALFORMED_TOOL_BROKEN = set()
+            print(f"{DIM}  malformed-args streaks cleared, all tools re-offered{RESET}")
+        return
+    if failures or broken:
+        print(f"{DIM}  malformed-args streaks (breaker opens at "
+              f"{st.MALFORMED_TOOL_BREAKER_LIMIT}):{RESET}")
+        for tool in sorted(set(failures) | set(broken)):
+            mark = f"{C.WARNING} [broken — not offered]{RESET}" if tool in broken else ""
+            print(f"    {tool}: {failures.get(tool, 0)}{mark}")
+    else:
+        print(f"{DIM}  no malformed-args failures recorded "
+              f"(breaker opens at {st.MALFORMED_TOOL_BREAKER_LIMIT}){RESET}")
+
+
 def _cmd_init(user: str, state: _ReplState) -> None:
     import nx as _m
     root = st.PROJECT_ROOT or os.getcwd()

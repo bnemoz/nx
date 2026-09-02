@@ -207,7 +207,7 @@ sessions and exits without entering the REPL.
 | `NX_SKIP_STARTUP_PROBES` | skip every startup probe — `resolve_model()`'s `/v1/models` + `/props` round-trip, the capability/thinking fingerprint probes, the context-window metadata probes and the over-max_tokens overrun probe (default off; `1` disables). Startup becomes instant but model autodetection is off: set the model explicitly (`NX_MODEL` / `NX_SOURCE_<NAME>_MODEL`); tool-calling falls back to reactive text-protocol parsing until a turn reveals better. Also what keeps `import nx` network-free in test runs |
 | `NX_BACKEND` | `vllm` to disable llama.cpp-only recovery samplers (min_p / repeat_penalty / DRY) that vLLM rejects |
 | `NX_NATIVE_TOOLS` | opt into server-side native `tool_calls` (default off — text-protocol fallback is parsed and repaired client-side) |
-| `NX_MALFORMED_TOOL_BREAKER` | malformed-args circuit breaker: after N malformed/truncated `tool_calls` argument payloads naming the SAME tool (default 2), that tool is dropped from the tool list for the rest of the session and the retry nudge steers the model to `edit_file`/`write_file` instead — an endpoint that keeps truncating one tool's args (observed: a local server dying right before `multi_edit`'s `[` array literal) stops being offered it. `0` disables; `/reset` re-arms |
+| `NX_MALFORMED_TOOL_BREAKER` | malformed-args circuit breaker: after N malformed/truncated `tool_calls` argument payloads naming the SAME tool (default 3), that tool is dropped from the tool list and the retry nudge steers the model to a sibling tool instead — an endpoint that keeps truncating one tool's args (observed: a local server dying right before `multi_edit`'s `[` array literal) stops being offered it. Since 0.29.9 the breaker DECAYS: one clean execution of the tool (its args parsed and the body ran without error) clears the streak and re-arms it, so two flaky truncations no longer cost the tool for the whole session; `0` disables; `/toolcalls` shows the streaks, `/toolcalls reset [tool]` clears them, `/reset` re-arms everything |
 | `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
 | `NX_SEARCH_EXCLUDE_DIRS` | space-separated dirs the `grep` fallback skips (mirrors ripgrep's `.gitignore` handling; default includes `.venv node_modules __pycache__ build dist`) |
 | `NX_<ROLE>_COLOR` | override one of ten semantic roles (see below) |
@@ -310,6 +310,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/theme [name]` | list color themes, or switch to one |
 | `/reasoning on\|off\|last` | toggle or show the reasoning trace |
 | `/tooloutput on\|off\|last` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
+| `/toolcalls [reset [tool]]` | show the malformed-args circuit-breaker streaks per tool (marked `[broken]` when dropped from the tool list); `/toolcalls reset` clears every streak and re-offers every tool, `/toolcalls reset <tool>` re-arms just that one |
 | `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search) |
 | `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |

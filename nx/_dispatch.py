@@ -359,6 +359,17 @@ def _unknown_tool_error(name: str) -> str:
             "configuration). Use one of: " + ", ".join(sorted(known)))
 
 
+def _breaker_decay(name: str) -> None:
+    """0.29.9: one clean execution of `name` clears its malformed-args streak
+    (and re-arms the tool if the breaker had dropped it). Two consecutive
+    truncations on a flaky local server were routine; losing a tool for the
+    whole session on that evidence was too heavy. A deliberately BROKEN tool
+    (the model can't reach it anyway) only decays when the user re-offers it
+    via /toolcalls reset — direct run_tool() calls (tests, hooks) count."""
+    if st._MALFORMED_TOOL_FAILURES.pop(name, None) is not None:
+        st._MALFORMED_TOOL_BROKEN.discard(name)
+
+
 def run_tool(name: str, args: dict[str, Any]) -> str:
     # Plan-mode write gate: refuse mutating tools while a plan is active, with
     # the gate message the model needs to act on (plan_edit, or ask for
@@ -505,6 +516,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             # above, so a vetoed call can never serve from the cache.
             from ._hooks import post_tool_hook
             post_tool_hook(name, args, cached.result, cached=True)
+            # Breaker decay (0.29.9): a cache hit is still a successful
+            # dispatch of exactly the tool the endpoint kept truncating — the
+            # endpoint's failure was in the ARGS stream, not the tool itself.
+            _breaker_decay(name)
             return cached.result
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.
@@ -563,6 +578,12 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         if not quiet:
             st._ACTIVE_SPINNER = None
             spinner.stop()
+    # Breaker decay (0.29.9): the tool executed cleanly — one success clears
+    # its malformed-args streak (and re-arms a broken tool). Kept after the
+    # error fold so an ERROR result does NOT count as the clean dispatch that
+    # earns the re-arm (the endpoint may still be truncating).
+    if isinstance(result, str) and not result.startswith(("ERROR", "DENIED")):
+        _breaker_decay(name)
     # Arg-repair note rides the result, the way edit_file's whitespace-
     # tolerant note does: the model sees what was normalized, never silently.
     if arg_notes and isinstance(result, str):

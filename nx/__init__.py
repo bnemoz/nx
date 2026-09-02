@@ -486,7 +486,7 @@ st.MALFORMED_STREAM_RETRY_LIMIT = _env_int("NX_MALFORMED_STREAM_RETRIES", 2)
 # _active_tools() for the rest of the session — an endpoint that reliably
 # truncates one tool's JSON args stops being offered it (see nx/_turn.py).
 # 0 disables the breaker.
-st.MALFORMED_TOOL_BREAKER_LIMIT = _env_int("NX_MALFORMED_TOOL_BREAKER", 2)
+st.MALFORMED_TOOL_BREAKER_LIMIT = _env_int("NX_MALFORMED_TOOL_BREAKER", 3)
 st.FORCED_FINAL_MAX_TOKENS = _env_int("NX_FORCED_FINAL_MAX_TOKENS", 2048)
 # Reasoning token budget: cap on the model's thinking phase, sent as
 # {"reasoning": {"max_tokens": N}} in the request body. 0 = off (the default —

@@ -541,6 +541,20 @@ def _prefetch_cacheable_tools(ordered: list[dict], parsed_args: list[dict]) -> N
         list(ex.map(_run, jobs))
 
 
+# Where the model should go when THIS tool's args keep getting truncated and
+# the breaker drops it: the nearest sibling that can do the same job. A tool
+# not listed here degrades the nudge to "use one of: <remaining tools>"
+# (computed live, so it never names a tool the breaker itself dropped).
+FALLBACK_FOR = {
+    "multi_edit": "edit_file", "apply_patch": "edit_file", "sed_edit": "edit_file",
+    "read_image": "read_file", "delete_file": "edit_file",
+    "plan_edit": "edit_file", "wait_background": "read_file",
+    "memory_write": "memory_search", "memory_delete": "memory_search",
+    "search_files": "list_dir", "list_dir": "search_files",
+    "todo_write": "write_file",
+}
+
+
 def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
     """Retry nudge for a malformed/truncated native tool-call args turn.
 
@@ -549,11 +563,21 @@ def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
     the model must switch tactics instead of re-emitting the doomed call."""
     head = "Your previous native tool call had malformed or truncated JSON arguments"
     if broken_now:
+        # 0.29.9: the suggestion derives from the dropped tool ("use plain
+        # edit_file calls" is nonsense when edit_file is the dropped one) —
+        # a known sibling when one exists, otherwise whatever's still offered.
+        sibling = FALLBACK_FOR.get(tool_name)
+        if sibling:
+            alt = f"use {sibling} for this step instead"
+        else:
+            import nx as _m
+            remaining = [t["function"]["name"] for t in _m._active_tools()]
+            alt = ("use one of: " + ", ".join(remaining)) if remaining else \
+                "accomplish the step without tool calls this turn"
         return (head + f" again. {tool_name} has now been removed from the tool "
                 "list for the rest of this session because this endpoint keeps "
                 "truncating its arguments. Accomplish the same step a different "
-                "way: plain edit_file calls (one per edit) instead of "
-                "multi_edit, or write_file, and emit only that one complete "
+                f"way: {alt}, and emit only that one complete "
                 "tool call with no surrounding prose.")
     return (head + " again. Repeating the identical call has failed twice now, "
             "so the tool call itself is the problem — pick a different way to "
