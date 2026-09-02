@@ -161,6 +161,14 @@ MALFORMED_TOOL_BREAKER_LIMIT: int = 2
 _MALFORMED_TOOL_FAILURES: dict[str, int] = {}
 _MALFORMED_TOOL_BROKEN: set[str] = set()
 
+# --- 0.30.0 recovery tally -----------------------------------------------------
+# Self-healing is invisible in aggregate: nothing recorded THAT a repair
+# happened, so NX_ARG_REPAIR / NX_MALFORMED_TOOL_BREAKER were untunable in
+# practice. Two counters, incremented by the repair sites, shown as one footer
+# field ("2 args repaired · 1 retry"), reset per turn by model_turn():
+_TALLY_ARG_REPAIRS: int = 0   # args/name repairs applied this turn
+_TALLY_RETRIES: int = 0       # corrective nudges / recovery cuts this turn
+
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time
 # by the module that owns each setting (_turn.py, _compress.py) — this is

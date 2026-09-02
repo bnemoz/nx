@@ -528,6 +528,11 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
 
 def _cmd_toolcalls(user: str, state: _ReplState) -> None:
     """0.29.9 /toolcalls: inspect or reset the malformed-args circuit breaker.
+    0.30.0: /toolcalls text|native|auto — force the tool-calling mode for this
+    session, giving the escalation ladder a rung PAST the breaker: an endpoint
+    whose NATIVE args keep truncating gets the grammar-constrained text
+    protocol back without switching sources ('text'); 'native' re-arms the
+    native flag; 'auto' returns to the reactive default.
 
     Bare: show each tool's failure streak and what's currently dropped.
     `reset [tool]`: clear the streak(s) and re-arm — a mid-session escape
@@ -535,10 +540,21 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
     handing the tool back to the model after fixing the cause. (The new
     decay-on-success usually re-arms on its own; this forces it.)"""
     import nx as _m
+    from ._compress import set_toolcalls_mode, toolcalls_mode
+    arg = user.strip()
+    if arg in ("text", "native", "auto"):
+        if set_toolcalls_mode(arg):
+            print(f"{DIM}  tool-calling mode: {arg} "
+                  f"(grammar {'attached' if arg == 'text' else 'per source capability'}){RESET}")
+        return
+    if arg and arg.split()[0] not in ("reset",):
+        print(f"{C.WARNING}  want /toolcalls, /toolcalls reset [tool], "
+              f"or /toolcalls text|native|auto{RESET}")
+        return
     failures = getattr(st, "_MALFORMED_TOOL_FAILURES", {}) or {}
     broken = getattr(st, "_MALFORMED_TOOL_BROKEN", set()) or set()
-    if user.strip().startswith("reset"):
-        target = user.strip()[len("reset"):].strip()
+    if arg.startswith("reset"):
+        target = arg[len("reset"):].strip()
         if target:
             st._MALFORMED_TOOL_FAILURES.pop(target, None)
             st._MALFORMED_TOOL_BROKEN.discard(target)
@@ -548,6 +564,7 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
             st._MALFORMED_TOOL_BROKEN = set()
             print(f"{DIM}  malformed-args streaks cleared, all tools re-offered{RESET}")
         return
+    print(f"{DIM}  tool-calling mode: {toolcalls_mode()}{RESET}")
     if failures or broken:
         print(f"{DIM}  malformed-args streaks (breaker opens at "
               f"{st.MALFORMED_TOOL_BREAKER_LIMIT}):{RESET}")

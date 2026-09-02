@@ -165,4 +165,4 @@ def test_toolcalls_registered_everywhere():
     from nx._chatbox import SLASH_COMMANDS, SLASH_ARG_OPTIONS
     assert _REPL_COMMANDS.get("/toolcalls") is not None
     assert any(c[0] == "/toolcalls" for c in SLASH_COMMANDS)
-    assert SLASH_ARG_OPTIONS.get("/toolcalls") == ["reset"]
+    assert SLASH_ARG_OPTIONS.get("/toolcalls") == ["reset", "text", "native", "auto"]

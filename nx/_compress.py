@@ -152,26 +152,65 @@ NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not
 # known to emit well-formed arguments.
 NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0")
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
+# 0.30.0: /toolcalls text|native|auto — the escalation ladder's rung PAST the
+# breaker. Once native tool-calling is confirmed, _grammar_extra_body() stops
+# attaching (above), so an endpoint whose NATIVE args keep truncating has no
+# mid-session route back to grammar-constrained text protocol; this override
+# ("text") un-confirms the flag for the session so the text-protocol ladder
+# (grammar + client-side repair) takes over again. "auto" clears the override
+# (the reactive default); "native" re-arms the flag so native is used
+# immediately without waiting for a confirming turn. None = no override.
+_TOOLCALLS_MODE_OVERRIDE: str | None = None
+
+
+def toolcalls_mode() -> str:
+    """The effective tool-calling mode: the /toolcalls override when set,
+    else the reactive default ('auto')."""
+    return _TOOLCALLS_MODE_OVERRIDE or "auto"
+
+
+def set_toolcalls_mode(mode: str | None) -> bool:
+    """Apply a /toolcalls override; returns False for an unknown mode.
+    None (or 'auto') clears the override and re-derives the flag reactively."""
+    global _TOOLCALLS_MODE_OVERRIDE
+    mode = (mode or "auto").strip().lower()
+    if mode not in ("auto", "text", "native"):
+        return False
+    _TOOLCALLS_MODE_OVERRIDE = None if mode == "auto" else mode
+    if mode == "text":
+        # Un-confirm native so _grammar_extra_body() re-attaches and
+        # tool_choice goes back to "none" (the text-protocol posture).
+        st._NATIVE_TOOL_CALLS_CONFIRMED = False
+    elif mode == "native":
+        st._NATIVE_TOOL_CALLS_CONFIRMED = True
+    return True
 
 
 def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    if not tools or st._NATIVE_TOOL_CALLS_CONFIRMED:
+    if not tools:
         return None
-    # The startup capability probe (nx/_capability.py) takes precedence over
-    # the NX_GRAMMAR opt-in once it lands: CAPABILITY_NATIVE means llama.cpp
-    # is already constraining tool_calls itself (skip, same as the reactive
-    # _NATIVE_TOOL_CALLS_CONFIRMED check above); CAPABILITY_GRAMMAR means the
-    # grammar demonstrably helps on this source, so attach it even without
-    # NX_GRAMMAR set; CAPABILITY_TEXT means it didn't help in the probe, so
-    # skip it (plain text-protocol parsing only). While the probe is still
-    # pending (None), fall back to the old NX_GRAMMAR env-var gate.
-    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
-    if capability is not None:
-        from ._capability import CAPABILITY_GRAMMAR
-        if capability != CAPABILITY_GRAMMAR:
+    # /toolcalls text override (0.30.0): the user forced the text protocol for
+    # this session — the grammar attaches even past the two vetoes below
+    # (native-confirmed, or a CAPABILITY_NATIVE probe verdict), because that
+    # rung exists exactly for endpoints whose NATIVE args keep truncating.
+    if toolcalls_mode() != "text":
+        if st._NATIVE_TOOL_CALLS_CONFIRMED:
             return None
-    elif not NX_GRAMMAR:
-        return None
+        # The startup capability probe (nx/_capability.py) takes precedence over
+        # the NX_GRAMMAR opt-in once it lands: CAPABILITY_NATIVE means llama.cpp
+        # is already constraining tool_calls itself (skip, same as the reactive
+        # _NATIVE_TOOL_CALLS_CONFIRMED check above); CAPABILITY_GRAMMAR means the
+        # grammar demonstrably helps on this source, so attach it even without
+        # NX_GRAMMAR set; CAPABILITY_TEXT means it didn't help in the probe, so
+        # skip it (plain text-protocol parsing only). While the probe is still
+        # pending (None), fall back to the old NX_GRAMMAR env-var gate.
+        capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+        if capability is not None:
+            from ._capability import CAPABILITY_GRAMMAR
+            if capability != CAPABILITY_GRAMMAR:
+                return None
+        elif not NX_GRAMMAR:
+            return None
     key = tuple(t.get("function", {}).get("name") for t in tools)
     if key not in _grammar_cache:
         grammar, trigger = build_tool_call_grammar(tools)
@@ -322,7 +361,8 @@ def open_stream(
         # else keeps the old "none" default.
         capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
         from ._capability import CAPABILITY_NATIVE
-        if NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED or capability == CAPABILITY_NATIVE:
+        if (NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED
+                or (capability == CAPABILITY_NATIVE and toolcalls_mode() != "text")):
             tool_choice = "auto"
         else:
             tool_choice = "none"

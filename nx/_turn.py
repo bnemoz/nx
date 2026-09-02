@@ -280,6 +280,17 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     """
     if quiet:
         return
+    # 0.30.0: one footer field for the self-healing work this turn — args
+    # repairs applied + corrective retries — so the knobs are tunable in
+    # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
+    tally = ""
+    if st._TALLY_ARG_REPAIRS or st._TALLY_RETRIES:
+        bits = []
+        if st._TALLY_ARG_REPAIRS:
+            bits.append(f"{st._TALLY_ARG_REPAIRS} arg{'s' if st._TALLY_ARG_REPAIRS != 1 else ''} repaired")
+        if st._TALLY_RETRIES:
+            bits.append(f"{st._TALLY_RETRIES} retr{'ies' if st._TALLY_RETRIES != 1 else 'y'}")
+        tally = " · " + " · ".join(bits)
     if timings and timings.get("predicted_n"):
         prompt_n = timings.get("prompt_n", 0)
         gen_n = timings["predicted_n"]
@@ -296,7 +307,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0
         prompt_n = usage.prompt_tokens or 0
@@ -313,7 +324,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if t_first:
             parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif streamed_chars > 0:
         gen_n = max(1, streamed_chars // 4)
         window, trusted = (parser.gen_window(elapsed) if parser is not None
@@ -321,9 +332,9 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
                  _tps_field(_window_tps(gen_n, window), trusted),
                  f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall"]
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}")
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif text or tcs:
-        print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}")
+        print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}" + tally)
 
 
 def _handle_forced_final_tool_call(messages: list[Message], tcs: dict, text: str,
@@ -555,6 +566,17 @@ FALLBACK_FOR = {
 }
 
 
+def _repair_log(kind: str, what: str) -> None:
+    """0.30.0 observability: every applied repair and every repair-rejection
+    gets one JSONL record in the session log (grep-able when tuning
+    NX_ARG_REPAIR / NX_MALFORMED_TOOL_BREAKER). Best-effort — never raises."""
+    try:
+        from ._logging import _log_event
+        _log_event("repair", {"kind": kind, "what": what})
+    except Exception:
+        pass
+
+
 def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
     """Retry nudge for a malformed/truncated native tool-call args turn.
 
@@ -586,6 +608,57 @@ def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
             "complete tool call with no surrounding prose.")
 
 
+def _salvage_truncated_args(raw: str) -> dict | None:
+    """0.30.0, CARVE-OUT — read-only tools only, and only when the stricter
+    required-args check passes at dispatch. WHY NOT EVERYWHERE: closure/bracket
+    repair INVENTS content. On write_file/edit_file/multi_edit/apply_patch the
+    truncated tail is usually the payload itself (cutting a "content" string
+    mid-line and closing the braces would WRITE a silently-truncated file —
+    exactly the degenerate-output-into-history failure this stack exists to
+    prevent), so those keep the discard-and-nudge-smaller path unconditionally.
+    On the cacheable read tools the args are small and structural (a path, an
+    offset) and a cut mid-path is at worst a not-found; the completed-JSON
+    guess can only ever dispatch when the required args survived intact, which
+    _argrepair.check_required() enforces in run_tool(). Never raises."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    s = raw
+    if s.count('"') % 2 == 1:
+        # Odd quote count: the cut landed inside a string literal. Trim to the
+        # last complete "key": pair boundary by dropping the trailing fragment
+        # is not possible honestly — refuse instead of inventing a value.
+        return None
+    stack = []
+    in_str = False
+    esc = False
+    for ch in s:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\" and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if stack:
+                stack.pop()
+    if in_str or not stack:
+        return None
+    closer = {"[": "]", "{": "}"}
+    try:
+        candidate = s + "".join(closer[c] for c in reversed(stack))
+        obj = json.loads(candidate)
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, finish_reasons: Any,
                               malformed_stream_cut_count: int) -> str:
     """Execute the native tool-calling path for one streamed turn.
@@ -597,7 +670,12 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
     tool, and appends matching tool results. If the user presses Esc at an
     approval, the remaining calls are marked CANCELLED/SKIPPED so the message
     history stays valid. Returns a TURN_* status for model_turn.
-    """
+
+    0.30.0 carve-out: a truncated args payload for a CACHEABLE READ tool gets
+    ONE bracket-closure salvage attempt before the nudge — see
+    _salvage_truncated_args for why this is deliberately NOT offered to the
+    write tools (closure repair would invent file content)."""
+    from ._dispatch import _CACHEABLE_READ_TOOLS
     st._NATIVE_TOOL_CALLS_CONFIRMED = True  # server is actually using native tool_calls this session
     quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
@@ -613,6 +691,15 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
                 break
             except json.JSONDecodeError as e:
                 err = e
+        if obj is None and c.get("name") in _CACHEABLE_READ_TOOLS:
+            # 0.30.0 carve-out: one bracket-closure salvage for the read tools
+            # (see _salvage_truncated_args for why writes never get this).
+            salvaged = _salvage_truncated_args(raw)
+            if salvaged is not None:
+                obj = salvaged
+                _repair_log("salvaged_truncated_args",
+                            f"{c.get('name')}: closure repair accepted "
+                            f"({len(raw)} -> {len(json.dumps(salvaged))} chars)")
         if obj is not None:
             # 0.29.5: servers occasionally double-encode the arguments object
             # (a JSON string) or emit a list of {name, value} pairs — both die
@@ -642,6 +729,10 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
                 st._MALFORMED_TOOL_BROKEN.add(tool_name)
         broken_now = tool_name in st._MALFORMED_TOOL_BROKEN
+        st._TALLY_RETRIES += 1
+        _repair_log("malformed_args", f"{tool_name}: {detail}")
+        if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name and count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
+            _repair_log("breaker_open", f"{tool_name}: {count} malformed attempts")
         retry_limit = _subagent_stream_cut_limit(max(0, st.MALFORMED_STREAM_RETRY_LIMIT))
         if malformed_stream_cut_count >= retry_limit:
             if not quiet:
@@ -745,6 +836,8 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             if not quiet:
                 print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {errors[0]}; "
                       f"nudging correction (attempt {malformed_call_count + 1}/1){RESET}")
+            st._TALLY_RETRIES += 1
+            _repair_log("malformed_text_call", errors[0])
             messages.append({"role": "assistant", "content": text})
             messages.append({"role": "user", "content": (
                 "[Runtime note: Your last tool call did not parse — "
@@ -764,7 +857,8 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
                 print(f"{C.ERROR}  ✗ MALFORMED TOOL CALL — correction retry also failed; "
                       f"discarded invalid tool-call output and waiting for user input{RESET}")
                 print(f"{DIM}    {errors[0]}{RESET}")
-            # Do not retain `text`: it may be a truncated <tool_call> fragment
+            _repair_log("repair_rejected", errors[0])
+            # Do not retain `text`: it may be a truncated tool_call fragment
             # and would be replayed as assistant context on every later turn.
             messages.append({"role": "assistant", "content":
                 "[Runtime: Discarded an invalid tool call after a failed correction retry. "
@@ -1018,6 +1112,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     t0 = time.time()
     st._LAST_API_ERROR = None  # cleared before every open; set by open_stream() on a terminal failure
     st._LAST_CONTEXT_OVERRUN = None  # ditto, for the context-length-400 branch of open_stream()
+    # 0.30.0: the tally counts ONE turn's self-healing work (the footer prints
+    # it after this stream settles); a multi-recovery turn keeps accumulating
+    # across its retry cycles until the next model_turn() starts.
+    st._TALLY_ARG_REPAIRS = 0
+    st._TALLY_RETRIES = 0
     quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"

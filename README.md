@@ -310,7 +310,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/theme [name]` | list color themes, or switch to one |
 | `/reasoning on\|off\|last` | toggle or show the reasoning trace |
 | `/tooloutput on\|off\|last` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
-| `/toolcalls [reset [tool]]` | show the malformed-args circuit-breaker streaks per tool (marked `[broken]` when dropped from the tool list); `/toolcalls reset` clears every streak and re-offers every tool, `/toolcalls reset <tool>` re-arms just that one |
+| `/toolcalls [text\|native\|auto] [reset [tool]]` | bare: show the session's tool-calling mode and the malformed-args breaker streaks per tool (marked `[broken]` when dropped from the tool list); `reset` clears every streak and re-offers every tool, `reset <tool>` re-arms just that one; `text` forces the grammar-constrained text protocol for this session (the rung past the breaker — an endpoint whose NATIVE args keep truncating gets the client-repairable protocol back without switching sources), `native` re-arms the native flag, `auto` returns to the reactive default |
 | `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search) |
 | `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |

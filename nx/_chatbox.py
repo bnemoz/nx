@@ -58,7 +58,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/reasoning", "on|off|last — toggle or show reasoning trace"),
     ("/tooloutput", "on|off|last — toggle or show tool-call result"),
     ("/tools", "legacy alias for /tooloutput"),
-    ("/toolcalls", "malformed-args circuit breaker: show streaks, or /toolcalls reset [tool]"),
+    ("/toolcalls", "tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show"),
     ("/undo", "revert the last write_file/edit_file/multi_edit"),
     ("/reset", "clear conversation, start a fresh session"),
     ("/clear", "alias for /reset"),
@@ -78,7 +78,7 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/reasoning": ["on", "off", "last"],
     "/tooloutput": ["on", "off", "last"],
     "/tools": ["on", "off", "last"],  # legacy alias arg dropdown
-    "/toolcalls": ["reset"],
+    "/toolcalls": ["reset", "text", "native", "auto"],
     "/approval": ["all", "low", "medium", "high", "yolo"],
     "/autocompress": ["off", "on"],
     "/budget": ["off"],

@@ -55,6 +55,12 @@ _INT_RE = re.compile(r"[+-]?\d+")
 # rejects a key that sits between two real properties.
 _RENAME_CUTOFF = 0.8
 
+# _schemas() cache: (identity of the TOOLS list object, parsed map). Whole-list
+# monkeypatching (the dynamic seam the tests rely on) gets a new object and
+# invalidates; the import-time TOOLS.append calls happen before any read.
+# Kept in module state so the conftest rewind drops it between tests.
+_SCHEMAS_CACHE: tuple[Any, dict] | None = None
+
 # Tool-NAME aliases: spellings from other tool ecosystems / a model's own
 # shorthand that similarity can never reach ("bash" vs "run_bash" is 0.67).
 # Only applied when the alias is not itself a real tool name (checked at use
@@ -242,12 +248,21 @@ def _schemas() -> dict[str, tuple[dict, list]]:
     module (read at call time like the rest of the dynamic seams). TOOLS
     carries the 17 always-on schemas plus the appended conditional ones;
     final_answer lives in its own module constant. Malformed entries are
-    skipped, not fatal."""
+    skipped, not fatal.
+
+    0.30.0: cached on the IDENTITY of the live TOOLS list object — monkey-
+    patching a whole new list (the dynamic seam tests rely on) invalidates,
+    while repeated calls in a turn (repair_args + check_required per tool
+    call) stop re-walking every schema."""
+    global _SCHEMAS_CACHE
     import nx as _m
-    tools = list(getattr(_m, "TOOLS", ()) or ())
+    tools_obj = getattr(_m, "TOOLS", None)
+    tools = list(tools_obj or ())
     fa = getattr(_m, "FINAL_ANSWER_TOOL", None)
     if fa is not None:
         tools = tools + [fa]
+    if _SCHEMAS_CACHE is not None and _SCHEMAS_CACHE[0] is tools_obj:
+        return _SCHEMAS_CACHE[1]
     out: dict[str, tuple[dict, list]] = {}
     for t in tools:
         try:
@@ -258,6 +273,7 @@ def _schemas() -> dict[str, tuple[dict, list]]:
             continue
         if isinstance(props, dict) and props:
             out[fn["name"]] = (props, required if isinstance(required, list) else [])
+    _SCHEMAS_CACHE = (tools_obj, out)
     return out
 
 
@@ -353,4 +369,10 @@ def repair_args(name: str, args: Any) -> tuple[Any, list[str]]:
         return args, []
     notes: list[str] = []
     repaired = _repair_mapping(entry[0], dict(args), "", notes, tool_name=name)
+    if notes:
+        try:
+            from . import _state as _st
+            _st._TALLY_ARG_REPAIRS += len(notes)
+        except Exception:  # tally is observability, never a failure path
+            pass
     return (repaired, notes) if notes else (args, [])
