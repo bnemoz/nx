@@ -343,6 +343,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     veto = pre_tool_hook(name, args)
     if veto:
         return f"ERROR: {veto}"
+    # Schema-level arg repair (NX_ARG_REPAIR, nx/_argrepair.py): coerce
+    # wrong-typed args and rename near-miss keys against the tool's declared
+    # schema BEFORE anything downstream (cache key, args preview, body)
+    # sees them; the note rides the result so the model learns what was
+    # normalized. Disabled / unknown tool / malformed args = pass-through.
+    from ._argrepair import repair_args
+    args, arg_notes = repair_args(name, args)
     # Background-completion notice: on the first tool call of a turn, check
     # whether any tracked bg job finished since the model last looked, and
     # stage a one-time runtime note (flushed with the other pending notices).
@@ -461,6 +468,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         if not quiet:
             st._ACTIVE_SPINNER = None
             spinner.stop()
+    # Arg-repair note rides the result, the way edit_file's whitespace-
+    # tolerant note does: the model sees what was normalized, never silently.
+    if arg_notes and isinstance(result, str):
+        result = f"[arg repair: {', '.join(arg_notes)}] {result}"
     # Post-edit structural check: for a successful .py write/edit, parse the
     # new contents in-process (~1ms) and append the verdict to the result, so
     # a broken edit is surfaced on the turn that caused it. Also records the
