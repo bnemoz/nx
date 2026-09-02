@@ -231,6 +231,7 @@ def test_concurrent_spawn_agents_overlap(nx_fresh, monkeypatch, tmp_path):
     restricted dispatch table (thread-local), and results map back in order."""
     from nx import _dispatch
     from nx._turn import _should_parallelize, _run_read_only_parallel
+    nx_fresh.NX_SUBAGENTS = 1  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
     lock = threading.Lock()
     state = {"cur": 0, "max": 0}
     barrier = threading.Barrier(2, timeout=10)
@@ -271,6 +272,7 @@ def test_native_path_fans_out_two_spawns(nx_fresh, monkeypatch):
     """_handle_native_tool_calls routes a 2-spawn turn through the parallel
     executor: one assistant tool_calls turn, two ordered tool results."""
     from nx._turn import _handle_native_tool_calls
+    nx_fresh.NX_SUBAGENTS = 1  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
     tcs = {0: {"id": "a1", "name": "spawn_agent", "args": '{"instruction": "find A"}'},
            1: {"id": "a2", "name": "spawn_agent", "args": '{"instruction": "find B"}'}}
 

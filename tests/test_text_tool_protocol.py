@@ -107,6 +107,48 @@ def test_malformed_tool_call_triggers_one_corrective_retry():
     assert "did not parse" in messages[-1]["content"]
 
 
+def test_correction_nudge_teaches_live_schema_names_and_args():
+    """0.28.1: the corrective nudge hardcodes example tool calls, so a schema
+    rename (run_bash's `cmd` -> `command`) or tool rename would silently teach
+    the model a call that dies with a TypeError. Parse every example in the
+    nudge and demand each name/arg pair exists in the live TOOLS schemas."""
+    import re as _re
+
+    messages = [{"role": "system", "content": "sys"}]
+    text = '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'
+
+    status = m._handle_text_tool_calls(messages, text, malformed_call_count=0)
+
+    assert status == m.TURN_MALFORMED_CALL
+    nudge = messages[-1]["content"]
+    assert "did not parse" in nudge  # pre-existing wording (pinned above too)
+    # run_bash's declared key is `command`; the nudge must not teach `cmd`
+    assert '"command"' in nudge
+    assert '"cmd"' not in nudge
+    # the primary example must be the dialect SYSTEM itself teaches
+    assert "<name>read_file</name>" in nudge
+    assert "<arguments>" in nudge
+
+    schemas = {}
+    for t in m.TOOLS:
+        fn = t["function"]
+        schemas[fn["name"]] = set(fn["parameters"]["properties"])
+    # every tool-call example in the nudge (legacy JSON + XML dialect) parses
+    calls, errors = m.parse_text_calls_with_errors(nudge)
+    assert not errors
+    assert len(calls) >= 3
+    for name, args in calls:
+        assert name in schemas, f"nudge teaches a tool TOOLS doesn't declare: {name}"
+        unknown = set(args) - schemas[name]
+        assert not unknown, f"nudge teaches non-schema args for {name}: {unknown}"
+    # the XML-dialect example's argument tags must exist in read_file's schema
+    xml_args = _re.findall(r"<arguments>(.*?)</arguments>", nudge, _re.DOTALL)
+    assert xml_args
+    for tag in xml_args:
+        unknown = set(_re.findall(r"<(\w+)>", tag)) - schemas["read_file"]
+        assert not unknown, f"XML example teaches non-schema args: {unknown}"
+
+
 def test_malformed_tool_call_gives_up_cleanly_after_one_retry(capsys):
     messages = [{"role": "system", "content": "sys"}]
     text = '<tool_call>{"name": "read_file", "arguments": {bad json}}</tool_call>'

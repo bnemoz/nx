@@ -317,14 +317,87 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
             del st._TOOL_RESULT_CACHE[key]
 
 
+def _unknown_tool_error(name: str) -> str:
+    """Error text for a tool name that resolved to nothing in the dispatch table.
+
+    Three distinct situations hide behind a failed lookup, and a flat "unknown
+    tool" answers only the first: (a) the name really is made up (suggest the
+    closest real names); (b) the tool exists but is withheld this session by a
+    gate — the model never saw its schema this turn, so a bare "unknown" reads
+    as "this capability does not exist at all" and the model abandons the task
+    (small models do this; seen live with wait_background/read_image/spawn_agent);
+    (c) the malformed-args circuit breaker dropped it — the model must know the
+    tool died for cause, and that the failure is about ITS formatting, not the
+    tool's existence. Never raises; unknown names fall to the generic wording."""
+    import nx as _m
+    known = {t["function"]["name"] for t in _m.TOOLS}
+    known.update(t["function"]["name"] for t in getattr(_m, "_EXTRA_TOOL_SCHEMAS", ()) or ())
+    if name not in known:
+        import difflib
+        suggestions = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.7)
+        if suggestions:
+            return (f"ERROR: unknown tool {name} — did you mean {', '.join(suggestions)}? "
+                    f"Available tools: {', '.join(sorted(known))}")
+        return f"ERROR: unknown tool {name} — Available tools: {', '.join(sorted(known))}"
+    # Withheld this session: name the gate and the alternative, so the model
+    # doesn't conclude the capability doesn't exist.
+    if name == "wait_background":
+        return (f"ERROR: {name} is not available in this session (no command has backgrounded "
+                "yet — nothing to wait on). run_bash returns a '[background] PID' line when a "
+                "command needs waiting on; read_file that log path in the meantime.")
+    if name == "read_image":
+        return (f"ERROR: {name} is not available in this session (NX_VISION is off, or native "
+                "tool calls are not confirmed on this source). Describe images by other means "
+                "or ask the user to paste the relevant details.")
+    if name == "spawn_agent":
+        return (f"ERROR: {name} is not available in this session (NX_SUBAGENTS is off). Do the "
+                "investigation yourself with search_files/read_file/list_dir.")
+    if name == "plan_edit":
+        return (f"ERROR: {name} is not available in this session (no plan is active). Start one "
+                "with /plan <goal>, or just proceed with the normal edit tools.")
+    return (f"ERROR: {name} is not available in this session (withheld by the current session "
+            "configuration). Use one of: " + ", ".join(sorted(known)))
+
+
 def run_tool(name: str, args: dict[str, Any]) -> str:
     # Plan-mode write gate: refuse mutating tools while a plan is active, with
     # the gate message the model needs to act on (plan_edit, or ask for
     # /plan done). Checked before every other gate so a gated call costs no
     # classifier round-trip, no approval prompt, and no sub-agent dispatch.
+    import nx as _m
     gated = check_gate(name)
     if gated:
         return gated
+    # Gated/withheld tools (wait_background / read_image / spawn_agent /
+    # plan_edit) stay in DISPATCH so direct callers (tests, hooks, admin
+    # scripts) can still exercise their bodies, but a MODEL that emits one
+    # before the gate opened it must get actionable refusal — the schema was
+    # never offered this turn, so its very next move after a bare "unknown
+    # tool" (or worse, after it actually ran) would be to conclude the
+    # capability doesn't exist. Returned before the pre-hook on purpose: these
+    # tools are not being offered, so a policy veto would be the wrong story.
+    # A sub-agent loop is exempt: its restricted table has none of these
+    # entries, so the lookup below already returns the sub-agent-specific
+    # refusal (and the parent's gate state says nothing about what an agent
+    # thread may call).
+    from ._subagent import _subagent_ctx as _gate_ctx
+    if _gate_ctx() is None:
+        if name == "wait_background" and not st._SESSION_HAS_BACKGROUNDED:
+            return _unknown_tool_error(name)
+        if name == "read_image" and not (_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED):
+            return _unknown_tool_error(name)
+        if name == "spawn_agent" and not _m.NX_SUBAGENTS:
+            return _unknown_tool_error(name)
+        if name == "plan_edit" and not plan_active():
+            return _unknown_tool_error(name)
+    # Malformed-args circuit breaker: the tool was dropped for cause (this
+    # endpoint keeps truncating its args), so refuse with the same wording the
+    # retry nudge uses — "unknown tool" would read as the tool never existed
+    # and invite the model to invent a substitute action instead of changing
+    # how it formats the call.
+    if name in st._MALFORMED_TOOL_BROKEN:
+        from ._turn import _malformed_args_nudge  # call-time: _turn imports this module
+        return _malformed_args_nudge(name, broken_now=True)
     # A spawn_agent() sub-loop installs a read-only table (per-thread, so 2+
     # concurrent sub-agents each keep their own); the sub-agent's tool calls
     # resolve against it (so "write_file" inside a subagent is simply an
@@ -335,7 +408,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if not fn:
         if _subagent_active():
             return f"ERROR: {name} is not available to the read-only sub-agent (parent must do it)"
-        return f"ERROR: unknown tool {name}"
+        return _unknown_tool_error(name)
     # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
     # exit vetoes the call. Checked before any cache/approval machinery so a
     # policy can block even cached reads.

@@ -713,11 +713,14 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             messages.append({"role": "user", "content": (
                 "[Runtime note: Your last tool call did not parse — "
                 f"{errors[0]}. Re-emit it as a single well-formed "
-                "<tool_call>{\"name\": ..., \"arguments\": {...}}</tool_call> "
-                "block with valid JSON. For example:\n"
-                "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"nx/_turn.py\"}}</tool_call>\n"
-                "<tool_call>{\"name\": \"search_files\", \"arguments\": {\"pattern\": \"TODO\", \"path\": \".\"}}</tool_call>\n"
-                "<tool_call>{\"name\": \"run_bash\", \"arguments\": {\"cmd\": \"ls -la\"}}</tool_call>]"
+                "<tool_call> block: the current dialect is XML-style, "
+                "<tool_call><name>read_file</name><arguments><path>nx/_turn.py</path></arguments></tool_call> "
+                "(one XML tag per argument; value is plain text or JSON). "
+                "The legacy JSON-in-tag form still works: "
+                "<tool_call>{\"name\": \"search_files\", \"arguments\": {\"pattern\": \"TODO\", \"path\": \".\"}}</tool_call> "
+                "or "
+                "<tool_call>{\"name\": \"run_bash\", \"arguments\": {\"command\": \"ls -la\"}}</tool_call>. "
+                "Emit only that one complete block with no surrounding prose.]"
             )})
             return TURN_MALFORMED_CALL
         if errors:

@@ -104,6 +104,8 @@ def test_schema_gating_vision_and_native(nx_fresh):
 
 def test_run_tool_passthrough_of_parts_result(nx_fresh, capsys):
     nx, tmp = nx_fresh
+    nx.NX_VISION = 1  # run_tool() refuses a gated read_image (0.28.1); this tests the parts passthrough
+    nx._state._NATIVE_TOOL_CALLS_CONFIRMED = True
     nx._state.TOOL_OUTPUT_VISIBLE = True  # render the body so the display path is exercised
     img = tmp / "shot.png"
     img.write_bytes(PNG_BYTES)

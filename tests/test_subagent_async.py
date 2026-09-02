@@ -211,6 +211,7 @@ def test_schema_async_key_routes_via_extra_kwargs(nx_fresh, monkeypatch):
     fn(**args) can only deliver it through **extra. It must still trigger
     backgrounding (not silently run the agent synchronously)."""
     from nx import _dispatch
+    nx_fresh.NX_SUBAGENTS = 1  # run_tool() refuses a gated spawn (0.28.1); this tests the routing
 
     def fake_loop(messages, *a, **kw):  # a sync run would reach this
         messages.append({"role": "assistant", "content": "SYNC LEAK"})
