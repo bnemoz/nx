@@ -164,6 +164,151 @@ def test_schemas_cover_all_tools_and_final_answer(clean_env):
     assert set(_argrepair._schemas()) == names
 
 
+# --- tool-name resolution (0.29.0) -------------------------------------------
+
+def test_resolve_exact_name_is_passthrough():
+    assert _argrepair.resolve_tool_name("read_file") == ("read_file", None)
+
+
+def test_resolve_similar_name_renamed():
+    got, note = _argrepair.resolve_tool_name("readfile")
+    assert got == "read_file"
+    assert note and "renamed" in note
+    got, note = _argrepair.resolve_tool_name("ReadFile")
+    assert got == "read_file"
+
+
+def test_resolve_alias_table():
+    got, note = _argrepair.resolve_tool_name("bash")
+    assert got == "run_bash"
+    assert note and "aliased" in note
+    assert _argrepair.resolve_tool_name("grep")[0] == "search_files"
+    assert _argrepair.resolve_tool_name("str_replace_editor")[0] == "edit_file"
+    assert _argrepair.resolve_tool_name("cat")[0] == "read_file"
+    assert _argrepair.resolve_tool_name("ls")[0] == "list_dir"
+
+
+def test_resolve_ambiguous_never_guesses(monkeypatch):
+    """Two equally-close schema names -> None (the unknown-tool error lists
+    the candidates instead); a single near-miss still resolves."""
+    monkeypatch.setattr(m, "TOOLS", [
+        {"function": {"name": "tool_aaa", "parameters": {"properties": {"a": {"type": "string"}}}}},
+        {"function": {"name": "tool_aab", "parameters": {"properties": {"a": {"type": "string"}}}}},
+    ])
+    assert _argrepair.resolve_tool_name("tool_aax") == (None, None)
+    assert _argrepair.resolve_tool_name("zzzzzzzzzz") == (None, None)
+
+
+def test_alias_never_shadows_a_real_tool_name(monkeypatch):
+    """If a future tool is really named `bash`, the alias must not steal it."""
+    monkeypatch.setattr(m, "TOOLS", [
+        {"function": {"name": "bash", "parameters": {"properties": {"command": {"type": "string"}}}}},
+        {"function": {"name": "run_bash", "parameters": {"properties": {"command": {"type": "string"}}}}},
+    ])
+    assert _argrepair.resolve_tool_name("bash") == ("bash", None)
+
+
+# --- arg alias map (0.29.0) ---------------------------------------------------
+
+def test_arg_alias_cmd_to_command():
+    args, notes = _argrepair.repair_args("run_bash", {"cmd": "ls"})
+    assert args == {"command": "ls"}
+    assert notes == ["cmd -> command (renamed)"]
+
+
+def test_arg_alias_old_str_to_old():
+    args, notes = _argrepair.repair_args(
+        "edit_file", {"path": "p", "old_str": "a", "new_str": "b"})
+    assert args == {"path": "p", "old": "a", "new": "b"}
+
+
+def test_arg_alias_never_clobbers_a_real_key():
+    args, notes = _argrepair.repair_args(
+        "edit_file", {"path": "p", "old": "keep", "old_str": "drop"})
+    assert args["old"] == "keep"
+    assert args["old_str"] == "drop"  # unknown key, no clobber, no rename
+    assert notes == []
+
+
+def test_arg_alias_respects_declared_properties_only(clean_env, monkeypatch):
+    """An alias pointing at a key the tool doesn't declare must not fire."""
+    monkeypatch.setattr(m, "TOOLS", [
+        {"function": {"name": "weird", "parameters": {"properties": {"x": {"type": "string"}}}}},
+    ])
+    args, notes = _argrepair.repair_args("weird", {"file": "p"})  # "file" aliases to "path" elsewhere
+    assert args == {"file": "p"}
+    assert notes == []
+
+
+# --- required-args pre-check (0.29.0) -----------------------------------------
+
+def test_check_required_message():
+    err = _argrepair.check_required("read_file", {"limit": 5})
+    assert err is not None
+    assert err.startswith('ERROR: read_file missing required "path"')
+    assert "schema: path:" in err
+    assert "Re-send with all required arguments" in err
+
+
+def test_check_required_passes_when_present():
+    assert _argrepair.check_required("read_file", {"path": "x"}) is None
+    # a None value counts as missing (the body can't use it either)
+    assert _argrepair.check_required("read_file", {"path": None}) is not None
+    assert _argrepair.check_required("list_dir", {}) is None  # nothing required
+
+
+def test_check_required_after_rename_counts_repaired_key():
+    """The pre-check runs on the REPAIRED args, so an aliased key satisfies it."""
+    err = _argrepair.check_required("run_bash", {"command": "ls"})
+    assert err is None
+
+
+def test_run_tool_missing_required_reports_not_executes(clean_env, monkeypatch, capsys):
+    ran = []
+
+    def fake_tool(path, limit=0):
+        ran.append(path)
+        return "ok"
+
+    monkeypatch.setattr(m, "TOOLS", m.TOOLS + [{"function": {
+        "name": "faketool3",
+        "parameters": {"properties": {"path": {"type": "string"},
+                                      "limit": {"type": "integer"}},
+                       "required": ["path"]}}},
+    ])
+    import nx._dispatch as dispatch
+    monkeypatch.setattr(dispatch, "DISPATCH", dict(dispatch.DISPATCH, faketool3=fake_tool))
+    m.YOLO = True
+    out = dispatch.run_tool("faketool3", {"limit": "5"})
+    assert ran == []  # the body never ran
+    assert 'missing required "path"' in out
+    assert "schema: path: string, limit: integer" in out
+
+
+def test_run_tool_name_repair_executes_real_tool_with_note(clean_env, monkeypatch, capsys):
+    seen = {}
+
+    def fake_tool(path):
+        seen["path"] = path
+        return "ok"
+
+    monkeypatch.setattr(m, "TOOLS", m.TOOLS + [{"function": {
+        "name": "faketool4",
+        "parameters": {"properties": {"path": {"type": "string"}},
+                       "required": ["path"]}}},
+    ])
+    import nx._dispatch as dispatch
+    monkeypatch.setattr(dispatch, "DISPATCH", dict(dispatch.DISPATCH, faketool4=fake_tool))
+    m.YOLO = True
+    out = dispatch.run_tool("faketool4x", {"path": "p"})  # one near-miss away
+    assert seen == {"path": "p"}
+    assert "[arg repair: tool faketool4x -> faketool4" in out
+    # ambiguity still reports instead of guessing (nothing close: plain list)
+    out2 = dispatch.run_tool("zzzzzzzzzz", {"path": "p"})
+    assert out2.startswith("ERROR: unknown tool zzzzzzzzzz")
+    assert "Available tools:" in out2 and "faketool4" in out2
+
+
 # --- run_tool integration ----------------------------------------------------
 
 def test_run_tool_repairs_args_and_notes_result(clean_env, monkeypatch, capsys):

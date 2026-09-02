@@ -405,10 +405,20 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     from ._subagent import _subagent_table, _subagent_active
     table = _subagent_table() or DISPATCH
     fn = table.get(name)
+    name_note = None  # set by the tool-name resolution branch below
     if not fn:
         if _subagent_active():
             return f"ERROR: {name} is not available to the read-only sub-agent (parent must do it)"
-        return _unknown_tool_error(name)
+        # Tool-NAME repair (0.29.0, nx/_argrepair.resolve_tool_name): one alias
+        # or one high-similarity match gets executed under its real name with
+        # the note riding the result; ambiguity falls through to the
+        # unknown-tool error, which lists the close names instead of guessing.
+        from ._argrepair import resolve_tool_name
+        resolved, name_note = resolve_tool_name(name)
+        if resolved and table.get(resolved):
+            name, fn = resolved, table[resolved]
+        else:
+            return _unknown_tool_error(name)
     # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
     # exit vetoes the call. Checked before any cache/approval machinery so a
     # policy can block even cached reads.
@@ -423,6 +433,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # normalized. Disabled / unknown tool / malformed args = pass-through.
     from ._argrepair import repair_args
     args, arg_notes = repair_args(name, args)
+    if name_note:
+        arg_notes = [name_note] + arg_notes
+    # Required-args pre-check (0.29.0): after repair (a renamed key counts as
+    # present), before cache/dispatch — the body would otherwise die with a
+    # TypeError the model can't act on. Never fabricates the missing value.
+    from ._argrepair import check_required
+    req_err = check_required(name, args)
+    if req_err:
+        return f"[arg repair: {', '.join(arg_notes)}] {req_err}" if arg_notes else req_err
     # Background-completion notice: on the first tool call of a turn, check
     # whether any tracked bg job finished since the model last looked, and
     # stage a one-time runtime note (flushed with the other pending notices).

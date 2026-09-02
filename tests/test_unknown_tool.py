@@ -20,12 +20,20 @@ from nx._dispatch import run_tool, _unknown_tool_error  # noqa: E402
 
 
 def test_truly_unknown_name_gets_did_you_mean():
-    out = run_tool("readfil", {})
+    out = run_tool("definitely_not_a_tool_qq", {})
     assert out.startswith("ERROR")
-    assert "did you mean" in out
-    assert "read_file" in out.split("did you mean")[1].split("?")[0]
+    assert "did you mean" not in out  # nothing close: no false suggestion
     assert "Available tools:" in out
     assert "write_file" in out.split("Available tools:")[1]
+
+
+def test_near_miss_name_resolves_into_the_real_tool():
+    """0.29.0 name repair: a one-keystroke slip executes under the real name
+    with the note riding the result (read_file's required `path` arg makes the
+    result itself carry the schema error)."""
+    out = run_tool("readfil", {})
+    assert "[arg repair: tool readfil -> read_file (renamed)]" in out
+    assert out.endswith('Re-send with all required arguments.')
 
 
 def test_truly_unknown_name_without_a_close_match_lists_tools():

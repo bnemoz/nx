@@ -137,3 +137,38 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
       documented syntax?
 - [ ] If it touches `TOOLS`/`FINAL_ANSWER_TOOL`/`SYSTEM`, is the added text as
       terse as possible — it's sent every turn?
+
+## Adding a tool: self-healing checklist
+
+The self-healing stack (grammar-constrained decoding, text-protocol parsing,
+JSON repair, malformed-args nudges/breaker, `NX_ARG_REPAIR`) is driven off the
+schema you declare, so a new tool is only as healable as its schema is
+complete. When you add an entry to `TOOLS`:
+
+- [ ] Schema first: flat `properties`, correct `required` list, `required`
+      before optional. `NX_ARG_REPAIR` coerces and renames against exactly
+      these declarations; a wrong `required` list makes the pre-check refuse
+      calls the body would have accepted (or accept calls it can't use).
+- [ ] Body signature matches the schema key-for-key (plus `**_` for extras) —
+      `tests/test_tool_schema_invariants.py` asserts this, and the
+      required-args pre-check refuses before your body ever sees a call.
+- [ ] Does the tool have near-miss NAME spellings similarity can never reach
+      (a one-word name like `bash`, or another ecosystem's name like
+      `str_replace_editor`)? Add them to `_TOOL_ALIASES` in `nx/_argrepair.py`
+      — an alias never fires when the spelling is itself a real tool name.
+- [ ] Does it have near-miss ARG keys (a `command` vs `cmd`, a `path` that
+      models keep sending as `file_path`)? Add a per-tool row to
+      `_ARG_ALIASES` in `nx/_argrepair.py`. Targets must be declared
+      properties; the no-clobber rule applies automatically.
+- [ ] If the model should be steered to a sibling tool when this one's args
+      keep truncating, make sure `_malformed_args_nudge`'s fallback map in
+      `nx/_turn.py` mentions it (or that the generic "use one of: …" wording
+      is acceptable).
+- [ ] Unknown-tool refusals name the gate for withheld tools: if your tool is
+      conditionally offered by `_active_tools()`, add a branch to
+      `_unknown_tool_error()` in `nx/_dispatch.py` saying why it's missing and
+      what to do instead — and cover it in `tests/test_unknown_tool.py`.
+- [ ] `NX_ARG_REPAIR` covers every tool automatically via `_schemas()`; no
+      per-tool registration. If you added a module-level conditional schema,
+      make sure it lands in `TOOLS` (or `_EXTRA_TOOL_SCHEMAS`) so repair and
+      the unknown-tool name list can see it.

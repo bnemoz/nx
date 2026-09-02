@@ -20,6 +20,17 @@ What is repaired (all demanded to be UNAMBIGUOUS — ambiguity never guesses):
      → "max_results"). Close-but-ambiguous or clobbering renames are skipped.
   4. string→array when the string is a JSON array literal (todo_write's
      todos="[ {...} ]").
+  5. pure per-tool arg ALIASES similarity can never reach ("cmd" → run_bash's
+     "command", "old_str" → edit_file's "old") — consulted after the
+     similarity pass, same no-clobber rule. Deliberate NON-repair: a comma-/
+     newline-separated string is never split into a oneOf array (filenames
+     contain commas); that failure is reported, not guessed at.
+  6. tool-NAME resolution (resolve_tool_name): one alias-table hit or one
+     difflib match >= _RENAME_CUTOFF among the live tool schemas, else None —
+     called from run_tool() before the dispatch lookup.
+  7. required-args pre-check (check_required): an ERROR naming the missing
+     keys and the declared schema, instead of a TypeError from the body.
+     Values are never fabricated (missing stays missing).
 
 Every change is appended to a note that run_tool() prepends to the tool
 result, so the model learns its args were normalized (same "say so"
@@ -43,6 +54,49 @@ _INT_RE = re.compile(r"[+-]?\d+")
 # declared property. 0.8 keeps "maxresults"→"max_results" and "pth"→"path",
 # rejects a key that sits between two real properties.
 _RENAME_CUTOFF = 0.8
+
+# Tool-NAME aliases: spellings from other tool ecosystems / a model's own
+# shorthand that similarity can never reach ("bash" vs "run_bash" is 0.67).
+# Only applied when the alias is not itself a real tool name (checked at use
+# time against the live schema list, so a future real "bash" tool wins).
+_TOOL_ALIASES: dict[str, str] = {
+    "bash": "run_bash", "shell": "run_bash", "execute_bash": "run_bash",
+    "run_command": "run_bash", "execute": "run_bash",
+    "grep": "search_files", "search": "search_files",
+    "find": "search_files", "ripgrep": "search_files",
+    "ls": "list_dir", "dir": "list_dir",
+    "cat": "read_file", "read": "read_file",
+    "str_replace_editor": "edit_file", "str_replace": "edit_file",
+    "edit": "edit_file",
+    "write": "write_file", "create_file": "write_file",
+    "remove": "delete_file", "rm": "delete_file", "delete": "delete_file",
+}
+
+# Per-tool ARG aliases for near-miss keys the 0.8 similarity cutoff
+# deliberately rejects ("cmd"→"command" is 0.6; lowering the cutoff starts
+# guessing). Same no-clobber rule as the similarity rename, and the target
+# must be a declared property of that tool.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "run_bash": {"cmd": "command", "commandline": "command",
+                 "script": "command", "bash": "command"},
+    "read_file": {"file": "path", "file_path": "path", "filepath": "path",
+                  "filename": "path"},
+    "write_file": {"file": "path", "file_path": "path", "filepath": "path",
+                   "filename": "path", "text": "content", "body": "content",
+                   "contents": "content"},
+    "edit_file": {"old_str": "old", "new_str": "new", "old_text": "old",
+                  "new_text": "new", "old_string": "old", "new_string": "new",
+                  "file": "path", "file_path": "path", "filepath": "path"},
+    "multi_edit": {"file": "path", "file_path": "path", "filepath": "path",
+                   "changes": "edits", "replacements": "edits"},
+    "search_files": {"query": "pattern", "regex": "pattern",
+                     "search": "pattern", "needle": "pattern"},
+    "list_dir": {"dir": "path", "directory": "path", "folder": "path"},
+    "delete_file": {"file": "path", "file_path": "path", "filename": "path"},
+    "git_diff": {"staged_only": "staged"},
+    "git_log": {"staged_only": "staged"},
+    "todo_write": {"items": "todos", "task_list": "todos"},
+}
 
 
 def enabled() -> bool:
@@ -131,9 +185,10 @@ def _items_props(prop: Any) -> dict | None:
 
 
 def _repair_mapping(props: dict, out: dict, label: str,
-                    notes: list[str]) -> dict:
+                    notes: list[str], tool_name: str = "") -> dict:
     """The one repair pass, recursive for array-of-objects properties.
     Mutates and returns `out`; appends human-readable notes."""
+    aliases = _ARG_ALIASES.get(tool_name, {})
     for key in list(out.keys()):
         val = out[key]
         if key in props:
@@ -166,6 +221,14 @@ def _repair_mapping(props: dict, out: dict, label: str,
         if len(candidates) == 1:
             out[candidates[0]] = out.pop(key)
             notes.append(f"{label}{key} -> {candidates[0]} (renamed)")
+            continue
+        # Pure alias: similarity can't reach it ("cmd" vs "command"), the
+        # mapping is curated so there is exactly one target, and the same
+        # no-clobber rule applies (never overwrite a real key).
+        target = aliases.get(key)
+        if target and target in props and target not in out:
+            out[target] = out.pop(key)
+            notes.append(f"{label}{key} -> {target} (renamed)")
     return out
 
 
@@ -174,26 +237,106 @@ def _show(v: Any) -> str:
     return s if len(s) <= 40 else s[:37] + "..."
 
 
-def _schemas() -> dict[str, dict]:
-    """name -> declared property schemas, from the live nx module (read at
-    call time like the rest of the dynamic seams). TOOLS carries the 17
-    always-on schemas plus the appended conditional ones; final_answer lives
-    in its own module constant. Malformed entries are skipped, not fatal."""
+def _schemas() -> dict[str, tuple[dict, list]]:
+    """name -> (declared property schemas, required list), from the live nx
+    module (read at call time like the rest of the dynamic seams). TOOLS
+    carries the 17 always-on schemas plus the appended conditional ones;
+    final_answer lives in its own module constant. Malformed entries are
+    skipped, not fatal."""
     import nx as _m
     tools = list(getattr(_m, "TOOLS", ()) or ())
     fa = getattr(_m, "FINAL_ANSWER_TOOL", None)
     if fa is not None:
         tools = tools + [fa]
-    out: dict[str, dict] = {}
+    out: dict[str, tuple[dict, list]] = {}
     for t in tools:
         try:
             fn = t["function"]
             props = fn["parameters"]["properties"]
+            required = fn["parameters"].get("required") or []
         except (KeyError, TypeError, IndexError):
             continue
         if isinstance(props, dict) and props:
-            out[fn["name"]] = props
+            out[fn["name"]] = (props, required if isinstance(required, list) else [])
     return out
+
+
+def _tool_names() -> set[str]:
+    """Every dispatchable tool name, from the live schemas (final_answer
+    included — it is a real tool to the model even though it never lands in
+    the DISPATCH table)."""
+    return set(_schemas())
+
+
+def resolve_tool_name(name: Any) -> tuple[str | None, str | None]:
+    """Map a near-miss tool NAME onto the real one, or give up.
+
+    Order: exact hit → alias table → difflib >= _RENAME_CUTOFF against the
+    live schema names, demanding exactly ONE candidate (ambiguity never
+    guesses — the caller's unknown-tool error lists the close names instead).
+    Returns (resolved_name_or_None, note_or_None). Never raises; non-string
+    names degrade to (None, None)."""
+    if not isinstance(name, str) or not name.strip():
+        return None, None
+    cand = name.strip()
+    tools = _tool_names()
+    if cand in tools:
+        return cand, None
+    if cand in _TOOL_ALIASES:
+        target = _TOOL_ALIASES[cand]
+        if target in tools:  # an alias never shadows a real tool name
+            return target, f"tool {cand} -> {target} (aliased)"
+        return None, None
+    hits = [t for t in sorted(tools)
+            if difflib.SequenceMatcher(None, cand.lower(), t.lower()).ratio()
+            >= _RENAME_CUTOFF]
+    if len(hits) == 1:
+        return hits[0], f"tool {cand} -> {hits[0]} (renamed)"
+    return None, None  # ambiguous or no match: caller reports, never guesses
+
+
+def _type_label(prop: Any) -> str:
+    """Terse declared-type label for the required-args message ("string",
+    "integer", "enum", "string|array"); unconstrained shapes read "any"."""
+    if not isinstance(prop, dict):
+        return "any"
+    if "enum" in prop:
+        return "enum"
+    t = prop.get("type")
+    if isinstance(t, str):
+        return t
+    arms = prop.get("oneOf")
+    if isinstance(arms, list):
+        types = sorted({a.get("type") for a in arms
+                        if isinstance(a, dict) and isinstance(a.get("type"), str)})
+        if types:
+            return "|".join(types)
+    return "any"
+
+
+def check_required(name: str, args: Any) -> str | None:
+    """ERROR text when required args are missing, else None.
+
+    Fires after repair_args (so a renamed key counts as present) and before
+    dispatch, where the body would otherwise die with a TypeError the model
+    can't act on. Lists the declared schema so the model can re-send without
+    a round-trip. Values are never fabricated: a missing required arg is
+    reported, not invented."""
+    if not isinstance(args, dict):
+        return None
+    entry = _schemas().get(name)
+    if not entry:
+        return None
+    props, required = entry
+    if not required:
+        return None
+    missing = [r for r in required if r not in args or args[r] is None]
+    if not missing:
+        return None
+    schema = ", ".join(f"{k}: {_type_label(v)}" for k, v in props.items())
+    quoted = ", ".join(f'"{m_}"' for m_ in missing)
+    return (f"ERROR: {name} missing required {quoted} — schema: {schema}. "
+            "Re-send with all required arguments.")
 
 
 def repair_args(name: str, args: Any) -> tuple[Any, list[str]]:
@@ -205,9 +348,9 @@ def repair_args(name: str, args: Any) -> tuple[Any, list[str]]:
     gate returns (args, []) — strict pass-through."""
     if not enabled() or not isinstance(args, dict) or not args:
         return args, []
-    props = _schemas().get(name)
-    if not props:
+    entry = _schemas().get(name)
+    if not entry:
         return args, []
     notes: list[str] = []
-    repaired = _repair_mapping(props, dict(args), "", notes)
+    repaired = _repair_mapping(entry[0], dict(args), "", notes, tool_name=name)
     return (repaired, notes) if notes else (args, [])
