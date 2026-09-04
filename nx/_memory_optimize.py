@@ -28,7 +28,10 @@ Flow, bounded at every step:
    `_scope:`/`_saved:` footers stripped first — the writer re-adds them),
    returning one markdown note — written through `_write_memory_file`, so merged notes
    are byte-for-byte conventional (`<timestamp>_<slug>.md`, 0600, `_scope:`
-   footer) and never clobber anything.
+   footer) and never clobber anything. The groups are independent, so their
+   round-trips run concurrently (NX_MEMORY_OPTIMIZE_MERGE_WORKERS): with a
+   reasoning source each merge can think for minutes, and serially that is
+   the whole run's wall clock.
 4. Source notes are never unlinked: they move to
    `<memories_dir>/archive/<run-stamp>/` inside their own scope dir. A bad
    librarian answer is therefore reversible by `mv`, and the scanner can't
@@ -45,6 +48,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, NamedTuple
 
 from ._ansi import DIM, RESET, C
@@ -74,6 +78,15 @@ _NOTE_DIGEST_CHARS = 480
 # of how many RETIRE lines come back. A safety limit, not a tunable. Viable
 # groups past it are reported (in _Plan.overflow) rather than silently dropped.
 _MAX_MERGES_PER_RUN = 8
+
+# Merge round-trips are independent model calls, so they run concurrently:
+# the run's wall clock becomes its slowest merge, not the sum of them all —
+# which matters since 0.33.2/0.33.3, when a reasoning source may legitimately
+# spend minutes of thinking per merge (36K token budget, 300s timeout).
+# 0 = auto: one worker per merge, capped so a full plan can't open
+# _MAX_MERGES_PER_RUN simultaneous requests. 1 = the old serial behavior.
+OPTIMIZE_DEFAULT_MERGE_WORKERS = 0
+_MERGE_WORKERS_CAP = 4
 
 # Per-call wall-clock cap for the librarian/merge round-trips (heavier prompts
 # than /memory save's single distillation call) — tunable via
@@ -111,6 +124,19 @@ def _optimize_batch(total: int) -> int:
 def _optimize_max_notes() -> int:
     """Notes reviewed per run (NX_MEMORY_OPTIMIZE_MAX_NOTES; 0 = all)."""
     return _opt_env_int("NX_MEMORY_OPTIMIZE_MAX_NOTES", OPTIMIZE_DEFAULT_MAX_NOTES)
+
+
+def _merge_workers(count: int) -> int:
+    """Concurrent merge round-trips for a plan holding `count` groups
+    (NX_MEMORY_OPTIMIZE_MERGE_WORKERS; 0 = auto — one worker per merge,
+    capped at _MERGE_WORKERS_CAP; 1 = the old serial behavior). Merges hit
+    the same endpoint as the librarian passes, so the cap exists to keep a
+    full plan from opening a wide burst against a small local server."""
+    workers = _opt_env_int("NX_MEMORY_OPTIMIZE_MERGE_WORKERS",
+                           OPTIMIZE_DEFAULT_MERGE_WORKERS)
+    if workers == 0:
+        return max(1, min(count, _MERGE_WORKERS_CAP))
+    return max(1, min(workers, max(1, count)))
 
 
 class _OptNote(NamedTuple):
@@ -539,40 +565,86 @@ def _print_plan(plan: _Plan, known: dict[str, _OptNote]) -> None:
               f"{DIM}({name}){RESET}")
 
 
+def _merge_pool(workers: int) -> ThreadPoolExecutor:
+    """The run's merge thread pool (one per _apply_plan call)."""
+    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix="nx-merge")
+
+
 def _apply_plan(plan: _Plan, known: dict[str, _OptNote],
                 messages: list[dict[str, Any]] | None) -> tuple[int, int, str | None]:
     """Write merged notes, archive every retired/merged source, refresh the
     live memory note and the search cache. Returns
-    (merged_notes, archived_notes, archive_dir_hint)."""
+    (merged_notes, archived_notes, archive_dir_hint).
+
+    The merge round-trips are independent model calls (one prompt per group),
+    so they run concurrently — the run's wall clock is its slowest merge, not
+    the sum of them. The shared seams are safe for this: `st.client` and the
+    log writer take no per-request locks a concurrent caller can poison
+    (per-request state rides the call's own kwargs), `_record_usage` is an
+    add-only accumulator, and `_write_memory_file` never clobbers (a
+    same-second same-title write gets a -2/-3 suffix)."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     archive_dir: str | None = None
     merged = 0
     archived = 0
 
-    for names, prop_title in plan.merges:
+    def _run_merge(names: list[str], prop_title: str) -> str | None:
+        """One merge round-trip, or None (already explained by _optimize_chat)
+        when the group degenerated or the call failed."""
         group = [known[n] for n in names if n in known]
         if len(group) < 2:
-            continue
-        text = _optimize_chat(_merge_prompt(group), "memory_optimize_merge")
-        if text is None:
-            continue
+            return None
+        return _optimize_chat(_merge_prompt(group), "memory_optimize_merge")
+
+    def _write_one(names: list[str], prop_title: str, text: str) -> None:
+        """Persist one merge result + archive its sources. `text` is a real
+        (non-empty) merge answer; failed round-trips are skipped by the
+        callers, so the group's notes stay untouched, as before."""
+        nonlocal merged, archived, archive_dir
+        group = [known[n] for n in names if n in known]
         if not text:
             print(f"{C.WARNING}  ⚠ empty merge answer — left {len(group)} notes alone{RESET}")
-            continue
+            return
         title = _first_title(text, prop_title) or prop_title
         try:
             written = _write_memory_file(title, text, _group_scope(group))
         except OSError as e:
             print(f"{C.ERROR}  ✗ couldn't write merged note: {e}{RESET}")
-            continue
+            return
         if written is None:
-            continue
+            return
         merged += 1
         for note in group:
             dst = _archive(note, stamp)
             if dst is not None:
                 archived += 1
                 archive_dir = os.path.dirname(dst)
+
+    merges = [(names, prop_title) for names, prop_title in plan.merges]
+    workers = _merge_workers(len(merges))
+    if workers > 1:
+        print(f"{DIM}  merging {len(merges)} group"
+              f"{'s' if len(merges) != 1 else ''} ({workers} at a time){RESET}")
+        with _merge_pool(workers) as pool:
+            futures = {pool.submit(_run_merge, names, prop_title): (names, prop_title)
+                       for names, prop_title in merges}
+            for fut in as_completed(futures):
+                names, prop_title = futures[fut]
+                try:
+                    text = fut.result()
+                except Exception as e:                 # a worker must not kill the run
+                    print(f"{C.ERROR}  ✗ merge round-trip failed: "
+                          f"{type(e).__name__}: {e}{RESET}")
+                    continue
+                if text is None:                       # call failed; _optimize_chat explained
+                    continue
+                _write_one(names, prop_title, text)
+    else:
+        for names, prop_title in merges:
+            text = _run_merge(names, prop_title)
+            if text is None:
+                continue
+            _write_one(names, prop_title, text)
 
     for name in plan.retire:
         note = known.get(name)

@@ -14,6 +14,9 @@ test, same reason as test_memory_tools.py: it is a shared module global).
 import os
 import sys
 import tempfile
+import time
+
+_PLAN = [""]   # mutable cell: the fake client reads the current run's plan
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-memopt-")
 os.environ["NX_HOME"] = _tmp
@@ -74,7 +77,7 @@ def _teardown_function():
     if "root" in _saved:
         m.st.PROJECT_ROOT = _saved["root"]
     for k in ("NX_MEMORY_OPTIMIZE_BATCH", "NX_MEMORY_OPTIMIZE_MAX_NOTES",
-              "NX_MEMORY_OPTIMIZE_MAX_TOKENS"):
+              "NX_MEMORY_OPTIMIZE_MAX_TOKENS", "NX_MEMORY_OPTIMIZE_MERGE_WORKERS"):
         os.environ.pop(k, None)
 
 
@@ -903,6 +906,163 @@ def test_optimize_survives_a_per_call_timeout_failure():
     assert sorted(_md_files(pdir)) == names            # nothing written
     assert not os.path.exists(os.path.join(pdir, "archive"))
     assert any("can't reach" in ln for ln in lines), lines
+
+
+def test_optimize_merges_run_concurrently():
+    """The 0.33.x slowness: merge round-trips ran one after another, so a
+    plan of N groups cost the SUM of N reasoning-model think times. The
+    groups are independent calls, so they must overlap (capped at
+    _MERGE_WORKERS_CAP) — wall clock becomes the slowest merge, not the sum."""
+    root = tempfile.mkdtemp(prefix="nx-opt-conc-")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body"),
+                         ("Gamma note", "gamma body"), ("Delta note", "delta body"),
+                         ("Epsilon notes", "epsilon body")], root)
+    pdir = os.path.join(root, ".nx", "memories")
+    names = sorted(os.path.basename(p) for p in paths)
+    # Three disjoint merge groups + one retire; the fake client tracks how
+    # many merge calls are in flight at once (create() blocks briefly so the
+    # overlap is observable).
+    plan = (f"MERGE {names[0]} + {names[1]} => First merged\n"
+            f"MERGE {names[2]} + {names[3]} => Second merged\n"
+            f"RETIRE {names[4]}\n")
+    state = {"in_flight": 0, "peak": 0, "merge_calls": 0}
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt.startswith("Merge the memory notes"):
+                state["in_flight"] += 1
+                state["peak"] = max(state["peak"], state["in_flight"])
+                state["merge_calls"] += 1
+                try:
+                    time.sleep(0.15)          # widen the overlap window
+                    return _Resp("# Merged\n\nbody\n")
+                finally:
+                    state["in_flight"] -= 1
+            return _Resp(plan)
+
+    class _Chat:
+        completions = _Completions()
+
+    class _ConcClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_ConcClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert state["merge_calls"] == 2, state
+    assert state["peak"] > 1, state                # merges actually overlapped
+    assert state["peak"] <= opt._MERGE_WORKERS_CAP, state
+    assert any("2 at a time" in ln for ln in lines), lines
+    # Every group's result still landed through the shared writer, and the
+    # retire went through too.
+    merged = _md_files(pdir)
+    assert len(merged) == 2, merged
+
+
+def test_merge_workers_env_caps_concurrency():
+    """NX_MEMORY_OPTIMIZE_MERGE_WORKERS=1 restores the serial behavior; an
+    oversized value is clamped to the number of merges actually planned.
+    Each run gets its own fresh store (a run consumes the notes it merges)."""
+    state = {"in_flight": 0, "peak": 0, "merge_calls": 0}
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt.startswith("Merge the memory notes"):
+                state["in_flight"] += 1
+                state["peak"] = max(state["peak"], state["in_flight"])
+                state["merge_calls"] += 1
+                try:
+                    time.sleep(0.1)
+                    return _Resp("# Merged\n\nbody\n")
+                finally:
+                    state["in_flight"] -= 1
+            return _Resp(_PLAN[0])
+
+    class _Chat:
+        completions = _Completions()
+
+    class _ConcClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    for workers in (1, 16):
+        root = tempfile.mkdtemp(prefix="nx-opt-workers-")
+        paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body"),
+                             ("Gamma note", "gamma body"), ("Delta note", "delta body")], root)
+        names = sorted(os.path.basename(p) for p in paths)
+        _PLAN[0] = (f"MERGE {names[0]} + {names[1]} => First merged\n"
+                    f"MERGE {names[2]} + {names[3]} => Second merged\n")
+        state.update({"in_flight": 0, "peak": 0, "merge_calls": 0})
+        _install_client(_ConcClient())
+        _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+        _env("NX_MEMORY_OPTIMIZE_MERGE_WORKERS", workers)
+        with _printed:
+            opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+        assert state["merge_calls"] == 2, (workers, state)
+        if workers == 1:
+            assert state["peak"] == 1, state           # serial: one at a time
+        else:
+            assert state["peak"] == 2, state           # clamped to the plan size
+
+
+def test_merge_worker_crash_does_not_kill_the_run():
+    """One merge group's round-trip blowing up must not lose the other
+    groups' results (the run is now concurrent, so an exception surfaces on
+    a worker thread, not in the caller's loop). _optimize_chat catches the
+    failure itself and explains it; the crashed group's sources stay put."""
+    root = tempfile.mkdtemp(prefix="nx-opt-wcrash-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body"),
+                         ("Gamma note", "gamma body"), ("Delta note", "delta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt.startswith("Merge the memory notes"):
+                if "Alpha note" in prompt:
+                    raise RuntimeError("boom")
+                return _Resp("# Survived\n\nbody\n")
+            return _Resp(f"MERGE {names[0]} + {names[1]} => First merged\n"
+                         f"MERGE {names[2]} + {names[3]} => Second merged\n")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _CrashyClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_CrashyClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    # The failure was explained (its message can interleave with the main
+    # thread's prints, so match the whole buffer, not one line).
+    assert "RuntimeError: boom" in "\n".join(lines), lines
+    after = _md_files(pdir)
+    # The crashed group's two sources are untouched; the healthy group's
+    # merged note landed (3 .md files = 2 unarchived sources + 1 merged note).
+    assert len(after) == 3, after
+
+
+def test_merge_workers_env_reader():
+    assert opt._merge_workers(0) == 1
+    assert opt._merge_workers(3) == 3              # auto: one worker per merge
+    assert opt._merge_workers(9) == opt._MERGE_WORKERS_CAP   # auto: capped
+    _env("NX_MEMORY_OPTIMIZE_MERGE_WORKERS", 1)
+    assert opt._merge_workers(4) == 1              # explicit serial
+    _env("NX_MEMORY_OPTIMIZE_MERGE_WORKERS", 16)
+    assert opt._merge_workers(2) == 2              # clamped to the plan size
+    _env("NX_MEMORY_OPTIMIZE_MERGE_WORKERS", 0)
+    assert opt._merge_workers(5) == opt._MERGE_WORKERS_CAP
 
 
 if __name__ == "__main__":

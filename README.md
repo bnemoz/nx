@@ -200,6 +200,7 @@ sessions and exits without entering the REPL.
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
+| `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -629,8 +630,12 @@ answer, and allows `NX_MEMORY_OPTIMIZE_TIMEOUT` seconds per call (default
 300; the pre-reasoning fixed 60s could kill a call mid-think — a read
 timeout also burns one `NX_HTTP_RETRIES` attempt, so retrying couldn't save
 it); if a call still comes back with no visible text, the run prints why
-(a `finish_reason=length` cut-off names the tunable). After a real run the
-cached `memory_search` entries are dropped and
+(a `finish_reason=length` cut-off names the tunable). Merge groups are
+independent model calls, so they run concurrently —
+`NX_MEMORY_OPTIMIZE_MERGE_WORKERS` at a time (default one per group, capped
+at 4; `1` restores serial) — which matters on a reasoning source, where the
+run's wall clock is otherwise the sum of several minutes-long merges. After
+a real run the cached `memory_search` entries are dropped and
 the session's own saved-memories note is rebuilt in place, so the model's view
 of the store matches the store — including in a session that started before
 the cleanup.
