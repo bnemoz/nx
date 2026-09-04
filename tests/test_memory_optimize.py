@@ -390,6 +390,58 @@ def test_optimize_drops_cached_memory_search_results():
     assert not [k for k in m.st._TOOL_RESULT_CACHE if k[0] == "memory_search"]
 
 
+def test_optimize_degenerate_response_aborts_instead_of_crashing():
+    """Empty `choices` (some providers' error payloads) must print an error and
+    stop the run, not raise IndexError out of the slash command into the REPL."""
+    root = tempfile.mkdtemp(prefix="nx-opt-degenerate-")
+    pdir = os.path.join(root, ".nx", "memories")
+    p1 = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in p1)
+
+    class _EmptyResp:
+        choices = []           # no message at all
+        usage = None
+
+        def model_dump(self):
+            return {}
+
+    class _DegenerateClient(_FakeOptClient):
+        def _chat(self):
+            client = self
+
+            class _Completions:
+                def create(self, **kwargs):
+                    prompt = kwargs["messages"][0]["content"]
+                    client.prompts.append(prompt)
+                    return _EmptyResp()
+
+            class _Chat:
+                completions = _Completions()
+
+            return _Chat()
+
+    client = _DegenerateClient("unused", "unused")
+    _install_client(client)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")   # must not raise
+    assert sorted(_md_files(pdir)) == names        # nothing written, nothing archived
+    assert _confirm_calls == []                    # never reached the gate
+
+
+def test_collect_notes_skips_non_utf8_notes():
+    """One hand-edited latin-1 note must not take the whole pass down — the
+    scanner skips it like an unreadable file (regression: UnicodeDecodeError
+    used to propagate out of _collect_notes into the REPL)."""
+    root = tempfile.mkdtemp(prefix="nx-opt-latin1-")
+    pdir = os.path.join(root, ".nx", "memories")
+    m.st.PROJECT_ROOT = root
+    _note("Good note", "good body", scope="project", root=root)
+    with open(os.path.join(pdir, "20250101-000000_bad.md"), "wb") as f:
+        f.write(b"# Caf\xe9 note\n\ncaf\xe9 body\n")
+    notes = opt._collect_notes("project")          # must not raise
+    assert {n.title for n in notes} == {"Good note"}, notes
+
+
 # --- the in-context memory note ----------------------------------------------
 
 def test_refresh_memory_note_replaces_in_place_and_drops_when_empty():

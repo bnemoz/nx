@@ -450,6 +450,49 @@ class _FakeSaveClient:
     base_url = "http://localhost:9999/v1"
 
 
+class _DegenerateSaveResp:
+    choices = []           # empty: nothing to extract a body from
+    usage = None
+
+    def model_dump(self):
+        return {}
+
+
+class _DegenerateSaveCompletions:
+    def create(self, **kwargs):
+        return _DegenerateSaveResp()
+
+
+class _DegenerateSaveChat:
+    completions = _DegenerateSaveCompletions()
+
+
+class _DegenerateSaveClient:
+    chat = _DegenerateSaveChat()
+    base_url = "http://localhost:9999/v1"
+
+
+def test_memory_save_degenerate_response_reports_error_instead_of_crashing():
+    """Empty `choices` used to raise IndexError out of /memory save into the
+    REPL; it must print the failure and save nothing."""
+    root = tempfile.mkdtemp(prefix="nx-save-degen-")
+    old = m.st.PROJECT_ROOT
+    old_client, old_model, old_active = m.st.client, m.st.MODEL, m.st.ACTIVE
+    old_metrics = m.st._METRICS
+    m.st.PROJECT_ROOT = root
+    m.st.client = _DegenerateSaveClient()
+    m.st.MODEL = "test-model"
+    m.st.ACTIVE = None
+    m.st._METRICS = None
+    try:
+        _memory_cmd._cmd_memory_save([{"role": "user", "content": "learned"}])  # no raise
+        assert not os.path.exists(os.path.join(root, ".nx", "memories"))
+    finally:
+        m.st.PROJECT_ROOT = old
+        m.st.client, m.st.MODEL, m.st.ACTIVE = old_client, old_model, old_active
+        m.st._METRICS = old_metrics
+
+
 def test_memory_save_distills_into_project_scope_with_unified_footer():
     root = tempfile.mkdtemp(prefix="nx-save-")
     old = m.st.PROJECT_ROOT

@@ -191,6 +191,12 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
             _log_event("resp", {"_purpose": "memory_save", "data": resp.model_dump()})
         except Exception:
             pass
+        body = (resp.choices[0].message.content or "").strip()
+        _record_usage(
+            getattr(resp, "usage", None),
+            fallback_chars=len(body),
+            fallback_prompt_chars=len(prompt),
+        )
     except APIConnectionError:
         print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — memory not saved{RESET}")
         return
@@ -198,13 +204,6 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
         print(f"{C.ERROR}  ✗ memory save failed: {type(e).__name__}: {e}{RESET}")
         return
 
-    _record_usage(
-        getattr(resp, "usage", None),
-        fallback_chars=len(resp.choices[0].message.content or ""),
-        fallback_prompt_chars=len(prompt),
-    )
-
-    body = (resp.choices[0].message.content or "").strip()
     if not body:
         print(f"{C.ERROR}  ✗ model returned empty — memory not saved{RESET}")
         return
@@ -377,11 +376,12 @@ class _MemoryHit(NamedTuple):
 
 
 def _read_memory_file(path: str, name: str) -> tuple[str, str] | None:
-    """(title, content) for one memory file, or None when unreadable."""
+    """(title, content) for one memory file, or None when unreadable
+    (missing, permissions, or a non-UTF-8 body)."""
     try:
         with open(path, encoding="utf-8") as f:
             content = f.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return _first_title(content, name), content
 

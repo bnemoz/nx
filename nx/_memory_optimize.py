@@ -246,18 +246,18 @@ def _optimize_chat(prompt: str, purpose: str) -> str | None:
             _log_event("resp", {"_purpose": purpose, "data": resp.model_dump()})
         except Exception:
             pass
+        text = (resp.choices[0].message.content or "").strip()
+        _record_usage(
+            getattr(resp, "usage", None),
+            fallback_chars=len(text),
+            fallback_prompt_chars=len(prompt),
+        )
     except APIConnectionError:
         print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — memory optimize stopped{RESET}")
         return None
     except Exception as e:
         print(f"{C.ERROR}  ✗ memory optimize failed: {type(e).__name__}: {e}{RESET}")
         return None
-    text = (resp.choices[0].message.content or "").strip()
-    _record_usage(
-        getattr(resp, "usage", None),
-        fallback_chars=len(text),
-        fallback_prompt_chars=len(prompt),
-    )
     return text
 
 
