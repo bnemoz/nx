@@ -17,12 +17,13 @@ Flow, bounded at every step:
 1. `_collect_notes` indexes the store (global + project, newest first) — no
    model call, capped at NX_MEMORY_OPTIMIZE_MAX_NOTES so a 300-note store
    can't turn one command into 300 notes of prompt.
-2. One librarian round-trip per NX_MEMORY_OPTIMIZE_BATCH notes sends a
-   compact index (name, age, size, one-line digest) and asks for plan lines
-   only — `RETIRE <name>` / `MERGE a + b => Title`. A line protocol, not JSON:
+2. One librarian round-trip (the whole MAX_NOTES-bounded index in a single
+   call; NX_MEMORY_OPTIMIZE_BATCH can split it into several) sends a compact
+   index (name, age, size, one-line digest) and asks for plan lines only —
+   `RETIRE <name>` / `MERGE a + b => Title`. A line protocol, not JSON:
    small models quote markdown bodies badly, and unparseable plans are
-   discarded line-by-line instead of losing the whole pass. From the second
-   batch on, the previous batch's unactioned titles ride along, so a
+   discarded line-by-line instead of losing the whole pass. When the review
+   is split, the previous batch's unactioned titles ride along, so a
    near-duplicate pair straddling a batch boundary can still meet.
 3. Each merge group gets its own round-trip with the real bodies (source
    `_scope:`/`_saved:` footers stripped first — the writer re-adds them),
@@ -61,10 +62,14 @@ from ._memory_cmd import (
     _write_memory_file,
 )
 
-# Notes reviewed per librarian call. Small enough that the index stays a
-# fraction of the context window even on a 4K model; large enough that a
-# 100-note store is a handful of calls, not a hundred.
-OPTIMIZE_DEFAULT_BATCH = 12
+# Notes reviewed per librarian call. 0 (the default since 0.34.1) = ONE pass
+# over the MAX_NOTES-bounded store: with a reasoning source each round-trip
+# thinks for minutes, so the per-pass calls were the run's slow path, and the
+# cross-batch carryover that motivated splitting (0.33.0) is moot when one
+# pass sees everything. The index stays bounded (~6K tokens at the
+# MAX_NOTES=120 default with 480-char digests); set NX_MEMORY_OPTIMIZE_BATCH
+# to split it again for a tiny-context model.
+OPTIMIZE_DEFAULT_BATCH = 0
 
 # Hard ceiling on how many notes one run reviews (newest first; the rest are
 # reported as unexamined rather than silently skipped). 0 = no ceiling.

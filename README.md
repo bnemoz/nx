@@ -196,7 +196,7 @@ sessions and exits without entering the REPL.
 | `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) — checked after every settled model turn, including mid-task; a context-length 400 folds once and retries the turn |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
-| `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default 12; `0` or oversized = one pass over the whole store) |
+| `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
@@ -596,12 +596,13 @@ a tool, because a tool schema costs tokens on every turn in every project
 forever.
 
 It indexes the store with no model call, then sends a compact index (filename,
-age, size, title, one-line digest) to the active model in batches of
-`NX_MEMORY_OPTIMIZE_BATCH` notes and asks for plan lines only:
+age, size, title, one-line digest) to the active model in ONE librarian call
+over the whole bounded store (`NX_MEMORY_OPTIMIZE_BATCH` can split it into
+several for a tiny-context model) and asks for plan lines only:
 `RETIRE <name>`, `MERGE a + b => Title`, or `OK`. A line protocol rather than
 JSON, because note bodies are markdown and small models quote that badly; an
 unresolvable or malformed line is dropped and shown instead of losing the
-whole pass. From the second batch on, the previous batch's unactioned titles
+whole pass. When the review is split, the previous batch's unactioned titles
 ride along, so a near-duplicate pair straddling a batch boundary can still
 meet. Each merge group then gets its own call carrying the full bodies (with
 the sources' `_scope:`/`_saved:` footer stripped first — the writer re-adds

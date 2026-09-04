@@ -204,8 +204,14 @@ def test_merge_plan_keeps_each_note_in_one_action_and_respects_budget():
 def test_optimize_batch_and_cap_env():
     os.environ.pop("NX_MEMORY_OPTIMIZE_BATCH", None)
     os.environ.pop("NX_MEMORY_OPTIMIZE_MAX_NOTES", None)
-    assert opt._optimize_batch(100) == opt.OPTIMIZE_DEFAULT_BATCH
+    # Default 0 = ONE librarian pass over the whole (MAX_NOTES-bounded)
+    # store; each round-trip thinks for minutes on a reasoning source, so
+    # the run must not default to a stack of per-batch calls.
+    assert opt.OPTIMIZE_DEFAULT_BATCH == 0
+    assert opt._optimize_batch(100) == 100
     assert opt._optimize_batch(3) == 3          # batch larger than the store
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 12)
+    assert opt._optimize_batch(100) == 12       # an explicit split still works
     _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
     assert opt._optimize_batch(50) == 50        # 0 = single pass
     assert opt._optimize_max_notes() == opt.OPTIMIZE_DEFAULT_MAX_NOTES
