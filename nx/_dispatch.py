@@ -36,6 +36,7 @@ from ._plan import plan_edit, plan_active, check_gate
 from ._subagent import spawn_agent, _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
+from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
 
 DISPATCH = {
@@ -305,6 +306,8 @@ def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
     return (name, json.dumps(args, sort_keys=True))
 
 
+
+
 def _invalidate_tool_cache_path(path: str | None) -> None:
     if not path:
         return
@@ -520,25 +523,24 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             # dispatch of exactly the tool the endpoint kept truncating — the
             # endpoint's failure was in the ARGS stream, not the tool itself.
             _breaker_decay(name)
+            # A parallel fan-out still shows a cache-hit read: until now a
+            # served-from-cache call printed NOTHING at all, so it looked like
+            # the call had been dropped. The sequential box keeps its existing
+            # (silent) cache-hit behavior — only the group box gains the line.
+            from ._subagent import _subagent_ctx as _cache_ctx
+            _rec = current_recorder() if _cache_ctx() is None else None
+            if _rec is not None:
+                _h, _, _d = tool_display(name, args)
+                _rec.blocks.append(ToolBlock(name=name, header=_h, detail=_d,
+                                             cached=True))
             return cached.result
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.
     undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit", "delete_file") else None
     # newline so the tool arrow gets its own line — streamed text uses end=""
-    # and would otherwise run straight into the indicator
-    arg_preview = json.dumps(args)
-    if len(arg_preview) > 120:
-        arg_preview = arg_preview[:117] + "..."
-    # Surface the target path in the header line for path-taking tools, so the
-    # file a write_file/edit_file/multi_edit touches is obvious at a glance even
-    # when the args preview (usually a big old/new diff body) gets truncated and
-    # buries the path. Falls back to just the name when there's no usable path.
-    header = name
-    path_arg = args.get("path")
-    if isinstance(path_arg, list):
-        path_arg = path_arg[0] if path_arg else None
-    if isinstance(path_arg, str) and path_arg not in (".", ""):
-        header = f"{name} {path_arg}"
+    # and would otherwise run straight into the indicator. The header and args
+    # preview come from tool_display(), shared with the grouped renderer.
+    header, arg_preview, detail = tool_display(name, args)
     # Tag write-tier sub-agent calls in the box so a diff prompt that appears
     # mid-sub-agent (the model's own loop output is suspended) is visibly the
     # sub-agent's edit, not the parent's. The tag rides the header line only —
@@ -552,7 +554,19 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # and st._ACTIVE_SPINNER all belong to the parent's terminal while this
     # agent runs detached. Results still flow to the agent's own transcript.
     quiet = _subagent_quiet()
-    if not quiet:
+    # A parallel fan-out worker owns neither the terminal nor a spinner: it
+    # records a ToolBlock (nx/_toolblocks) and the dispatching thread draws the
+    # group. Without this, N pool threads each printed half a box while N
+    # spinner threads erased one another's lines mid-print. Two exclusions: a
+    # thread with a recorder but a live sub-agent context (a sync agent's reads,
+    # which run ON the parent's fan-out thread) records nothing, and neither
+    # does anything inside a sub-agent loop — those belong to the agent's own
+    # transcript, not the parent's group box. `quiet` deliberately plays no
+    # part here: a fan-out worker sets it precisely to mean "draw nothing",
+    # yet its call must still be recorded for the group.
+    recorder = current_recorder() if ctx is None else None
+    buffered = recorder is not None
+    if not quiet and not buffered:
         print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
         print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
@@ -562,20 +576,20 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # screen after the green model output finishes. _confirm pauses/resumes
     # us around its own I/O so the auto-allow line / Y/n prompt aren't clobbered.
     spinner = LifeSpinner(label=f"running {name}")
-    if not quiet:
+    if not quiet and not buffered:
         spinner.start()
         st._ACTIVE_SPINNER = spinner
     try:
         result = fn(**args)
     except _EscToChat:
         # Close the tool box before propagating so it isn't left visually open.
-        if not quiet:
+        if not quiet and not buffered:
             print(f"{C.ACCENT}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         result = f"ERROR: {type(e).__name__}: {e}"
     finally:
-        if not quiet:
+        if not quiet and not buffered:
             st._ACTIVE_SPINNER = None
             spinner.stop()
     # Breaker decay (0.29.9): the tool executed cleanly — one success clears
@@ -635,7 +649,27 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # done=green, in_progress=yellow, pending=orange) and sanitizes the item
     # text, so it goes to the screen verbatim inside the box — not the generic
     # strip + uniform-recolor path used for other tool/bash output.
-    if quiet:
+    if buffered:
+        # Recorded for the group box: one header line always, the result body
+        # only when tool output is visible (the group footer carries the single
+        # collapse hint instead of one per call). A failure also carries its
+        # first line as `note`, so a collapsed group still says why it failed.
+        body: list[str] = []
+        if st.TOOL_OUTPUT_VISIBLE:
+            if name == "todo_write":
+                body = render_todos_display().splitlines()
+            else:
+                body = [f"{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}"
+                        for line in preview_lines]
+        failed = isinstance(result, str) and result.startswith(("ERROR", "DENIED"))
+        note = ""
+        if failed:
+            first = strip_ansi_for_display(result.splitlines()[0])
+            note = first[:100] + "..." if len(first) > 100 else first
+        recorder.blocks.append(ToolBlock(
+            name=name, header=header, detail=detail,
+            body=body, note=note, failed=failed))
+    elif quiet:
         pass  # quiet (async-agent) loop: no box, no result echo
     elif name == "todo_write":
         disp = render_todos_display().splitlines()
@@ -650,7 +684,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
         print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
-    if not quiet:
+    if not quiet and not buffered:
         print(f"{C.ACCENT}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         # git_* results reflect .git/ state, which the root dir's mtime never

@@ -25,6 +25,7 @@ import os
 import subprocess
 from typing import Any, Optional
 
+from ._ansi import C, RESET
 from ._env import _env_int
 
 
@@ -73,7 +74,12 @@ def pre_tool_hook(tool: str, args: dict[str, Any]) -> Optional[str]:
     if ok:
         return None
     from ._subagent import _subagent_quiet
-    if not _subagent_quiet():
+    from ._toolblocks import record_note
+    # A parallel fan-out worker (quiet, recorder attached) must not print from
+    # its thread: route the veto line into the group box instead of leaving the
+    # blocked call unexplained on screen.
+    if not record_note(f"{C.WARNING}↳ pre-hook blocked {tool}: {msg}{RESET}") \
+            and not _subagent_quiet():
         print(f"  ↳ pre-hook blocked {tool}: {msg}")
     return f"blocked by NX_PRE_TOOL_HOOK ({msg})"
 

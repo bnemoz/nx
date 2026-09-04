@@ -417,24 +417,41 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
     requirement beyond the Observation order, so a thread pool is safe here.
     Mutating/prompting calls keep the sequential path (approval UX depends on
     it). Results print in original order after all complete; observations map
-    back by index so the model sees the same transcript shape as before."""
+    back by index so the model sees the same transcript shape as before.
+
+    'Print in original order' is what this function did NOT do until 0.31.0:
+    each worker called run_tool() non-quiet, so N threads interleaved their own
+    tool boxes while N spinner threads cleared lines one another had just
+    drawn. Workers now run quiet and record a ToolBlock instead (nx/_toolblocks);
+    this thread — the only one owning the terminal — draws the whole turn as ONE
+    group box, in call order, with a single spinner and one elapsed time. A
+    quiet caller (async agent / batch task) records but never renders."""
     results: dict[int, str] = {}
     jobs = [(i, n, a) for i, (n, a) in enumerate(calls)]
     workers = min(8, len(jobs))
+    blocks_by_index: dict[int, list] = {}
 
     # Pool threads inherit nothing from the dispatching thread's quiet state
-    # (thread-local by design), so a quiet loop's read-only fan-out would print
-    # tool boxes from the pool onto the shared terminal. Re-apply THIS thread's
-    # quiet posture in each worker: it can only be True here when the caller is
-    # a quiet loop (async sub-agent or batch task) — the interactive parent
-    # never fans out quiet.
+    # (thread-local by design), which is why a quiet loop's fan-out had to
+    # re-apply quiet in every worker. Since 0.31.0 the worker is ALWAYS quiet,
+    # interactive parent included: "quiet" is how a thread says "I do not own
+    # the terminal", which is exactly true of a pool worker — its output
+    # reaches the user through the recorder instead of straight to stdout.
     from ._subagent import _subagent_quiet, _ASYNC_QUIET_SLOTS
-    quiet = _subagent_quiet()
+    from ._toolblocks import (attach_recorder, detach_recorder, group_spinner,
+                              render_group)
+    render = not _subagent_quiet()
+    started = time.time()
+    # One activity line for the whole group, in place of one spinner thread per
+    # call erasing the lines its siblings had just printed.
+    spinner = group_spinner(f"running {len(jobs)} tool calls") if render else None
+    if spinner is not None:
+        spinner.start()
 
     def _one(job: tuple[int, str, dict[str, Any]]) -> tuple[int, str]:
         i, n, a = job
-        if quiet:
-            _ASYNC_QUIET_SLOTS.quiet = True
+        _ASYNC_QUIET_SLOTS.quiet = True
+        rec = attach_recorder()
         try:
             return i, run_tool(n, a)
         except _EscToChat:
@@ -442,11 +459,34 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
         except Exception as e:  # noqa: BLE001 — mirror run_tool's error surfacing
             return i, f"ERROR: {type(e).__name__}: {e}"
         finally:
+            # Distinct keys per worker; the parent only reads this after the
+            # pool has joined, so no lock is needed.
+            blocks_by_index[i] = rec.blocks
+            detach_recorder()
             _ASYNC_QUIET_SLOTS.quiet = False
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for i, res in ex.map(_one, jobs):
-            results[i] = res
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for i, res in ex.map(_one, jobs):
+                results[i] = res
+    finally:
+        if spinner is not None:
+            spinner.stop()
+        # Render even on the exception path (an Esc mid-fan-out, a tool that
+        # raised past run_tool's own folding): the calls that DID happen have
+        # already happened, and dropping their lines would misreport the turn.
+        if render:
+            render_group(
+                [b for i in range(len(jobs)) for b in blocks_by_index.get(i, [])],
+                time.time() - started, st.TOOL_OUTPUT_VISIBLE)
+            # `/tooloutput last` replays st._LAST_TOOL_*, which each worker set
+            # from whichever thread finished last. Re-point it at the group's
+            # LAST call so "last" means the last thing the user just saw, not
+            # an artifact of thread scheduling.
+            _last = results.get(len(jobs) - 1)
+            if isinstance(_last, str):
+                st._LAST_TOOL_NAME = calls[-1][0]
+                st._LAST_TOOL_OUTPUT = _last
     return results
 
 
@@ -481,7 +521,13 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
     Single calls, mutating/prompting tools, any turn while already inside
     a sub-agent (no nested fan-out), and WRITE-TIER fan-outs stay sequential:
     a write-capable sub-agent's bodies run the parent's real _confirm(), so
-    two of them in flight would interleave approval prompts."""
+    two of them in flight would interleave approval prompts.
+
+    Since 0.31.0 this gate carries a second load-bearing meaning: a fan-out
+    worker runs quiet (it must not own the terminal), and _confirm() auto-DENIES
+    on a quiet thread. So anything eligible here must also be incapable of
+    needing an approval prompt — true for _CACHEABLE_READ_TOOLS and read-only
+    spawn_agent, and exactly why the write tier stays sequential."""
     if len(calls) < 2:
         return False
     import nx as _m
