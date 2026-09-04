@@ -21,9 +21,12 @@ Flow, bounded at every step:
    compact index (name, age, size, one-line digest) and asks for plan lines
    only — `RETIRE <name>` / `MERGE a + b => Title`. A line protocol, not JSON:
    small models quote markdown bodies badly, and unparseable plans are
-   discarded line-by-line instead of losing the whole pass.
-3. Each merge group gets its own round-trip with the real bodies, returning
-   one markdown note — written through `_write_memory_file`, so merged notes
+   discarded line-by-line instead of losing the whole pass. From the second
+   batch on, the previous batch's unactioned titles ride along, so a
+   near-duplicate pair straddling a batch boundary can still meet.
+3. Each merge group gets its own round-trip with the real bodies (source
+   `_scope:`/`_saved:` footers stripped first — the writer re-adds them),
+   returning one markdown note — written through `_write_memory_file`, so merged notes
    are byte-for-byte conventional (`<timestamp>_<slug>.md`, 0600, `_scope:`
    footer) and never clobber anything.
 4. Source notes are never unlinked: they move to
@@ -68,7 +71,8 @@ OPTIMIZE_DEFAULT_MAX_NOTES = 120
 _NOTE_DIGEST_CHARS = 480
 
 # Merges cost one model call each, so the whole run is capped independently
-# of how many RETIRE lines come back. A safety limit, not a tunable.
+# of how many RETIRE lines come back. A safety limit, not a tunable. Viable
+# groups past it are reported (in _Plan.overflow) rather than silently dropped.
 _MAX_MERGES_PER_RUN = 8
 
 # Timeout for the librarian/merge round-trips (heavier prompts than /memory
@@ -114,6 +118,7 @@ class _OptNote(NamedTuple):
 class _Plan(NamedTuple):
     retire: list[str]              # note names
     merges: list[tuple[list[str], str]]   # (names, proposed title)
+    overflow: int = 0              # viable merge groups past the run's cap
 
 
 # --- index -------------------------------------------------------------------
@@ -188,8 +193,18 @@ def _index_block(notes: list[_OptNote]) -> str:
 
 # --- prompts -----------------------------------------------------------------
 
-def _plan_prompt(notes: list[_OptNote], focus: str) -> str:
+def _plan_prompt(notes: list[_OptNote], focus: str,
+                 carry: list[_OptNote] | None = None) -> str:
     guidance = f"\nThe owner adds this guidance: {focus}\n" if focus else ""
+    carry_block = ""
+    if carry:
+        lines = "\n".join(f"[{n.label}] {n.name}  title: {n.title}" for n in carry)
+        carry_block = (
+            "\n--- carryover from the previous batch (titles only) ---\n"
+            "These notes were reviewed last pass and left unactioned. You may RETIRE "
+            "or MERGE them together with this batch's notes when they overlap; "
+            f"otherwise ignore them.\n{lines}\n"
+        )
     return (
         "You are the librarian of a coding agent's saved memory notes. Each note is one "
         "markdown file distilled from a past session: learnings, file paths, commands, "
@@ -203,8 +218,19 @@ def _plan_prompt(notes: list[_OptNote], focus: str) -> str:
         "the same thing differently (the newer account wins), or when it records only session "
         "logistics with no durable fact. MERGE near-duplicate notes about one topic; never "
         "merge unrelated notes. Use only names from the index. Reply OK if nothing should "
-        f"change.{guidance}\n--- index ---\n{_index_block(notes)}\n--- end ---"
+        f"change.{guidance}{carry_block}\n--- index ---\n{_index_block(notes)}\n--- end ---"
     )
+
+
+_FOOTER_RE = re.compile(r"\n---\n_scope:.*$", re.DOTALL)
+
+
+def _strip_footer(body: str) -> str:
+    """Drop the writer's trailing scope/saved bookkeeping block from a note
+    body. The merge model must not re-emit it (and often would, verbatim);
+    `_write_memory_file` appends a fresh footer for the merged note anyway.
+    Anything that does not end in that shape is returned untouched."""
+    return _FOOTER_RE.sub("", body).rstrip() + "\n"
 
 
 def _merge_prompt(group: list[_OptNote]) -> str:
@@ -212,8 +238,8 @@ def _merge_prompt(group: list[_OptNote]) -> str:
     for n in group:
         try:
             with open(os.path.join(n.dir, n.name), encoding="utf-8") as f:
-                body = f.read()
-        except OSError:
+                body = _strip_footer(f.read())
+        except (OSError, UnicodeDecodeError):
             body = f"(unreadable — title only: {n.title})"
         parts.append(f"--- {n.name} ({_age(n.mtime)} old, scope: {n.label}) ---\n{body}")
     return (
@@ -342,27 +368,30 @@ def _merge_plan(total: _Plan, chunk: tuple[list[str], list[tuple[str, str]]],
                 budget: int) -> _Plan:
     """Fold one pass's plan into the run's totals, keeping every name in
     exactly one action (a merge wins over a retire of the same note) and
-    honouring the run-wide merge budget."""
+    honouring the run-wide merge budget. Viable groups past the budget are
+    counted in overflow rather than silently dropped."""
     retire = list(total.retire)
     merges = list(total.merges)
+    overflow = total.overflow
     used = {n for names, _t in merges for n in names}
     for name in chunk[0]:
         if name not in used and name not in retire:
             retire.append(name)
     for names, title in chunk[1]:
-        if len(merges) >= budget:
-            break
         picked = [n for n in names if n not in used]
         if len(picked) < 2:
             continue
         if len(set(picked)) != len(picked):
+            continue
+        if len(merges) >= budget:
+            overflow += 1
             continue
         merges.append((picked, title))
         used.update(picked)
         for n in picked:
             if n in retire:
                 retire.remove(n)
-    return _Plan(retire, merges)
+    return _Plan(retire, merges, overflow)
 
 
 # --- applying ----------------------------------------------------------------
@@ -539,12 +568,13 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     print(f"{DIM}  reviewing {len(notes)} memories"
           f"{' (dry run)' if dry else ''}…{RESET}")
     plan = _Plan([], [])
+    carry: list[_OptNote] = []
     for start in range(0, len(notes), batch):
         chunk = notes[start:start + batch]
         if len(notes) > batch:
             print(f"{DIM}  · librarian pass {start // batch + 1}"
                   f"/{-(-len(notes) // batch)}{RESET}")
-        text = _optimize_chat(_plan_prompt(chunk, focus), "memory_optimize_plan")
+        text = _optimize_chat(_plan_prompt(chunk, focus, carry), "memory_optimize_plan")
         if text is None:
             if not (plan.retire or plan.merges):
                 return
@@ -554,6 +584,10 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
         plan = _merge_plan(plan, (retire, merges), _MAX_MERGES_PER_RUN)
         for ln in skipped:
             print(f"{DIM}  · ignored plan line: {ln[:80]}{RESET}")
+        # The next pass sees this chunk's unactioned titles, so a pair split
+        # across a batch boundary can still meet.
+        actioned = set(plan.retire) | {n for names, _t in plan.merges for n in names}
+        carry = [n for n in chunk if n.name not in actioned]
 
     if not plan.retire and not plan.merges:
         print(f"{DIM}  librarian found nothing to change ({len(notes)} notes reviewed){RESET}")
@@ -564,6 +598,10 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
 
     print(f"{DIM}  plan:{RESET}")
     _print_plan(plan, known)
+    if plan.overflow:
+        print(f"{DIM}  {plan.overflow} more merge group"
+              f"{'s' if plan.overflow != 1 else ''} found past this run's merge cap "
+              f"— run /memory optimize again{RESET}")
     if dry:
         print(f"{DIM}  dry run — nothing changed{RESET}")
         return

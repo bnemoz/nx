@@ -598,11 +598,17 @@ age, size, title, one-line digest) to the active model in batches of
 `RETIRE <name>`, `MERGE a + b => Title`, or `OK`. A line protocol rather than
 JSON, because note bodies are markdown and small models quote that badly; an
 unresolvable or malformed line is dropped and shown instead of losing the
-whole pass. Each merge group then gets its own call carrying the full bodies
-and returns one note, written through the same shared writer as every other
-memory, so merged files are conventional: timestamped slug, `0600`,
+whole pass. From the second batch on, the previous batch's unactioned titles
+ride along, so a near-duplicate pair straddling a batch boundary can still
+meet. Each merge group then gets its own call carrying the full bodies (with
+the sources' `_scope:`/`_saved:` footer stripped first — the writer re-adds
+it) and returns one note, written through the same shared writer as every
+other memory, so merged files are conventional: timestamped slug, `0600`,
 `_scope:` footer, never clobbering. A merge that spans both scopes lands in
-whichever scope held most of its sources (ties go to project).
+whichever scope held most of its sources (ties go to project). A run applies
+at most eight merges (each is a model call); when the librarian finds more
+groups than that, the run says so and a second `/memory optimize` picks them
+up.
 
 Nothing is unlinked. Retired notes move to
 `<memories dir>/archive/<run-stamp>/` inside their own scope, which no scanner

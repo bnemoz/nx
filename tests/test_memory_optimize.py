@@ -491,6 +491,71 @@ def test_optimize_leaves_cross_scope_name_collisions_alone():
             pass
 
 
+# --- carryover / footer / overflow (0.33.0) ------------------------------------
+
+def test_strip_footer_removes_only_the_writers_tail():
+    body = "# T\n\nfact line\n\n---\n_scope: project  _saved: 2025-01-01 00:00:00\n"
+    out = opt._strip_footer(body)
+    assert out == "# T\n\nfact line\n", out
+    # No footer shape -> untouched (plus trailing-newline normalization).
+    plain = "# T\n\nfinal line\n"
+    assert opt._strip_footer(plain) == "# T\n\nfinal line\n"
+    # A mid-body horizontal rule is not a footer and survives.
+    mid = "# T\n\n---\n\nnot a footer\n"
+    assert "not a footer" in opt._strip_footer(mid)
+
+
+def test_merge_prompt_strips_source_footers():
+    root = tempfile.mkdtemp(prefix="nx-opt-merge-")
+    pdir = os.path.join(root, ".nx", "memories")
+    _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    notes = opt._collect_notes("project")
+    prompt = opt._merge_prompt(notes)
+    assert "_scope:" not in prompt and "_saved:" not in prompt, prompt
+    assert "alpha body" in prompt and "beta body" in prompt
+
+
+def test_plan_prompt_carries_previous_batch_titles():
+    root = tempfile.mkdtemp(prefix="nx-opt-carry-")
+    _with_store([("A one", "body a"), ("B two", "body b"), ("C three", "body c")], root)
+    notes = opt._collect_notes("project")
+    later = notes[1:]
+    carry = notes[:1]
+    with_carry = opt._plan_prompt(later, "", carry)
+    without = opt._plan_prompt(later, "")
+    assert "carryover from the previous batch" in with_carry
+    assert "carryover" not in without
+    assert carry[0].name in with_carry          # titles only, still no digest
+    assert carry[0].digest not in with_carry
+
+
+def test_optimize_overflow_reports_groups_past_the_cap(monkeypatch):
+    root = tempfile.mkdtemp(prefix="nx-opt-overflow-")
+    _with_store([(f"Note {i}", f"body {i} distinct") for i in range(8)], root)
+    names = sorted(os.path.basename(p) for p in
+                   [os.path.join(root, ".nx", "memories", f) for f in
+                    os.listdir(os.path.join(root, ".nx", "memories"))])
+    # Three viable groups, cap 2: two applied, one reported.
+    plan = (f"MERGE {names[0]} + {names[1]} => First merged\n"
+            f"MERGE {names[2]} + {names[3]} => Second merged\n"
+            f"MERGE {names[4]} + {names[5]} => Third merged\n")
+    client = _FakeOptClient(plan, "# Merged\n\nbody\n")
+    _install_client(client)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    monkeypatch.setattr(opt, "_MAX_MERGES_PER_RUN", 2)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "dry")
+    assert len(client.prompts) == 1
+
+
+def test_merge_plan_counts_overflow_past_budget():
+    p = opt._Plan([], [])
+    p = opt._merge_plan(p, ([], [(["a.md", "b.md"], "T")]), budget=1)
+    assert p.merges == [(["a.md", "b.md"], "T")] and p.overflow == 0
+    p = opt._merge_plan(p, ([], [(["c.md", "d.md"], "U"), (["e.md", "f.md"], "V")]), budget=1)
+    assert [t for _n, t in p.merges] == ["T"]
+    assert p.overflow == 2
+
+
 # --- the in-context memory note ----------------------------------------------
 
 def test_refresh_memory_note_replaces_in_place_and_drops_when_empty():
