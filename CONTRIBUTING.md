@@ -10,8 +10,9 @@ A slash command has **three** touch points. Miss one and the command "works"
 but is broken in a way that's easy to not notice:
 
 1. **Dispatch** — `nx/_repl.py`, the `_REPL_COMMANDS` dict (command → handler
-   from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py`).
-   This is where the command actually runs.
+   from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py`, and
+   subcommand modules like `_memory_optimize.py` reached via their parent
+   handler). This is where the command actually runs.
 2. **Chatbox hint menu** — `nx/_chatbox.py`, the `SLASH_COMMANDS` list
    (`(command, description)` tuples). Drives the autocomplete dropdown when
    typing `/`. A command missing here still works if typed in full, but users
@@ -21,12 +22,17 @@ but is broken in a way that's easy to not notice:
 Also add the command to `_HELP_COMMANDS` in `_repl_settings_cmds.py` (the
 `/help` output) — a fourth touch point that's easy to miss. All four must be
 updated together for a new command. When reviewing a diff that adds a
-command, grep for the command string across all four files before
-considering it done:
+command, grep for the command string across all four files to verify:
 
 ```bash
 grep -rn '"/yourcommand"' nx/_repl.py nx/_chatbox.py nx/_repl_settings_cmds.py README.md
 ```
+
+Subcommands can live in the same module as their parent's dispatch (see
+`/memory optimize` in `nx/_memory_optimize.py`, reached by a lazy import from
+`_cmd_memory` because it imports `_memory_cmd` at module level, with a test
+re-export in `nx/_repl.py`) — the grep above won't surface that indirection, so
+mention the module in the commit/PR instead.
 
 If `/help`-style guidance text exists inline for the command (e.g. the
 "unknown arg" error branch), keep the accepted-args list in that message in

@@ -556,6 +556,106 @@ def test_merge_plan_counts_overflow_past_budget():
     assert p.overflow == 2
 
 
+# --- partial run / escape / focus (0.33.1) --------------------------------------
+
+class _FailingPlanClient(_FakeOptClient):
+    """Answers pass 1 with `plan`, then fails every later librarian call."""
+    base_url = "http://localhost:9999/v1"
+
+    def __init__(self, plan, merged):
+        super().__init__(plan, merged)
+        self.calls = 0
+
+    def _chat(self):
+        client = self
+
+        class _Completions:
+            def create(self, **kwargs):
+                client.calls += 1
+                prompt = kwargs["messages"][0]["content"]
+                client.prompts.append(prompt)
+                if prompt.startswith("Merge the memory notes"):
+                    return _Resp(client.merged)
+                if client.calls > 1:
+                    raise RuntimeError("endpoint lost")
+                return _Resp(client.plan)
+
+        class _Chat:
+            completions = _Completions()
+
+        return _Chat()
+
+
+def test_optimize_partial_run_applies_what_earlier_passes_found():
+    """A later librarian pass dying mid-run must not lose the earlier passes'
+    findings: the run warns and applies the partial plan."""
+    root = tempfile.mkdtemp(prefix="nx-opt-partial-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([(f"Note {i}", f"body {i}") for i in range(4)], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    plan = f"RETIRE {names[0]}\n"
+    client = _FailingPlanClient(plan, "unused")
+    _install_client(client)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 2)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert client.calls == 2                       # pass 2 raised, run stopped there
+    after = _md_files(pdir)
+    assert names[0] not in after, after            # the partial plan was applied
+    arch = os.path.join(pdir, "archive")
+    assert os.path.isdir(arch) and _md_files(os.path.join(arch, os.listdir(arch)[0])) == [names[0]]
+
+
+def test_optimize_first_pass_failure_with_empty_plan_returns_quietly():
+    root = tempfile.mkdtemp(prefix="nx-opt-firstfail-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([(f"Note {i}", f"body {i}") for i in range(4)], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    client = _FailingPlanClient("OK", "unused")    # pass 1 OK, pass 2 raises
+    client.plan = "OK"
+    _install_client(client)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 2)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    # Pass 1 found nothing and pass 2 failed -> quiet return, nothing touched.
+    assert sorted(_md_files(pdir)) == names
+    assert _confirm_calls == []
+
+
+def test_confirm_optimize_escape_returns_false():
+    """Esc at the approval prompt must cancel the run, not propagate into the
+    REPL."""
+    root = tempfile.mkdtemp(prefix="nx-opt-esc-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    _install_client(_FakeOptClient(f"RETIRE {names[0]}\n", "unused"))
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+
+    class _Esc(BaseException):
+        pass
+
+    def _esc(action, preview=None):
+        raise _Esc()
+
+    saved = m._EscToChat
+    m._EscToChat = _Esc
+    m._confirm = _esc
+    try:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")  # no raise
+    finally:
+        m._EscToChat = saved
+        m._confirm = _fake_confirm
+    assert sorted(_md_files(pdir)) == names
+    assert not os.path.exists(os.path.join(pdir, "archive"))
+
+
+def test_plan_prompt_focus_guidance_and_unreviewed_print():
+    root = tempfile.mkdtemp(prefix="nx-opt-focus-")
+    _with_store([(f"Note {i}", f"body {i}") for i in range(5)], root)
+    notes = opt._collect_notes("project")
+    prompt = opt._plan_prompt(notes[:2], "focus on the build system notes", None)
+    assert "The owner adds this guidance: focus on the build system notes" in prompt
+
+
 # --- the in-context memory note ----------------------------------------------
 
 def test_refresh_memory_note_replaces_in_place_and_drops_when_empty():

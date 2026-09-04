@@ -327,7 +327,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|delete\|list` | manage persistent memory |
-| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
+| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (newest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive) |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -617,7 +617,11 @@ by moving the files back. The plan is printed in full before anything happens
 and goes through the approval gate once, so `/approval` rules and yolo apply
 as they do elsewhere; `/memory optimize dry` prints the plan and writes
 nothing, and a trailing argument guides the review ("focus on the build
-notes"). After a real run the cached `memory_search` entries are dropped and
+notes"). Reviews run newest first over at most `NX_MEMORY_OPTIMIZE_MAX_NOTES`
+notes (default 120), so in a bigger store the oldest notes — the strongest
+retirement candidates — are never seen; run `/memory optimize` with the
+cap set to `0` (all notes) periodically to reach them. After a real run the
+cached `memory_search` entries are dropped and
 the session's own saved-memories note is rebuilt in place, so the model's view
 of the store matches the store — including in a session that started before
 the cleanup.
