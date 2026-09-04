@@ -276,8 +276,6 @@ def _resolve_name(raw: str, known: dict[str, _OptNote]) -> str | None:
         return None
     if raw in known:
         return raw
-    if raw.endswith(".md") and raw in known:
-        return raw
     if f"{raw}.md" in known:
         return f"{raw}.md"
     cands = [k for k in known if k.lower().startswith(raw.lower())]
@@ -485,6 +483,25 @@ def _parse_opts(arg: str) -> tuple[bool, str]:
     return False, " ".join(words)
 
 
+def _split_collisions(notes: list[_OptNote]) -> tuple[list[_OptNote], list[str]]:
+    """(reviewable notes, colliding names). A name present in both scopes is
+    unaddressable — a plan line naming it must not silently pick one scope's
+    file to archive — so those notes sit this run out instead, with the run
+    saying so. The writer's second-resolution timestamped filenames make a
+    collision impossible unless a note was hand-copied across scopes."""
+    by_name: dict[str, _OptNote] = {}
+    colliding: set[str] = set()
+    for n in notes:
+        if n.name in by_name or n.name in colliding:
+            colliding.add(n.name)
+        else:
+            by_name[n.name] = n
+    if colliding:
+        for name in colliding:
+            del by_name[name]
+    return list(by_name.values()), sorted(colliding)
+
+
 def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
                          arg: str = "") -> None:
     """`/memory optimize [dry] [focus…]` — librarian pass over the store.
@@ -502,6 +519,13 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     if total_before < 2:
         print(f"{DIM}  nothing to optimize ({len(notes)} memor"
               f"{'y' if len(notes) == 1 else 'ies'} saved){RESET}")
+        return
+    notes, colliding = _split_collisions(notes)
+    if colliding:
+        print(f"{C.WARNING}  ⚠ {len(colliding)} note name(s) exist in both scopes — "
+              f"left untouched this run (rename or delete one to review it){RESET}")
+    if len(notes) < 2:
+        print(f"{DIM}  nothing else to optimize{RESET}")
         return
 
     cap = _optimize_max_notes()

@@ -442,6 +442,55 @@ def test_collect_notes_skips_non_utf8_notes():
     assert {n.title for n in notes} == {"Good note"}, notes
 
 
+def test_split_collisions_sets_both_scoped_names_aside():
+    now = 1_700_000_000.0
+    rows = [("a", "project"), ("b", "global"), ("a", "global"),
+            ("c", "project"), ("b", "project"), ("b", "global")]
+    entries = [opt._OptNote(f"{stem}.md", "t", label, "/tmp", now, 1, "g")
+               for stem, label in rows]
+    keep, collide = opt._split_collisions(entries)
+    assert collide == ["a.md", "b.md"], collide
+    assert [k.name for k in keep] == ["c.md"], keep
+
+
+def test_optimize_leaves_cross_scope_name_collisions_alone():
+    """A plan line naming a note that exists in both scopes must not silently
+    archive one of them: the run warns and the colliding names sit it out."""
+    root = tempfile.mkdtemp(prefix="nx-opt-collide-")
+    pdir = os.path.join(root, ".nx", "memories")
+    gdir = os.path.join(m.st.SESSION_HOME, "memories")
+    paths = _with_store([
+        ("Alpha note", "alpha body"), ("Beta note", "beta body"),
+    ], root)
+    # Hand-copy one project note into the global store under the same name.
+    twin = os.path.join(gdir, os.path.basename(paths[0]))
+    os.makedirs(gdir, exist_ok=True)
+    with open(paths[0], "rb") as f:
+        data = f.read()
+    with open(twin, "wb") as f:
+        f.write(data.replace(b"_scope: project", b"_scope: global"))
+
+    plan = f"RETIRE {os.path.basename(paths[0])}\n"
+    client = _FakeOptClient(plan, "unused")
+    _install_client(client)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    try:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+        assert os.path.exists(paths[0])           # both colliding copies untouched
+        assert os.path.exists(twin)
+        assert not os.path.exists(os.path.join(pdir, "archive"))
+        assert _confirm_calls == []                # never reached the gate
+        # The colliding name never reached a librarian prompt.
+        assert all(os.path.basename(paths[0]) not in p for p in client.prompts)
+    finally:
+        # The twin is test pollution in the shared global store — remove it so
+        # no later test's store-empty assertions can see it (xdist-safe).
+        try:
+            os.unlink(twin)
+        except OSError:
+            pass
+
+
 # --- the in-context memory note ----------------------------------------------
 
 def test_refresh_memory_note_replaces_in_place_and_drops_when_empty():
