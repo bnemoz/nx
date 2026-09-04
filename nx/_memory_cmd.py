@@ -5,8 +5,10 @@ Two storage scopes:
   - global:  ~/.nx/memories/            (cross-project, via _memories_dir)
   - project: <project_root>/.nx/memories/ (via _project_memories_dir)
 
-`/memory save|remember|delete|list` are the manual slash commands (`/memory
-save` round-trips the whole session into one distilled note). The *tools* are
+`/memory save|remember|delete|list|optimize` are the manual slash commands
+(`/memory save` round-trips the whole session into one distilled note;
+`/memory optimize` is the consolidation pass in `_memory_optimize.py`).
+The *tools* are
 what the model calls itself mid-turn: `memory_write` to persist a discrete
 learning, `memory_search` to recall prior notes, `memory_delete` to remove a
 superseded one. The session-start memory-awareness note (`_load_memory_note`)
@@ -92,6 +94,8 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     /memory remember <query>     — keyword search through saved memories
     /memory delete <target>      — remove one memory (title/file/prefix)
     /memory list                 — list all saved memories
+    /memory optimize [dry] [focus]  — librarian pass over the store: fold
+        duplicates together and archive notes a matured project outgrew
     """
     parts = user_input.split(None, 2)
     sub = parts[1].lower() if len(parts) >= 2 else ""
@@ -115,12 +119,20 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
         _cmd_memory_save(messages, notes)
         return
 
+    if sub == "optimize":
+        # Imported lazily: _memory_optimize imports this module at module level.
+        from ._memory_optimize import _cmd_memory_optimize
+        _cmd_memory_optimize(messages, parts[2] if len(parts) >= 3 else "")
+        return
+
     # Bare /memory — show usage
     print(f"{DIM}  usage:{RESET}")
     print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
     print(f"{DIM}    /memory remember <query>    search memories{RESET}")
     print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
     print(f"{DIM}    /memory list                list all memories{RESET}")
+    print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
+          f"(dry prints the plan only){RESET}")
 
 
 def _cmd_memory_handler(user: str, state: Any) -> None:
@@ -680,14 +692,53 @@ def _add_memory_note_if_absent(messages: list[dict[str, Any]]) -> None:
     transcript already carries one. Fresh sessions get it from
     _initial_messages(); a resumed session replays a transcript that may
     predate the feature — or predate the memories it would list."""
-    for m in messages:
+    at = _find_memory_note_index(messages)
+    if at is None:
+        note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
+        if note is not None:
+            at = 1 if (messages and messages[0].get("role") == "system") else 0
+            messages.insert(at, note)
+
+
+MEMORY_NOTE_MARKER = "[Saved memories"
+
+
+def _find_memory_note_index(messages: list[dict[str, Any]]) -> int | None:
+    """Index of the transcript's memory-awareness note, or None."""
+    for i, m in enumerate(messages):
         if (m.get("role") == "user" and isinstance(m.get("content"), str)
-                and "[Saved memories" in m["content"]):
-            return
+                and MEMORY_NOTE_MARKER in m["content"]):
+            return i
+    return None
+
+
+def _refresh_memory_note(messages: list[dict[str, Any]]) -> bool:
+    """Rebuild the memory-awareness note that a running session carries, after
+    the store changed underneath it (see /memory optimize). Returns True when
+    the message list changed. An existing entry is replaced at its own index,
+    so turn order and any /ctx pin on that turn survive; when every note has
+    gone the stale entry is dropped; when the transcript somehow has none, the
+    fresh note is inserted where _add_memory_note_if_absent would put it.
+
+    Cost, deliberately paid: rewriting a mid-transcript message busts the
+    prompt cache for the next turn (the /undo-style edit the cache-visibility
+    docs warn about). It only ever happens when the user explicitly runs
+    /memory optimize, and leaving the model reciting archived titles for the
+    rest of the session is the worse trade."""
+    at = _find_memory_note_index(messages)
     note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
-    if note is not None:
-        at = 1 if (messages and messages[0].get("role") == "system") else 0
-        messages.insert(at, note)
+    if at is None:
+        if note is None:
+            return False
+        messages.insert(1 if (messages and messages[0].get("role") == "system") else 0, note)
+        return True
+    if note is None:
+        del messages[at]
+        return True
+    if messages[at].get("content") == note["content"]:
+        return False
+    messages[at] = note
+    return True
 
 
 def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, str] | None:

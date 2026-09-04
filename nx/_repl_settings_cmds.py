@@ -63,7 +63,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/export [md] [path]", "write the current session to a markdown file"),
     ("/resume [target]", "switch to another session"),
     ("/save [title]", "persist current session, optionally with a title"),
-    ("/memory [save|remember|delete|list]", "save a distilled memory, search/remove/list saved memories"),
+    ("/memory [save|remember|delete|list|optimize]", "save a distilled memory, search/remove/list saved memories, optimize (merge duplicates, retire stale notes)"),
     ("/delete [target]", "delete a session"),
     ("/todo", "show the model's current todo_write list"),
     ("/plan [goal|done|off|discard]", "start/view/exit plan mode — while active, mutating tool calls are gated"),

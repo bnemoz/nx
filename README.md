@@ -196,6 +196,8 @@ sessions and exits without entering the REPL.
 | `NX_PRICE_<SOURCE>_INPUT` / `_OUTPUT` / `_CACHE` | $ per 1M tokens for a source; feeds `/cost`'s $ column (unset sources show token totals only) |
 | `NX_AUTOCOMPRESS_PERCENT` | auto-compress threshold (default 85; `0` disables) — checked after every settled model turn, including mid-task; a context-length 400 folds once and retries the turn |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
+| `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default 12; `0` or oversized = one pass over the whole store) |
+| `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -325,6 +327,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|delete\|list` | manage persistent memory |
+| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive) |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -577,7 +580,41 @@ suffix instead of overwriting. `memory_write` and `memory_delete` go through
 the approval gate like `write_file`/`delete_file`; `memory_search` is
 read-only. The manual `/memory save|remember|delete|list` slash commands
 remain for distilling a whole session at once (project scope, same
-convention) and hand-managing notes.
+convention) and hand-managing notes, and `/memory optimize` cleans the store
+up once it has outgrown itself.
+
+### `/memory optimize`
+
+A store that only grows turns into noise: after a hundred notes some pair
+almost certainly describes the same subsystem from two different weeks, and
+older notes describe things the matured project no longer has.
+`/memory optimize` is the janitor pass — deliberately a slash command and not
+a tool, because a tool schema costs tokens on every turn in every project
+forever.
+
+It indexes the store with no model call, then sends a compact index (filename,
+age, size, title, one-line digest) to the active model in batches of
+`NX_MEMORY_OPTIMIZE_BATCH` notes and asks for plan lines only:
+`RETIRE <name>`, `MERGE a + b => Title`, or `OK`. A line protocol rather than
+JSON, because note bodies are markdown and small models quote that badly; an
+unresolvable or malformed line is dropped and shown instead of losing the
+whole pass. Each merge group then gets its own call carrying the full bodies
+and returns one note, written through the same shared writer as every other
+memory, so merged files are conventional: timestamped slug, `0600`,
+`_scope:` footer, never clobbering. A merge that spans both scopes lands in
+whichever scope held most of its sources (ties go to project).
+
+Nothing is unlinked. Retired notes move to
+`<memories dir>/archive/<run-stamp>/` inside their own scope, which no scanner
+can see (a directory name has no `.md` suffix), so a bad review is reversible
+by moving the files back. The plan is printed in full before anything happens
+and goes through the approval gate once, so `/approval` rules and yolo apply
+as they do elsewhere; `/memory optimize dry` prints the plan and writes
+nothing, and a trailing argument guides the review ("focus on the build
+notes"). After a real run the cached `memory_search` entries are dropped and
+the session's own saved-memories note is rebuilt in place, so the model's view
+of the store matches the store — including in a session that started before
+the cleanup.
 
 ## Metrics
 
