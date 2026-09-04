@@ -105,6 +105,15 @@ _MERGE_WORKERS_CAP = 4
 # a server that refuses the number is retried without the kwarg.
 DEFAULT_OPTIMIZE_MAX_TOKENS = 36 * 1024
 
+# A finish_reason="length" answer with no visible text is the one empty-answer
+# shape a bigger budget can fix (the cap, not the model, ended the call), so it
+# is retried once at this multiple before the run gives up. 36K → 108K covers
+# every observed cutoff; a second cutoff means the model genuinely cannot fit
+# an answer and the run prints the tunable advice instead of burning a third
+# minutes-long call. When max_tokens is omitted entirely (env 0) the retry
+# sends the default budget, since the server's own cap is what cut the call off.
+_LENGTH_RETRY_FACTOR = 3
+
 _DRY_WORDS = ("dry", "dry-run", "--dry", "--dry-run")
 
 
@@ -340,6 +349,64 @@ def _empty_reason(choice: Any) -> str:
     return "the model returned no content"
 
 
+def _length_capped(choice: Any) -> bool:
+    """Was this response cut off by the completion budget (finish_reason=
+    "length") rather than finishing? That is the one empty-answer shape a
+    bigger `max_tokens` can actually fix, so it is the one that gets a retry."""
+    try:
+        return getattr(choice, "finish_reason", None) == "length"
+    except Exception:
+        return False
+
+
+def _answer_text(choice: Any) -> str:
+    """Visible answer text of a choice ('' for a degenerate payload)."""
+    try:
+        return (choice.message.content or "").strip()
+    except (AttributeError, IndexError):
+        return ""
+
+
+def _optimize_call(prompt: str, purpose: str, mt_kwargs: dict[str, int],
+                   base_kwargs: dict[str, Any]) -> tuple[Any, Any]:
+    """One HTTP round-trip → (first choice, response). `max_tokens` rides in
+    as a kwarg dict so a caller can raise it between attempts. A server that
+    rejects the kwarg with a 4xx is retried once without it (the kwarg is
+    nx's idea; 5xx/transport failures are already retried below the client).
+    Raises on failure — nothing here prints or decides."""
+    _log_event("req", {"model": st.MODEL, "messages": [{"role": "user", "content": prompt}],
+                       "stream": False, "_purpose": purpose,
+                       "max_tokens": mt_kwargs.get("max_tokens")})
+    try:
+        resp = st.client.chat.completions.create(
+            model=st.MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False, timeout=_optimize_timeout(),
+            **mt_kwargs, **base_kwargs)
+    except Exception as first_e:
+        # Some backends reject unknown/unusual completion params; the
+        # kwarg is nx's idea, so one no-kwarg retry on a 4xx is cheap
+        # and keeps those sources working.
+        if not mt_kwargs or not _bad_request(first_e):
+            raise
+        _log_event("req", {"model": st.MODEL,
+                           "messages": [{"role": "user", "content": prompt}],
+                           "stream": False, "_purpose": purpose,
+                           "max_tokens": None, "retry": "without max_tokens"})
+        resp = st.client.chat.completions.create(
+            model=st.MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False, timeout=_optimize_timeout(), **base_kwargs)
+    try:
+        _log_event("resp", {"_purpose": purpose, "data": resp.model_dump()})
+    except Exception:
+        pass
+    try:
+        return resp.choices[0], resp
+    except (AttributeError, IndexError):
+        return None, resp
+
+
 def _optimize_chat(prompt: str, purpose: str) -> str | None:
     """One non-streaming librarian/merge call. Mirrors `/memory save`'s call
     shape (same logging purposes, same usage recording, same error surface)
@@ -348,47 +415,28 @@ def _optimize_chat(prompt: str, purpose: str) -> str | None:
     Sends max_tokens (NX_MEMORY_OPTIMIZE_MAX_TOKENS, default 36K) so a
     reasoning model can't silently spend a server's small default cap on
     thinking; a server that rejects the kwarg with a 4xx is retried once
-    without it, and an HTTP-200 answer with no visible text prints why."""
+    without it. An HTTP-200 answer with no visible text prints why — and a
+    cutoff by the budget (finish_reason=length) is retried ONCE at a raised
+    budget first: on a reasoning source that empty answer is usually the cap,
+    not the model, and one more call beats losing the whole run."""
     if st.client is None or st.MODEL is None:
         print(f"{C.ERROR}  ✗ no active source — memory optimize aborted{RESET}")
         return None
     max_tokens = _optimize_max_tokens()
     mt_kwargs = {} if max_tokens == 0 else {"max_tokens": max_tokens}
     base_kwargs = dict(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {})
-    choice: Any = None
     try:
-        _log_event("req", {"model": st.MODEL, "messages": [{"role": "user", "content": prompt}],
-                           "stream": False, "_purpose": purpose,
-                           "max_tokens": max_tokens})
-        try:
-            resp = st.client.chat.completions.create(
-                model=st.MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False, timeout=_optimize_timeout(),
-                **mt_kwargs, **base_kwargs)
-        except Exception as first_e:
-            # Some backends reject unknown/unusual completion params; the
-            # kwarg is nx's idea, so one no-kwarg retry on a 4xx is cheap
-            # and keeps those sources working.
-            if not mt_kwargs or not _bad_request(first_e):
-                raise
-            _log_event("req", {"model": st.MODEL,
-                               "messages": [{"role": "user", "content": prompt}],
-                               "stream": False, "_purpose": purpose,
-                               "max_tokens": None, "retry": "without max_tokens"})
-            resp = st.client.chat.completions.create(
-                model=st.MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False, timeout=_optimize_timeout(), **base_kwargs)
-        try:
-            _log_event("resp", {"_purpose": purpose, "data": resp.model_dump()})
-        except Exception:
-            pass
-        try:
-            choice = resp.choices[0]
-            text = (choice.message.content or "").strip()
-        except (AttributeError, IndexError):
-            text = ""
+        choice, resp = _optimize_call(prompt, purpose, mt_kwargs, base_kwargs)
+        text = _answer_text(choice)
+        if not text and _length_capped(choice):
+            if mt_kwargs:
+                raised = {"max_tokens": max_tokens * _LENGTH_RETRY_FACTOR}
+            else:
+                raised = {"max_tokens": DEFAULT_OPTIMIZE_MAX_TOKENS}
+            print(f"{C.WARNING}  ⚠ empty answer — {_empty_reason(choice)}; "
+                  f"retrying with max_tokens={raised['max_tokens']}{RESET}")
+            choice, resp = _optimize_call(prompt, purpose, raised, base_kwargs)
+            text = _answer_text(choice)
         _record_usage(
             getattr(resp, "usage", None),
             fallback_chars=len(text),

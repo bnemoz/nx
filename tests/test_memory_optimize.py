@@ -637,35 +637,145 @@ def test_optimize_partial_run_applies_what_earlier_passes_found():
     assert os.path.isdir(arch) and _md_files(os.path.join(arch, os.listdir(arch)[0])) == [names[0]]
 
 
-def test_optimize_empty_answer_reports_reason_and_keeps_notes():
-    """An HTTP-200 answer with no visible text (a reasoning model cut off by
-    the token cap: content=None, finish_reason="length") must not raise, must
-    print *why*, and must leave the merge sources untouched."""
-    root = tempfile.mkdtemp(prefix="nx-opt-empty-")
+# --- empty-answer retry (0.34.2) ----------------------------------------------
+
+class _CutoffResp:
+    """HTTP-200 with no visible text: a reasoning model cut off by the token
+    cap after burning the budget on reasoning_content."""
+
+    def __init__(self):
+        msg = type("M", (), {"content": None,
+                             "reasoning_content": "thinking and thinking, "
+                                                 "but never answering"})()
+        self.choices = [type("C", (), {"message": msg, "finish_reason": "length"})()]
+        self.usage = None
+
+    def model_dump(self):
+        return {}
+
+
+def test_optimize_length_cutoff_is_retried_with_raised_budget():
+    """An HTTP-200 answer with no visible text and finish_reason="length" is
+    the cap cutting the model off mid-think — retried ONCE at a raised budget
+    rather than losing the whole run (regression: a 36K reasoning burn on the
+    plan call ended /memory optimize with no plan at all)."""
+    root = tempfile.mkdtemp(prefix="nx-opt-retry-")
     pdir = os.path.join(root, ".nx", "memories")
     paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
     names = sorted(os.path.basename(p) for p in paths)
-
-    class _Msg:
-        content = None
-        reasoning_content = "thinking and thinking, but never answering"
-
-    class _Choice:
-        message = _Msg()
-        finish_reason = "length"
-
-    class _Resp:
-        choices = [_Choice()]
-        usage = None
-
-        def model_dump(self):
-            return {}
+    seen = []
 
     class _Completions:
         @staticmethod
         def create(**kwargs):
-            assert kwargs["max_tokens"] == 36 * 1024    # the tunable rides along
-            return _Resp()
+            seen.append(kwargs.get("max_tokens"))
+            if len(seen) == 1:
+                return _CutoffResp()          # first attempt: cut off mid-think
+            return _Resp(f"RETIRE {names[0]}\n")   # retry: the real plan
+
+    class _Chat:
+        completions = _Completions()
+
+    class _CutOffOnceClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_CutOffOnceClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    # Second attempt carried the raised budget (36K × _LENGTH_RETRY_FACTOR).
+    assert seen == [36 * 1024, 108 * 1024], seen
+    # The retried plan was applied.
+    after = _md_files(pdir)
+    assert names[0] not in after, after
+    assert os.path.isdir(os.path.join(pdir, "archive"))
+    assert any("retrying with max_tokens=110592" in ln for ln in _printed)
+
+
+def test_optimize_second_cutoff_gives_up_after_one_retry():
+    """A model that cannot fit an answer in even the raised budget gets ONE
+    retry, then the run explains and stops — no unbounded round-trip loop."""
+    root = tempfile.mkdtemp(prefix="nx-opt-retry2-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            seen.append(kwargs.get("max_tokens"))
+            return _CutoffResp()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _AlwaysCutOffClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_AlwaysCutOffClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen == [36 * 1024, 108 * 1024], seen     # exactly one retry
+    # Nothing written, nothing archived; the empty answer was explained.
+    assert sorted(_md_files(pdir)) == names
+    assert not os.path.exists(os.path.join(pdir, "archive"))
+    assert any("finish_reason=length" in ln for ln in lines), lines
+
+
+def test_optimize_max_tokens_zero_retry_uses_default_budget():
+    """With max_tokens omitted (env 0), a length cutoff means the SERVER's cap
+    ended the call — the retry sends the default budget so the model finally
+    has room."""
+    root = tempfile.mkdtemp(prefix="nx-opt-retry3-")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            seen.append(kwargs.get("max_tokens"))
+            if len(seen) == 1:
+                return _CutoffResp()
+            return _Resp("OK")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _CutOffOnceClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_CutOffOnceClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    _env("NX_MEMORY_OPTIMIZE_MAX_TOKENS", 0)
+    with _printed:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen == [None, opt.DEFAULT_OPTIMIZE_MAX_TOKENS], seen
+
+
+def test_optimize_empty_answer_reports_reason_and_keeps_notes():
+    """An HTTP-200 answer with no visible text (a reasoning model cut off by
+    the token cap: content=None, finish_reason="length") must not raise, must
+    print *why*, and must leave the merge sources untouched — after the one
+    raised-budget retry also comes back empty."""
+    root = tempfile.mkdtemp(prefix="nx-opt-empty-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            mt = kwargs.get("max_tokens")
+            assert mt in (36 * 1024, 108 * 1024), mt    # the tunable rides along
+            seen.append(mt)
+            return _CutoffResp()
 
     class _Chat:
         completions = _Completions()

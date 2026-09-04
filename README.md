@@ -198,7 +198,7 @@ sessions and exits without entering the REPL.
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
-| `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer |
+| `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer; an answer that *was* cut off (`finish_reason=length`) is retried once at 3× this budget |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
@@ -630,8 +630,9 @@ model can't burn a small server-side cap on thinking and return an empty
 answer, and allows `NX_MEMORY_OPTIMIZE_TIMEOUT` seconds per call (default
 300; the pre-reasoning fixed 60s could kill a call mid-think — a read
 timeout also burns one `NX_HTTP_RETRIES` attempt, so retrying couldn't save
-it); if a call still comes back with no visible text, the run prints why
-(a `finish_reason=length` cut-off names the tunable). Merge groups are
+it); if a call still comes back with no visible text the run says why, and a
+`finish_reason=length` cut-off — the budget, not the model, ended the call —
+is retried once at three times the budget before the run gives up. Merge groups are
 independent model calls, so they run concurrently —
 `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` at a time (default one per group, capped
 at 4; `1` restores serial) — which matters on a reasoning source, where the
