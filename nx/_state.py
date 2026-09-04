@@ -169,6 +169,15 @@ _MALFORMED_TOOL_BROKEN: set[str] = set()
 _TALLY_ARG_REPAIRS: int = 0   # args/name repairs applied this turn
 _TALLY_RETRIES: int = 0       # corrective nudges / recovery cuts this turn
 
+# --- text-only-after-stall guard ---------------------------------------------
+# Set when a real tool call runs after this reasoning-stall episode's first
+# nudge (see _run_model_turn_loop's TURN_TOOL branch). While it is True, a
+# later text-only turn is accepted as the final summary of completed work
+# rather than re-nudged — and the stall nudge itself asks for a wrap-up
+# instead of "act now" (see STALL_WRAPUP_NUDGE). Reset when a fresh episode
+# begins (cut_count == 0 in _handle_loop_cut).
+_STALL_EPISODE_ACTED: bool = False
+
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time
 # by the module that owns each setting (_turn.py, _compress.py) — this is

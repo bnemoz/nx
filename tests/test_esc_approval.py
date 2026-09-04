@@ -758,6 +758,126 @@ def test_text_only_after_stall_nudges_when_nudge_is_last_message():
     print("PASS — text-only intent after nudge (no tool) still re-nudged")
 
 
+# ---------------------------------------------------------------------------
+# 10. Stall-episode "acted" marker: acts, stalls, then summarizes = real finish
+# ---------------------------------------------------------------------------
+def test_text_only_after_stall_accepts_summary_after_toolwork_then_stall():
+    # The shape the old layout-only guard missed: the model acts (a tool
+    # result lands), then stalls once more (the re-nudge is rewritten in
+    # place as the trailing user message), and only THEN delivers its
+    # finished-work summary. The last message is the nudge, so the old check
+    # fired "TEXT-ONLY AFTER STALL NUDGE" on a legitimate final answer. The
+    # episode-level _STALL_EPISODE_ACTED marker (set by _run_model_turn_loop
+    # when TURN_TOOL lands mid-episode) must suppress the re-nudge here.
+    saved_open_stream = m.open_stream
+    saved_watcher = m._interrupt_watcher
+    saved_spinner = getattr(m, "LifeSpinner", None)
+    saved_retries = m.REASONING_ONLY_RETRY_LIMIT
+    saved_acted = m.st._STALL_EPISODE_ACTED
+    m._interrupt_watcher = lambda: None
+    m.REASONING_ONLY_RETRY_LIMIT = 3
+    m.LifeSpinner = type("NoSpinner", (), {
+        "__init__": lambda self, **kw: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+        "_t": None,
+    })
+    builtins.print = lambda *a, **k: None
+    summary_text = "The work is complete - no further changes are needed."
+    chunks = [_FakeChunk(_FakeDelta(content=summary_text), finish_reason="stop")]
+    m.open_stream = lambda messages, **kw: iter(chunks)
+    try:
+        m.st._STALL_EPISODE_ACTED = True  # the loop marked a mid-episode TURN_TOOL
+        messages = [{"role": "system", "content": m.SYSTEM},
+                    {"role": "user", "content": "answer me"},
+                    {"role": "assistant", "content": ""},
+                    {"role": "tool", "content": "result of the action"},
+                    {"role": "assistant", "content": "[stalled again]"},
+                    {"role": "user", "content": "[Runtime note: nudge to act]"}]
+        status = m.model_turn(messages, reasoning_loop_cut_count=2)
+        assert status == m.TURN_DONE, f"expected TURN_DONE, got {status!r}"
+        assert messages[-1] == {"role": "assistant", "content": summary_text}
+        # The earlier nudge was NOT rewritten with another re-nudge.
+        assert messages[-2]["content"] == "[Runtime note: nudge to act]"
+    finally:
+        m.open_stream = saved_open_stream
+        m._interrupt_watcher = saved_watcher
+        if saved_spinner is not None:
+            m.LifeSpinner = saved_spinner
+        else:
+            m.__dict__.pop("LifeSpinner", None)
+        m.REASONING_ONLY_RETRY_LIMIT = saved_retries
+        m.st._STALL_EPISODE_ACTED = saved_acted
+        builtins.print = _REAL_PRINT
+    print("PASS - acts, stalls, then summarizes: accepted as final answer")
+
+def test_stall_nudge_asks_for_wrapup_after_episode_toolwork():
+    # A stall AFTER the model already did tool work this episode means it
+    # stalled while composing its wrap-up: the mid-ladder nudge must ask for
+    # the visible answer (STALL_WRAPUP_NUDGE) instead of demanding "ACT NOW".
+    saved_print = builtins.print
+    saved_acted = m.st._STALL_EPISODE_ACTED
+    saved_retries = m.REASONING_ONLY_RETRY_LIMIT
+    m.REASONING_ONLY_RETRY_LIMIT = 3
+    builtins.print = lambda *a, **k: None
+    try:
+        base = [{"role": "user", "content": "do the thing"},
+                {"role": "assistant", "content": ""},
+                {"role": "tool", "content": "result"},
+                {"role": "user", "content": "task brief"}]
+        # Without the marker: the old "ACT NOW" nudge (unchanged behavior).
+        m.st._STALL_EPISODE_ACTED = False
+        messages = [dict(x) for x in base]
+        status = m._handle_loop_cut(messages, False, 1, 0, 0, None, 5, [], 0)
+        assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
+        assert "ACT NOW" in messages[-1]["content"]
+        # With the marker: wrap-up request instead.
+        m.st._STALL_EPISODE_ACTED = True
+        messages = [dict(x) for x in base]
+        status = m._handle_loop_cut(messages, False, 1, 0, 0, None, 5, [], 0)
+        assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
+        assert "Deliver the visible answer now" in messages[-1]["content"]
+        assert "ACT NOW" not in messages[-1]["content"]
+    finally:
+        m.st._STALL_EPISODE_ACTED = saved_acted
+        m.REASONING_ONLY_RETRY_LIMIT = saved_retries
+        builtins.print = saved_print
+    print("PASS - post-toolwork stall nudges for a wrap-up, not a tool call")
+
+def test_turn_loop_marks_episode_acted_on_tool_call():
+    # The loop wiring: a TURN_TOOL arriving while a stall episode is in
+    # progress (reasoning_loop_cuts > 0) sets _STALL_EPISODE_ACTED.
+    saved_model_turn = m.model_turn
+    saved_acted = m.st._STALL_EPISODE_ACTED
+    m.st._STALL_EPISODE_ACTED = False
+    calls = {"n": 0}
+
+    def fake_model_turn(messages, *args, reasoning_loop_cut_count=0, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert m.st._STALL_EPISODE_ACTED is False  # episode just started
+            return m.TURN_STALL
+        if calls["n"] == 2:
+            assert args[0] == 1  # reasoning_loop_cut_count, passed positionally
+            messages.append({"role": "assistant", "content": ""})
+            messages.append({"role": "tool", "content": "ok"})
+            return m.TURN_TOOL
+        assert m.st._STALL_EPISODE_ACTED is True  # the loop marked it
+        messages.append({"role": "assistant", "content": "All done."})
+        return m.TURN_DONE
+
+    m.model_turn = fake_model_turn
+    try:
+        summary = m._run_model_turn_loop([{"role": "user", "content": "go"}])
+        assert summary["status"] == "done", summary
+        assert calls["n"] == 3
+        assert m.st._STALL_EPISODE_ACTED is True
+    finally:
+        m.model_turn = saved_model_turn
+        m.st._STALL_EPISODE_ACTED = saved_acted
+    print("PASS - TURN_TOOL mid-episode sets the acted marker")
+
+
 if __name__ == "__main__":
     test_confirm_esc_raises()
     test_confirm_y_n()
@@ -772,4 +892,7 @@ if __name__ == "__main__":
     test_repl_recover_command_forces_visible_checkpoint()
     test_text_only_after_stall_accepts_final_summary_after_toolwork()
     test_text_only_after_stall_nudges_when_nudge_is_last_message()
+    test_text_only_after_stall_accepts_summary_after_toolwork_then_stall()
+    test_stall_nudge_asks_for_wrapup_after_episode_toolwork()
+    test_turn_loop_marks_episode_acted_on_tool_call()
     print("\nALL ESC-APPROVAL TESTS PASSED")

@@ -544,6 +544,17 @@ FORCED_FINAL_NUDGE = (
     "visible answer now in at most six short bullets or paragraphs. If you are "
     "blocked, say exactly what is blocking you and what input is needed."
 )
+# A stall after the model has already done tool work in this recovery episode
+# means it stalled while composing its wrap-up — not while dodging the work.
+# Ask for the visible answer instead of demanding another tool call.
+STALL_WRAPUP_NUDGE = (
+    "You have already made tool calls and collected their results in this task. "
+    "Your previous response was reasoning only — do not start over and do not "
+    "keep planning privately. Deliver the visible answer now: a concise summary "
+    "of what you did and what it produced (use the final_answer tool if "
+    "available). Only make another tool call if a step is genuinely unfinished "
+    "and its result is required for the answer."
+)
 EMPTY_TURN_NUDGE = (
     "Your previous response was empty — you produced no visible text and no tool "
     "call, so nothing happened. Do not stop. If the task is not finished, emit the "

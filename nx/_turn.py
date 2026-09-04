@@ -41,6 +41,7 @@ from . import _state as st
 from . import (
     FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
     REASONING_STALL_NUDGE, FORCED_FINAL_NUDGE, EMPTY_TURN_NUDGE,
+    STALL_WRAPUP_NUDGE,
     REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
     _CACHEABLE_READ_TOOLS, _tool_cache_key,
 )
@@ -1020,6 +1021,13 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         return TURN_STREAM_CUT
     retry_limit = _subagent_scoped_retry(max(0, st.REASONING_ONLY_RETRY_LIMIT))
     cut_count = reasoning_loop_cut_count
+    # Set when a real tool call runs mid-episode (see the TURN_TOOL branch in
+    # _run_model_turn_loop): the "has the model acted?" marker that demotes
+    # this nudge from "ACT NOW" to a wrap-up request. Reset when a fresh
+    # episode begins so a stale marker from an earlier episode can't suppress
+    # this episode's text-only guard or rewrite the nudge text.
+    if cut_count == 0:
+        st._STALL_EPISODE_ACTED = False
     reasoning_secs = (time.time() - reasoning_only_start) if reasoning_only_start else 0
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
@@ -1118,10 +1126,23 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         else:
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
         return TURN_FORCE_FINAL
+    # A stall AFTER the model has already done tool work this episode is a
+    # different failure: it stalled while composing its wrap-up, not while
+    # dodging the work. Ask for the visible answer instead of demanding a
+    # tool call — "ACT NOW" is exactly what produced the TEXT-ONLY-AFTER-
+    # STALL misfires on legitimate finished answers.
+    wrapup_note = (STALL_WRAPUP_NUDGE
+                   if (st._STALL_EPISODE_ACTED and not plan_active()) else None)
     if not quiet:
-        print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; nudging to act "
+        print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; "
+              f"{'nudging to wrap up' if wrapup_note else 'nudging to act'} "
               f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
-    if reasoning_text.strip():
+    if wrapup_note is not None:
+        if reasoning_text.strip():
+            messages.append({"role": "user", "content": f"[Runtime note: {wrapup_note}]"})
+        else:
+            _nudge_current_user_turn(messages, wrapup_note)
+    elif reasoning_text.strip():
         messages.append({"role": "user", "content":
             "[Runtime note: You were thinking about the task above. "
             "Your reasoning has been preserved as your previous message. "
@@ -1499,16 +1520,18 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # prompt mid-task, requiring a manual "go ahead" to get the model to
     # actually act. Nudge again instead of accepting it as a final answer.
     #
-    # BUT only when the stall nudge is actually the last thing the model saw.
-    # If the model DID act in between — ran a tool, so the last message is a
-    # `tool` result — this text-only turn is its legitimate final summary of
-    # completed work, not a stalled restatement of intent. Nudging there
-    # rejects a correct finished answer and wastes turns re-prompting a model
-    # that already did the task. The counter (reasoning_loop_cut_count) does
-    # not reset on a tool call (see _run_model_turn_loop), so it alone can't
-    # tell the two cases apart; the message layout can.
+    # BUT only while the model has not acted since this stall episode began.
+    # The last-message check (_last_is_dangling_tool) misses the common
+    # layout: the model acts, then stalls once more — the re-nudge is
+    # rewritten in place as the trailing user message — and then delivers
+    # its finished-work summary. st._STALL_EPISODE_ACTED (set by the
+    # TURN_TOOL branch of _run_model_turn_loop, cleared when a fresh
+    # episode starts) records "acted at any point this episode", so a
+    # text-only turn after any mid-episode tool call is accepted as the
+    # final summary instead of being re-nudged.
     if (not forced_final and reasoning_loop_cut_count > 0
             and reasoning_loop_cut_count < max(0, st.REASONING_ONLY_RETRY_LIMIT)
+            and not st._STALL_EPISODE_ACTED
             and not _last_is_dangling_tool(messages)):
         if not quiet:
             print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
@@ -1761,6 +1784,14 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
             recovery_sampling = True
             continue
         if status == TURN_TOOL:
+            # A real tool call just ran. If a stall-recovery episode is in
+            # progress (reasoning_loop_cuts > 0), mark it: any later text-only
+            # turn is a legitimate final summary of completed work, not a
+            # stalled restatement of intent — even when a further stall has
+            # re-nudged in between (making the nudge the last message, the
+            # layout the last-message check in model_turn can't see).
+            if reasoning_loop_cuts > 0:
+                st._STALL_EPISODE_ACTED = True
             # A tool call is real progress for malformed-stream and empty-turn
             # recovery — those counters are about output pathologies, and a
             # successful tool call means the model is producing again.

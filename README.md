@@ -165,7 +165,7 @@ sessions and exits without entering the REPL.
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
 | `NX_REASONING_BUDGET` | cap on the model's reasoning/thinking phase in tokens, sent as `{"reasoning": {"max_tokens": N}}` in the request body (default `0` — off, let the model self-terminate its thinking; ignored by backends that don't consume that field; set per-source with `NX_SOURCE_<NAME>_EXTRA_BODY`; toggle live with `/budget`) |
-| `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders) |
+| `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders). In a parallel turn the collapse hint appears once on the group footer, not once per call |
 | `NX_TOOL_RESULT_CHARS` | cap on tool-result characters entering context (default 20000; `0` disables the cap). Oversized results are head/tail-kept and their full text spilled to `~/.nx/overflow/<sha256>.txt` — the result tells the model the path so it can `read_file`/`search_files` the elided middle |
 | `NX_TOOL_RESULT_SPILL` | write oversized tool results to `~/.nx/overflow/` (default `1`; `0` falls back to the old blind elision marker) |
 | `NX_ARG_REPAIR` | schema-level argument and tool-name repair before a tool body runs (default `1`; `0` = strict pass-through). Coerces wrong-typed args against the tool's declared schema (`"5"` to `5`, `"true"` to `true`, `42` to `"42"`), case-folds a unique enum match (`"In_Progress"` to `"in_progress"`), renames a near-miss key (`maxresults` to `max_results`; difflib similarity 0.8+ and unambiguous only) plus curated per-tool aliases similarity can't reach (`cmd` to `command`, `old_str` to `old`, `file_path` to `path`) — and repairs the tool NAME itself: one alias (`bash` to `run_bash`, `grep` to `search_files`, `str_replace_editor` to `edit_file`) or one unambiguous close match executes under the real name. A missing required argument is refused up front with the declared schema (`ERROR: read_file missing required "path" — schema: …`) instead of a TypeError from the body; values are never fabricated. Every fix is reported in the tool result as an `[arg repair: <note>]` prefix, never applied silently |
@@ -222,6 +222,15 @@ final answer, the forced turn is a nudge rather than a straitjacket: a
 call instead, nx runs it (through the normal approval gate) and keeps the
 turn going — the counter stays pinned at the last rung so any fresh stall
 escalates straight back to forced-final instead of re-climbing the ladder.
+
+Episode awareness also shapes the mid-ladder nudge: once a real tool call has
+run since the first stall, a fresh stall is read as the model stalling while
+composing its wrap-up — nx asks it to deliver the visible answer
+(`STALL_WRAPUP_NUDGE`) instead of demanding another tool call, and a
+text-only reply that arrives after any tool work in the episode is accepted
+as the final answer rather than re-nudged (the old layout-only check missed
+the acts-then-stalls-then-summarizes shape and fired a spurious
+"TEXT-ONLY AFTER STALL NUDGE" on legitimate finished answers).
 
 ### Themes
 
@@ -380,7 +389,14 @@ a blessed `run: pytest*` cannot be stretched into `run: pytest && <anything>`.
 
 Read-only tool calls in an all-read-only turn (e.g. three `read_file` calls
 plus a `search_files`) execute concurrently; anything mutating or
-approval-gated keeps strict sequential dispatch.
+approval-gated keeps strict sequential dispatch. A concurrent turn renders as
+ONE group box drawn by the terminal-owning thread after the calls finish — one
+collapse hint and one elapsed time for the group, calls in the order the model
+emitted them, `· cached` on results served from the read cache, and a failed
+call showing its reason inline — instead of one half-box per thread with
+spinners overwriting each other's lines. 2+ `spawn_agent` calls fan out the
+same way, and an agent's own tool activity never reaches the parent's terminal
+— the group line is the whole story while they run.
 
 ## Sessions
 
@@ -488,7 +504,7 @@ go through the approval gate above.
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |
 | `memory_delete` | `target`, `scope?` | delete one memory by exact title, filename, or unique prefix; requires confirmation |
-| `spawn_agent` | `instruction`, `max_turns?`, `async?` | delegate an investigation or task to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log). The agent sees its turn budget (default 100, ceiling 200) and spends its last turn answering, not searching; rescues inside the agent are capped at one per failure family, and a budget mostly spent on rescues gets its final answer forced early; an agent that dies at the cap still returns its last observation. Write-capable only with `NX_SUBAGENT_WRITE=1` (write_file/edit_file/multi_edit/sed_edit, each confirmed by the user with a diff preview, tagged `(sub-agent)`; run sequentially, no delete/no nested spawn). Send several read-only ones in one turn to run them concurrently — one question per agent; re-spawning an instruction whose background job is still running is refused. Background is the default (`NX_SUBAGENT_ASYNC=0` for foreground): a background spawn returns a job id immediately and delivers a short answer head + the path of its full markdown report (`~/.nx/agents/<job>.md`) as a one-time `[Runtime note]` on a later turn — the parent reads the file when the head isn't enough. Foreground renders the agent's search activity live and returns the answer inline. Async/background agents are always read-only, and a failed agent still announces (FAILED note). `/bg` lists running/finished agents with their report paths. Flash-tier models sometimes narrate delegation instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
+| `spawn_agent` | `instruction`, `max_turns?`, `async?` | delegate an investigation or task to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log). The agent sees its turn budget (default 100, ceiling 200) and spends its last turn answering, not searching; rescues inside the agent are capped at one per failure family, and a budget mostly spent on rescues gets its final answer forced early; an agent that dies at the cap still returns its last observation. Write-capable only with `NX_SUBAGENT_WRITE=1` (write_file/edit_file/multi_edit/sed_edit, each confirmed by the user with a diff preview, tagged `(sub-agent)`; run sequentially, no delete/no nested spawn). Send several read-only ones in one turn to run them concurrently — one question per agent; re-spawning an instruction whose background job is still running is refused. Background is the default (`NX_SUBAGENT_ASYNC=0` for foreground): a background spawn returns a job id immediately and delivers a short answer head + the path of its full markdown report (`~/.nx/agents/<job>.md`) as a one-time `[Runtime note]` on a later turn — the parent reads the file when the head isn't enough. Foreground returns the answer inline; while foreground spawns are in flight the turn shows a single group line (`2 tool calls in parallel · spawn_agent ×2`) rather than each agent's own boxes and spinners (0.31.0). Async/background agents are always read-only, and a failed agent still announces (FAILED note). `/bg` lists running/finished agents with their report paths. Flash-tier models sometimes narrate delegation instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
