@@ -23,6 +23,27 @@ os.environ["NX_ENV_FILE"] = "/dev/null"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
 from nx import _memory_cmd, _memory_optimize as opt  # noqa: E402
+from nx._openai_client import APIError as _APIError  # noqa: E402
+
+# Captured stdout lines, for asserting on the printed explanations.
+import io  # noqa: E402
+from contextlib import redirect_stdout  # noqa: E402
+
+
+class _Captured(list):
+    def __enter__(self):
+        self._buf = io.StringIO()
+        self._ctx = redirect_stdout(self._buf)
+        self._ctx.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self._ctx.__exit__(*exc)
+        self.extend(self._buf.getvalue().splitlines())
+        return False
+
+
+_printed = _Captured()
 
 _confirm_calls = []
 
@@ -51,7 +72,8 @@ def _teardown_function():
         m.st.SESSION_HOME = _saved["home"]
     if "root" in _saved:
         m.st.PROJECT_ROOT = _saved["root"]
-    for k in ("NX_MEMORY_OPTIMIZE_BATCH", "NX_MEMORY_OPTIMIZE_MAX_NOTES"):
+    for k in ("NX_MEMORY_OPTIMIZE_BATCH", "NX_MEMORY_OPTIMIZE_MAX_NOTES",
+              "NX_MEMORY_OPTIMIZE_MAX_TOKENS"):
         os.environ.pop(k, None)
 
 
@@ -603,6 +625,113 @@ def test_optimize_partial_run_applies_what_earlier_passes_found():
     assert names[0] not in after, after            # the partial plan was applied
     arch = os.path.join(pdir, "archive")
     assert os.path.isdir(arch) and _md_files(os.path.join(arch, os.listdir(arch)[0])) == [names[0]]
+
+
+def test_optimize_empty_answer_reports_reason_and_keeps_notes():
+    """An HTTP-200 answer with no visible text (a reasoning model cut off by
+    the token cap: content=None, finish_reason="length") must not raise, must
+    print *why*, and must leave the merge sources untouched."""
+    root = tempfile.mkdtemp(prefix="nx-opt-empty-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+
+    class _Msg:
+        content = None
+        reasoning_content = "thinking and thinking, but never answering"
+
+    class _Choice:
+        message = _Msg()
+        finish_reason = "length"
+
+    class _Resp:
+        choices = [_Choice()]
+        usage = None
+
+        def model_dump(self):
+            return {}
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            assert kwargs["max_tokens"] == 36 * 1024    # the tunable rides along
+            return _Resp()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _CutOffClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_CutOffClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    # Nothing written, nothing archived; the empty answer was explained.
+    assert sorted(_md_files(pdir)) == names
+    assert not os.path.exists(os.path.join(pdir, "archive"))
+    assert any("finish_reason=length" in ln for ln in lines), lines
+
+
+def test_optimize_max_tokens_env_is_sent_and_zero_disables_it():
+    root = tempfile.mkdtemp(prefix="nx-opt-mt-")
+    _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            seen.append(kwargs.get("max_tokens"))
+            return _Resp("OK")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _MTClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_MTClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    _env("NX_MEMORY_OPTIMIZE_MAX_TOKENS", 1234)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen and all(v == 1234 for v in seen), seen
+
+    seen.clear()
+    _env("NX_MEMORY_OPTIMIZE_MAX_TOKENS", 0)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen and all(v is None for v in seen), seen
+
+
+def test_optimize_4xx_on_max_tokens_is_retried_without_it():
+    root = tempfile.mkdtemp(prefix="nx-opt-4xx-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            if "max_tokens" in kwargs:
+                raise _APIError("max_tokens not supported", status_code=400)
+            seen.append("plain")
+            return _Resp("OK")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _PickyClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_PickyClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen == ["plain"]                    # retried without the kwarg
+    assert sorted(_md_files(pdir)) == names
 
 
 def test_optimize_first_pass_failure_with_empty_plan_returns_quietly():

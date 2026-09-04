@@ -79,6 +79,13 @@ _MAX_MERGES_PER_RUN = 8
 # save's single distillation call).
 _OPTIMIZE_TIMEOUT = 60
 
+# Completion budget for the librarian/merge round-trips. Reasoning models burn
+# this on `reasoning_content` before writing a visible character, and many
+# servers cap at 4096 when the request doesn't set it — the answer then arrives
+# as content=None with finish_reason="length". Sized so a long merge finishes;
+# a server that refuses the number is retried without the kwarg.
+DEFAULT_OPTIMIZE_MAX_TOKENS = 36 * 1024
+
 _DRY_WORDS = ("dry", "dry-run", "--dry", "--dry-run")
 
 
@@ -253,31 +260,99 @@ def _merge_prompt(group: list[_OptNote]) -> str:
 
 # --- model round-trips -------------------------------------------------------
 
+def _optimize_max_tokens() -> int:
+    """Completion budget for the librarian/merge round-trips
+    (NX_MEMORY_OPTIMIZE_MAX_TOKENS; 0 = don't send max_tokens at all, letting
+    the server default apply)."""
+    return _opt_env_int("NX_MEMORY_OPTIMIZE_MAX_TOKENS", DEFAULT_OPTIMIZE_MAX_TOKENS)
+
+
+def _bad_request(e: Exception) -> bool:
+    """Is this an APIError whose server response was a 4xx (as opposed to a
+    transport failure)? Used to decide whether a retry without max_tokens can
+    help — retrying on 5xx/timeout would just repeat the failure."""
+    status = getattr(e, "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500
+
+
+def _empty_reason(choice: Any) -> str:
+    """Human-readable reason an HTTP-200 response carries no visible text.
+    The interesting case is finish_reason="length" after real thinking: a
+    reasoning model that burned the whole completion budget on
+    `reasoning_content` and was cut off before the answer."""
+    try:
+        fr = getattr(choice, "finish_reason", None)
+        msg = getattr(choice, "message", None)
+        if getattr(msg, "reasoning_content", None) and fr == "length":
+            return ("the model ran out of completion tokens while reasoning "
+                    "(finish_reason=length) — raise NX_MEMORY_OPTIMIZE_MAX_TOKENS "
+                    "or disable thinking on this source")
+        if fr == "length":
+            return "the answer was cut off by the token cap (finish_reason=length)"
+        if getattr(msg, "reasoning_content", None):
+            return "the model reasoned but produced no answer text"
+    except Exception:
+        pass
+    return "the model returned no content"
+
+
 def _optimize_chat(prompt: str, purpose: str) -> str | None:
     """One non-streaming librarian/merge call. Mirrors `/memory save`'s call
     shape (same logging purposes, same usage recording, same error surface)
-    and returns None after printing why, so callers just stop."""
+    and returns None after printing why, so callers just stop.
+
+    Sends max_tokens (NX_MEMORY_OPTIMIZE_MAX_TOKENS, default 36K) so a
+    reasoning model can't silently spend a server's small default cap on
+    thinking; a server that rejects the kwarg with a 4xx is retried once
+    without it, and an HTTP-200 answer with no visible text prints why."""
     if st.client is None or st.MODEL is None:
         print(f"{C.ERROR}  ✗ no active source — memory optimize aborted{RESET}")
         return None
+    max_tokens = _optimize_max_tokens()
+    mt_kwargs = {} if max_tokens == 0 else {"max_tokens": max_tokens}
+    base_kwargs = dict(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {})
+    choice: Any = None
     try:
         _log_event("req", {"model": st.MODEL, "messages": [{"role": "user", "content": prompt}],
-                           "stream": False, "_purpose": purpose})
-        resp = st.client.chat.completions.create(
-            model=st.MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False, timeout=_OPTIMIZE_TIMEOUT,
-            **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
+                           "stream": False, "_purpose": purpose,
+                           "max_tokens": max_tokens})
+        try:
+            resp = st.client.chat.completions.create(
+                model=st.MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                stream=False, timeout=_OPTIMIZE_TIMEOUT,
+                **mt_kwargs, **base_kwargs)
+        except Exception as first_e:
+            # Some backends reject unknown/unusual completion params; the
+            # kwarg is nx's idea, so one no-kwarg retry on a 4xx is cheap
+            # and keeps those sources working.
+            if not mt_kwargs or not _bad_request(first_e):
+                raise
+            _log_event("req", {"model": st.MODEL,
+                               "messages": [{"role": "user", "content": prompt}],
+                               "stream": False, "_purpose": purpose,
+                               "max_tokens": None, "retry": "without max_tokens"})
+            resp = st.client.chat.completions.create(
+                model=st.MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                stream=False, timeout=_OPTIMIZE_TIMEOUT, **base_kwargs)
         try:
             _log_event("resp", {"_purpose": purpose, "data": resp.model_dump()})
         except Exception:
             pass
-        text = (resp.choices[0].message.content or "").strip()
+        try:
+            choice = resp.choices[0]
+            text = (choice.message.content or "").strip()
+        except (AttributeError, IndexError):
+            text = ""
         _record_usage(
             getattr(resp, "usage", None),
             fallback_chars=len(text),
             fallback_prompt_chars=len(prompt),
         )
+        if not text:
+            print(f"{C.WARNING}  ⚠ empty answer — {_empty_reason(choice)}{RESET}")
+            return None
     except APIConnectionError:
         print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — memory optimize stopped{RESET}")
         return None

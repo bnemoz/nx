@@ -198,6 +198,7 @@ sessions and exits without entering the REPL.
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default 12; `0` or oversized = one pass over the whole store) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
+| `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -620,7 +621,11 @@ nothing, and a trailing argument guides the review ("focus on the build
 notes"). Reviews run newest first over at most `NX_MEMORY_OPTIMIZE_MAX_NOTES`
 notes (default 120), so in a bigger store the oldest notes — the strongest
 retirement candidates — are never seen; run `/memory optimize` with the
-cap set to `0` (all notes) periodically to reach them. After a real run the
+cap set to `0` (all notes) periodically to reach them. Each round-trip sends
+`max_tokens` (`NX_MEMORY_OPTIMIZE_MAX_TOKENS`, default 36K) so a reasoning
+model can't burn a small server-side cap on thinking and return an empty
+answer; if a call still comes back with no visible text, the run prints why
+(a `finish_reason=length` cut-off names the tunable). After a real run the
 cached `memory_search` entries are dropped and
 the session's own saved-memories note is rebuilt in place, so the model's view
 of the store matches the store — including in a session that started before
