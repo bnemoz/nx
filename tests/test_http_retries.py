@@ -136,7 +136,7 @@ def test_connect_refused_is_never_retried(sleeps):
     assert sleeps == []
 
 
-def test_read_timeout_is_retried_then_success(sleeps):
+def test_read_timeout_is_retried_then_success(sleeps, capsys):
     attempts = {"n": 0}
 
     def handler(request):
@@ -148,6 +148,28 @@ def test_read_timeout_is_retried_then_success(sleeps):
     _client(handler).models.list()
     assert attempts["n"] == 2
     assert sleeps == [0.5]
+    # The retry notice names the read timeout and its tunable — the 0.33.2
+    # memory-optimize failure mode was invisible without this hint.
+    err = capsys.readouterr().err
+    assert "read timeout" in err and "NX_HTTP_TIMEOUT_READ" in err
+
+
+def test_client_read_timeout_follows_env_and_zero_disables_it(monkeypatch):
+    def handler(request):
+        return _ok()
+
+    monkeypatch.setenv("NX_HTTP_TIMEOUT_READ", "123.5")
+    c = _client(handler)
+    assert c._client.timeout.read == 123.5
+
+    monkeypatch.setenv("NX_HTTP_TIMEOUT_READ", "0")
+    c = _client(handler)
+    assert c._client.timeout.read is None     # not 0.0: that fails instantly
+    assert c._client.timeout.connect == 10.0  # connect default untouched
+
+    monkeypatch.setenv("NX_HTTP_TIMEOUT_CONNECT", "0")
+    c = _client(handler)
+    assert c._client.timeout.connect is None
 
 
 def test_stream_retry_happens_before_first_byte(sleeps):

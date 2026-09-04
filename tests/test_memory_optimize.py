@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
 from nx import _memory_cmd, _memory_optimize as opt  # noqa: E402
 from nx._openai_client import APIError as _APIError  # noqa: E402
+from nx._openai_client import APIConnectionError as _APIConn  # noqa: E402
 
 # Captured stdout lines, for asserting on the printed explanations.
 import io  # noqa: E402
@@ -831,6 +832,77 @@ def test_usage_text_matches_documented_subcommands():
     src = inspect.getsource(_memory_cmd._cmd_memory)
     for sub in ("save", "remember", "delete", "list", "optimize"):
         assert f"/memory {sub}" in src, sub
+
+
+def test_optimize_timeout_is_passed_per_call_and_env_tunable():
+    """The 0.33.2 regression: the librarian/merge round-trips were hard-capped
+    at 60s, shorter than a reasoning model's real think time on a big merge —
+    the call died as a read timeout (and burned one NX_HTTP_RETRIES attempt),
+    so /memory optimize failed whenever the model took too long. The timeout
+    must ride along per-call and follow NX_MEMORY_OPTIMIZE_TIMEOUT."""
+    root = tempfile.mkdtemp(prefix="nx-opt-timeout-")
+    _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    seen = []
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            seen.append(kwargs.get("timeout"))
+            return _Resp("OK")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _TimeoutClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_TimeoutClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+
+    _env("NX_MEMORY_OPTIMIZE_TIMEOUT", 321)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen and all(v == 321.0 for v in seen), seen
+
+    seen.clear()
+    _env("NX_MEMORY_OPTIMIZE_TIMEOUT", 0)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen and all(v is None for v in seen), seen
+
+    # Default: the 300s reasoning-model-friendly budget, not the old 60s.
+    os.environ.pop("NX_MEMORY_OPTIMIZE_TIMEOUT", None)
+    seen.clear()
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert seen and all(v == 300.0 for v in seen), seen
+
+
+def test_optimize_survives_a_per_call_timeout_failure():
+    """A call that dies on its timeout behaves like any failed round-trip:
+    explained, no writes, later passes still apply what earlier ones found."""
+    root = tempfile.mkdtemp(prefix="nx-opt-timo-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in paths)
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            raise _APIConn("connection error: timed out")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _SlowClient:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_SlowClient())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    assert sorted(_md_files(pdir)) == names            # nothing written
+    assert not os.path.exists(os.path.join(pdir, "archive"))
+    assert any("can't reach" in ln for ln in lines), lines
 
 
 if __name__ == "__main__":

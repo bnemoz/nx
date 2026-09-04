@@ -199,6 +199,7 @@ sessions and exits without entering the REPL.
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default 12; `0` or oversized = one pass over the whole store) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer |
+| `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -206,7 +207,7 @@ sessions and exits without entering the REPL.
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 500) |
 | `NX_TASK_TIMEOUT_SECONDS` | `nx run` per-task wall-clock cap in seconds (default 0 = off; `--timeout` or the task's `timeout_seconds` field override) — a task that exceeds it stops at the next model-turn boundary and reports `status: "error"`, `timed_out: true` |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
-| `NX_HTTP_RETRIES` / `NX_HTTP_BACKOFF_BASE` | transient-failure retries for every endpoint call: 429/5xx and read/write timeouts are retried up to N times beyond the first attempt (default 2; `0` off) with exponential backoff (base seconds, default 0.5 → 0.5s, 1s, 2s…) or the server's `Retry-After` when it sends one (capped at 30s). Never retried: refused connections (a cold-start fails fast) and anything after the first streamed byte |
+| `NX_HTTP_RETRIES` / `NX_HTTP_BACKOFF_BASE` / `NX_HTTP_TIMEOUT_CONNECT` / `NX_HTTP_TIMEOUT_READ` | transient-failure retries for every endpoint call: 429/5xx and read/write timeouts are retried up to N times beyond the first attempt (default 2; `0` off) with exponential backoff (base seconds, default 0.5 → 0.5s, 1s, 2s…) or the server's `Retry-After` when it sends one (capped at 30s). Never retried: refused connections (a cold-start fails fast) and anything after the first streamed byte. Per-request timeouts in seconds: connect 10 (refused/unreachable fails fast), read 900 (a slow server may need more — a read-timeout retry notice names this variable); `0` = no cap |
 | `NX_SKIP_STARTUP_PROBES` | skip every startup probe — `resolve_model()`'s `/v1/models` + `/props` round-trip, the capability/thinking fingerprint probes, the context-window metadata probes and the over-max_tokens overrun probe (default off; `1` disables). Startup becomes instant but model autodetection is off: set the model explicitly (`NX_MODEL` / `NX_SOURCE_<NAME>_MODEL`); tool-calling falls back to reactive text-protocol parsing until a turn reveals better. Also what keeps `import nx` network-free in test runs |
 | `NX_BACKEND` | `vllm` to disable llama.cpp-only recovery samplers (min_p / repeat_penalty / DRY) that vLLM rejects |
 | `NX_NATIVE_TOOLS` | opt into server-side native `tool_calls` (default off — text-protocol fallback is parsed and repaired client-side) |
@@ -624,7 +625,10 @@ retirement candidates — are never seen; run `/memory optimize` with the
 cap set to `0` (all notes) periodically to reach them. Each round-trip sends
 `max_tokens` (`NX_MEMORY_OPTIMIZE_MAX_TOKENS`, default 36K) so a reasoning
 model can't burn a small server-side cap on thinking and return an empty
-answer; if a call still comes back with no visible text, the run prints why
+answer, and allows `NX_MEMORY_OPTIMIZE_TIMEOUT` seconds per call (default
+300; the pre-reasoning fixed 60s could kill a call mid-think — a read
+timeout also burns one `NX_HTTP_RETRIES` attempt, so retrying couldn't save
+it); if a call still comes back with no visible text, the run prints why
 (a `finish_reason=length` cut-off names the tunable). After a real run the
 cached `memory_search` entries are dropped and
 the session's own saved-memories note is rebuilt in place, so the model's view

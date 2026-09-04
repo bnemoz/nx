@@ -75,9 +75,10 @@ _NOTE_DIGEST_CHARS = 480
 # groups past it are reported (in _Plan.overflow) rather than silently dropped.
 _MAX_MERGES_PER_RUN = 8
 
-# Timeout for the librarian/merge round-trips (heavier prompts than /memory
-# save's single distillation call).
-_OPTIMIZE_TIMEOUT = 60
+# Per-call wall-clock cap for the librarian/merge round-trips (heavier prompts
+# than /memory save's single distillation call) — tunable via
+# NX_MEMORY_OPTIMIZE_TIMEOUT, because the old fixed 60s was too short for a
+# reasoning model working a big merge prompt.
 
 # Completion budget for the librarian/merge round-trips. Reasoning models burn
 # this on `reasoning_content` before writing a visible character, and many
@@ -260,6 +261,18 @@ def _merge_prompt(group: list[_OptNote]) -> str:
 
 # --- model round-trips -------------------------------------------------------
 
+def _optimize_timeout() -> float | None:
+    """Per-call wall-clock cap for the librarian/merge round-trips, or None
+    (no timeout at all) when NX_MEMORY_OPTIMIZE_TIMEOUT is 0. The old fixed
+    60s predated reasoning models: a non-streaming merge can spend minutes
+    thinking before a single byte arrives, and a read timeout burns one of
+    the NX_HTTP_RETRIES attempts — so an over-eager cap turned into a silent
+    hard failure. httpx reads a literal 0.0 as a *zero-second* timeout, so 0
+    is mapped to None (disabled), never passed through as a number."""
+    t = _opt_env_int("NX_MEMORY_OPTIMIZE_TIMEOUT", 300)
+    return None if t == 0 else float(t)
+
+
 def _optimize_max_tokens() -> int:
     """Completion budget for the librarian/merge round-trips
     (NX_MEMORY_OPTIMIZE_MAX_TOKENS; 0 = don't send max_tokens at all, letting
@@ -320,7 +333,7 @@ def _optimize_chat(prompt: str, purpose: str) -> str | None:
             resp = st.client.chat.completions.create(
                 model=st.MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                stream=False, timeout=_OPTIMIZE_TIMEOUT,
+                stream=False, timeout=_optimize_timeout(),
                 **mt_kwargs, **base_kwargs)
         except Exception as first_e:
             # Some backends reject unknown/unusual completion params; the
@@ -335,7 +348,7 @@ def _optimize_chat(prompt: str, purpose: str) -> str | None:
             resp = st.client.chat.completions.create(
                 model=st.MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                stream=False, timeout=_OPTIMIZE_TIMEOUT, **base_kwargs)
+                stream=False, timeout=_optimize_timeout(), **base_kwargs)
         try:
             _log_event("resp", {"_purpose": purpose, "data": resp.model_dump()})
         except Exception:

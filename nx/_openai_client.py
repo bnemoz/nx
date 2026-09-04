@@ -125,12 +125,14 @@ def _backoff_delay(attempt: int, retry_after: float | None) -> float:
 
 
 def _notice(req: httpx.Request, attempt: int, retries: int, why: str,
-            delay: float, retry_after: float | None) -> None:
+            delay: float, retry_after: float | None, hint: str = "") -> None:
     """One-line stderr notice + traffic-log entry per retry. stderr, not
-    stdout: stdout is strictly chat rendering (and --json harness output)."""
+    stdout: stdout is strictly chat rendering (and --json harness output).
+    `hint` is appended verbatim when a failure shape has an actionable
+    tunable worth naming (a read timeout, most commonly)."""
     basis = "Retry-After" if retry_after is not None else "backoff"
     print(f"nx: {req.method} {req.url.path} failed ({why}); retrying "
-          f"{attempt + 1}/{retries} in {delay:.1f}s ({basis})", file=sys.stderr)
+          f"{attempt + 1}/{retries} in {delay:.1f}s ({basis}){hint}", file=sys.stderr)
     from ._logging import _log_event  # lazy: _logging builds on NX_HOME state
     _log_event("http_retry", {"method": req.method, "url": str(req.url),
                               "why": why, "attempt": attempt + 1,
@@ -297,10 +299,19 @@ class OpenAI:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if default_headers:
             headers.update(default_headers)
-        # Short connect timeout so an unreachable server fails fast (matches
-        # the openai SDK's practical behavior); generous read timeout since
-        # local models can take a while to start streaming.
-        timeout = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=600.0)
+        # Per-request timeouts (NX_HTTP_TIMEOUT_CONNECT / NX_HTTP_TIMEOUT_READ,
+        # read here so tests can retune them): short connect so an unreachable
+        # server fails fast (matches the openai SDK's practical behavior);
+        # generous read since local models can take minutes before a
+        # non-streaming answer's first byte. 0 (or negative) means no cap —
+        # httpx reads a literal 0.0 as a *zero-second* timeout, which would
+        # kill every request instantly.
+        connect = _env_float("NX_HTTP_TIMEOUT_CONNECT", 10.0)
+        read = _env_float("NX_HTTP_TIMEOUT_READ", 900.0)
+        timeout = httpx.Timeout(
+            connect=connect if connect > 0 else None,
+            read=read if read > 0 else None,
+            write=30.0, pool=600.0)
         self._client = httpx.Client(base_url=self.base_url, headers=headers,
                                      timeout=timeout, transport=transport)
         self.chat = _Chat(self)
@@ -341,8 +352,15 @@ class OpenAI:
                 if attempt < retries and _is_transient_net_exc(e):
                     retry_after = None
                     delay = _backoff_delay(attempt, retry_after)
+                    hint = ""
+                    if isinstance(e, httpx.ReadTimeout):
+                        read = self._client.timeout.read
+                        read_s = "no limit" if read is None else f"{read:g}s"
+                        hint = (f" — the server sent no response bytes within "
+                                f"the {read_s} read timeout; a slow server needs "
+                                "NX_HTTP_TIMEOUT_READ raised")
                     _notice(req, attempt, retries, f"connection error: {e}", delay,
-                            retry_after)
+                            retry_after, hint)
                     attempt += 1
                     time.sleep(delay)
                     continue
