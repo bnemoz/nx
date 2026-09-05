@@ -664,6 +664,11 @@ from ._turn import (
 )
 
 
+# --- auto-continuation: wake the REPL when a background job finishes --------
+from ._autowake import (
+    WAKE_INPUT, WAKE_INSTRUCTION, wake_due, arm_wake, ensure_poller,
+)
+
 # --- multi-line chatbox input ---------------------------------------------
 from ._chatbox import (
     _chatbox_fallback, _char_width, _str_width, _str_slice_by_width,

@@ -380,13 +380,19 @@ def _raw_read_available(fd: int, timeout: float = 0.02) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
+def _chatbox_raw(initial: str = "", history: list[str] | None = None,
+                 wake: "object | None" = None) -> str:
     """Normal-scrollback multi-line editor.
 
     This does not enter the alternate screen. The prompt, streamed model output,
     tool confirmations, and the next prompt all stay in one terminal mode, which
     avoids garbling the REPL after submit.
-    """
+
+    wake=None is the plain blocking editor. Passing the WAKE_INPUT sentinel
+    makes the key loop poll stdin in short slices and return the sentinel as
+    soon as _state._WAKE_DUE is set (a background job finished while the user
+    idled — nx/_autowake.py). Whatever the user had typed is stashed in
+    _state._WAKE_PREFILL so the REPL can restore it after the wake turn."""
     history = history or []
     fd = sys.stdin.fileno()
 
@@ -677,6 +683,19 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
         try:
             render()
             while True:
+                # Wake-aware wait: with a sentinel set, poll stdin readiness
+                # in short slices instead of blocking forever on one key. A
+                # keypress still arrives instantly (fd ready → fall through),
+                # but a finished background job now ends the wait too. The
+                # typed buffer is stashed and restored after the wake turn,
+                # so the wake never eats half a message.
+                if wake is not None:
+                    if st._WAKE_DUE:
+                        st._WAKE_PREFILL = "\n".join(buf)
+                        finish()
+                        return wake
+                    if not wait_ready(fd, 0.2):
+                        continue
                 c = _raw_read_key(fd)
                 if c == "\x1b":
                     esc = handle_escape(_raw_read_available(fd))
@@ -763,14 +782,23 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None) -> str:
             sys.stdout.flush()
 
 
-def read_multiline(initial: str = "", history: list[str] | None = None) -> str:
+def read_multiline(initial: str = "", history: list[str] | None = None,
+                   wake: "object | bool" = False) -> str:
     """Public entry point. Returns the entered text, or '' on empty submit.
-    Raises EOFError / KeyboardInterrupt to match `input()`'s contract."""
+    Raises EOFError / KeyboardInterrupt to match `input()`'s contract.
+
+    wake=True makes the prompt return the WAKE_INPUT sentinel instead of
+    blocking forever when a background job finishes while the user idles at
+    an empty prompt (nx/_autowake.py): the raw editor's key loop checks the
+    flag between keypresses, so the wake lands within ~0.2s of the next key
+    — or immediately if the user hasn't started typing. Half-typed text is
+    stashed in _WAKE_PREFILL and restored by the REPL after the wake turn."""
+    from . import _autowake
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         # Fallback path — single-line input. Same UX as before this feature.
         return _chatbox_fallback(f"{C.ACCENT}you ›{RESET} ")
     try:
-        return _chatbox_raw(initial, history)
+        return _chatbox_raw(initial, history, wake=_autowake.WAKE_INPUT if wake else None)
     except (EOFError, KeyboardInterrupt):
         raise
     except OSError:

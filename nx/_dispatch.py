@@ -719,6 +719,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     if name == "run_bash" and result.startswith("[background]") and not st._SESSION_HAS_BACKGROUNDED:
         st._SESSION_HAS_BACKGROUNDED = True
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE
+        # This session now has background work whose completion only a LATER
+        # turn can observe — arm the auto-continuation poller (0.36.0) so the
+        # finish notice reaches the model without the user typing first.
+        from ._autowake import arm_wake
+        arm_wake()
     # (No seen-marking here: a just-backgrounded job is still alive, so the
     # completion scan's alive-check already skips it — and if it exits before
     # the next scan, announcing "exited (code N)" is exactly what the model

@@ -132,6 +132,21 @@ _INTERRUPT_REDIRECT_SUBMITTED: bool = False
 # in the prompt instead of vanishing.
 _INTERRUPT_REDIRECT_PREFILL: str = ""
 
+# --- auto-continuation ("wake") state (nx/_autowake.py, 0.36.0) --------------
+# armed = this session has backgrounded a job or spawned an async agent, so a
+# self-triggered turn can ever be warranted. due = the poller saw a completion
+# note staged (or stageable) while no turn was running; the prompt returns the
+# WAKE_INPUT sentinel and the REPL starts the turn. prefill carries the user's
+# typed-but-unsent buffer across that wake turn so it is never eaten.
+_WAKE_ARMED: bool = False
+_WAKE_DUE: bool = False
+_WAKE_PREFILL: str = ""
+
+# True for the whole duration of one _run_model_turn_loop() call in the
+# interactive parent. wake_due() refuses to fire mid-turn: a notice that
+# stages while a turn runs is flushed by that turn's own tool-loop machinery.
+_TURN_ACTIVE: bool = False
+
 # --- background run_bash notice ----------------------------------------------
 _SESSION_HAS_BACKGROUNDED: bool = False
 _PENDING_BACKGROUND_NOTICE: str | None = None

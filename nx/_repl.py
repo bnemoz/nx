@@ -228,10 +228,20 @@ def _repl() -> None:
         try:
             # Esc-then-type: if the user was mid-line typing a redirect when
             # the interrupt's disarm handshake completed, resume the prompt
-            # with those characters already there instead of blank.
-            prefill = st._INTERRUPT_REDIRECT_PREFILL
+            # with those characters already there instead of blank. Same
+            # mechanism for a wake prefill: text the user had typed when a
+            # background job's auto-continuation turn took over (0.36.0).
+            prefill = st._INTERRUPT_REDIRECT_PREFILL or st._WAKE_PREFILL
             st._INTERRUPT_REDIRECT_PREFILL = ""
-            user = _m.read_multiline(initial=prefill, history=state.history)
+            st._WAKE_PREFILL = ""
+            try:
+                user = _m.read_multiline(initial=prefill, history=state.history,
+                                         wake=True)
+            except TypeError:
+                # Test stubs predating the wake kwarg: call them with the
+                # original two-kwarg signature (real read_multiline always
+                # accepts it, so in production this line never runs).
+                user = _m.read_multiline(initial=prefill, history=state.history)
         except (EOFError, KeyboardInterrupt):
             print()
             # Flush the current session on Ctrl-D / Ctrl-C exit so the last
@@ -243,8 +253,20 @@ def _repl() -> None:
             if state.session_id:
                 print(f"{DIM}  resume with: nx --resume {state.session_id}{RESET}")
             break
-        user = user.strip()
-        if not user:
+        # Auto-continuation turn (0.36.0): a background job finished while the
+        # user idled at the prompt and the editor returned the WAKE sentinel.
+        # Identity check BEFORE any .strip() — the sentinel is an object, not a
+        # string. It becomes a synthetic user instruction and runs the turn:
+        # no slash dispatch, no input-history entry. The completion note itself
+        # is flushed into the transcript below, before model_turn(), so a
+        # wake turn that never emits a tool call still sees it.
+        wake = user is _m.WAKE_INPUT
+        user = "" if wake else user.strip()
+        if wake:
+            st._WAKE_DUE = False
+            user = _m._autowake.WAKE_INSTRUCTION
+            print(f"{DIM}  ▸ background job finished — auto-continuing{RESET}")
+        if not user and not wake:
             continue
         cmd = user.split(None, 1)[0]
         handler = _REPL_COMMANDS.get(cmd) if cmd.startswith("/") else None
@@ -255,10 +277,18 @@ def _repl() -> None:
         # Record for recall (skips slash commands and repeats of the very
         # last entry) and persist it so a future run's Up reaches this
         # prompt too — see _input_history.py.
-        _record_input(user, state.history)
+        if not wake:
+            _record_input(user, state.history)
         print()  # breathing room before the spinner/text starts
-        state.messages.append({"role": "user", "content": expand_at_mentions(user)})
+        state.messages.append({"role": "user", "content": user if wake
+                               else expand_at_mentions(user)})
         try:
+            st._TURN_ACTIVE = True
+            if wake:
+                # Flush the staged completion note(s) up front: the wake turn
+                # may end as plain text (no tool call), and the notes otherwise
+                # only flush on the first tool call of a turn.
+                _m._flush_pending_background_notice(state.messages)
             _run_model_turn_loop(
                 state.messages,
                 on_step=lambda meta=None: _save_current(state, meta, update_index=False),
@@ -269,6 +299,8 @@ def _repl() -> None:
             _save_current(state)
         except Exception as e:
             print(f"{DIM}  turn failed: {e}{RESET}")
+        finally:
+            st._TURN_ACTIVE = False
         # Auto-save after the turn settles (whether it ended cleanly, hit the
         # step cap, or was escaped). This is the Hermes pattern: persist every
         # turn so a crash / accidental close never loses work.
@@ -287,7 +319,6 @@ def _repl() -> None:
         if state.session_id is not None:
             _maybe_refresh_description(state.session_id, state.messages)
         state.session_dirty = False
-
 
 def _session_id_from_args() -> str | None:
     """Resolve a starting session id from CLI flags: --resume/-r and --session.

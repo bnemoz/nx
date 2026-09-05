@@ -552,6 +552,16 @@ _ASYNC_SEQ = 0
 _PENDING_NOTICE_KEY = "_PENDING_SUBAGENT_NOTICE"
 
 
+def _async_running() -> bool:
+    """True while any async sub-agent of this process is still executing its
+    sub-loop. The wake poller (_autowake.wake_due) holds off while this is
+    set: an agent that is mid-run will stage its own note when it finishes,
+    and waking the parent for an *unfinished* agent would only make it wait
+    synchronously — the exact behavior async spawn is meant to avoid."""
+    with _ASYNC_LOCK:
+        return any(rec.get("status") == "running" for rec in _ASYNC_AGENTS.values())
+
+
 def _new_job_id() -> str:
     """A collision-proof job id: monotonic counter + random suffix, so two
     agents spawned in the same instant (a fan-out turn) still get distinct
@@ -677,6 +687,11 @@ def _spawn_async(instruction: str, max_turns: int) -> str:
             "instruction": instruction, "status": "running",
             "answer": None, "started": time.time(), "announced": False,
         }
+
+    # A background agent's whole point is that its answer lands later; without
+    # this the finish notice would sit staged until the user typed something.
+    from ._autowake import arm_wake
+    arm_wake()
 
     def _worker() -> None:
         # Quiet: this thread never writes the shared terminal (no spinner,
