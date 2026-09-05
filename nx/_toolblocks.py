@@ -36,6 +36,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from ._ansi import DIM, RESET, C, LifeSpinner
+from ._progress import ProgressCounter
 
 
 def clip(text: str, limit: int) -> str:
@@ -132,10 +133,20 @@ def record_note(text: str) -> bool:
     return record_block(ToolBlock(name="", note=text))
 
 
-def group_spinner(label: str) -> LifeSpinner:
+def group_spinner(label: str, counter: "ProgressCounter | None" = None,
+                  elapsed: bool = True) -> LifeSpinner:
     """The single activity line a parallel group shows while its calls are in
-    flight — replacing one spinner thread per call fighting over one row."""
-    return LifeSpinner(label=label)
+    flight — replacing one spinner thread per call fighting over one row.
+
+    0.35.0: the line is now live, because `running 3 tool calls [▪▪▪·······]`
+    looked identical whether one call had landed or two of three, and whether
+    the group was 0.2s or 40s old. `counter` renders as `· 2/3` (a worker bumps
+    it as its call returns) and `elapsed` as `· 4.2s`, so the row says how far
+    along the turn is instead of merely that something is happening."""
+    sp = LifeSpinner(label=label)
+    sp.counter = counter
+    sp.show_elapsed = elapsed
+    return sp
 
 
 def _group_title(blocks: list[ToolBlock]) -> str:

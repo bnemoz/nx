@@ -71,6 +71,7 @@ from typing import Any
 
 from . import _state as st
 from ._env import _env_int
+from ._progress import note_progress
 
 SUBAGENT_SYSTEM = (
     "You are a focused read-only sub-agent answering ONE question about this "
@@ -752,10 +753,23 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
         else:
             st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
     try:
+        # A foreground agent is the longest-running tool call there is (its own
+        # model loop, minutes), and until 0.35.0 the parent showed only
+        # `running spawn_agent` for all of it. Each step of its loop now posts a
+        # turn count to the parent's activity line through note_progress, which
+        # lands on st._ACTIVE_SPINNER — set by run_tool() for this very call.
+        # A quiet (background) agent has no parent spinner, so it keeps
+        # on_step=None rather than paying for a callback that goes nowhere.
+        _steps = [0]
+
+        def _progress_step() -> None:
+            _steps[0] += 1
+            note_progress(f"agent turn {_steps[0]}/{max_turns}")
+
         summary = _m._run_model_turn_loop(
             messages,
             max_turns_override=max_turns,
-            on_step=None,
+            on_step=(None if quiet else _progress_step),
         )
     except Exception as e:  # noqa: BLE001 — a failed subagent is a tool error, not a crash
         return f"ERROR: sub-agent failed: {type(e).__name__}: {e}"

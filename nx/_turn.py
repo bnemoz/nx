@@ -49,7 +49,7 @@ from ._subagent import (_subagent_active, _subagent_quiet, _subagent_scoped_retr
                         _subagent_stream_cut_limit)
 from ._batch import _batch_active
 from ._plan import plan_active
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _say_console = Console()  # renders the assistant's final-answer markdown live
 
@@ -438,14 +438,18 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
     # interactive parent included: "quiet" is how a thread says "I do not own
     # the terminal", which is exactly true of a pool worker — its output
     # reaches the user through the recorder instead of straight to stdout.
+    from ._progress import ProgressCounter
     from ._subagent import _subagent_quiet, _ASYNC_QUIET_SLOTS
     from ._toolblocks import (attach_recorder, detach_recorder, group_spinner,
                               render_group)
     render = not _subagent_quiet()
     started = time.time()
     # One activity line for the whole group, in place of one spinner thread per
-    # call erasing the lines its siblings had just printed.
-    spinner = group_spinner(f"running {len(jobs)} tool calls") if render else None
+    # call erasing the lines its siblings had just printed. Since 0.35.0 the
+    # line is live (elapsed + n/m landed): a group of 3 that had finished 2 of
+    # its calls looked exactly like one that had finished none.
+    counter = ProgressCounter(len(jobs))
+    spinner = group_spinner(f"running {len(jobs)} tool calls", counter=counter) if render else None
     if spinner is not None:
         spinner.start()
 
@@ -468,7 +472,15 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for i, res in ex.map(_one, jobs):
+            # as_completed, not ex.map: map hands back results in SUBMISSION
+            # order, so with a slow first call the live counter would sit at
+            # 0/3 while two calls had already landed. as_completed reports each
+            # call as it actually finishes, which is the number being shown.
+            # Results are keyed by index, so consumption order is free here.
+            futs = [ex.submit(_one, job) for job in jobs]
+            for fut in as_completed(futs):
+                i, res = fut.result()
+                counter.bump()
                 results[i] = res
     finally:
         if spinner is not None:

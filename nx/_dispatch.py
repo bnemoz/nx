@@ -576,6 +576,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # screen after the green model output finishes. _confirm pauses/resumes
     # us around its own I/O so the auto-allow line / Y/n prompt aren't clobbered.
     spinner = LifeSpinner(label=f"running {name}")
+    # 0.35.0: the line also counts the seconds the call has been in flight. A
+    # 40s run_bash and a 0.1s one used to be indistinguishable, so a slow call
+    # read as a hang and people Esc'd out of work that was fine. A tool can add
+    # its own progress with nx._progress.note_progress("compiling 3/40").
+    spinner.show_elapsed = True
     if not quiet and not buffered:
         spinner.start()
         st._ACTIVE_SPINNER = spinner

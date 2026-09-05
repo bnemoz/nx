@@ -12,6 +12,7 @@ Run: uv run pytest tests/test_parallel_toolblocks.py -q  (also standalone)
 import io
 import os
 import sys
+import threading
 import time
 from contextlib import redirect_stdout
 
@@ -137,6 +138,55 @@ def test_quiet_caller_renders_nothing(nx_fresh):
         _ASYNC_QUIET_SLOTS.quiet = False
     assert all("body" in res[i] for i in res)
     assert out == ""
+
+
+def test_group_line_reports_completed_calls_not_submitted(nx_fresh):
+    """0.35.0: while a group runs, its line shows elapsed + n/m so the user can
+    tell 2-of-3 from 0-of-3. The count must track ACTUAL completions: with a
+    slow first call, ex.map would have the line sitting at 0/3 after two calls
+    had already landed."""
+    nx, tmp = nx_fresh
+    paths = _files(tmp, 3)
+    real = nx._dispatch.DISPATCH["read_file"]
+    seen = {}
+
+    def slow_first(path, **kw):
+        time.sleep(0.4 if path == paths[0] else 0.02)
+        return real(path, **kw)
+
+    class _Probe:
+        """Stands in for the group spinner. Samples its counter from a SEPARATE
+        thread: the counter is bumped by the dispatching thread as it consumes
+        completed futures, so anything sampled on that thread (including from
+        inside start()) would always read 0."""
+
+        def __init__(self, label, counter=None, elapsed=True):
+            seen["label"], seen["counter"], seen["elapsed"] = label, counter, elapsed
+
+        def start(self):
+            def _sample():
+                time.sleep(0.15)     # calls 2 and 3 land well before this
+                seen["mid"] = seen["counter"].done
+            threading.Thread(target=_sample, daemon=True).start()
+
+        def stop(self):
+            pass
+
+    nx._dispatch.DISPATCH["read_file"] = slow_first
+    saved = nx._toolblocks.group_spinner
+    nx._toolblocks.group_spinner = _Probe
+    try:
+        nx._turn._run_read_only_parallel(
+            [("read_file", {"path": p}) for p in paths])
+    finally:
+        nx._dispatch.DISPATCH["read_file"] = real
+        nx._toolblocks.group_spinner = saved
+
+    assert seen["elapsed"] is True, "the group line stopped tracking elapsed"
+    assert seen.get("mid") == 2, (
+        f"count did not track real completions (saw {seen.get('mid')}); "
+        "ex.map yields in submission order and would report 0 here")
+    assert str(seen["counter"]) == "3/3"
 
 
 def test_prefetch_still_silent(nx_fresh):

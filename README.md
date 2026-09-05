@@ -161,7 +161,7 @@ sessions and exits without entering the REPL.
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
-| `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users |
+| `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users. While a tool runs the line also carries live progress (`· 12s · 2/3 · compiling 3/40`) — see [Live tool progress](#live-tool-progress); under `0` that tail is suppressed, since a redraw-once line cannot show a moving clock |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
 | `NX_REASONING_BUDGET` | cap on the model's reasoning/thinking phase in tokens, sent as `{"reasoning": {"max_tokens": N}}` in the request body (default `0` — off, let the model self-terminate its thinking; ignored by backends that don't consume that field; set per-source with `NX_SOURCE_<NAME>_EXTRA_BODY`; toggle live with `/budget`) |
@@ -403,6 +403,38 @@ call showing its reason inline — instead of one half-box per thread with
 spinners overwriting each other's lines. 2+ `spawn_agent` calls fan out the
 same way, and an agent's own tool activity never reaches the parent's terminal
 — the group line is the whole story while they run.
+
+## Live tool progress
+
+A long tool call used to look exactly like a hung one: after the cyan args line
+the terminal showed a static `running run_bash [▪▪▪▪·······]` for the whole
+call, with no clock and no way for the tool to say what it was doing. The
+activity line now reports progress while the call is in flight:
+
+```
+running run_bash · 12s · pytest tests/ -q 4 passed [▪▪▪▪········]
+running 3 tool calls · 2/3 · 4.2s [▪▪▪▪········]
+running spawn_agent · 1m48s · agent turn 7/100 [▪▪▪▪········]
+```
+
+- **elapsed** — seconds since the call started, on every tool line and on the
+  parallel group line. It keeps counting across an approval prompt rather than
+  resetting, so a slow risk-classifier round trip reads as the wait it is.
+- **`n/m`** — how many of a concurrent group's calls have actually landed.
+  It tracks completions, not submissions, so a slow first call no longer has
+  the line sitting at `0/3` while two calls are already done.
+- **a log tail** — `run_bash` and `wait_background` stream the command's last
+  log line into the line (throttled to ~1/s), which is also the only live view
+  of a long command, since its output is buffered to a log file until it exits.
+- **a tool's own note** — a long call with no other feedback channel can report
+  through `nx._progress.note_progress("compiling 3/40")`. A foreground
+  `spawn_agent` uses it to show its turn count; `run_bash` needs it not at all.
+  Notes are display-only — never sent to the model, never in the transcript.
+
+All of it is one row that never wraps (the label gives up cells to the progress
+tail), is suppressed entirely when stdout is not a tty, and is dropped under
+`NX_SPINNER=0`, where drawing a clock once and freezing it would misreport the
+call.
 
 ## Sessions
 

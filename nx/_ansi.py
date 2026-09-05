@@ -4,9 +4,12 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import threading
 from typing import Literal
 
+from ._progress import (LABEL_CELLS, MAX_NOTE_SHOWN, MAX_TAIL, MIN_TAIL,
+                        TAIL_BUDGET, clip_line, fmt_secs)
 from ._tty import raw_mode  # noqa: F401  re-exported for back-compat (callers do `from ._ansi import raw_mode`)
 
 def _rgb(hex_color: str) -> str:
@@ -232,6 +235,15 @@ class LifeSpinner:
     stripped on render — `_bash_jobs.py` streams raw log tails into it, which
     previously injected ANSI/OSC straight into the terminal and broke the
     line width, smearing the spinner over the tool box.
+
+    Three optional live segments can ride the line, all off by default so the
+    classic render is byte-identical to before. They exist because a tool that
+    took 40 seconds looked exactly like one that took 0.1 seconds, leaving the
+    user in the dark about what was happening (0.35.0, see nx/_progress.py):
+      * `show_elapsed=True` appends the seconds since `start()`.
+      * `counter` (a `_progress.ProgressCounter`, set by a parallel fan-out)
+        appends how many of the group's calls have landed, as `2/3`.
+      * a tool body calling `note_progress()` appends its note.
     """
 
     _WIDTH = 12       # total cells; runner covers TRACK+1 while sweeping
@@ -245,6 +257,42 @@ class LifeSpinner:
         self._done = threading.Event()
         self._t: threading.Thread | None = None
         self._pos = 0
+        # Live tail of the line (see the class docstring). At their off-values,
+        # every pre-existing call site renders exactly as before.
+        self.show_elapsed = False
+        self.counter = None
+        self.note = ""
+        self._live = True
+        self._t0: float | None = None
+
+    def _tail(self, width: int = MAX_TAIL) -> str:
+        """The live `· 4.2s · 2/3 · note` segment (DIM), or "" when this spinner
+        tracks nothing. Safe to call from any thread: every input is read once
+        and each read is a GIL-atomic reference load, so a frame sees a
+        consistent before-or-after value, never a torn one.
+
+        Returns "" when nothing is animating (NX_SPINNER=0 draws its line once,
+        so a frozen clock or a stale count would be a lie).
+
+        `width` covers the WHOLE segment including its ` · ` lead, which is what
+        _render() passes (whatever the label left of the row's budget), keeping
+        its arithmetic plain addition: len(label) + len(this) <= TAIL_BUDGET."""
+        if not self._live:
+            return ""
+        parts = []
+        if self.show_elapsed and self._t0 is not None:
+            parts.append(fmt_secs(time.monotonic() - self._t0) + "s")
+        if self.counter is not None:
+            parts.append(str(self.counter))
+        note = " ".join(strip_ansi_for_display(self.note or "").split())
+        if note:
+            parts.append(clip_line(note, MAX_NOTE_SHOWN))
+        if not parts:
+            return ""
+        # Clip per PART, then the whole: clipping only the joined string would
+        # spend the budget on the elapsed count and amputate the note, which is
+        # the one segment a long tool chose to say something with.
+        return " " + DIM + "· " + clip_line(" · ".join(parts), width - 3) + RESET
 
     def _render(self, pos: int) -> str:
         # Clamp + sanitize the label: it may come from a live command's log
@@ -252,13 +300,21 @@ class LifeSpinner:
         # NOT stripped by strip_ansi_for_display, so collapse whitespace
         # explicitly — the spinner must stay exactly one line.
         label = " ".join(strip_ansi_for_display(self.label or "").split())
-        if len(label) > 48:
-            label = label[:45] + "..."
+        # label + tail share one TAIL_BUDGET-cell row, and the LABEL is served
+        # first: `running search_files` is the most useful thing on the line, so
+        # it keeps up to LABEL_CELLS and the tail clips into the remainder (never
+        # below MIN_TAIL, so the clock still reads). Clamping only the label let a
+        # long note squeeze the tool name to five cells; the tail is redrawn every
+        # frame and unbounded by construction, so both ends need a bound or the
+        # row wraps and leaves droppings over the tool box.
+        label = clip_line(label, LABEL_CELLS)
+        tail_w = TAIL_BUDGET - len(label)
+        tail = self._tail(tail_w if tail_w > MIN_TAIL else MIN_TAIL)
         cells = ["·"] * self._WIDTH
         for i in range(self._TRACK):
             cells[(pos + i) % self._WIDTH] = "▪"
         bar = "".join(cells)
-        return f"{CLEAR_LINE}  {DIM}{label}{RESET} {DIM}[{bar}]{RESET}"
+        return CLEAR_LINE + "  " + DIM + label + tail + RESET + " " + DIM + "[" + bar + "]" + RESET
 
     def _run(self) -> None:
         try:
@@ -281,9 +337,16 @@ class LifeSpinner:
             return  # headless (piped/redirected) — no animation
         self._stop.clear()
         self._done.clear()
+        # Stamped once per spinner and deliberately NOT re-stamped by a later
+        # start(): _confirm() restarts this same spinner around an approval
+        # prompt, and the number must keep reading as how long the tool has been
+        # in flight rather than resetting to 0.0s the moment the Y/n goes away.
+        if self._t0 is None:
+            self._t0 = time.monotonic()
         if os.environ.get("NX_SPINNER", "1") == "0":
             # animation disabled: draw the label ONCE, statically, and remember
             # it so stop() can clear the same line. No thread, no redraws.
+            self._live = False
             self._static_line = self._render(0)
             sys.stdout.write(self._static_line)
             sys.stdout.flush()

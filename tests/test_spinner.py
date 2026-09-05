@@ -18,6 +18,10 @@ The replacement must keep:
     wiped its line;
   * NX_SPINNER=0 — no animation at all (one static draw, cleared on stop).
 
+and since 0.35.0 the live tail (elapsed / n-of-m / a tool's own note, see
+nx/_progress.py) must stay OFF for every spinner that does not opt in, so the
+classic line is byte-identical to the pre-0.35 render.
+
 No model/network round-trip.
 """
 import io
@@ -154,6 +158,168 @@ def test_headless_start_is_noop():
         assert sp._t is None
         assert sys.stdout.getvalue() == ""
         sp.stop()  # must not raise either
+    finally:
+        sys.stdout = real_stdout
+
+
+def test_live_tail_is_off_unless_the_spinner_opts_in():
+    # The default render must stay byte-identical to the pre-0.35 line: a call
+    # site that does not ask for progress draws no tail at all.
+    sp = LifeSpinner(label="running read_file")
+    assert sp._tail() == ""
+    text = _ansi.strip_ansi_for_display(sp._render(0))
+    assert "·" not in text.split("[")[0], text
+
+
+def test_elapsed_and_counter_appear_in_the_tail():
+    import time as _time
+
+    from nx._progress import ProgressCounter
+
+    sp = LifeSpinner(label="running 3 tool calls")
+    sp._t0 = _time.monotonic()      # a real stamp; see start()
+    sp.show_elapsed = True
+    sp.counter = ProgressCounter(3)
+    tail = _ansi.strip_ansi_for_display(sp._tail())
+    assert tail == " · 0.0s · 0/3", tail      # elapsed first, then landed/total
+    for _ in range(2):
+        sp.counter.bump()
+    assert "2/3" in _ansi.strip_ansi_for_display(sp._tail())
+    assert str(sp.counter) == "2/3"
+
+
+def test_fmt_secs_shapes_and_ceiling():
+    # Fixed shapes hold the line width; the ceiling matters because the stamp is
+    # monotonic, so an unstamped spinner must not print a five-digit duration.
+    from nx._progress import fmt_secs
+
+    assert fmt_secs(0.04) == "0.0"
+    assert fmt_secs(4.16) == "4.2"
+    assert fmt_secs(59.4) == "59"
+    assert fmt_secs(125) == "2m05"
+    assert fmt_secs(-1) == "0.0"
+    assert fmt_secs(10 ** 9) == "999m"
+
+
+def test_note_is_sanitized_and_collapsed():
+    import time as _time
+
+    sp = LifeSpinner(label="running run_bash")
+    sp._t0 = _time.monotonic()
+    sp.show_elapsed = True
+    sp.note = "\033]52;c;pawned\033\\ compiles   3/40\nmore"
+    text = _ansi.strip_ansi_for_display(sp._render(0))
+    assert "pawned" not in text and "\033" not in text, text
+    assert "compiles 3/40 more" in text, text   # one line, whitespace collapsed
+    assert "\n" not in text.replace(CLEAR_LINE, "")
+
+
+def test_a_full_tail_never_widens_the_line():
+    # label + tail share ONE budget, so an unbounded note (a tool can write any
+    # thing) can never push the row past the terminal — a wrap leaves droppings
+    # over the tool box — and the tail can never crowd the tool name out, since
+    # the label is served first.
+    import time as _time
+
+    from nx._progress import LABEL_CELLS, MAX_NOTE_SHOWN, TAIL_BUDGET, ProgressCounter
+
+    sp = LifeSpinner(label="running " + "x" * 200)
+    sp._t0 = _time.monotonic()
+    sp.show_elapsed = True
+    sp.counter = ProgressCounter(12)
+    sp.note = "n" * 60
+    widths = {len(_ansi.strip_ansi_for_display(f)) for f in _capture_frames(sp, 4)}
+    assert len(widths) == 1, f"width varied across frames: {widths}"
+    plain = widths.pop()
+    # 2 leading cells + the shared budget + " [bar]" — and narrower than the
+    # pre-0.35 worst case (2 + 51 + 1 + 14 = 68), so this can never wrap where
+    # the old line fit.
+    bar_cells = sp._WIDTH + 4
+    assert plain <= 2 + TAIL_BUDGET + bar_cells, plain
+    assert plain < 68, plain
+    # The overlong label was clamped to exactly its share of the budget.
+    label_part = _ansi.strip_ansi_for_display(sp._render(0)).strip().split(" · ")[0]
+    assert len(label_part) == LABEL_CELLS and label_part.endswith("..."), label_part
+
+    short = LifeSpinner(label="running run_bash")
+    short._t0 = _time.monotonic()
+    short.show_elapsed = True
+    short.counter = ProgressCounter(12)
+    short.note = "n" * 60
+    drawn = _ansi.strip_ansi_for_display(short._render(0))
+    # The note is what gets sacrificed, never the tool name.
+    assert "running run_bash" in drawn, drawn
+    assert "0/12" in drawn, drawn
+    assert len(drawn.split("n" * 5)[0]) > 0 and drawn.count("n" * 30) == 0, drawn
+    assert len(_ansi.strip_ansi_for_display(short._tail(MAX_NOTE_SHOWN))) <= MAX_NOTE_SHOWN
+
+
+def test_static_spinner_shows_no_live_tail():
+    # NX_SPINNER=0 draws the line ONCE and never redraws it, so a clock or a
+    # count frozen at first draw would misreport the call: suppress it.
+    real = os.environ.get("NX_SPINNER")
+    os.environ["NX_SPINNER"] = "0"
+    out = _FakeTTY()
+    real_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        from nx._progress import ProgressCounter
+
+        sp = LifeSpinner(label="running run_bash")
+        sp.show_elapsed = True
+        sp.counter = ProgressCounter(4)
+        sp.note = "compiling"
+        sp.start()
+        drawn = _ansi.strip_ansi_for_display(out.getvalue())
+        # The bar itself is built from · glyphs, so compare the label region.
+        assert "·" not in drawn.split("[")[0], drawn
+        assert "compiling" not in drawn, drawn
+        sp.stop()
+    finally:
+        sys.stdout = real_stdout
+        if real is None:
+            os.environ.pop("NX_SPINNER", None)
+        else:
+            os.environ["NX_SPINNER"] = real
+
+
+def test_note_progress_reaches_the_active_spinner():
+    # note_progress writes onto st._ACTIVE_SPINNER, not a thread-local: the line
+    # is drawn by the spinner's OWN render thread, which would never see a
+    # per-thread slot. Same channel the bash log tail already uses.
+    import nx
+    from nx._progress import MAX_NOTE, note_progress
+
+    sp = LifeSpinner(label="running write_file")
+    nx._state._ACTIVE_SPINNER = sp
+    try:
+        note_progress("compiling   3/40")
+        assert sp.note == "compiling 3/40"
+        note_progress("x" * 200)
+        assert len(sp.note) == MAX_NOTE
+        assert " " not in sp.note and "\n" not in sp.note
+        note_progress(None)
+        assert sp.note == ""
+    finally:
+        nx._state._ACTIVE_SPINNER = None
+
+
+def test_elapsed_survives_an_approval_pause():
+    # _confirm() stops and restarts the SAME spinner around a Y/n prompt. A
+    # re-stamp there would visibly reset the clock mid-call, which reads as the
+    # tool having restarted.
+    out = _FakeTTY()
+    real_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        sp = LifeSpinner(label="running edit_file", tick=LifeSpinner._MIN_TICK)
+        sp.show_elapsed = True
+        sp.start()
+        first = sp._t0
+        sp.stop()
+        sp.start()
+        assert sp._t0 == first, "restart reset the elapsed clock"
+        sp.stop()
     finally:
         sys.stdout = real_stdout
 
