@@ -586,7 +586,7 @@ from ._dispatch import (
     BACKGROUND_GUIDANCE, MULTI_EDIT_GUIDANCE, DELEGATION_STREAK_NOTICE,
     _MULTI_EDIT_NUDGE_THRESHOLD, _DELEGATION_NUDGE_THRESHOLD,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, _invalidate_tool_cache_path,
-    run_tool, _tool_args_parse_error,
+    run_tool, _tool_args_parse_error, _run_bg_completion_scan,
 )
 from ._tool_cache import (  # noqa: F401 (re-export for tests)
     cache_store_entry as _tool_cache_store_entry,

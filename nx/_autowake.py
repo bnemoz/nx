@@ -23,6 +23,13 @@ Two halves:
   stashed in st._WAKE_PREFILL and restored after the wake turn, so the wake
   never eats half a message.
 
+Since 0.36.3 the wake path also runs the completion sweep itself (the one
+run_tool() runs on a turn's first tool call): a turn that backgrounded a job
+and then answered in plain text never runs that scan, so its finished job
+used to wake the REPL again and again while every wake turn — also text-only
+— left it unseen, ad infinitum. The sweep marks what it reports seen, so the
+first wake delivers the exit line and the next wake_due() is False.
+
 NX_WAKE_PROMPT=0 turns the whole mechanism off (the notes then wait for the
 next real user turn, as before).
 """
@@ -125,7 +132,16 @@ def wake_due() -> bool:
 
     Conservative on every axis: not while a turn/sub-agent/batch loop owns the
     machinery, not while a sub-agent is still running (its own finish will
-    wake later), and never before the session has backgrounded anything."""
+    wake later), and never before the session has backgrounded anything.
+
+    With nothing staged it runs the same completion sweep run_tool()'s
+    first-tool-of-turn hook runs (0.36.3) and re-checks the slots. That scan
+    marks what it reports seen, so a job whose containing turn died as plain
+    text — no tool call, scan never ran — is announced by the wake turn
+    itself instead of re-waking forever with nothing to deliver: the wake
+    turn ends text-only, nothing marks the job seen, and the poller (which
+    also calls this) would find it again every 2s. A sweep that comes back
+    empty therefore means "nothing left to say" — no wake."""
     if not _wake_enabled() or not getattr(st, "_WAKE_ARMED", False):
         return False
     if st._WAKE_DUE:
@@ -141,6 +157,22 @@ def wake_due() -> bool:
         return False
     if any(getattr(st, s, None) for s in _pending_notice_slots()):
         return True
+    # Nothing staged: maybe a sweep would stage one now. Run the SAME scan
+    # run_tool()'s first-tool-of-turn hook runs (0.36.3): it marks what it
+    # reports seen, so a job whose turn died as plain text — the scan never
+    # ran because there was no tool call — is announced by the wake turn
+    # itself instead of re-waking forever with nothing to deliver. A sweep
+    # that comes back empty means there is genuinely nothing to say: don't
+    # wake on work that has already been reported.
+    try:
+        from ._dispatch import _run_bg_completion_scan
+        _run_bg_completion_scan()
+    except Exception:
+        pass
+    if any(getattr(st, s, None) for s in _pending_notice_slots()):
+        return True
+    # Anything left here is finished-but-unstaged work the sweep could not
+    # announce (e.g. a sub-agent record with no answer) — still wake-worthy.
     return bool(_finished_unstaged_subagents() or _finished_unseen_bg_jobs())
 
 

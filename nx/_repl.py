@@ -285,6 +285,12 @@ def _repl() -> None:
         try:
             st._TURN_ACTIVE = True
             if wake:
+                # Run the completion sweep before flushing: wake_due() ran it
+                # too (0.36.3), and its note is only staged here — the flush
+                # below just drains the slots. A text-only wake turn therefore
+                # still delivers the finished job's exit line, and the next
+                # wake_due() finds nothing (no infinite wake loop).
+                _m._run_bg_completion_scan()
                 # Flush the staged completion note(s) up front: the wake turn
                 # may end as plain text (no tool call), and the notes otherwise
                 # only flush on the first tool call of a turn.

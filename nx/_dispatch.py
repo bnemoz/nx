@@ -302,6 +302,33 @@ def _scan_background_completions() -> str | None:
 _CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search")
 
 
+def _run_bg_completion_scan() -> None:
+    """The completion sweep run_tool() runs on the first tool call of a turn:
+    scan finished bg jobs, NX_VERIFY_CMD outcomes, and finished async agents,
+    staging each as its one-time [Runtime note]. The wake path shares it —
+    see _autowake.wake_due for why a wake turn must not fire on an empty
+    sweep."""
+    note = _scan_background_completions()
+    if note:
+        st._PENDING_BG_COMPLETION_NOTICE = note
+    # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
+    # pending notice (independent of the generic bg-completion note).
+    from ._verify import _stage_verify_outcome
+    try:
+        _stage_verify_outcome()
+    except Exception:
+        pass
+    # Async sub-agent finished since the last look? Its answer is normally
+    # staged by the worker itself; this sweep catches any finished-but-unstaged
+    # stragglers (idempotent per job id).
+    from ._subagent import _stage_subagent_completions
+    try:
+        _stage_subagent_completions()
+    except Exception:
+        pass
+
+
+
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
     return (name, json.dumps(args, sort_keys=True))
 
@@ -462,6 +489,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # Background-completion notice: on the first tool call of a turn, check
     # whether any tracked bg job finished since the model last looked, and
     # stage a one-time runtime note (flushed with the other pending notices).
+    # The scan body lives in _run_bg_completion_scan(), shared with the wake
+    # path (nx/_autowake.py), whose text-only turns otherwise never run it.
     # Skipped inside a sub-agent loop (run_tool is shared machinery): the
     # notices belong to the PARENT's transcript — an agent thread must never
     # consume/stage them into its own scoped messages, and async agents run
@@ -471,24 +500,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     from ._batch import _batch_active
     if not st._BG_SCAN_DONE and _subagent_ctx() is None and not _batch_active():
         st._BG_SCAN_DONE = True
-        note = _scan_background_completions()
-        if note:
-            st._PENDING_BG_COMPLETION_NOTICE = note
-        # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
-        # pending notice (independent of the generic bg-completion note).
-        from ._verify import _stage_verify_outcome
-        try:
-            _stage_verify_outcome()
-        except Exception:
-            pass
-        # Async sub-agent finished since the last look? Its answer is
-        # normally staged by the worker itself; this sweep catches any
-        # finished-but-unstaged stragglers (idempotent per job id).
-        from ._subagent import _stage_subagent_completions
-        try:
-            _stage_subagent_completions()
-        except Exception:
-            pass
+        _run_bg_completion_scan()
     # Delegation streak counter (runs BEFORE the cache lookup so a cache-hit
     # read still counts): exploration calls accumulate, a spawn_agent resets,
     # anything else (an edit, a bash run, a todo) breaks the streak — those

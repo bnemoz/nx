@@ -12,6 +12,10 @@ These tests pin the three pieces that fix that:
      blocking, stashing typed text so the wake never eats half a message.
   3. the REPL — the WAKE sentinel becomes a synthetic user turn that flushes
      the staged note and calls model_turn, with no history/slash side effects.
+  4. the 0.36.3 loop fix — a bg job finished after its turn answered in plain
+     text used to re-wake forever (every wake turn also ended text-only, so
+     nothing ever marked the job seen); wake_due() must run the completion
+     sweep itself, and a text-only wake turn must deliver its note.
 """
 import builtins
 import os
@@ -285,6 +289,91 @@ def test_repl_wake_restores_typed_prefill(monkeypatch):
         for k, v in saved.items():
             setattr(m, k, v)
         m.st._WAKE_PREFILL = ""
+        _restore()
+
+
+# ---------------------------------------------------------------------------
+# 4. the 0.36.3 loop fix: wake_due() runs the sweep; a text-only wake turn
+#    delivers the note so the loop terminates
+# ---------------------------------------------------------------------------
+def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
+    """A finished job nothing ever announced must be staged by wake_due()
+    itself (the containing turn ended as plain text, so run_tool()'s scan
+    never ran) — and the NEXT wake_due() must be False, not an endless
+    'background job finished — auto-continuing' loop."""
+    _silence()
+    m.st._WAKE_ARMED = True
+    fake_jobs = [{"pid": "424243", "alive": False,
+                  "owner_pid": os.getpid(), "command": "true",
+                  "tail": "done"}]
+    monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
+    monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
+                        lambda pid: (True, 0, "/tmp/x.log"))
+    m.st._BG_NOTICE_SEEN = None
+    m.st._PENDING_BG_COMPLETION_NOTICE = None
+    try:
+        assert _autowake.wake_due() is True
+        note = m.st._PENDING_BG_COMPLETION_NOTICE
+        assert note and "424243" in note, "the sweep must stage the exit note"
+        # The wake turn flushes the note it staged; only then is the job both
+        # seen AND delivered — so the next wake_due() must be False.
+        m._flush_pending_background_notice([])
+        assert _autowake.wake_due() is False
+    finally:
+        m.st._BG_NOTICE_SEEN = None
+        m.st._PENDING_BG_COMPLETION_NOTICE = None
+        _restore()
+
+
+def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
+    """The wake turn itself must run the sweep before flushing: a wake turn
+    that ends as plain text (no tool call) still delivers the finished job's
+    exit line into the transcript."""
+    _silence()
+    saved = {k: getattr(m, k) for k in
+             ("read_multiline", "model_turn", "_banner", "_record_input",
+              "_flush_pending_background_notice", "_run_bg_completion_scan")}
+    m._banner = lambda: ""
+    m.st._WAKE_ARMED = True
+    # Pre-stage nothing: the sweep must be what produces the note.
+    m.st._PENDING_BG_COMPLETION_NOTICE = None
+    m.st._BG_NOTICE_SEEN = None
+    fake_jobs = [{"pid": "424244", "alive": False,
+                  "owner_pid": os.getpid(), "command": "true", "tail": "ok"}]
+    monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
+    monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
+                        lambda pid: (True, 0, "/tmp/x.log"))
+    seen_in_turn = {}
+
+    def fake_model_turn(messages, *a, **kw):
+        # Model emits plain text: no tool call, so run_tool() never scans.
+        users = [(i, mm.get("content") or "") for i, mm in enumerate(messages)
+                 if mm.get("role") == "user"]
+        seen_in_turn["note"] = any("424244" in c for _, c in users)
+        seen_in_turn["instruction_idx"] = next(
+            (i for i, c in users if c == _autowake.WAKE_INSTRUCTION), None)
+        seen_in_turn["note_idx"] = next(
+            (i for i, c in users if "424244" in c), None)
+        return m.TURN_DONE
+
+    turns = iter([_autowake.WAKE_INPUT, "/quit"])
+    m.read_multiline = lambda initial="", history=None, wake=False: next(turns)
+    m.model_turn = fake_model_turn
+    m._record_input = lambda user, hist: None
+    try:
+        m.main()
+        assert seen_in_turn["note"], "text-only wake turn must deliver the note"
+        assert seen_in_turn["instruction_idx"] is not None
+        assert seen_in_turn["note_idx"] is not None
+        assert seen_in_turn["note_idx"] > seen_in_turn["instruction_idx"], \
+            "the completion note rides right after the wake instruction"
+        # The delivered job is marked seen: no further wake is due.
+        assert _autowake.wake_due() is False
+    finally:
+        for k, v in saved.items():
+            setattr(m, k, v)
+        m.st._BG_NOTICE_SEEN = None
+        m.st._PENDING_BG_COMPLETION_NOTICE = None
         _restore()
 
 
