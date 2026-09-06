@@ -542,7 +542,7 @@ go through the approval gate above.
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
-| `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only |
+| `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only; ends with the absolute dirs holding the shown hits, because the listed `(name)` is a bare filename — `read_file` needs the full path |
 | `memory_delete` | `target`, `scope?` | delete one memory by exact title, filename, or unique prefix; requires confirmation |
 | `spawn_agent` | `instruction`, `max_turns?`, `async?` | delegate an investigation or task to a sub-agent (`NX_SUBAGENTS=1`); sub-agents can run an allowlisted read-only bash tier (grep/ls/du/ps/git log). The agent sees its turn budget (default and floor 100 — a parent's smaller `max_turns` is raised to it — ceiling 200) and spends its last turn answering, not searching; rescues inside the agent are capped at one per failure family, and a budget mostly spent on rescues gets its final answer forced early; an agent that dies at the cap still returns its last observation. Write-capable only with `NX_SUBAGENT_WRITE=1` (write_file/edit_file/multi_edit/sed_edit, each confirmed by the user with a diff preview, tagged `(sub-agent)`; run sequentially, no delete/no nested spawn). Send several read-only ones in one turn to run them concurrently — one question per agent; re-spawning an instruction whose background job is still running is refused. Background is the default (`NX_SUBAGENT_ASYNC=0` for foreground): a background spawn returns a job id immediately and delivers a short answer head + the path of its full markdown report (`~/.nx/agents/<job>.md`) as a one-time `[Runtime note]` on a later turn — the parent reads the file when the head isn't enough. Foreground returns the answer inline; while foreground spawns are in flight the turn shows a single group line (`2 tool calls in parallel · spawn_agent ×2`) rather than each agent's own boxes and spinners (0.31.0). Async/background agents are always read-only, and a failed agent still announces (FAILED note). `/bg` lists running/finished agents with their report paths. Flash-tier models sometimes narrate delegation instead of emitting the call, or mis-key arguments (`prompt` instead of `instruction`) — both self-correct on retry, but heavy delegation wants a non-flash model |
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls) |
@@ -596,8 +596,11 @@ needed. Three tools drive it: `memory_search` (recall prior learnings before
 re-deriving them), `memory_write` (persist a new one), and `memory_delete`
 (retire a superseded one). At session start a short note listing
 already-saved titles is appended to context so the model knows what's
-remembered; a resumed session gets the same note when its transcript predates
-it. Searches require every query term to match, rank title hits above body
+remembered. A resumed session's note (`--resume` and `/resume`) is rebuilt
+from the live store when the store changed since that transcript was saved —
+notes that `/memory optimize` has since archived or merged don't linger as
+phantom titles for the model to chase. Searches require every query term to
+match, rank title hits above body
 hits, and cap results at `NX_MEMORY_SEARCH_LIMIT` (default 8) so a large
 store can't flood a turn with snippets.
 
@@ -674,7 +677,9 @@ run's wall clock is otherwise the sum of several minutes-long merges. After
 a real run the cached `memory_search` entries are dropped and
 the session's own saved-memories note is rebuilt in place, so the model's view
 of the store matches the store — including in a session that started before
-the cleanup.
+the cleanup. Session resume (`--resume` and `/resume`) runs the same
+rebuild, so a transcript written before an optimize run in another session
+no longer carries its retired titles either.
 
 ## Metrics
 

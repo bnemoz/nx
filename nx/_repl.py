@@ -180,6 +180,11 @@ def _repl() -> None:
             # _load_memory_note); give a resumed session the same signal when
             # its saved transcript predates the feature or the memories.
             _add_memory_note_if_absent(messages)
+            # A transcript's note snapshots titles as of that session's last
+            # run; /memory optimize in another session may have archived or
+            # merged notes since. Rebuild from the live store (no-op when it
+            # still matches, so the prompt cache survives a normal resume).
+            _refresh_memory_note(messages)
             st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(messages)
             st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(messages)
             from ._subagent import _add_delegation_note_if_absent

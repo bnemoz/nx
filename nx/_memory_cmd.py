@@ -629,6 +629,15 @@ def memory_search(query: str, scope: str = "project", **_: Any) -> str:
         out.append(f"  {hit.snippet}")
     if overflow:
         out.append(f"  … {overflow} more not shown — raise NX_MEMORY_SEARCH_LIMIT to see them")
+    dirs: list[str] = []
+    for d, _label in _iter_memory_dirs(scope):
+        if d in dirs:
+            continue
+        if any(os.path.isfile(os.path.join(d, h.name)) for h in hits):
+            dirs.append(d)
+    if dirs:
+        out.append("read a note with read_file <absolute path> — the (name) above is a bare filename; the files live in: "
+                   + "; ".join(dirs))
     return "\n".join(out)
 
 
@@ -722,9 +731,14 @@ def _refresh_memory_note(messages: list[dict[str, Any]]) -> bool:
 
     Cost, deliberately paid: rewriting a mid-transcript message busts the
     prompt cache for the next turn (the /undo-style edit the cache-visibility
-    docs warn about). It only ever happens when the user explicitly runs
-    /memory optimize, and leaving the model reciting archived titles for the
-    rest of the session is the worse trade."""
+    docs warn about). It runs when the user explicitly runs /memory optimize,
+    and at session resume (both --resume and /resume), where the transcript's
+    note snapshots the store as of that session's last run — a /memory optimize
+    in another session may have archived or merged notes since, and the model
+    reciting archived titles for the rest of the session is the worse trade.
+    Both call sites rewrite only when the note actually differs (the store
+    changed underneath it), so a resume over an untouched store stays
+    prompt-cache-clean."""
     at = _find_memory_note_index(messages)
     note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
     if at is None:

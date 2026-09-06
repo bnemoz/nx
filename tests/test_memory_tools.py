@@ -533,6 +533,88 @@ def test_memory_write_accepts_title_in_body_without_doubling_h1():
     assert content2.count("# Body Title") == 1, content2
 
 
+# --- memory_search paths + resume note staleness (0.37.0) ---------------------
+
+def _archive_all_notes(pdir, stamp):
+    """Move every .md in a memories dir into <pdir>/archive/<stamp>/ — what a
+    /memory optimize run does to retired notes (reversible, scanner-invisible)."""
+    dst_dir = os.path.join(pdir, "archive", stamp)
+    os.makedirs(dst_dir)
+    for n in [n for n in os.listdir(pdir) if n.endswith(".md")]:
+        os.replace(os.path.join(pdir, n), os.path.join(dst_dir, n))
+    return dst_dir
+
+
+def test_memory_search_reports_absolute_dirs_for_read_file():
+    """memory_search prints bare filenames — a model that treats one as a path
+    guesses a plausible dir (e.g. ~/.nx/memory/) and read_file 404s. The result
+    now ends with the absolute dirs actually holding the shown hits."""
+    root = tempfile.mkdtemp(prefix="nx-mem-paths-")
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        res = _write_memory("Path hint memo", "uniquepathmarker body", scope="project", project_root=root)
+        assert res.startswith("saved project memory"), res
+        out = _memory_cmd.memory_search(query="uniquepathmarker", scope="project")
+        assert os.path.join(root, ".nx", "memories") in out, out
+        assert "read_file" in out, out
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+def test_memory_search_dir_hint_tracks_only_live_hit_dirs():
+    """A dir line is only printed for dirs still holding a shown hit: after a
+    note is archived (optimize ran), its dir must vanish from the hint instead
+    of pointing at a file that is no longer there."""
+    root = tempfile.mkdtemp(prefix="nx-mem-dirs-")
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        _write_memory("Dirs project memo", "dirsmarker037 body", scope="project", project_root=root)
+        _write_memory("Dirs global memo", "dirsmarker037 body", scope="global", project_root=None)
+        out = _memory_cmd.memory_search(query="dirsmarker037", scope="project")
+        assert os.path.join(root, ".nx", "memories") in out, out
+        assert m._memories_dir() in out, out
+        _archive_all_notes(os.path.join(root, ".nx", "memories"), "20260906-000002")
+        out2 = _memory_cmd.memory_search(query="dirsmarker037", scope="project")
+        assert m._memories_dir() in out2, out2
+        assert os.path.join(root, ".nx", "memories") not in out2, out2
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
+def test_refresh_memory_note_at_resume_updates_stale_titles():
+    """A resumed transcript's [Saved memories] note lists titles as of the
+    session's last run; /memory optimize in another session may have retired
+    or merged notes since. --resume and /resume both rebuild it (and must be
+    a no-op when the store still matches, so the prompt cache survives)."""
+    root = tempfile.mkdtemp(prefix="nx-mem-resume-")
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        _write_memory("Resume memo one", "resumeone body", scope="project", project_root=root)
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}]
+        _memory_cmd._add_memory_note_if_absent(msgs)
+        assert "[project] Resume memo one" in str(msgs[1].get("content")), str(msgs[1])
+        # the store moved on: the only note is archived by an optimize elsewhere
+        _archive_all_notes(os.path.join(root, ".nx", "memories"), "20260906-000003")
+        assert _memory_cmd._refresh_memory_note(msgs) is True
+        assert all("Resume memo one" not in str(x.get("content")) for x in msgs)
+        # refreshing again with an unchanged store must not touch the transcript
+        assert _memory_cmd._refresh_memory_note(msgs) is False
+        # a new note lands in the store: the transcript note is replaced IN PLACE
+        _write_memory("Resume memo two", "resumetwo body", scope="project", project_root=root)
+        idx = next(i for i, x in enumerate(msgs) if "[Saved memories" in str(x.get("content")))
+        assert _memory_cmd._refresh_memory_note(msgs) is True
+        idx2 = next(i for i, x in enumerate(msgs) if "[Saved memories" in str(x.get("content")))
+        assert idx2 == idx  # same slot: turn order and any /ctx pin survive
+        assert "[project] Resume memo two" in str(msgs[idx2].get("content"))
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))

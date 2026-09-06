@@ -29,6 +29,7 @@ from . import (
     _load_session, _list_sessions, _delete_session, _resolve_session,
 )
 from ._repl_state import _ReplState, _save_current, _fresh_metrics, _reload_metrics_totals
+from ._memory_cmd import _refresh_memory_note
 
 
 def _session_messages(session_id: str) -> list[dict[str, Any]]:
@@ -476,6 +477,11 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     from ._subagent import _add_delegation_note_if_absent
     _add_delegation_note_if_absent(state.messages)
     st._DELEGATION_NUDGED = _messages_show_prior_delegation_nudge(state.messages)
+    # Same staleness the --resume path fixes: the transcript's saved-memories
+    # note lists the store as of the session's last run — optimize in another
+    # session may have archived or merged since. Rebuild from the live store
+    # (no-op when it still matches, keeping the prompt cache intact).
+    _refresh_memory_note(state.messages)
     state.session_dirty = False
     # Reload the cumulative-token recorder from the resumed
     # session's saved totals so they keep climbing from here.
