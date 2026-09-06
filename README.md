@@ -577,14 +577,20 @@ before it can land:
   boilerplate) is left alone, and swapped `old`/`new` arguments get a
   targeted resubmit hint;
 - repetition that is ordinary code shape is not flagged at all: a period-2
-  echo only counts when its two copies are whitespace-joined on one line (so
-  an attribute saved and then reassigned is untouched), a suspected line
+  echo only counts when BOTH copies sit whole on one line (so an attribute
+  saved then reassigned, or `return d` on one line and another `return`
+  starting the next, are untouched), a suspected line
   splice is ignored when trimming the shared words would leave an operator
   behind (line 2 was continuing line 1's expression, not echoing it), and
   loop/guard bodies that legitimately repeat (`if not quiet:` + print twice,
   two identical `for` loops) are spared — a repeated phrase counts only when
   its copies sit on one line, and a duplicated line only when nothing but a
   blank line separates the copies.
+
+- when a repair would collapse `new` back to exactly `old` (the only
+  "corruption" was a stutter adjacent to the replaced text), the edit is
+  refused with a targeted hint instead of being written as a silent no-op;
+  resubmitting the byte-identical edit writes `new` as-is.
 
 The guard is passive — no extra tool schema, no tokens per turn — and
 `NX_GARBLE_GUARD=0` turns it off.

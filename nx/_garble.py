@@ -170,6 +170,9 @@ def garble_signature(new: str) -> list[str]:
             gap = new[spans[i + 1].end():spans[i + 2].start()]
             if not _ECHO_JOIN_RE.fullmatch(gap):
                 continue  # copies not whitespace-joined on one line -> code
+            if ("\n" in new[spans[i].start():spans[i + 1].end()]
+                    or "\n" in new[spans[i + 2].start():spans[i + 3].end()]):
+                continue  # a copy straddles a line break -> code, not echo
             bg = f"{words[i]} {words[i + 1]}"
             if bg not in seen_bigram:
                 seen_bigram.add(bg)
@@ -401,6 +404,8 @@ def garble_check(new: str, src: str, old: str = "",
     positive costs the model one retry, never a loop."""
     if not enabled() or not new.strip():
         return "clean", None, new
+    key = hashlib.sha1(
+        f"{path}\x00{old}\x00{new}".encode("utf-8", "replace")).hexdigest()
     work = new
     first_sigs: list[str] | None = None
     for _ in range(_MAX_REPAIR_PASSES):
@@ -413,8 +418,6 @@ def garble_check(new: str, src: str, old: str = "",
         fixed = realign_new(work, sigs, src + "\n" + (old or ""))
         if fixed == work:
             quoted = "; ".join(sigs[:2])
-            key = hashlib.sha1(
-                f"{path}\x00{old}\x00{new}".encode("utf-8", "replace")).hexdigest()
             if key in _INSISTED:
                 return ("repaired",
                         "(garble guard: the same suspect `new` was resubmitted "
@@ -431,6 +434,27 @@ def garble_check(new: str, src: str, old: str = "",
         work = fixed
     if first_sigs is None:
         return "clean", None, new
-    note = ("(garble guard: `new` contained " + "; ".join(first_sigs[:2])
+    quoted = "; ".join(first_sigs[:2])
+    if old and work == old:
+        # auto-repair erased the edit: the only "corruption" was a stutter
+        # adjacent to `old`, and collapsing it left `new` == `old` — writing it
+        # would be a silent no-op (field bug fixed in 0.37.3: the model then resubmits
+        # and gets a misleading "no change" error). Refuse with guidance; a
+        # byte-identical resubmission is insistence and writes `new` as-is.
+        if key in _INSISTED:
+            return ("repaired",
+                    "(garble guard: repairing would make `new` identical to "
+                    "`old`; the same suspect `new` was resubmitted — written "
+                    "as-is; " + quoted + ")", new)
+        if len(_INSISTED) >= _INSISTED_MAX:
+            _INSISTED.clear()
+        _INSISTED.add(key)
+        return ("error",
+                "ERROR: the suspect text is only a stutter adjacent to `old` — "
+                "repairing it would leave `new` identical to `old` (a no-op "
+                "edit), so nothing was written. If `new` is really what you "
+                "want, resubmit the byte-identical edit and it will be written "
+                "as-is.", new)
+    note = ("(garble guard: `new` contained " + quoted
             + " — repaired automatically; check the diff)")
     return "repaired", note, work

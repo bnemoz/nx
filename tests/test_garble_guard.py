@@ -331,3 +331,64 @@ def test_one_line_echo_still_caught():
     status, _msg, repaired = _garble.garble_check(
         "keep the fast-path fast-path fast-path here\n", "unrelated source\n", "")
     assert status == "repaired" and repaired == "keep the fast-path here\n", (status, repaired)
+
+
+# --- field misfire 0.37.2: period-2 echo across a line break ------------------
+
+def test_return_d_fallback_is_not_a_stutter():
+    # `return d` ending one line + another `return` starting the next reads as
+    # "d return" in the word stream; both echo copies must be whole on
+    # ONE line, and the repair must never eat the first return
+    new = ('    for d in sorted(jobs, key=len, reverse=True):\n'
+           '        if mab.startswith(d):\n'
+           '            return d\n'
+           '    return mab.split("_")[0]\n')
+    assert _garble.garble_signature(new) == []
+    status, msg, out = _garble.garble_check(new, "def f():\n    pass\n", "")
+    assert status == "clean" and msg is None and out == new, (status, msg)
+
+
+def test_edit_file_keeps_return_d_fallback():
+    # end-to-end through edit_file: the multi_edit payload from the field
+    # session must land byte-identical, no repair note, no mangled body
+    _allow()
+    path = _write("g10.py", "def write_summary(results, job_of):\n    pass\n")
+    new = ('def job_for_mab(mab, jobs):\n'
+           '    """Best-guess job dir for a mAb id from a previous run\'s CSV (longest match)."""\n'
+           '    for d in sorted(jobs, key=len, reverse=True):\n'
+           '        if mab.startswith(d):\n'
+           '            return d\n'
+           '    return mab.split("_")[0]\n'
+           '\n'
+           '\n')
+    res = m.edit_file(path, old="def write_summary(results, job_of):", new=new)
+    assert res.startswith("edited") and "garble" not in res, res
+    with open(path) as fh:
+        assert "            return d\n    return mab.split(\"_\")[0]" in fh.read()
+
+
+def test_noop_repair_is_refused_then_insisted():
+    # repair would collapse `new` back to `old` (a silent no-op edit): refuse
+    # once with guidance, then honor a byte-identical resubmission
+    _allow()
+    path = _write("g11.py", "AA BB, CC\nCC DD\n")
+    old = "AA BB, CC\nCC DD\n"
+    new = "AA BB, CC\nBB, CC CC DD\n"
+    res1 = m.edit_file(path, old=old, new=new)
+    assert res1.startswith("ERROR") and "identical to `old`" in res1, res1
+    with open(path) as fh:
+        assert fh.read() == old  # nothing written on the refusal
+    res2 = m.edit_file(path, old=old, new=new)
+    assert res2.startswith("edited") and "written as-is" in res2, res2
+    with open(path) as fh:
+        assert fh.read() == new  # insistence wins, text preserved
+
+
+def test_noop_repair_new_does_not_silently_noop():
+    # the tool must never report success while writing `old`: a repair that
+    # erases the edit surfaces as the refusal above, not an "edited" result
+    _allow()
+    path = _write("g12.py", "AA BB, CC\nCC DD\n")
+    res = m.edit_file(path, old="AA BB, CC\nCC DD\n",
+                      new="AA BB, CC\nBB, CC CC DD\n")
+    assert not res.startswith("edited") or "AA BB, CC\nBB, CC CC DD" in res, res
