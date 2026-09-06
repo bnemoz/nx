@@ -289,6 +289,14 @@ def _repl() -> None:
                                else expand_at_mentions(user)})
         try:
             st._TURN_ACTIVE = True
+            # Clear the wake flag at turn start, not only on the wake path:
+            # a flag raised in the race window between the editor's last
+            # _WAKE_DUE poll and this point describes work a user-typed turn
+            # is about to drain itself (first-tool-call flush). Leaving it set
+            # produced a phantom wake — a banner with no note — right after
+            # that turn's own delivery. Anything genuinely undelivered is
+            # re-derived by wake_due()'s fresh sweep after the turn.
+            st._WAKE_DUE = False
             if wake:
                 # Run the completion sweep before flushing: wake_due() ran it
                 # too (0.36.3), and its note is only staged here — the flush

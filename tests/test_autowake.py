@@ -16,6 +16,11 @@ These tests pin the three pieces that fix that:
      text used to re-wake forever (every wake turn also ended text-only, so
      nothing ever marked the job seen); wake_due() must run the completion
      sweep itself, and a text-only wake turn must deliver its note.
+  5. the 0.37.1 phantom-wake fix — a _WAKE_DUE flag raised in the race window
+     between the editor's last poll and a USER-typed turn's start survived the
+     turn that delivered the note itself (first-tool-call flush), so the flag
+     described already-delivered work and the REPL fired one banner-only wake
+     with nothing to hand the model. A turn must clear the flag at its start.
 """
 import builtins
 import os
@@ -374,6 +379,75 @@ def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
             setattr(m, k, v)
         m.st._BG_NOTICE_SEEN = None
         m.st._PENDING_BG_COMPLETION_NOTICE = None
+        _restore()
+
+
+def test_repl_user_turn_clears_stale_wake_flag(monkeypatch):
+    """0.37.1 phantom-wake fix: the wake flag can be raised in the race
+    window between the editor's last _WAKE_DUE poll and a USER-typed turn's
+    start. That user turn drains the staged note itself (first-tool-call
+    flush), so the flag describes already-delivered work and the REPL must
+    not fire a banner-only wake for it after the turn. A turn therefore
+    clears _WAKE_DUE at its start; anything genuinely undelivered is
+    re-derived by wake_due()'s fresh sweep after the turn."""
+    _silence()
+    saved = {k: getattr(m, k) for k in
+             ("read_multiline", "model_turn", "_banner", "_record_input",
+              "_flush_pending_background_notice")}
+    m._banner = lambda: ""
+    m.st._WAKE_ARMED = True
+    # The note is already staged when the user starts typing: the poller's
+    # sweep staged it and raised _WAKE_DUE.
+    m.st._PENDING_SUBAGENT_NOTICE = ("[Runtime note: background sub-agent "
+                                     "agent-9 finished. Its answer: done]")
+    calls = {"turns": 0, "wake_turns": 0}
+
+    def fake_model_turn(messages, *a, **kw):
+        calls["turns"] += 1
+        last_user = [mm for mm in messages if mm.get("role") == "user"][-1]
+        if last_user["content"] == _autowake.WAKE_INSTRUCTION:
+            calls["wake_turns"] += 1
+            return m.TURN_DONE
+        # The user turn's own first tool call drains the staged note —
+        # mirror _compress._flush_pending_background_notice.
+        if m.st._PENDING_SUBAGENT_NOTICE:
+            messages.append({"role": "user",
+                             "content": m.st._PENDING_SUBAGENT_NOTICE})
+            m.st._PENDING_SUBAGENT_NOTICE = None
+        return m.TURN_DONE
+
+    # Scripted prompts: a user turn whose start races the flag on, then /quit.
+    # The fake editor mirrors the real one: it returns the sentinel only when
+    # _WAKE_DUE is set at poll time — so a flag that survived the user turn
+    # comes back as a phantom wake here.
+    seq = iter(["continue the refactor", "/quit"])
+
+    def fake_read(initial="", history=None, wake=False):
+        if m.st._WAKE_DUE:
+            return _autowake.WAKE_INPUT
+        nxt = next(seq)
+        if nxt != "/quit":  # the user turn is about to start: poller fires
+            m.st._WAKE_DUE = True
+        return nxt
+
+    m.read_multiline = fake_read
+    m.model_turn = fake_model_turn
+    m._record_input = lambda user, hist: None
+    m._flush_pending_background_notice = lambda messages: None
+    try:
+        m.main()
+        assert calls["turns"] == 1, "the user turn ran; no second (wake) turn"
+        assert calls["wake_turns"] == 0, \
+            "stale flag must not fire a noteless wake after the user turn " \
+            "delivered the note itself"
+        assert m.st._PENDING_SUBAGENT_NOTICE is None, "note was delivered"
+        assert m.st._WAKE_DUE is False
+        # And nothing is left to wake about: the next poller pass finds none.
+        assert _autowake.wake_due() is False
+    finally:
+        for k, v in saved.items():
+            setattr(m, k, v)
+        m.st._PENDING_SUBAGENT_NOTICE = None
         _restore()
 
 
