@@ -621,8 +621,11 @@ NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 # Sub-agent budget knobs (read in nx/_subagent.py at spawn time): the default
 # turn budget the schema advertises (NX_SUBAGENT_DEFAULT_TURNS, 100 — the old
 # 12 left real investigations capping out with no answer) and the hard ceiling
-# for a requested max_turns (NX_SUBAGENT_MAX_TURNS, 200). Kept here alongside
-# the other NX_SUBAGENT_* resolution points so tests/REPL can flip them live.
+# for a requested max_turns (NX_SUBAGENT_MAX_TURNS, 200). The default is also a
+# FLOOR: a model that passes its own smaller max_turns (several carry a 5/10/12-
+# scale notion and were capping their agents out) is raised to it. Kept here
+# alongside the other NX_SUBAGENT_* resolution points so tests/REPL can flip
+# them live.
 NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
 NX_VISION = _env_int("NX_VISION", 0)

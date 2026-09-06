@@ -106,6 +106,9 @@ def test_subagent_empty_answer_and_cap(nx_fresh, monkeypatch):
         return nx_fresh.TURN_TOOL  # never "done" → loop exhausts the cap
 
     monkeypatch.setattr(nx_fresh, "model_turn", fake_turn_cap)
+    # default is a FLOOR (0.36.1): drop it to 1 so this test's max_turns=2 is
+    # actually honored and the tiny loop reaches the cap quickly.
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)
     out = spawn_agent("summarize", max_turns=2)
     assert "turn cap" in out and "partial" in out
 
@@ -130,6 +133,12 @@ def test_subagent_rejects_bad_args_and_nested(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("q", max_turns=9999)
     assert seen["max_turns"] == 200
+    # a request below the default floor is RAISED to it (0.36.1); with the
+    # default left at 100, max_turns=0 lands on 100, not 1.
+    spawn_agent("q", max_turns=0)
+    assert seen["max_turns"] == 100
+    # only by lowering the floor can a genuinely tiny budget survive the clamp
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)
     spawn_agent("q", max_turns=0)
     assert seen["max_turns"] == 1
 

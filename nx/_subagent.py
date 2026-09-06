@@ -162,6 +162,12 @@ def _add_delegation_note_if_absent(messages: list) -> None:
 # env-tunable (NX_SUBAGENT_MAX_TURNS, 200) instead of hard-coded. Resolved through
 # the top-level module attributes (NX_SUBAGENT_DEFAULT_TURNS /
 # NX_SUBAGENT_MAX_TURNS in nx/__init__.py) so tests/REPL can flip them live.
+#
+# The default is a FLOOR, not only the omitted-value fallback. Several models
+# carry their own notion of a turn budget and pass a small max_turns (5/10/12
+# scale) even for a broad sweep, then watch the sub-agent die mid-investigation
+# — honoring that request was the 0.36 cap-out we keep seeing. A request below
+# the floor is raised to it; only the ceiling pulls a request back down.
 
 
 def _subagent_default_turns() -> int:
@@ -184,7 +190,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
     "description": "Hand one investigation to a read-only sub-agent that searches and reads on its own and returns only its findings (it changes no files). Your default for multi-file work you haven't read: PROACTIVELY spawn one per independent area -- map an unfamiliar codebase, trace behavior across modules, list callers/uses of a symbol, or split unrelated questions (issue ONE CALL PER QUESTION in the same turn; they run concurrently). Keep to yourself: edits already under way, one known file, one targeted search. Backgrounded by default -- job id now, answer as a [Runtime note] plus report path on a later turn.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
-        "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100; 1-200). Leave the default for broad questions: an agent that runs out spends its last turn answering instead of searching."},
+        "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
     }, "required": ["instruction"]},
 }}
@@ -849,12 +855,19 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
                 "\"...\"} — you may have used a different key, e.g. `prompt`; "
                 "retry with `instruction`)")
-    if max_turns is None:  # the schema default: NX_SUBAGENT_DEFAULT_TURNS
-        max_turns = _subagent_default_turns()
+    # The default is a FLOOR, not just the omitted-value fallback (see the note
+    # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
+    # and pass a small max_turns for a broad sweep, then the agent dies mid-
+    # investigation. Clamp to the ceiling first, then raise to the floor; the
+    # floor is itself ceiling-bounded so an inverted config (default > ceiling)
+    # can never exceed the ceiling. int(None) raises → the floor, so an omitted
+    # max_turns lands on the default.
+    _ceiling = _subagent_max_turns()
+    _floor = min(_subagent_default_turns(), _ceiling)
     try:
-        max_turns = max(1, min(_subagent_max_turns(), int(max_turns)))
+        max_turns = max(_floor, min(_ceiling, int(max_turns)))
     except (TypeError, ValueError):
-        max_turns = _subagent_default_turns()
+        max_turns = _floor
     # Models send booleans as real booleans through native tool calls but as
     # "true"/"1" strings through the text-protocol fallback — accept both.
     # The schema key is `async` — a Python keyword, so it can never bind to a

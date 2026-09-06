@@ -61,6 +61,8 @@ def test_budget_line_in_subagent_user_message(nx_fresh, monkeypatch):
         return {"status": "done", "turns": 1}
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    # default is a FLOOR (0.36.1); lower it so an explicit max_turns=7 is honored
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)
     spawn_agent("where is X?", max_turns=7)
     assert seen["max_turns"] == 7
     assert "[Budget: at most 7 tool turns" in seen["user"]
@@ -89,11 +91,16 @@ def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
     assert seen[-1] == 30
     spawn_agent("q", max_turns=9999)
     assert seen[-1] == 200  # ceiling
+    # the default is a FLOOR: a request below it is raised to it
+    spawn_agent("q", max_turns=3)
+    assert seen[-1] == 30
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_MAX_TURNS", 15)
     spawn_agent("q", max_turns=9999)
     assert seen[-1] == 15
     spawn_agent("q", max_turns="not-a-number")
-    assert seen[-1] == 30  # nonsense → the (tunable) default
+    # nonsense → the floor; the floor is min(default, ceiling)=min(30,15)=15 so
+    # an inverted config (default>ceiling) can never exceed the ceiling
+    assert seen[-1] == 15
 
 
 def test_schema_advertises_default_100(nx_fresh):
@@ -103,6 +110,36 @@ def test_schema_advertises_default_100(nx_fresh):
                   if t["function"]["name"] == "spawn_agent")
     desc = schema["function"]["parameters"]["properties"]["max_turns"]["description"]
     assert "default 100" in desc
+
+
+def test_default_is_a_floor_not_a_cap(nx_fresh, monkeypatch):
+    """0.36.1: several models carry their own turn-budget notion and pass a
+    small max_turns (5/10/12 scale) even for a broad sweep, then watch the
+    sub-agent cap out mid-investigation. The default is a FLOOR: such a request
+    is raised to it. Only the ceiling pulls a request back down, so a request
+    between floor and ceiling is honored exactly."""
+    from nx._subagent import spawn_agent
+    seen = []
+
+    def fake_loop(messages, *a, **kw):
+        seen.append(kw.get("max_turns_override"))
+        messages.append({"role": "assistant", "content": "ok"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    # the classic failure: model passes 12 for a broad sweep → raised to 100
+    spawn_agent("map the repo", max_turns=12)
+    assert seen[-1] == 100
+    spawn_agent("quick check", max_turns=1)
+    assert seen[-1] == 100
+    # a request above the floor but below the ceiling is honored verbatim
+    spawn_agent("scoped question", max_turns=150)
+    assert seen[-1] == 150
+    # the schema must tell the parent this, or it keeps sending small numbers
+    schema = next(t for t in nx_fresh.TOOLS
+                  if t["function"]["name"] == "spawn_agent")
+    desc = schema["function"]["parameters"]["properties"]["max_turns"]["description"]
+    assert "FLOOR" in desc
 
 
 # --- recovery failsafe clamp -------------------------------------------------
@@ -199,6 +236,7 @@ def test_last_sub_turn_is_forced_final(nx_fresh, monkeypatch):
         return m.TURN_DONE
 
     monkeypatch.setattr(m, "model_turn", fake_turn)
+    monkeypatch.setattr(m, "NX_SUBAGENT_DEFAULT_TURNS", 1)  # floor (0.36.1)
     out = spawn_agent("q", max_turns=3)
     assert forced == [False, False, True]  # only the LAST sub-turn is forced
     assert "answer" in out or out  # the loop still returns the sub-agent's text
@@ -221,6 +259,7 @@ def test_rescue_eaten_budget_preforces_final(nx_fresh, monkeypatch):
         return statuses[len(forced) - 1]
 
     monkeypatch.setattr(m, "model_turn", fake_turn)
+    monkeypatch.setattr(m, "NX_SUBAGENT_DEFAULT_TURNS", 1)  # floor (0.36.1)
     spawn_agent("q", max_turns=4)
     assert forced == [False, False, True, True]
 
@@ -284,6 +323,7 @@ def test_cap_without_answer_returns_last_observation(nx_fresh, monkeypatch):
         return {"status": "cap", "turns": 12}
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)  # floor (0.36.1)
     out = spawn_agent("q", max_turns=12)
     assert out.startswith("[sub-agent hit its 12-turn cap before writing an "
                           "answer; last observation]")
