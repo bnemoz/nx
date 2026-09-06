@@ -330,6 +330,44 @@ def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
         _restore()
 
 
+def test_run_bg_scan_merges_into_unflushed_notice(monkeypatch):
+    """0.37.2: the sweep must MERGE into an unflushed staged note, not
+    overwrite it. The wake poller's sweep stages a note the moment a job
+    finishes; the containing turn's first tool call re-runs the sweep — if a
+    second job finished in between, assigning the slot dropped the first
+    job's exit line entirely (it was already marked seen, so no later scan
+    would ever re-announce it)."""
+    _silence()
+    fake_jobs = [{"pid": "530001", "alive": False,
+                  "owner_pid": os.getpid(), "command": "true", "tail": "a"}]
+    monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
+    monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
+                        lambda pid: (True, 0, "/tmp/x.log"))
+    m.st._BG_NOTICE_SEEN = None
+    m.st._PENDING_BG_COMPLETION_NOTICE = None
+    try:
+        # Poller's sweep: stages job 1's exit note.
+        m._run_bg_completion_scan()
+        # A second job finishes before the turn's first tool call re-scans.
+        fake_jobs.append({"pid": "530002", "alive": False,
+                          "owner_pid": os.getpid(), "command": "true",
+                          "tail": "b"})
+        m._run_bg_completion_scan()
+        note = m.st._PENDING_BG_COMPLETION_NOTICE or ""
+        assert "530001" in note and "530002" in note, \
+            f"both jobs must be announced, got: {note!r}"
+        # The merged note still flushes once, clears, and leaves no wake.
+        msgs: list = []
+        m._flush_pending_background_notice(msgs)
+        assert sum("53000" in (mm.get("content") or "") for mm in msgs) == 1
+        assert m.st._PENDING_BG_COMPLETION_NOTICE is None
+        assert _autowake.wake_due() is False
+    finally:
+        m.st._BG_NOTICE_SEEN = None
+        m.st._PENDING_BG_COMPLETION_NOTICE = None
+        _restore()
+
+
 def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
     """The wake turn itself must run the sweep before flushing: a wake turn
     that ends as plain text (no tool call) still delivers the finished job's

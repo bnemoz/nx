@@ -310,7 +310,13 @@ def _run_bg_completion_scan() -> None:
     sweep."""
     note = _scan_background_completions()
     if note:
-        st._PENDING_BG_COMPLETION_NOTICE = note
+        # Merge, don't overwrite: a staged note can still be unflushed here
+        # (the poller's own sweep staged one before this turn's first tool
+        # call). Assigning would drop the earlier job's exit line — it is
+        # already marked seen in _BG_NOTICE_SEEN, so no later scan would
+        # ever re-announce it. _stage_subagent_answer merges the same way.
+        prev = getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None)
+        st._PENDING_BG_COMPLETION_NOTICE = f"{prev}\n{note}" if prev else note
     # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
     # pending notice (independent of the generic bg-completion note).
     from ._verify import _stage_verify_outcome
