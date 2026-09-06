@@ -1,0 +1,159 @@
+"""Regression: a command with no trailing newline must survive the exit-code
+wrapper (0.36.2).
+
+`_run_bash` wraps the model's command as `( <cmd> ); echo "[exit: $?]"`. When
+the closing `)` was glued straight onto the command's last line, every command
+ending in something that must sit alone on its own line broke at *parse* time —
+above all a heredoc, whose terminator has to be alone on a line. Models emit
+heredocs constantly and omit the final newline with similar frequency, so this
+surfaced as a random `sh: Syntax error: end of file unexpected (expecting ")")`
+across every class of model.
+
+The wrapper-level tests are pure-string (fast, no subprocess). The end-to-end
+tests drive the real `_run_bash` launch path so the fix cannot silently regress
+into "helper is right, call site is wrong".
+"""
+import importlib
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("NX_ENV_FILE", "/dev/null")
+for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR",
+          "NX_BASH_MAX_SECONDS"):
+    os.environ.pop(k, None)
+
+import pytest
+
+
+@pytest.fixture()
+def nx_fresh(tmp_path, monkeypatch):
+    os.environ["NX_HOME"] = str(tmp_path / "nxhome")
+    os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
+    os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
+    os.environ["NX_BASE_URL"] = "http://127.0.0.1:9/v1"
+    os.environ["NX_MODEL"] = "test-model"
+    os.environ["NX_API_KEY"] = "sk-test"
+    monkeypatch.chdir(tmp_path)
+    import nx
+    importlib.reload(nx)
+    yield nx, tmp_path
+    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
+              "NX_BASH_MAX_SECONDS"):
+        os.environ.pop(k, None)
+    # these tests launch real jobs — rewind the session flags they flip so later
+    # files don't see a session that "already backgrounded something"
+    nx._state._SESSION_HAS_BACKGROUNDED = False
+    nx._state._PENDING_BACKGROUND_NOTICE = None
+    nx._state._BG_SCAN_DONE = False
+    nx._state._PENDING_BG_COMPLETION_NOTICE = None
+    nx._state._BG_NOTICE_SEEN = None
+
+
+# --- wrapper shape (pure string) ---------------------------------------------
+
+def test_close_paren_never_glued_to_last_line():
+    from nx._bash_jobs import _wrap_exit_trailer
+    for cmd in ("printf hi", "printf hi\n", "cat <<'EOF'\nhi\nEOF", "echo x # c"):
+        wrapped = _wrap_exit_trailer(cmd)
+        # the `)` must always open a line by itself, whatever the input ended with
+        assert "\n);" in wrapped, cmd
+
+
+def test_trailing_comment_survives():
+    from nx._bash_jobs import _wrap_exit_trailer
+    # glued on, `)` would be swallowed by the comment and the subshell never closes
+    assert _wrap_exit_trailer("true # note").startswith("(true # note\n)")
+
+
+# --- end-to-end through the real launch path ---------------------------------
+
+def _drain(run_bash, command, timeout=5, want_code=True):
+    """Run via _run_bash and return (log_content, exit_code).
+
+    exit_code is None when the trailer never appears — which is what happens
+    when `sh` fails to *parse* the script at all: the trailing
+    `echo "[exit: $?]"` never runs either. Pass want_code=False for that case.
+    """
+    pid, log_path = run_bash(command)
+    assert pid.isdigit(), f"launcher returned no pid: {pid!r}"
+    read_log = run_bash.__globals__["_read_log"]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        content, code = read_log(log_path)
+        if code is not None:
+            return content, code
+        # a parse error exits immediately and writes no trailer: the process is
+        # gone, so stop waiting instead of burning the whole window
+        if not want_code and not _alive(pid):
+            return read_log(log_path)[0], None
+        time.sleep(0.05)
+    pytest.fail(f"command never finished: {command!r}")
+
+
+def _alive(pid):
+    """True unless the pid is provably gone. `os.kill(pid, 0)` returns None on
+    success, so the live case must be returned explicitly, not fallen through."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists but not signalable by us: still counts as alive
+
+
+def test_heredoc_without_trailing_newline(nx_fresh):
+    """The exact reported failure: heredoc, no final newline."""
+    nx, _ = nx_fresh
+    from nx._bash_jobs import _run_bash
+    cmd = "python3 - <<'PY'\nprint('hello from heredoc')\nPY"  # no trailing \n
+    out, code = _drain(_run_bash, cmd)
+    assert "hello from heredoc" in out, out
+    assert code == 0, out
+
+
+def test_heredoc_with_trailing_newline_still_works(nx_fresh):
+    nx, _ = nx_fresh
+    from nx._bash_jobs import _run_bash
+    out, code = _drain(_run_bash, "cat <<'EOF'\nbody\nEOF\n")
+    assert out.strip() == "body", out
+    assert code == 0, out
+
+
+def test_trailing_comment_and_case_block(nx_fresh):
+    nx, _ = nx_fresh
+    from nx._bash_jobs import _run_bash
+    out, code = _drain(_run_bash, "echo ok  # trailing comment")
+    assert out.strip() == "ok" and code == 0, out
+    case = "case a in\na) echo matched;;\nesac"  # `esac` must be alone on its line
+    out, code = _drain(_run_bash, case)
+    assert out.strip() == "matched" and code == 0, out
+
+
+def test_exit_code_still_captured(nx_fresh):
+    """The newline must not eat the trailer `_read_log` parses."""
+    nx, _ = nx_fresh
+    from nx._bash_jobs import _run_bash
+    out, code = _drain(_run_bash, "false")
+    assert code == 1, out
+    out, code = _drain(_run_bash, "true")
+    assert code == 0, out
+    # multi-line + nonzero: exit status is the *last* command's, unchanged
+    out, code = _drain(_run_bash, "echo one\necho two\nexit 7")
+    assert "one" in out and "two" in out and code == 7, out
+
+
+def test_broken_command_still_fails_loudly(nx_fresh):
+    """No over-eager repair: a genuinely broken command must not be papered
+    over. A shell *parse* error kills the whole `sh -c` script, so the exit
+    trailer never gets written either — the error text is what the model sees.
+    Asserting this pins the boundary of the fix: it repairs the wrapper, not
+    the model's command.
+    """
+    nx, _ = nx_fresh
+    from nx._bash_jobs import _run_bash
+    out, code = _drain(_run_bash, "echo ok &&", want_code=False)
+    assert "Syntax error" in out or "syntax error" in out, out
+    assert "ok" not in out  # nothing ran

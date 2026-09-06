@@ -34,6 +34,25 @@ def _confirm(action: str, preview: str | None = None) -> bool:
     return _m._confirm(action, preview=preview)
 
 
+def _wrap_exit_trailer(command: str) -> str:
+    """Wrap *command* in a subshell that echoes its exit status.
+
+    The trailing newline before the closing ``)`` is load-bearing, not
+    cosmetic: a model-authored command routinely arrives with no final newline,
+    and gluing ``)`` onto its last line corrupts every shape that must end on a
+    line of its own. The common case is a heredoc — the terminator has to be
+    *alone* on its line, so ``EOF); echo "[exit: 0]"`` never closes the heredoc,
+    the ``(`` never closes, and the shell dies at parse time with
+    ``Syntax error: end of file unexpected (expecting ")")`` before running
+    anything. A trailing ``# comment`` has the same requirement. A trailing
+    ``\\`` is unaffected: backslash-newline splices the lines back together.
+
+    A genuinely broken command (dangling ``&&``, unbalanced quote) still fails
+    loudly, which is the correct outcome.
+    """
+    return f"({command}\n); echo \"[exit: $?]\""
+
+
 def _run_bash(command: str) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
@@ -62,7 +81,7 @@ def _run_bash(command: str) -> tuple[str, str]:
     # Inline: run the command in a subshell, then echo its exit status.
     # setsid detaches into a new session so terminal Ctrl+C / SIGINT can't
     # reach the background job. Redirect to the log file ourselves.
-    inner = f"({command}); echo \"[exit: $?]\""
+    inner = _wrap_exit_trailer(command)
     wrapped = (f"setsid sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
                f"echo $!")
     r = subprocess.run(wrapped, shell=True, capture_output=True, text=True)
