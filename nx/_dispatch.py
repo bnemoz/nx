@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
 from . import _state as st
@@ -68,6 +69,10 @@ st._PENDING_BG_COMPLETION_NOTICE = None  # set by that scan; flushed with the ot
 # first-tool-of-turn scan below, flushed once with the other runtime notes.
 st._PENDING_SUBAGENT_NOTICE = None
 st._BG_NOTICE_SEEN = None  # pids already announced (None → seed from _BG_NOTICE_BASELINE)
+# The scan runs from both the model turn (run_tool's first-tool hook) and the
+# wake poller thread; the seen-set is read-modify-rewritten, so both sides
+# serialize on this (also held by _bash_jobs._mark_bg_notice_seen).
+_BG_SCAN_LOCK = threading.Lock()
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
@@ -263,36 +268,53 @@ def _scan_background_completions() -> str | None:
     exit codes once, then marks them seen — no repeated noise."""
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
     from ._verify import _is_verify_job  # verify jobs report via _stage_verify_outcome instead
-    try:
-        jobs = list_bg_jobs()
-    except Exception:
-        return None
-    mine = os.getpid()
-    seen = getattr(st, "_BG_NOTICE_SEEN", None)
-    if seen is None:
-        seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
-    notes = []
-    finished = []
-    for j in jobs:
-        pid = str(j.get("pid", ""))
-        if not pid:
-            continue
-        # only jobs this nx process launched — never another session's strays
-        if j.get("owner_pid") != mine:
-            continue
-        if _is_verify_job(j):
-            continue  # NX_VERIFY_CMD outcome has its own dedicated note path
-        if j.get("alive"):
-            continue  # still running — the existing [background] flow covers it
-        if pid in seen:
-            continue
-        seen.add(pid)
-        finished.append(j)
-        code = _read_bg_exit_status(pid)[1]
-        tail = (j.get("tail") or "").strip()[:80]
-        code_s = "unknown" if code is None else str(code)
-        notes.append(f"  pid {pid} exited (code {code_s})" + (f" — tail: {tail}" if tail else ""))
-    st._BG_NOTICE_SEEN = seen
+    with _BG_SCAN_LOCK:
+        try:
+            jobs = list_bg_jobs()
+        except Exception:
+            return None
+        mine = os.getpid()
+        seen = getattr(st, "_BG_NOTICE_SEEN", None)
+        if seen is None:
+            seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
+        notes = []
+        finished = []
+        for j in jobs:
+            try:
+                pid = str(j.get("pid", ""))
+                if not pid:
+                    continue
+                # only jobs this nx process launched — never another session's strays
+                if j.get("owner_pid") != mine:
+                    continue
+                if _is_verify_job(j):
+                    continue  # NX_VERIFY_CMD outcome has its own dedicated note path
+                if j.get("alive"):
+                    continue  # still running — the existing [background] flow covers it
+                if pid in seen:
+                    continue
+                # A dead job whose log is already gone has nothing left to
+                # announce: its output reached the model another way (run_bash
+                # finished inside its own poll window, wait_background, or a
+                # read_file of the log) and _finish_bg_job deleted the log.
+                # "pid N exited (code unknown)" with no tail is pure noise —
+                # and each such orphan woke a pointless auto-continuation turn
+                # — so mark it consumed silently (0.37.4).
+                if not j.get("log_path") or not os.path.exists(j["log_path"]):
+                    seen.add(pid)
+                    continue
+                seen.add(pid)
+                finished.append(j)
+                code = _read_bg_exit_status(pid)[1]
+                tail = (j.get("tail") or "").strip()[:80]
+                code_s = "unknown" if code is None else str(code)
+                notes.append(f"  pid {pid} exited (code {code_s})" + (f" — tail: {tail}" if tail else ""))
+            except Exception:
+                # One malformed job must not discard the whole sweep: the
+                # marks made so far are committed below either way, so a probe
+                # that raises can never make the same pid re-announce forever.
+                continue
+        st._BG_NOTICE_SEEN = seen
     if not notes:
         return None
     return ("[Runtime note: background job(s) you started have finished:\n"
@@ -316,7 +338,16 @@ def _run_bg_completion_scan() -> None:
         # already marked seen in _BG_NOTICE_SEEN, so no later scan would
         # ever re-announce it. _stage_subagent_answer merges the same way.
         prev = getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None)
-        st._PENDING_BG_COMPLETION_NOTICE = f"{prev}\n{note}" if prev else note
+        if prev:
+            # Dedup (0.37.4): the poller thread and this turn can both sweep
+            # the same job in a race — _BG_SCAN_LOCK marks it seen once, but
+            # each sweep may have already staged its own copy of the note.
+            fresh = [ln for ln in note.splitlines()
+                     if ln.strip().startswith("pid ") and ln not in prev]
+            if fresh:
+                note = f"{prev}\n" + "\n".join(fresh)
+            # else: every line already staged — keep prev untouched
+        st._PENDING_BG_COMPLETION_NOTICE = note
     # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
     # pending notice (independent of the generic bg-completion note).
     from ._verify import _stage_verify_outcome
@@ -753,6 +784,18 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             st._PENDING_MULTI_EDIT_NOTICE = MULTI_EDIT_GUIDANCE
     elif name != "edit_file":
         st._CONSECUTIVE_EDITS = 0
+    # read_file just returned a bg job's log in full? If the job has already
+    # exited, its output now sits in the transcript — mark it seen so the
+    # completion scan never wakes the model to say what it just read (0.37.4).
+    # (run_bash/wait_background mark their own inline deliveries inside
+    # _bash_jobs; this covers the model fetching the log by path instead.)
+    if name == "read_file" and isinstance(result, str) and not result.startswith("ERROR"):
+        try:
+            from ._bash_jobs import _mark_log_consumed
+            for _p in (args.get("path") if isinstance(args.get("path"), list) else [args.get("path")]):
+                _mark_log_consumed(_p)
+        except Exception:
+            pass
     return result
 
 

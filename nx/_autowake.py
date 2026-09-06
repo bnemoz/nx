@@ -32,6 +32,15 @@ first wake delivers the exit line and the next wake_due() is False.
 
 NX_WAKE_PROMPT=0 turns the whole mechanism off (the notes then wait for the
 next real user turn, as before).
+
+0.37.4 hardening: short-lived run_bash commands never go through the
+[background] flow at all (they finish inside the 3s poll window, output
+inline), but their pid->log map outlives the log _finish_bg_job deletes —
+an orphan that scanned as "pid N exited (code unknown)" once per turn and
+woke a "Nothing to do" auto-continuation every time. Fix is three-sided:
+run_bash/wait_background mark a job seen the moment its full output lands
+in a tool result, read_file on a finished job's log marks it seen too, and
+the wake sweep skips dead jobs with no log left to read.
 """
 from __future__ import annotations
 
@@ -119,6 +128,15 @@ def _finished_unseen_bg_jobs() -> list[str]:
             if not pid or pid in seen or j.get("alive"):
                 continue
             if j.get("owner_pid") != mine or _is_verify_job(j):
+                continue
+            # A dead job whose log is already gone has nothing left to
+            # announce: nx delivered its output inline (run_bash finished in
+            # its own poll window) or via wait_background/read_file, and
+            # _finish_bg_job deleted the log. Announcing it here is what made
+            # every short bash command wake the next turn with
+            # "pid N exited (code unknown)" and a "Nothing to do" reply —
+            # one orphan map per bash call, one bogus wake each (0.37.4).
+            if not j.get("log_path") or not os.path.exists(j["log_path"]):
                 continue
             out.append(pid)
         return out

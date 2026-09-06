@@ -53,8 +53,23 @@ def setup_function(_function):
     m.st._WAKE_PREFILL = ""
     m.st._TURN_ACTIVE = False
     os.environ["NX_WAKE_PROMPT"] = "1"
+    # Fake job fixtures point log_path here; the wake sweep (0.37.4) skips a
+    # dead job whose log is gone, so the fixtures' logs must exist.
+    _make_fixture_log("/tmp/nx-test-424242.log")
+    _make_fixture_log("/tmp/nx-test-424243.log")
+    _make_fixture_log("/tmp/nx-test-424244.log")
+    _make_fixture_log("/tmp/nx-test-530001.log")
+    _make_fixture_log("/tmp/nx-test-530002.log")
     # Don't leave a real poller thread running between tests.
     _autowake._POLLER = None
+
+
+def _make_fixture_log(path):
+    try:
+        with open(path, "a") as f:
+            f.write("fixture\n[exit 0]\n")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +144,8 @@ def test_wake_due_holds_off_while_agent_running():
 def test_wake_due_on_finished_unseen_bg_job(monkeypatch):
     m.st._WAKE_ARMED = True
     fake_jobs = [{"pid": "424242", "alive": False,
-                  "owner_pid": os.getpid(), "command": "true"}]
+                  "owner_pid": os.getpid(), "command": "true",
+                  "log_path": "/tmp/nx-test-424242.log"}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     assert _autowake._finished_unseen_bg_jobs() == ["424242"]
     assert _autowake.wake_due() is True
@@ -310,7 +326,7 @@ def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
     m.st._WAKE_ARMED = True
     fake_jobs = [{"pid": "424243", "alive": False,
                   "owner_pid": os.getpid(), "command": "true",
-                  "tail": "done"}]
+                  "tail": "done", "log_path": "/tmp/nx-test-424243.log"}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))
@@ -339,7 +355,8 @@ def test_run_bg_scan_merges_into_unflushed_notice(monkeypatch):
     would ever re-announce it)."""
     _silence()
     fake_jobs = [{"pid": "530001", "alive": False,
-                  "owner_pid": os.getpid(), "command": "true", "tail": "a"}]
+                  "owner_pid": os.getpid(), "command": "true", "tail": "a",
+                  "log_path": "/tmp/nx-test-530001.log"}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))
@@ -351,7 +368,7 @@ def test_run_bg_scan_merges_into_unflushed_notice(monkeypatch):
         # A second job finishes before the turn's first tool call re-scans.
         fake_jobs.append({"pid": "530002", "alive": False,
                           "owner_pid": os.getpid(), "command": "true",
-                          "tail": "b"})
+                          "tail": "b", "log_path": "/tmp/nx-test-530002.log"})
         m._run_bg_completion_scan()
         note = m.st._PENDING_BG_COMPLETION_NOTICE or ""
         assert "530001" in note and "530002" in note, \
@@ -382,7 +399,8 @@ def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
     m.st._PENDING_BG_COMPLETION_NOTICE = None
     m.st._BG_NOTICE_SEEN = None
     fake_jobs = [{"pid": "424244", "alive": False,
-                  "owner_pid": os.getpid(), "command": "true", "tail": "ok"}]
+                  "owner_pid": os.getpid(), "command": "true", "tail": "ok",
+                  "log_path": "/tmp/nx-test-424244.log"}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))

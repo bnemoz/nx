@@ -522,6 +522,12 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
         return (f"[background] PID {pid} | log: {log_path}\n"
                 "The command is still running in the background. "
                 f"Check output with read_file('{os.path.abspath(log_path)}')")
+    # Finished inside the poll window: the result below carries the command's
+    # FULL output + exit code. Mark it seen so the completion scan never
+    # announces "pid N exited (code unknown)" for work the model just saw —
+    # the log is about to be deleted, leaving a dead pid + map file that the
+    # scan (and the wake poller) would otherwise report once per turn forever.
+    _mark_bg_notice_seen(pid)
     return _finish_bg_job(log_path)
 
 
@@ -596,6 +602,73 @@ def _maybe_start_watchdog(pid: int | str, command: str, max_seconds: int) -> Non
                      name=f"nx-bash-watchdog-{pid_i}").start()
 
 
+def _mark_bg_notice_seen(pid: int | str | None) -> None:
+    """Record a background job's pid as already delivered to the model.
+
+    The completion scan (nx/_dispatch.py) announces finished jobs the model
+    hasn't heard about yet; but when nx itself handed the job's output to the
+    model in a tool result — run_bash finishing inside its own poll window
+    (inline `[exit N]` result), or wait_background returning the full log —
+    the transcript already contains that work, and announcing "pid N exited"
+    afterwards only produces a pointless wake turn ("Nothing to do — that was
+    the sweep script from my last turn exiting").
+
+    Without this, every short-lived bash command leaks exactly such an
+    orphan: _finish_bg_job deletes the LOG but leaves the pid->log MAP file,
+    so the next scan (or wake_due's sweep) finds a dead pid, no log, and no
+    seen-entry — "exited (code unknown)" — once per turn, forever.
+
+    Locks the same mutex as the scan so a concurrent poller sweep can't
+    drop one side's marking (the scan rewrites st._BG_NOTICE_SEEN in full).
+    """
+    if not pid:
+        return
+    pid = str(pid)
+    if not pid.isdigit():
+        return
+    try:
+        from ._dispatch import _BG_SCAN_LOCK
+        with _BG_SCAN_LOCK:
+            seen = getattr(st, "_BG_NOTICE_SEEN", None)
+            if seen is None:
+                seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
+            seen.add(pid)
+            st._BG_NOTICE_SEEN = seen
+    except Exception:
+        pass  # a seen-marking hint must never break the tool result
+
+
+def _mark_log_consumed(log_path: str | None) -> None:
+    """read_file() just returned *log_path* in full: if it is a background
+    job's log and the job has already exited, its output now sits entirely in
+    the transcript — mark the job seen so the completion scan never repeats
+    it. A still-running job stays unmarked: its eventual exit is still news
+    worth announcing."""
+    if not log_path:
+        return
+    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
+    if os.path.dirname(os.path.abspath(log_path)) != bg_dir:
+        return
+    try:
+        for name in os.listdir(bg_dir):
+            if not (name.startswith("bg-pid-") and name.endswith(".map")):
+                continue
+            pid = name[len("bg-pid-"):-len(".map")]
+            try:
+                with open(os.path.join(bg_dir, name)) as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("log_path") != log_path:
+                continue
+            if _pid_is_alive(int(pid), data.get("pid_start_time")):
+                continue  # still running — the exit will be the real notice
+            _mark_bg_notice_seen(pid)
+            return
+    except Exception:
+        pass  # a seen-marking hint must never break the tool result
+
+
 def _finish_bg_job(log_path: str) -> str:
     """Read+format the output of a finished background job, deleting its log."""
     time.sleep(0.2)  # brief settle so the log is flushed
@@ -655,6 +728,9 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
     if status == "timeout":
         return (f"[timeout after {timeout}s] PID {pid} still running. "
                 f"Check output so far with read_file('{os.path.abspath(log_path)}')")
+    # The full output is about to land in the transcript — same as an inline
+    # run_bash finish, so the completion scan must never announce this pid.
+    _mark_bg_notice_seen(pid)
     return _finish_bg_job(log_path)
 
 
