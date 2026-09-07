@@ -538,7 +538,7 @@ go through the approval gate above.
 | `git_status` | `path?` | `git status --short -b`; read-only |
 | `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only |
 | `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only |
-| `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands |
+| `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |

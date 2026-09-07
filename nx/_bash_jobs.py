@@ -53,6 +53,78 @@ def _wrap_exit_trailer(command: str) -> str:
     return f"({command}\n); echo \"[exit: $?]\""
 
 
+def _heredoc_quote_trap(command: str) -> str | None:
+    """Detect a heredoc whose delimiter is a quoting idiom, not a plain word.
+
+    Models fuse two shell idioms that never belong together: the ssh
+    quote-embedding dance (each single quote respelled as an alternating
+    double/single-quote pair) and a heredoc delimiter. The shell decodes the
+    word after << with normal quoting rules, so the fused spelling yields a
+    7-character delimiter of quote characters around EOF, which a bare EOF
+    terminator can never match. The heredoc then swallows everything after it
+    (including the exit-trailer wrapper's closing paren) and sh dies at parse
+    time with "Syntax error: end of file unexpected" - the exact signature of
+    the pre-0.36.2 wrapper bug, which is why the failure got misread as "the
+    heredoc wrapper broke again". nx executes the command verbatim; this
+    pre-flight check names the culprit instead of leaving the model to
+    misdiagnose a parse error it cannot see the source of.
+
+    A delimiter word that carries shell quoting is decoded the way the shell
+    would: single-quoted, double-quoted, backslash-escaped and doubled-empty-
+    quote spellings of a plain word all pass. A word that still carries quote
+    characters after decoding (the fused-idiom shape) is reported when the
+    body closes with the bare token its author clearly meant; if the body
+    instead closes with that same quote-riddled token, the heredoc is
+    self-consistent and passes.
+
+    Returns a human-readable explanation, or None when no trap is present.
+    Diagnosis only - never rewrites the command.
+    """
+    sq, dq = chr(39), chr(34)
+    fused = sq + dq + sq + sq + "EOF" + sq + sq + dq + sq
+    for m in re.finditer(r"<<(-?)([ \t]*)(\S+)", command):
+        delim = m.group(3)
+        if not ("'" in delim or '"' in delim or "\\" in delim):
+            continue  # bare word delimiter (EOF, PY, END) - nothing to decode
+        # Decode the delimiter word the way the shell would: strip quoting.
+        decoded_chars: list[str] = []
+        in_sq = in_dq = False
+        for ch in delim:
+            if ch == "'" and not in_dq:
+                in_sq = not in_sq
+            elif ch == '"' and not in_sq:
+                in_dq = not in_dq
+            elif ch == "\\" and not in_sq and not in_dq:
+                continue  # backslash-quoted delimiter char (<<\\EOF)
+            else:
+                decoded_chars.append(ch)
+        decoded = "".join(decoded_chars)
+        if decoded == "EOF" and not in_sq and not in_dq:
+            continue  # a legal quoting spelling of the word EOF
+        # The word still carries quote characters after decoding, so the
+        # delimiter is not the plain token its author intended. Report when
+        # the body closes with that bare token -- such a heredoc can never
+        # terminate, because its real delimiter is the quote-riddled word.
+        core = decoded.strip("'\"\\")
+        if (
+            core
+            and core != decoded
+            and re.search(r"(?m)^\s*" + re.escape(core) + r"\s*$", command[m.end():])
+        ):
+            return (
+                "ERROR: heredoc delimiter is a quoting idiom, not a word - the "
+                "shell decodes what follows << to the delimiter " + repr(delim)
+                + " (decoded: " + repr(decoded) + "), so the body's bare "
+                "terminator line never matches and the whole command dies at "
+                "parse time "
+                "(Syntax error: end of file unexpected). The " + fused
+                + " spelling is the ssh quote-embedding idiom; it must never "
+                "decorate a heredoc delimiter. Write << 'EOF' and close with "
+                "EOF alone on its line."
+            )
+    return None
+
+
 def _run_bash(command: str) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
@@ -480,6 +552,9 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     NX_BASH_SLEEP_CAP (default 3600) bounds the sleep-inferred poll window so
     "sleep 1d && cmd" cannot block the turn for a day; 0 disables the cap.
     """
+    trap = _heredoc_quote_trap(command)
+    if trap:
+        return trap
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
     if secret is not None:
         from ._subagent import _subagent_quiet

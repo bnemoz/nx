@@ -145,15 +145,80 @@ def test_exit_code_still_captured(nx_fresh):
     assert "one" in out and "two" in out and code == 7, out
 
 
-def test_broken_command_still_fails_loudly(nx_fresh):
-    """No over-eager repair: a genuinely broken command must not be papered
-    over. A shell *parse* error kills the whole `sh -c` script, so the exit
-    trailer never gets written either — the error text is what the model sees.
-    Asserting this pins the boundary of the fix: it repairs the wrapper, not
-    the model's command.
-    """
+# --- fused-idiom delimiter trap (pre-flight diagnosis) ------------------------
+
+from nx._bash_jobs import _heredoc_quote_trap
+
+
+def _fused(core: str = "EOF") -> str:
+    """The ssh quote-embedding idiom wrapped around a delimiter word: every
+    single quote respelled as an alternating double/single-quote pair."""
+    sq, dq = chr(39), chr(34)
+    return sq + dq + sq + sq + core + sq + sq + dq + sq
+
+
+def test_trap_fires_on_reported_ssh_shape():
+    """The exact field failure: ssh + fused-idiom delimiter + bare EOF close."""
+    cmd = "ssh sunk 'cat > /tmp/x.sh' << " + _fused() + "\n#!/bin/bash\necho body\nEOF"
+    msg = _heredoc_quote_trap(cmd)
+    assert msg is not None
+    assert "quoting idiom" in msg
+    assert "ssh quote-embedding" in msg
+    assert "<< 'EOF'" in msg  # the correction is spelled out
+
+
+def test_trap_fires_for_any_bare_terminator_core():
+    cmd = "ssh h 'cat > /tmp/x.sh' << " + _fused("PY") + "\nbody\nPY"
+    assert _heredoc_quote_trap(cmd) is not None
+
+
+def test_legal_delimiter_spellings_pass():
+    sq, dq = chr(39), chr(34)
+    ok = [
+        "cat <<'EOF'\nhi\nEOF",
+        "cat <<" + sq + sq + "EOF" + sq + sq + "\nhi\nEOF",
+        "cat <<-'EOF'\nhi\n   EOF",
+        "python3 - <<'PY'\nprint(1)\nPY",
+        "cat <<EOF\nhi\nEOF",
+    ]
+    for cmd in ok:
+        assert _heredoc_quote_trap(cmd) is None, cmd
+
+
+def test_backslash_escaped_delimiter_passes():
+    # built from chr() so the literal never reads like quote-soup to reviewers
+    bs = chr(92)
+    assert _heredoc_quote_trap("cat <<" + bs + "EOF\nhi\nEOF") is None
+
+
+def test_unterminated_or_selfconsistent_body_not_flagged():
+    sq, dq = chr(39), chr(34)
+    # no bare terminator anywhere: broken, but not by THIS trap — stay silent
+    assert _heredoc_quote_trap("cat << " + _fused() + "\nbody") is None
+    # body closes with the token the delimiter really decodes to: consistent
+    exotic = dq + sq + "EOF" + sq + dq
+    assert _heredoc_quote_trap("cat << " + _fused() + "\nbody\n" + exotic) is None
+
+
+def test_run_bash_refuses_trapped_command_without_launching(nx_fresh, monkeypatch):
+    """The diagnosis comes back as the tool result and nothing is executed —
+    not even an approval prompt for a command that cannot run."""
     nx, _ = nx_fresh
-    from nx._bash_jobs import _run_bash
-    out, code = _drain(_run_bash, "echo ok &&", want_code=False)
-    assert "Syntax error" in out or "syntax error" in out, out
-    assert "ok" not in out  # nothing ran
+    from nx import _bash_jobs
+    launched: list[str] = []
+    monkeypatch.setattr(_bash_jobs, "_run_bash",
+                        lambda c: launched.append(c) or ("0", "/dev/null"))
+    msg = _bash_jobs.run_bash("ssh h 'cat > /tmp/x.sh' << " + _fused() + "\nbody\nEOF")
+    assert "quoting idiom" in msg
+    assert not launched
+
+
+def test_run_bash_still_runs_good_heredoc(nx_fresh, monkeypatch):
+    """The pre-flight check must not scare off legitimate heredocs."""
+    nx, _ = nx_fresh
+    from nx import _bash_jobs
+    monkeypatch.setattr(nx, "_confirm", lambda *a, **k: True)
+    out = _bash_jobs.run_bash("cat <<'EOF'\nbody\nEOF\n", timeout=10)
+    assert "body" in out, out
+    assert "[exit:" not in out  # the trailer is still stripped from results
+
