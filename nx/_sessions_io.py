@@ -160,13 +160,19 @@ def _summarize_session_data(session_id: str, data: dict[str, Any]) -> dict[str, 
     """The small listing summary (id, title, preview, …) pulled out of a
     full session dict. Shared by the sidecar-index writer and the
     full-parse fallback in _session_summary_from_file, so both paths
-    produce identical fields."""
+    produce identical fields.
+
+    Since 2.3a the summary also carries `sha256s`: every image sidecar
+    hash the transcript references — the live-set for the index-driven
+    GC, so image collection reads the shards instead of re-parsing
+    every transcript JSON on each save."""
     msgs = data.get("messages", [])
     preview = ""
     for msg in msgs:
         if msg.get("role") == "user" and msg.get("content"):
             preview = _safe_title(msg["content"]) or ""
             break
+    from ._images import _collect_message_image_refs
     return {
         "id": session_id,
         "short": _short_id(session_id),
@@ -178,6 +184,7 @@ def _summarize_session_data(session_id: str, data: dict[str, Any]) -> dict[str, 
         "model": data.get("model"),
         "source": data.get("source"),
         "cwd": data.get("cwd"),
+        "sha256s": sorted(_collect_message_image_refs(msgs)),
     }
 
 

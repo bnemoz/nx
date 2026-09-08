@@ -38,6 +38,7 @@ from ._resume import resume_session
 from ._sessions_cmd import (
     _fmt_when, _print_transcript, _session_list_page_options,
     _print_session_list, _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
+    _cli_prune_sessions,
     _cmd_sessions, _cmd_resume, _cmd_delete,
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
     _cmd_export,

@@ -148,7 +148,10 @@ disables the probe and the attach.
 | `--version` / `-v` | print the installed version and exit |
 
 `nx sessions [query]` is a shell subcommand (not a flag): it lists/filters saved
-sessions and exits without entering the REPL.
+sessions and exits without entering the REPL. `nx sessions --prune` reconciles
+the store by hand: drops listing-index shards whose session file vanished,
+collects unreferenced image payloads immediately (no age grace), and enforces
+the `NX_IMAGES_QUOTA_MB` cap — one line per action.
 
 ### Key environment variables
 
@@ -160,7 +163,8 @@ sessions and exits without entering the REPL.
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (`NX_SOURCE_<NAME>_MODELS` pins a source's model-id dropdown list when its `GET /v1/models` is stale) |
 | `NX_ACTIVE` | source to start on (persistent version of `--source`) |
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
-| `NX_SESSION_IMAGES` | keep `read_image` payloads out of session JSON (default `1`): the base64 lives content-addressed in `<sessions>/_images/<sha256>.b64` — deduped across sessions, written once, garbage-collected to the images still referenced by any session — and messages carry a small `image_ref` (hash, mime, size, original path) that resume expands back into the live transcript. A missing/corrupt sidecar degrades that image to a text note instead of a 400. `0` restores 0.38.x inline-base64 storage (multi-MB session files) |
+| `NX_SESSION_IMAGES` | keep `read_image` payloads out of session JSON (default `1`): the base64 lives content-addressed in `<sessions>/_images/<sha256>.b64` — deduped across sessions, written once, garbage-collected to the images still referenced by any session — and messages carry a small `image_ref` (hash, mime, size, original path) that resume expands back into the live transcript. A missing/corrupt sidecar degrades that image to a text note instead of a 400. `0` restores 0.38.x inline-base64 storage for NEW saves; already-stored payloads are still garbage-collected (since 0.45 they were orphaned forever under `0`) |
+| `NX_IMAGES_QUOTA_MB` | size cap on the `_images/` payload dir (default `200` MB, `0` disables): once over quota, the oldest unreferenced payloads are evicted first, then — only if still over — the oldest referenced ones (their resume degrades to the missing-sidecar note). Enforced after every indexed save and by `nx sessions --prune` |
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
 | `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users. While a tool runs the line also carries live progress (`· 12s · 2/3 · compiling 3/40`) — see [Live tool progress](#live-tool-progress); under `0` that tail is suppressed, since a redraw-once line cannot show a moving clock |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |

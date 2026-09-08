@@ -18,7 +18,7 @@ from typing import Any
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
-from ._repl import _repl, _cli_sessions, _cli_tokens
+from ._repl import _repl, _cli_sessions, _cli_prune_sessions, _cli_tokens
 from ._repl_state import _fresh_metrics
 from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
 from ._images import _parts_preview
@@ -237,6 +237,9 @@ def main() -> None:
     # it short-circuits before the banner / network source resolution that the
     # interactive loop depends on.
     if _cli_sessions(sys.argv[1:]):
+        return
+    # `nx sessions --prune` — reconcile the store by hand, then exit.
+    if _cli_prune_sessions(sys.argv[1:]):
         return
     # `nx --tokens` / `--bench` — print the prompt-token floor and exit.
     if _cli_tokens(sys.argv[1:]):

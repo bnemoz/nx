@@ -30,7 +30,7 @@ from ._logging import _log_event
 from ._metrics import _record_usage
 from ._images import (
     IMAGE_REF_TYPE, _data_url_to_ref, _ref_to_data_url_part,
-    _collect_message_image_refs, _gc_image_sidecars,
+    _collect_message_image_refs, _gc_image_sidecars, _images_dir,
 )
 from ._env import _env_int
 from ._openai_client import APIConnectionError
@@ -343,28 +343,134 @@ def _write_session(
             pass
         if update_index:
             _update_index(session_id, data)
-        # Sidecar GC (0.39.0), after the indexed save: live = every sha still
-        # referenced by ANY session file on disk, plus the one just written
-        # (identical anyway — data["messages"] is what went to disk). A 60s
-        # age grace keeps a concurrent save's about-to-be-referenced payload
-        # safe without cross-process coordination; the scan is cheap because
-        # ref-form session files are KB, not MB.
-        if _env_int("NX_SESSION_IMAGES", 1):
-            live = _collect_message_image_refs(merged_messages)
-            live |= _scan_session_image_refs()
-            _gc_image_sidecars(live, min_age_s=60.0)
+        # Sidecar GC (0.39.0), after the indexed save. Since 2.3a the
+        # live-set comes from the .index shards (each summary carries the
+        # session's sha256s) — no transcript re-parse per save. The just-merged
+        # messages are unioned in: an unindexed mid-turn autosave may have
+        # added refs whose shard is stale, and a concurrent writer's payload
+        # gets the same 60s age grace as before. Runs whenever image sidecars
+        # exist: gating it on NX_SESSION_IMAGES=0 used to orphan every
+        # already-stored payload the moment the rollback flag flipped.
+        live = _collect_message_image_refs(merged_messages)
+        live |= _scan_session_image_refs()
+        _gc_image_sidecars(live, min_age_s=60.0)
+        _gc_image_quota()
+
+
+def _gc_image_quota() -> int:
+    """2.3a size quota for the `_images/` dir: when the payload dir exceeds
+    NX_IMAGES_QUOTA_MB (default 200; 0 disables), the OLDEST unreferenced
+    payloads are evicted first, then oldest referenced ones, until under
+    quota. Content-addressed and deduped, so an evicted payload that is
+    still referenced degrades its session's resume to the
+    "[image missing from session image store]" note — never a 400 — but
+    nothing else breaks. Returns payloads removed.
+
+    Unreferenced-first ordering means quota eviction never destroys live
+    data while orphan-free GC has anything left to clean; the referenced
+    tier only fires when the user's quota is genuinely smaller than their
+    live image set."""
+    quota_mb = _env_int("NX_IMAGES_QUOTA_MB", 200)
+    if quota_mb <= 0:
+        return 0
+    limit = quota_mb * 1024 * 1024
+    d = _images_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    payloads: list[tuple[float, str]] = []  # (mtime, name)
+    total = 0
+    for name in names:
+        if not name.endswith(".b64"):
+            continue
+        try:
+            st = os.stat(os.path.join(d, name))
+        except OSError:
+            continue
+        payloads.append((st.st_mtime, name))
+        total += st.st_size
+    if total <= limit:
+        return 0
+    payloads.sort()  # oldest first
+    live = _scan_session_image_refs()
+    # pass 1: unreferenced orphans (age grace does not apply — quota is a
+    # storage bound, not a concurrency concern; orphan means nothing on
+    # disk references the payload)
+    removed = 0
+    kept: list[tuple[float, str]] = []
+    for mtime, name in payloads:
+        if total <= limit:
+            kept.append((mtime, name))
+            continue
+        if name[:-4] in live:
+            kept.append((mtime, name))
+            continue
+        side = os.path.join(d, name)
+        try:
+            size = os.path.getsize(side)
+            os.remove(side)
+        except OSError:
+            kept.append((mtime, name))
+            continue
+        total -= size
+        removed += 1
+    # pass 2: still over quota — evict oldest referenced payloads
+    if total > limit:
+        kept.sort()
+        for mtime, name in kept:
+            if total <= limit:
+                break
+            try:
+                size = os.path.getsize(os.path.join(d, name))
+                os.remove(os.path.join(d, name))
+                total -= size
+                removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def _scan_session_image_refs() -> set[str]:
     """Every image sha referenced by any session file currently on disk —
-    the union live-set for sidecar GC. Tolerant: unreadable/invalid files
-    contribute nothing (their payloads age out via the grace window)."""
+    the union live-set for sidecar GC.
+
+    Since 2.3a this reads the .index shards (each carries the session's
+    `sha256s`), so the cost is O(#sessions) small JSON reads instead of a
+    full transcript parse per save. A session with no shard, a shard without
+    a sha256s field (pre-0.45 files), or a corrupt shard falls back to
+    parsing that one transcript — tolerant, never lossy: an unreadable
+    file contributes nothing to the live-set, exactly as before."""
     live: set[str] = set()
+    covered: set[str] = set()  # ids whose shard gave us a trustworthy sha256s
+    try:
+        with os.scandir(_index_dir()) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    with open(entry.path, encoding="utf-8") as f:
+                        shard = json.load(f)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    continue
+                shas = shard.get("sha256s") if isinstance(shard, dict) else None
+                if isinstance(shas, list):
+                    live.update(s for s in shas if isinstance(s, str) and s)
+                    covered.add(entry.name[:-len(".json")])
+                # else: pre-2.3a shard (no ref list) — its transcript is
+                # parsed by the loop below, like a session with no shard.
+    except OSError:
+        pass
+    # Anything the shards could not answer (missing shard, corrupt shard,
+    # pre-2.3a shard) falls back to parsing that one transcript.
     try:
         names = [n for n in os.listdir(_sessions_dir()) if n.endswith(".json")]
     except OSError:
-        return live
+        names = []
     for name in names:
+        sid = name[:-len(".json")]
+        if sid in covered:
+            continue
         try:
             with open(os.path.join(_sessions_dir(), name), encoding="utf-8") as f:
                 data = json.load(f)
@@ -534,8 +640,49 @@ def _list_sessions(limit: int | None = 20, offset: int = 0, query: str | None = 
     return out[offset:end]
 
 
+def _prune_sessions_store() -> dict[str, int]:
+    """`nx sessions --prune` (2.3a): reconcile the store by hand.
+
+    1. A shard whose session JSON is gone (crash, manual rm — /delete
+       already removes both) is dropped, so listings and the GC live-set
+       stop counting a dead session. 2. Unreferenced image payloads are
+       collected immediately, no age grace. 3. The size quota runs last.
+    Returns a small stats dict for the CLI to print."""
+    # 1. orphaned shards
+    shards_dropped = 0
+    try:
+        shard_names = [n for n in os.listdir(_index_dir()) if n.endswith(".json")]
+    except OSError:
+        shard_names = []
+    for name in shard_names:
+        sid = name[:-len(".json")]
+        if not os.path.exists(_session_path(sid)):
+            try:
+                os.remove(_index_entry_path(sid))
+                shards_dropped += 1
+            except OSError:
+                pass
+    # 2. immediate GC (no grace: the user asked)
+    live = _scan_session_image_refs()
+    images_removed = _gc_image_sidecars(live, min_age_s=0.0)
+    try:
+        kept = len([n for n in os.listdir(_images_dir()) if n.endswith(".b64")])
+    except OSError:
+        kept = 0
+    # 3. quota
+    quota_removed = _gc_image_quota()
+    return {"shards_dropped": shards_dropped, "images_removed": images_removed,
+            "images_kept": kept, "quota_removed": quota_removed}
+
+
 def _delete_session(session_id: str) -> bool:
-    """Remove a session file. Returns True if something was deleted."""
+    """Remove a session file. Returns True if something was deleted.
+
+    2.3a: removes the index shard as before, then runs the sidecar GC
+    immediately — a deleted session's images used to linger until some
+    *other* session happened to save. The shard removal MUST precede the
+    GC (it is the ref list being dropped); the scan covers every other
+    session, and the 60s grace protects concurrent writers."""
     path = _session_path(session_id)
     try:
         os.remove(path)
@@ -544,6 +691,14 @@ def _delete_session(session_id: str) -> bool:
     try:
         os.remove(_index_entry_path(session_id))
     except OSError:
+        pass
+    # GC-on-delete: with the shard gone, nothing (else) references the
+    # session's unique images. Best-effort, never raises.
+    try:
+        live = _scan_session_image_refs()
+        _gc_image_sidecars(live, min_age_s=0.0)
+        _gc_image_quota()
+    except Exception:
         pass
     return True
 

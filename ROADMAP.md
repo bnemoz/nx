@@ -384,6 +384,14 @@ _record_usage'd via _record_api_call, chars//4 estimates carry a provenance
 flag surfaced by /cost (~N est), by_source survives resume (saved+reloaded
 in the session JSON), and pricing gained optional per-model keys
 NX_PRICE_<SOURCE>_<MODEL>_<KIND>.
+Then 2.3a (0.45.0): index-driven image GC — each .index shard summary carries
+`sha256s`, so the GC live-set is O(#sessions) shard reads instead of a full
+transcript parse per save (missing/corrupt/pre-2.3a shards fall back to
+parsing that one transcript); GC runs even when NX_SESSION_IMAGES=0 (it used
+to orphan every stored payload); GC-on-delete in _delete_session; a
+NX_IMAGES_QUOTA_MB cap (default 200, 0 disables) evicting oldest-unreferenced
+first; and `nx sessions --prune` to reconcile by hand (drop orphaned shards,
+immediate collect, quota).
 
 | Minor | Contents |
 | --- | --- |
@@ -391,7 +399,7 @@ NX_PRICE_<SOURCE>_<MODEL>_<KIND>.
 | **0.41** | 1.8 two-tier overflow · window-aware max_tokens |
 | **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests |
 | **0.43** | 2.1 hard write fence *(shipped)* · 2.5 cost correctness *(0.44.0)* |
-| **0.43–0.44** | 2.3a/b store index + GC · P3-5 `run_tests` |
+| **0.43–0.44** | 2.3a store GC *(0.45.0)* · P3-5 `run_tests` |
 | **0.45–0.46** | 2.4 compression v2 · 2.6 memory v2 · P3-4 one dialect |
 | **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
 
