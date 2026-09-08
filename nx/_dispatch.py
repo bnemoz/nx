@@ -92,6 +92,48 @@ st._PENDING_DELEGATION_NOTICE = None  # staged notice, flushed with the other ru
 _DELEGATION_NUDGE_THRESHOLD = _env_int("NX_DELEGATION_NUDGE_READS", 8)
 
 
+def _breaker_endpoint_key() -> tuple[str | None, str | None]:
+    """Identity of the endpoint the malformed-args evidence was gathered
+    against: (active source name, active model). A per-model key because
+    `/source <name> <model>` can point one Source at any model on a
+    multi-model host, and truncation is a property of the weights + server
+    pair, not of the Source row."""
+    return (st.ACTIVE.name if st.ACTIVE is not None else None, st.MODEL)
+
+
+def _breaker_views() -> tuple[dict[str, int], set[str]]:
+    """(failures, broken) — the breaker's live containers, after re-keying.
+
+    0.40: the breaker is evidence about ONE endpoint. It used to be
+    process-global, so switching to a healthy source left the model permanently
+    missing tools that endpoint handles fine. Every reader goes through here:
+    if the (source, model) identity changed since the evidence was gathered,
+    the streaks are dropped in place (clear, not reassign — the conftest state
+    rewind and `nx.<name>` proxy both rely on container identity).
+
+    Lazy rather than a hook in switch_source(): tests (and future callers) may
+    reassign st.ACTIVE/st.MODEL directly, and a read-time check cannot be
+    bypassed by forgetting to call a notifier.
+
+    The first observation just adopts the key without clearing — there is no
+    prior-endpoint evidence to drop yet, and the containers may legitimately
+    hold state installed by a caller (a test, or /toolcalls reset) rather than
+    by an observed truncation."""
+    key = _breaker_endpoint_key()
+    observed = st._BREAKER_ENDPOINT_KEY
+    if observed != key:
+        if observed != st.BREAKER_UNOBSERVED:
+            st._MALFORMED_TOOL_FAILURES.clear()
+            st._MALFORMED_TOOL_BROKEN.clear()
+        st._BREAKER_ENDPOINT_KEY = key
+    return st._MALFORMED_TOOL_FAILURES, st._MALFORMED_TOOL_BROKEN
+
+
+def _breaker_broken(name: str) -> bool:
+    """True if `name` is currently dropped by the malformed-args breaker."""
+    return name in _breaker_views()[1]
+
+
 def _active_tools() -> list[dict[str, Any]]:
     """The tool schema list to send this turn. wait_background is included
     only once run_bash has actually backgrounded this session — see run_tool();
@@ -108,8 +150,8 @@ def _active_tools() -> list[dict[str, Any]]:
     # Malformed-args circuit breaker: an endpoint that keeps truncating one
     # tool's JSON args stops being offered that tool for the session (see
     # st._MALFORMED_TOOL_BROKEN — armed in _turn.py's native parse path).
-    if st._MALFORMED_TOOL_BROKEN:
-        broken = st._MALFORMED_TOOL_BROKEN
+    broken = _breaker_views()[1]
+    if broken:
         tools = [t for t in tools if t["function"]["name"] not in broken]
     if not _m.NX_VISION or not st._NATIVE_TOOL_CALLS_CONFIRMED:
         tools = [t for t in tools if t["function"]["name"] != "read_image"]
@@ -384,6 +426,23 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
             del st._TOOL_RESULT_CACHE[key]
 
 
+def _withheld_tool_error(name: str) -> str:
+    """Refusal for a tool that exists but is NOT offered this turn: a session
+    gate (sub-agents off, no backgrounded job yet, no plan active) or the
+    malformed-args breaker. run_tool() applies it to RESOLVED names (0.40) —
+    a repaired spelling like `multi_edits` -> `multi_edit` used to bypass both
+    the early breaker check (which saw only the emitted name) and the gate
+    checks, and the fall-through 'unknown tool' text then sent the model off to
+    invent a substitute instead of fixing its spelling or its formatting.
+    Empty for a tool that is in fact offered, so callers fall through."""
+    if _breaker_broken(name):
+        from ._turn import _malformed_args_nudge  # call-time: _turn imports this module
+        return _malformed_args_nudge(name, broken_now=True)
+    if name in {t["function"]["name"] for t in _active_tools()}:
+        return ""
+    return _unknown_tool_error(name)
+
+
 def _unknown_tool_error(name: str) -> str:
     """Error text for a tool name that resolved to nothing in the dispatch table.
 
@@ -432,9 +491,13 @@ def _breaker_decay(name: str) -> None:
     truncations on a flaky local server were routine; losing a tool for the
     whole session on that evidence was too heavy. A deliberately BROKEN tool
     (the model can't reach it anyway) only decays when the user re-offers it
-    via /toolcalls reset — direct run_tool() calls (tests, hooks) count."""
-    if st._MALFORMED_TOOL_FAILURES.pop(name, None) is not None:
-        st._MALFORMED_TOOL_BROKEN.discard(name)
+    via /toolcalls reset — direct run_tool() calls (tests, hooks) count.
+
+    0.40: reads through _breaker_views() first, so a clean dispatch on a NEW
+    endpoint can never inherit a stale `broken` mark from the previous one."""
+    failures, broken = _breaker_views()
+    if failures.pop(name, None) is not None:
+        broken.discard(name)
 
 
 def run_tool(name: str, args: dict[str, Any]) -> str | list:
@@ -473,7 +536,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # retry nudge uses — "unknown tool" would read as the tool never existed
     # and invite the model to invent a substitute action instead of changing
     # how it formats the call.
-    if name in st._MALFORMED_TOOL_BROKEN:
+    if _breaker_broken(name):
         from ._turn import _malformed_args_nudge  # call-time: _turn imports this module
         return _malformed_args_nudge(name, broken_now=True)
     # A spawn_agent() sub-loop installs a read-only table (per-thread, so 2+
@@ -492,8 +555,16 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # the note riding the result; ambiguity falls through to the
         # unknown-tool error, which lists the close names instead of guessing.
         from ._argrepair import resolve_tool_name
+        # The gates the top of run_tool() applies to an EXACT name must be
+        # re-applied to the RESOLVED one (0.40): the early breaker check sees
+        # only the emitted spelling, so a breaker-dropped `multi_edit` used to
+        # run when the model typed `multi_edits`, and a typo could repair its
+        # way onto a tool the session deliberately withholds.
         resolved, name_note = resolve_tool_name(name)
         if resolved and table.get(resolved):
+            refused = _withheld_tool_error(resolved)
+            if refused:
+                return refused
             name, fn = resolved, table[resolved]
         else:
             return _unknown_tool_error(name)

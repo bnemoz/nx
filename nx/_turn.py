@@ -734,7 +734,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
     ONE bracket-closure salvage attempt before the nudge — see
     _salvage_truncated_args for why this is deliberately NOT offered to the
     write tools (closure repair would invent file content)."""
-    from ._dispatch import _CACHEABLE_READ_TOOLS
+    from ._dispatch import _CACHEABLE_READ_TOOLS, _breaker_views, _breaker_broken
     st._NATIVE_TOOL_CALLS_CONFIRMED = True  # server is actually using native tool_calls this session
     quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
@@ -783,11 +783,15 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         tool_name = c.get("name") or ""
         count = 0
         if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name:
-            count = st._MALFORMED_TOOL_FAILURES.get(tool_name, 0) + 1
-            st._MALFORMED_TOOL_FAILURES[tool_name] = count
+            # _breaker_views() first (0.40): it stamps which endpoint this
+            # evidence belongs to and drops any streak carried over from a
+            # different one, so the count below is this endpoint's alone.
+            failures, broken = _breaker_views()
+            count = failures.get(tool_name, 0) + 1
+            failures[tool_name] = count
             if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
-                st._MALFORMED_TOOL_BROKEN.add(tool_name)
-        broken_now = tool_name in st._MALFORMED_TOOL_BROKEN
+                broken.add(tool_name)
+        broken_now = _breaker_broken(tool_name)
         st._TALLY_RETRIES += 1
         _repair_log("malformed_args", f"{tool_name}: {detail}")
         if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name and count >= st.MALFORMED_TOOL_BREAKER_LIMIT:

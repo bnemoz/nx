@@ -172,9 +172,23 @@ _PENDING_DELEGATION_NOTICE: str | None = None
 # MALFORMED_TOOL_BREAKER_LIMIT malformed-args failures naming the SAME tool,
 # it is dropped from _active_tools() for the rest of the session and the
 # retry nudge says to use the plain alternative instead. 0 disables.
-MALFORMED_TOOL_BREAKER_LIMIT: int = 2
+#
+# The LIMIT has NO default here on purpose (0.40): it used to be `2` while
+# nx/__init__.py's env resolution assigns 3, and a module that ever read the
+# value before __init__ ran would silently arm the breaker one failure early.
+# `__init__.py` (NX_MALFORMED_TOOL_BREAKER) is the only owner; reading it
+# before that assignment is now an AttributeError instead of a wrong number.
+MALFORMED_TOOL_BREAKER_LIMIT: int
 _MALFORMED_TOOL_FAILURES: dict[str, int] = {}
 _MALFORMED_TOOL_BROKEN: set[str] = set()
+# (source name, model) the two containers above describe. The breaker is
+# EVIDENCE ABOUT AN ENDPOINT, not about the tool — a local server that truncates
+# multi_edit says nothing about what a hosted endpoint does — so it is dropped
+# when the (source, model) identity changes (0.40). The sentinel marks "no
+# truncation observed yet on this process", and is what /toolcalls reset and
+# /reset re-arm to; it is a string so it can never collide with a real key tuple.
+BREAKER_UNOBSERVED: Any = "<unobserved>"
+_BREAKER_ENDPOINT_KEY: Any = BREAKER_UNOBSERVED
 
 # --- 0.30.0 recovery tally -----------------------------------------------------
 # Self-healing is invisible in aggregate: nothing recorded THAT a repair

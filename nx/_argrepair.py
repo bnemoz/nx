@@ -291,7 +291,12 @@ def resolve_tool_name(name: Any) -> tuple[str | None, str | None]:
     live schema names, demanding exactly ONE candidate (ambiguity never
     guesses — the caller's unknown-tool error lists the close names instead).
     Returns (resolved_name_or_None, note_or_None). Never raises; non-string
-    names degrade to (None, None)."""
+    names degrade to (None, None).
+
+    Resolution deliberately spans the FULL schema set (not the tools offered
+    this turn): the caller still has to get the name through run_tool(), which
+    re-checks the breaker and the session gates against the RESOLVED name so it
+    can answer with the reason the tool is unavailable rather than 'unknown'."""
     if not isinstance(name, str) or not name.strip():
         return None, None
     cand = name.strip()

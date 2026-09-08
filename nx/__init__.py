@@ -481,11 +481,12 @@ HISTORY_LINES = _env_int("NX_HISTORY_LINES", INPUT_HISTORY_LINES_DEFAULT)
 
 st.REASONING_ONLY_RETRY_LIMIT = _env_int("NX_REASONING_ONLY_RETRIES", 3)
 st.MALFORMED_STREAM_RETRY_LIMIT = _env_int("NX_MALFORMED_STREAM_RETRIES", 2)
-# Malformed-args circuit breaker: after this many malformed-args failures for
-# the SAME tool name (native tool_calls path), that tool is dropped from
-# _active_tools() for the rest of the session — an endpoint that reliably
-# truncates one tool's JSON args stops being offered it (see nx/_turn.py).
-# 0 disables the breaker.
+# An endpoint that reliably truncates one tool's JSON args stops being offered
+# it for the session (see nx/_turn.py) — no fallback default: this is the
+# breaker's ONLY owner, and _state.py deliberately declares the name with no
+# value so an early read is an AttributeError instead of a silently different
+# limit (0.40: the old `= 2` fallback here disagreed with the real default
+# of 3, and test_breaker_ergonomics only passed because of import order).
 st.MALFORMED_TOOL_BREAKER_LIMIT = _env_int("NX_MALFORMED_TOOL_BREAKER", 3)
 st.FORCED_FINAL_MAX_TOKENS = _env_int("NX_FORCED_FINAL_MAX_TOKENS", 2048)
 # Reasoning token budget: cap on the model's thinking phase, sent as

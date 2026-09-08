@@ -513,6 +513,10 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     # endpoint-level tool-args quirk may have been transient.
     st._MALFORMED_TOOL_FAILURES = {}
     st._MALFORMED_TOOL_BROKEN = set()
+    # Re-arm the endpoint identity too (0.40) so the reset isn't undone by a
+    # pending re-key, and a switch to another source is treated as fresh
+    # evidence rather than a carry-over.
+    st._BREAKER_ENDPOINT_KEY = st.BREAKER_UNOBSERVED
     print(f"{DIM}  context cleared{RESET}")
     # A reset forks a new session id so the fresh chat isn't written
     # over the old one (mirrors Hermes's "new session on /new").
@@ -541,6 +545,7 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
     decay-on-success usually re-arms on its own; this forces it.)"""
     import nx as _m
     from ._compress import set_toolcalls_mode, toolcalls_mode
+    from ._dispatch import _breaker_views
     arg = user.strip()
     if arg in ("text", "native", "auto"):
         if set_toolcalls_mode(arg):
@@ -551,8 +556,9 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
         print(f"{C.WARNING}  want /toolcalls, /toolcalls reset [tool], "
               f"or /toolcalls text|native|auto{RESET}")
         return
-    failures = getattr(st, "_MALFORMED_TOOL_FAILURES", {}) or {}
-    broken = getattr(st, "_MALFORMED_TOOL_BROKEN", set()) or set()
+    # Read through _breaker_views() (0.40): the listing shows the ACTIVE
+    # endpoint's streaks, not a previous source's leftovers.
+    failures, broken = _breaker_views()
     if arg.startswith("reset"):
         target = arg[len("reset"):].strip()
         if target:
@@ -562,6 +568,7 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
         else:
             st._MALFORMED_TOOL_FAILURES = {}
             st._MALFORMED_TOOL_BROKEN = set()
+            st._BREAKER_ENDPOINT_KEY = st.BREAKER_UNOBSERVED
             print(f"{DIM}  malformed-args streaks cleared, all tools re-offered{RESET}")
         return
     print(f"{DIM}  tool-calling mode: {toolcalls_mode()}{RESET}")
