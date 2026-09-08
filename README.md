@@ -540,9 +540,9 @@ go through the approval gate above.
 | `apply_patch` | `diff`, `path?` | apply a unified diff; for multi-file restructure |
 | `list_dir` | `path`, `pattern?` | flat list, or recursive glob (`**/*.py`) |
 | `search_files` | `pattern`, `path?`, `glob?`, … | regex content search; read-only |
-| `git_status` | `path?` | `git status --short -b`; read-only |
-| `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only |
-| `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only |
+| `git_status` | `path?` | `git status --short -b`; read-only. `path` is a directory (repo), never a file |
+| `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
+| `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
@@ -553,7 +553,10 @@ go through the approval gate above.
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls). png/jpeg/gif/webp/bmp by extension, with a magic-byte sniff fallback for missing/unknown extensions; `~` works; refusal (not downscale) past `NX_IMAGE_MAX_BYTES`. The base64 rides the tool message; on a text-protocol turn, in `--trace`, or in batch output it renders as a one-line image-attached hint instead. Saved sessions store a hash reference and the payload once in `<sessions>/_images/` (see `NX_SESSION_IMAGES`); if the image contributed to a context overrun, the next auto-compress evicts the payload and keeps its marker line |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
-or any `run_bash`. The `git_status`/`git_diff`/`git_log` cache entries carry a
+or any `run_bash`. A `git_*` call that passes a file where the `path`
+directory belongs, or an absolute path as `file`, is repaired in-flight instead
+of erroring (the file's directory is used and the command is restricted to that
+file). The `git_status`/`git_diff`/`git_log` cache entries carry a
 fingerprint of `.git` state (HEAD/index/`ORIG_HEAD` mtimes) and are dropped by
 any edit tool or `run_bash` too — a commit in another terminal, or `git reset`
 via `run_bash`, is never served stale. `wait_background` is omitted from the

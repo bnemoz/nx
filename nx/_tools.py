@@ -272,12 +272,59 @@ def search_files(
     return shown
 
 
+def _abs_to_rel(a: str, run_dir: str) -> str:
+    """Turn an absolute pathspec into one relative to run_dir; git rejects
+    absolute pathspecs as outside the repository. Unresolvable paths are
+    returned untouched so git reports them itself."""
+    if not os.path.isabs(a):
+        return a
+    try:
+        rel = os.path.relpath(a, run_dir)
+    except ValueError:      # different drive (Windows)
+        return a
+    return a if rel.startswith("..") else rel
+
+
+def _anchor_file(path: str, file: str | None) -> str:
+    """Where to run a git command that names an absolute `file`. An explicit
+    directory `path` that contains the file wins (a subrepo/subdir may be
+    meant); otherwise — including the default `path="."`, which may not be a
+    repository at all — anchor to the file's own directory. Relative `file`
+    args are left alone."""
+    f = str(file or "")
+    if not f or not os.path.isabs(f):
+        return path
+    p = path or "."
+    if p != "." and os.path.isdir(p):
+        try:
+            inside = not os.path.relpath(f, p).startswith("..")
+        except ValueError:
+            inside = False
+        if inside:
+            return p
+    return os.path.dirname(f)
+
+
 def _run_git(args: list[str], path: str) -> tuple[str | None, str | None]:
     if not shutil.which("git"):
         return None, "ERROR: git not found on PATH"
+
+    # Models keep passing a FILE where a directory belongs (git_diff with
+    # path=src/x.py instead of file=src/x.py); `git -C <file>` hard-fails with
+    # "cannot change to ...: Not a directory". Run inside the file's directory
+    # and restrict the command to that file so the intent still lands.
+    run_dir = str(path) or "."
+    if os.path.isfile(os.path.abspath(run_dir)):
+        fname = os.path.basename(os.path.abspath(run_dir))
+        run_dir = os.path.dirname(os.path.abspath(run_dir))
+        if "--" not in args:
+            args = [*args, "--", fname]
+    i = args.index("--") if "--" in args else -1
+    if i >= 0:
+        args = [*args[:i + 1], *(_abs_to_rel(a, run_dir) for a in args[i + 1:])]
     try:
-        proc = subprocess.run(["git", "-C", str(path), *args],
-                               capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(["git", "-C", run_dir, *args],
+                              capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
         return None, "ERROR: git command timed out after 15s"
     except OSError as e:
@@ -305,16 +352,14 @@ def git_diff(path: str = ".", staged: bool = False, file: str | None = None, **_
     `run_bash("git diff")`.
 
     Args:
-      path: repo/directory to run inside (default ".").
+      path: repo/directory to run inside (default ".") — a directory, not a
+        file; to scope the diff use `file` instead.
       staged: pass True for `git diff --staged` (staged changes only).
       file: optional path to restrict the diff to a single file.
     """
-    args = ["diff"]
-    if staged:
-        args.append("--staged")
-    if file:
-        args += ["--", str(file)]
-    out, err = _run_git(args, path)
+    out, err = _run_git(["diff"] + (["--staged"] if staged else [])
+                        + (["--", str(file)] if file else []),
+                        _anchor_file(path, str(file) if file else None))
     if err or out is None:
         return err or "[no changes]"
     return out.strip() or "[no changes]"
@@ -326,14 +371,14 @@ def git_log(path: str = ".", max_count: int = 20, file: str | None = None, **_: 
     rather than `run_bash("git log")`.
 
     Args:
-      path: repo/directory to run inside (default ".").
+      path: repo/directory to run inside (default ".") — a directory, not a
+        file; to scope history use `file` instead.
       max_count: cap on commits returned (default 20).
       file: optional path to restrict history to a single file.
     """
-    args = ["log", "--oneline", f"-{max(1, int(max_count))}"]
-    if file:
-        args += ["--", str(file)]
-    out, err = _run_git(args, path)
+    out, err = _run_git(["log", "--oneline", f"-{max(1, int(max_count))}"]
+                        + (["--", str(file)] if file else []),
+                        _anchor_file(path, str(file) if file else None))
     if err or out is None:
         return err or "[no commits]"
     return out.strip() or "[no commits]"
