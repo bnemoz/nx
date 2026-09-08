@@ -38,7 +38,13 @@ def _flatten_message_text(
                 f"{tc['function']['name']}(...)" for tc in m["tool_calls"])
         content = f"→ {calls}"
     elif isinstance(content, list):
+        # A parts tool result (read_image) flattens to its text parts; an
+        # image-only result would render as blank, so name the attachment.
+        has_image = any(isinstance(p, dict) and p.get("type") == "image_url"
+                        for p in content)
         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if not content and has_image:
+            content = "[image attached]"
     content = (content or "").replace("\n", " ").strip()
     if per_msg is not None and len(content) > per_msg:
         content = content[:per_msg - 1] + "…"

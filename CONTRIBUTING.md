@@ -115,6 +115,9 @@ tests/test_test_speed_tunables.py).
 - Read env-var-dependent values at call time, not at module import: the
   standalone assertion-style files scrub NX_* at module scope, so an
   import-time _env_int freezes whatever the shell had during collection.
+  (nx/_images.py got this wrong before 0.38.0: NX_IMAGE_MAX_BYTES was
+  resolved at import; now the module attribute is the default and
+  _env_int runs inside read_image.)
 
 ## Choosing what tests to run
 
@@ -174,6 +177,16 @@ complete. When you add an entry to `TOOLS`:
       conditionally offered by `_active_tools()`, add a branch to
       `_unknown_tool_error()` in `nx/_dispatch.py` saying why it's missing and
       what to do instead — and cover it in `tests/test_unknown_tool.py`.
+- [ ] If the tool returns anything but a plain string (a content-parts array,
+      like `read_image`), audit every consumer before shipping: the terminal
+      preview and the `/tooloutput` stash (nx/_dispatch.py run_tool), the
+      text-protocol Observation interpolation (both branches in
+      nx/_turn.py), the overrun auto-compress retry (nx/_compress.py),
+      `--trace` (nx/_cli.py), batch stdout (nx/_batch.py), session
+      flattening (nx/_sessions_io.py), and the post-hook JSON. Route them
+      through `_images._parts_preview` / `_strip_image_parts` so a large
+      non-text payload can never reach a text channel — the 0.38.0
+      read_image work is the worked example.
 - [ ] `NX_ARG_REPAIR` covers every tool automatically via `_schemas()`; no
       per-tool registration. If you added a module-level conditional schema,
       make sure it lands in `TOOLS` (or `_EXTRA_TOOL_SCHEMAS`) so repair and

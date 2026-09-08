@@ -316,7 +316,17 @@ def _compress_for_overrun(messages: list[dict[str, Any]]) -> bool:
     # Via the top-level package so a test stubbing nx.compress takes effect,
     # mirroring _maybe_autocompress below.
     import nx as _m
-    return _m.compress(messages, auto=True) is not None
+    # Image parts first (0.38.0): auto-compress keeps ~1/3 of turns verbatim,
+    # so a read_image blob that CAUSED the overrun would survive the fold and
+    # the retry would 400 again — the turn died with "could not free enough
+    # room" and the only recovery was the user hand-pruning the session.
+    # Swap every image_url part for its one-line text marker (in place, so the
+    # live history — and any later save — loses the megabytes, not just the
+    # retry), then fold. The marker keeps the model's memory of what it saw.
+    from ._images import _strip_image_parts
+    stripped = _strip_image_parts(messages)
+    folded = _m.compress(messages, auto=True) is not None
+    return folded or stripped > 0
 
 
 def open_stream(

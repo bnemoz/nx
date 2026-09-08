@@ -21,6 +21,7 @@ from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl, _cli_sessions, _cli_tokens
 from ._repl_state import _fresh_metrics
 from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
+from ._images import _parts_preview
 
 _HELP_TEXT = """\
 usage: nx [flags]
@@ -173,10 +174,15 @@ def _one_shot_result(messages: list, start_idx: int, summary: dict, elapsed: flo
                     final_answer = text
         elif role == "tool" and trace:
             idx = pending_by_id.get(m.get("tool_call_id", ""))
+            content = m.get("content")
+            if isinstance(content, list):
+                # read_image parts: trace the one-line hint, not megabytes of
+                # base64 (the trace is a debugging artifact, not the payload)
+                content = _parts_preview(content)
             if idx is not None:
-                trace[idx]["result"] = m.get("content")
+                trace[idx]["result"] = content
             else:
-                trace[-1]["result"] = m.get("content")
+                trace[-1]["result"] = content
         elif role == "user" and trace:
             # text-protocol observations: one user message holding an
             # "Observation (tool): result" block per call, in call order;

@@ -411,6 +411,16 @@ def _trim(text: Any, cap: int) -> Any:
             + (text[-tail:] if tail else ""))
 
 
+def _trim_result_value(value: Any, cap: int) -> Any:
+    """_trim for one traced tool result: a content-parts result (read_image)
+    becomes its one-line payload-free preview (megabytes of base64 in a JSONL
+    stdout line is unrenderable and can't be head+tail trimmed usefully)."""
+    if isinstance(value, list):
+        from ._images import _parts_preview
+        return _parts_preview(value)
+    return _trim(value, cap)
+
+
 def _emit(result: dict[str, Any]) -> None:
     """Write one JSONL result line to stdout, flushed immediately so a
     streaming consumer sees tasks land one by one. final_answer and each
@@ -423,7 +433,7 @@ def _emit(result: dict[str, Any]) -> None:
     tc = trimmed.get("tool_calls")
     if isinstance(tc, list):
         trimmed["tool_calls"] = [
-            {**t, "result": _trim(t.get("result"), _RESULT_FIELD_CHARS)}
+            {**t, "result": _trim_result_value(t.get("result"), _RESULT_FIELD_CHARS)}
             if isinstance(t, dict) else t for t in tc]
     sys.stdout.write(json.dumps(trimmed, ensure_ascii=False, default=str) + "\n")
     sys.stdout.flush()

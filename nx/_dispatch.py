@@ -437,7 +437,7 @@ def _breaker_decay(name: str) -> None:
         st._MALFORMED_TOOL_BROKEN.discard(name)
 
 
-def run_tool(name: str, args: dict[str, Any]) -> str:
+def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # Plan-mode write gate: refuse mutating tools while a plan is active, with
     # the gate message the model needs to act on (plan_edit, or ask for
     # /plan done). Checked before every other gate so a gated call costs no
@@ -678,9 +678,14 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
     # the on-screen preview both get this sanitized form). Bounding repetitive
     # tool output is the cheapest defense against context-copying collapse.
     # A content-parts result (read_image) is not a string — it bypasses text
-    # sanitization entirely and gets a one-line display hint instead.
+    # sanitization entirely and gets a one-line display hint instead. The
+    # hint is built by _parts_preview so the text parts ("[image: path, N
+    # bytes]") stay visible and the base64 payload never reaches a terminal,
+    # /tooloutput, or the post-hook JSON (any of which would have to carry
+    # megabytes it cannot trim).
     if isinstance(result, list):
-        preview_lines = [f"[image attached — {len(result)} part(s), base64 payload not shown]"]
+        from ._images import _parts_preview
+        preview_lines = [_parts_preview(result)]
     else:
         result = _sanitize_tool_result(result)
         # box the result; the preview is a further display-only trim of the (already
@@ -691,9 +696,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str:
             preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
     # User/org post-hook (NX_POST_TOOL_HOOK): observer only — failures are
     # logged, never raised, and the result is unaffected. Parts results are
-    # serialized for the hook's JSON stdin.
+    # serialized for the hook's JSON stdin — via _parts_preview, so the hook
+    # sees the same one-line hint the terminal does, not a base64 dump.
     from ._hooks import post_tool_hook
-    post_tool_hook(name, args, result if isinstance(result, str) else json.dumps(result)[:2000])
+    post_tool_hook(name, args, result if isinstance(result, str) else preview_lines[0])
     # Stash the sanitized result of the most recent tool call regardless of
     # visibility, so /tooloutput last can replay it after the fact even when the
     # result body was collapsed live (mirrors _LAST_REASONING for reasoning).

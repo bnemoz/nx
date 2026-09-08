@@ -129,3 +129,76 @@ def test_read_image_not_available_to_subagent(nx_fresh):
     from nx._subagent import _subagent_tools
     names = {t["function"]["name"] for t in _subagent_tools()}
     assert "read_image" not in names  # parts results are a parent-only capability
+
+
+# ---- 0.38.0 reader refinements: paths, sniffing, refusals -------------------
+
+def test_read_image_expands_home(nx_fresh, monkeypatch):
+    nx, tmp = nx_fresh
+    monkeypatch.setenv("HOME", str(tmp))  # POSIX expanduser reads HOME
+    img = tmp / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    from nx._images import read_image
+    out = read_image("~/shot.png")
+    assert isinstance(out, list)
+    assert "shot.png" in out[0]["text"]
+
+
+def test_read_image_rejects_directory_and_empty(nx_fresh):
+    nx, tmp = nx_fresh
+    from nx._images import read_image
+    (tmp / "adir.png").mkdir()
+    out = read_image(str(tmp / "adir.png"))
+    assert out.startswith("ERROR") and "directory" in out
+    empty = tmp / "empty.png"
+    empty.write_bytes(b"")
+    assert read_image(str(empty)).startswith("ERROR") and "empty" in read_image(str(empty))
+
+
+def test_read_image_sniffs_missing_or_unknown_extension(nx_fresh):
+    nx, tmp = nx_fresh
+    from nx._images import read_image
+    # a real PNG with no extension still reads, as image/png
+    bare = tmp / "screenshot"
+    bare.write_bytes(PNG_BYTES)
+    out = read_image(str(bare))
+    assert isinstance(out, list)
+    assert out[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    # a real JPEG under an unmapped extension too
+    jpg = tmp / "frame.bin"
+    jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"rest")
+    out = read_image(str(jpg))
+    assert isinstance(out, list)
+    assert out[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    # but a genuinely non-image file with no extension stays refused
+    notimg = tmp / "notes.txt"
+    notimg.write_bytes(b"plain text\n")
+    assert read_image(str(notimg)).startswith("ERROR")
+
+
+def test_read_image_extension_aliases(nx_fresh):
+    nx, tmp = nx_fresh
+    from nx._images import read_image
+    for name in ("a.jpeg", "b.jfif", "c.jpe"):
+        p = tmp / name
+        p.write_bytes(PNG_BYTES)  # bytes lie; the extension is what's trusted
+        out = read_image(str(p))
+        assert isinstance(out, list), name
+        assert out[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"), name
+
+
+def test_read_image_regrowth_past_cap_after_stat(nx_fresh, monkeypatch):
+    nx, tmp = nx_fresh
+    import nx._images as imgs
+    img = tmp / "grew.png"
+    img.write_bytes(b"x" * 100)
+    saved = imgs.IMAGE_MAX_BYTES
+    imgs.IMAGE_MAX_BYTES = 50
+    try:
+        # stat lies (file grows between getsize and read): the post-read
+        # re-check must still refuse, never base64 the oversize payload
+        monkeypatch.setattr(imgs.os.path, "getsize", lambda p: 10)
+        out = imgs.read_image(str(img))
+        assert out.startswith("ERROR") and "context cap" in out
+    finally:
+        imgs.IMAGE_MAX_BYTES = saved

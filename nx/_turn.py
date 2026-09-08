@@ -930,7 +930,16 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     # other mixed turns stay sequential.
     if _should_parallelize(calls):
         parallel_results = _run_read_only_parallel(calls)
-        obs = [f"Observation ({calls[i][0]}): {parallel_results[i]}" for i in range(len(calls))]
+        obs = []
+        for i, (n, _a) in enumerate(calls):
+            res = parallel_results[i]
+            # Same payload rule as the sequential branch below: a parts result
+            # (read_image) on a text-protocol turn renders as a one-line hint,
+            # never megabytes of base64 in a user message.
+            if isinstance(res, list):
+                from ._images import _parts_preview
+                res = _parts_preview(res)
+            obs.append(f"Observation ({n}): {res}")
         messages.append({"role": "user", "content": "\n".join(obs)})
         _flush_pending_background_notice(messages)
         return TURN_TOOL
@@ -938,7 +947,15 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     esc_action = None
     for n, a in calls:
         try:
-            obs.append(f"Observation ({n}): {run_tool(n, a)}")
+            res = run_tool(n, a)
+            # A gated read_image that slipped through on a text-protocol turn
+            # (e.g. after /toolcalls native, or a native-confirmed model that
+            # fell back mid-session) must not dump megabytes of base64 into a
+            # user message — render it like the terminal preview does.
+            if isinstance(res, list):
+                from ._images import _parts_preview
+                res = _parts_preview(res)
+            obs.append(f"Observation ({n}): {res}")
         except _EscToChat as e:
             esc_action = e.args[0] if e.args else n
             obs.append(f"Observation ({n}): CANCELLED by user (Esc)")
