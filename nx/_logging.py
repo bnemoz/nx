@@ -20,6 +20,7 @@ from typing import Any
 
 from . import _state as st
 from ._env import _env_int
+from ._private import private_dir
 
 # Under NX_HOME (same convention as sessions), not the installed package dir —
 # a system-wide/read-only install must not crash on import, and the log holds
@@ -56,7 +57,7 @@ class _AsyncLogWriter:
         the writer thread (or, transitively, `import nx`) just because the
         log directory can't be created."""
         try:
-            os.makedirs(os.path.dirname(self._path), exist_ok=True, mode=0o700)
+            private_dir(os.path.dirname(self._path))
             fd = os.open(self._path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
             return os.fdopen(fd, "a", buffering=1)
         except OSError:

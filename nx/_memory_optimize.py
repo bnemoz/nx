@@ -56,6 +56,7 @@ from ._ansi import DIM, RESET, C
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
+from ._private import private_dir
 from . import _state as st
 from ._memory_cmd import (
     _first_title, _iter_memory_dirs, _read_memory_file, _refresh_memory_note,
@@ -569,11 +570,7 @@ def _archive(note: _OptNote, stamp: str) -> str | None:
     failed — in which case the note is simply left in place."""
     dst_dir = os.path.join(note.dir, "archive", stamp)
     try:
-        os.makedirs(dst_dir, exist_ok=True)
-        try:
-            os.chmod(dst_dir, 0o700)
-        except OSError:
-            pass
+        private_dir(dst_dir)
         dst = os.path.join(dst_dir, note.name)
         os.replace(os.path.join(note.dir, note.name), dst)
         return dst

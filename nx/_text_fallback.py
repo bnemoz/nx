@@ -67,6 +67,30 @@ TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
 # 0 disables spilling (plain elision marker, as before).
 TOOL_RESULT_SPILL = _env_int("NX_TOOL_RESULT_SPILL", 1)
 
+# First-line secrets hygiene (0.40, roadmap 1.6): mask known token SHAPES in
+# tool results before the result is shown, persisted (sessions, spills,
+# sub-agent reports, bg logs) or cached. Best-effort by construction — it
+# catches credentials that announce themselves, not arbitrary strings — but
+# every pattern below is a shape no legitimate tool output needs verbatim.
+# 0 restores pass-through. The approval-side counterpart (input commands) is
+# NX_BASH_PROMPT_SECRETS in _bash_jobs.py.
+TOOL_RESULT_REDACT = _env_int("NX_TOOL_RESULT_REDACT", 1)
+
+# (compiled pattern, placeholder label). Patterns with a second group keep
+# that prefix (a header name, `Bearer `) and redact only the value after it.
+_REDACT_PATTERNS = (
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private-key"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"), "api-key"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "github-token"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws-access-key"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "slack-token"),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}\b"), "gitlab-token"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
+     "bearer-token"),
+    (re.compile(r"(?i)\b((?:x-api-key|api-key|api_key)\s*[:=]\s*)[A-Za-z0-9._~+/=-]{16,}"),
+     "api-key"),
+)
+
 
 def _inside_code_fence(text: str, index: int) -> bool:
     """True if `index` falls inside a ``` fenced block (odd fence count before it)."""
@@ -359,17 +383,37 @@ def _escape_tool_protocol_delimiters(text: Any) -> Any:
     return text
 
 
+def _redact_tool_secrets(text: str) -> str:
+    """Mask known secret shapes (see _REDACT_PATTERNS). Runs BEFORE anything
+    else in _sanitize_tool_result — including the disk spill — so a spill holds
+    no more than the model was sent (that was the one sink that persisted the
+    COMPLETE untruncated text). The placeholder keeps the token's kind so the
+    model can still reason about what it was ("the key was rejected"), just not
+    the value."""
+    if not TOOL_RESULT_REDACT:
+        return text
+    for rx, label in _REDACT_PATTERNS:
+        text = rx.sub(
+            lambda m, _label=label: (
+                (m.group(1) + f"[redacted:{_label}]")
+                if m.lastindex else f"[redacted:{_label}]"),
+            text)
+    return text
+
+
 def _sanitize_tool_result(text: Any) -> Any:
-    """Neutralize active protocol delimiters, dedup, and cap tool results.
+    """Redact secret shapes, neutralize protocol delimiters, dedup, and cap
+    tool results.
 
     Large, near-duplicate tool outputs (find/ls/grep path dumps) are the fuel
     for context-copying repetition collapse, so we collapse runs of >=3
     identical consecutive lines, then head/tail-cap to TOOL_RESULT_CHARS with a
     visible marker. Short, non-repetitive results pass through except for
-    protocol-delimiter escaping.
+    secret redaction and protocol-delimiter escaping.
     """
     if not isinstance(text, str):
         return text
+    text = _redact_tool_secrets(text)
     text = _escape_tool_protocol_delimiters(text)
     if len(text) <= 1000:
         return text

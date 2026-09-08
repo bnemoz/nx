@@ -34,6 +34,7 @@ from ._images import (
 )
 from ._env import _env_int
 from ._openai_client import APIConnectionError
+from ._private import open_private, private_dir
 from ._sessions_io import (
     _flatten_message_text, _safe_title, _prune_empty_assistant_messages,
     _short_id, _summarize_session_data, _session_matches_query,
@@ -95,9 +96,11 @@ def _open_private(path: str, flags: int = os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
     """Open ``path`` for writing so only the owner can read it (0600),
     regardless of the process umask. Sessions/logs hold tool output and
     command results that may include secrets — world-readable files leak
-    them to any other local user on a shared host."""
-    fd = os.open(path, flags, 0o600)
-    return os.fdopen(fd, "w", encoding="utf-8")
+    them to any other local user on a shared host.
+
+    Thin alias (kept for its many call sites) onto the shared private-sink
+    helper in nx/_private.py, which every other sink uses too (0.40)."""
+    return open_private(path, flags)
 
 
 @contextmanager
@@ -147,7 +150,7 @@ def _load_index() -> dict[str, Any]:
 def _write_index_entry(session_id: str, summary: dict[str, Any]) -> None:
     d = _index_dir()
     try:
-        os.makedirs(d, exist_ok=True, mode=0o700)
+        private_dir(d)
     except OSError:
         return
     path = _index_entry_path(session_id)
@@ -292,8 +295,7 @@ def _write_session(
     per-turn save that follows refresh the index instead.
     """
     d = _sessions_dir()
-    os.makedirs(d, exist_ok=True, mode=0o700)
-    os.chmod(d, 0o700)
+    private_dir(d)
     _prune_empty_assistant_messages(messages)
     path = _session_path(session_id)
     # The lock spans reading the current revision through replacing it. A

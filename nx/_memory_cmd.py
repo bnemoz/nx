@@ -27,10 +27,9 @@ NX_MEMORY_SEARCH_LIMIT so a big store can't dump an unbounded context blob
 into a turn. `/memory remember` shares the scan (unlimited) for its previews.
 
 Self-contained aside from a model round-trip (via `st.client`), the
-transcript-flattening helper shared with `_sessions_cmd.py`,
-`_open_private` (from _sessions_fs, same 0600 discipline as session files),
-and `_confirm()` (read via the top-level module, same pattern as _edit_tools).
-"""
+transcript-flattening helper shared with `_sessions_cmd.py`, and `_confirm()`
+(read via the top-level module, same pattern as _edit_tools). All writes go
+through nx/_private.py (0600/0700, umask-proof)."""
 from __future__ import annotations
 
 import os
@@ -42,7 +41,7 @@ from ._ansi import DIM, RESET, C
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
-from ._sessions_fs import _open_private
+from ._private import atomic_write_private, private_dir
 from ._sessions_io import _flatten_message_text
 from . import _state as st
 from . import _memories_dir, _project_memories_dir
@@ -476,19 +475,9 @@ def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
 
 def _atomic_write_private(path: str, content: str) -> None:
     """Write `content` to `path` 0600 (regardless of umask, via
-    _sessions_fs._open_private) and atomically — tmp file + os.replace, so a
-    crash mid-write can't leave a truncated memory behind."""
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with _open_private(tmp) as f:
-            f.write(content)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    _private.atomic_write_private) and atomically — tmp file + os.replace, so
+    a crash mid-write can't leave a truncated memory behind."""
+    atomic_write_private(path, content)
 
 
 def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) -> tuple[str, str] | None:
@@ -527,11 +516,7 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
             memories_dir = _memories_dir()
         else:
             memories_dir = pdir
-    os.makedirs(memories_dir, exist_ok=True)
-    try:
-        os.chmod(memories_dir, 0o700)
-    except OSError:
-        pass
+    private_dir(memories_dir)
 
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     slug = _slugify(title)

@@ -27,6 +27,7 @@ from . import _state as st
 from ._env import _env_float, _env_int
 from ._interrupt import _USER_INTERRUPTED, _watch_for_interrupts
 from ._logging import _log_event
+from ._private import open_private, private_dir, touch_private
 
 
 def _confirm(action: str, preview: str | None = None) -> bool:
@@ -146,10 +147,15 @@ def _run_bash(command: str) -> tuple[str, str]:
     """
     _delete_old_bg_logs()
     bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
-    os.makedirs(bg_dir, exist_ok=True)
+    private_dir(bg_dir)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     suffix = f"{stamp}-{secrets.token_hex(3)}"
     log_path = os.path.join(bg_dir, f"bg-{suffix}.log")
+    # The log is created HERE, at 0600, before the shell redirection opens it:
+    # `>` honours the umask, so a group-writable default would put every
+    # backgrounded command's full output where other local users can read it
+    # (and this directory is shared by every nx session on the machine).
+    touch_private(log_path)
     # Inline: run the command in a subshell, then echo its exit status.
     # setsid detaches into a new session so terminal Ctrl+C / SIGINT can't
     # reach the background job. Redirect to the log file ourselves.
@@ -174,7 +180,7 @@ def _run_bash(command: str) -> tuple[str, str]:
     if pid:
         try:
             map_path = os.path.join(bg_dir, f"bg-pid-{pid}.map")
-            with open(map_path, "w") as f:
+            with open_private(map_path) as f:
                 json.dump({"log_path": log_path, "command": command,
                            "started": time.time(),
                            "pid_start_time": _pid_start_time(pid),

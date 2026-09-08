@@ -23,6 +23,7 @@ import re
 import time
 from typing import Any, Optional
 
+from ._private import atomic_write_private, private_dir
 from . import _state as st
 
 DEFAULT_FILENAME = "allowed.json"
@@ -67,18 +68,10 @@ def _load_rules() -> list[dict[str, Any]]:
 
 def _save_rules(rules: list[dict[str, Any]]) -> None:
     path = _allowed_path()
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(rules, f, indent=2)
-    try:
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    private_dir(os.path.dirname(path) or ".")
+    # Allow rules encode command shapes the user has blessed — e.g. a
+    # `run: curl *` pattern is itself a map to whatever secrets curl reaches.
+    atomic_write_private(path, json.dumps(rules, indent=2))
 
 
 def add_rule(tool: str, pattern: str, scope: str = "project") -> dict[str, Any]:

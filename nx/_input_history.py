@@ -33,7 +33,8 @@ import json
 import os
 
 from . import _state as st
-from ._sessions_fs import _exclusive_file_lock, _open_private
+from ._private import open_private, private_dir
+from ._sessions_fs import _exclusive_file_lock
 
 # Default for NX_HISTORY_LINES: how many past submissions Up/Down recalls.
 INPUT_HISTORY_LINES_DEFAULT = 100
@@ -91,21 +92,17 @@ def _append_to_file(entry: str) -> None:
     d = os.path.dirname(path)
     if d:
         try:
-            os.makedirs(d, exist_ok=True, mode=0o700)
+            private_dir(d)
         except OSError:
-            return
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            pass  # not our dir (e.g. an NX_INPUT_HISTORY_FILE in a shared
-                  # /tmp) — makedirs already applied 0700 if we created it
+            return  # not our dir (e.g. an NX_INPUT_HISTORY_FILE in a shared
+            # /tmp) — makedirs already applied 0700 if we created it
     with _exclusive_file_lock(path):
         entries = _read_entries(path)
         entries.append(entry)
         del entries[:-cap]
         tmp = f"{path}.{os.getpid()}.tmp"
         try:
-            with _open_private(tmp) as f:
+            with open_private(tmp) as f:
                 json.dump(entries, f, ensure_ascii=False)
             os.replace(tmp, path)
         except OSError:

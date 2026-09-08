@@ -69,6 +69,7 @@ import threading
 import time
 from typing import Any
 
+from ._private import atomic_write_private, private_dir
 from . import _state as st
 from ._env import _env_int
 from ._progress import note_progress
@@ -507,7 +508,7 @@ def _write_agent_report(job_id: str, instruction: str, status: str,
     """
     try:
         d = _agents_report_dir()
-        os.makedirs(d, exist_ok=True)
+        private_dir(d)
         path = os.path.join(d, f"{job_id}.md")
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         body = (
@@ -518,10 +519,10 @@ def _write_agent_report(job_id: str, instruction: str, status: str,
             "## Answer\n\n"
             f"{answer.strip()}\n"
         )
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", errors="replace") as f:
-            f.write(body)
-        os.replace(tmp, path)
+        # Sub-agent reports carry the full instruction and answer verbatim
+        # (exactly what the parent saw), so they are written like the other
+        # sinks: 0600 at creation, umask-proof, atomically replaced.
+        atomic_write_private(path, body)
         _purge_old_agent_reports()
         return path
     except OSError:

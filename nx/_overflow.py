@@ -13,6 +13,7 @@ from typing import Optional
 
 from . import _state as st
 from ._env import _env_int
+from ._private import open_private, private_dir
 
 # Purge threshold for stale overflow files, matching bg-log trimming (_bash_jobs).
 OVERFLOW_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
@@ -64,19 +65,32 @@ def spill_to_disk(full: str) -> Optional[str]:
     re-seeing the same output rewrites the same file (content-addressed, no
     duplicate pile-up) and bumps its mtime (refreshing its TTL). Writes go
     through a temp file + os.replace so a concurrent reader never sees a
-    half-written spill.
+    half-written spill, and the file is created 0600 regardless of umask —
+    a spill is the one place nx persists MORE than the model was sent.
     """
     d = overflow_dir()
+    tmp = None
     try:
-        os.makedirs(d, exist_ok=True)
+        private_dir(d)
         path = os.path.join(d, _short_hash(full) + ".txt")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+        tmp = f"{path}.{os.getpid()}.tmp"
+        # This file holds the COMPLETE untruncated tool result — strictly more
+        # than the model itself was sent. Creating it 0600 (not via plain
+        # open(), which honours a group-writable umask) is what keeps a grep
+        # dump over a credential out of other users' hands; write_private is
+        # also atomic, so a concurrent read_file on the spill never sees a
+        # half-written file.
+        with open_private(tmp) as f:
             f.write(full)
         os.replace(tmp, path)
         _purge_old_overflow()
         return path
     except OSError:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         return None
 
 

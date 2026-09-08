@@ -31,6 +31,7 @@ import time
 from typing import Any
 
 from ._env import _env_int
+from ._private import open_private, private_dir
 
 # Formats browsers/servers accept in data: URLs; anything else is refused
 # with a message naming the supported set (prevents "it read a .exe").
@@ -196,8 +197,7 @@ def _images_dir() -> str:
     """Sidecar dir next to the session files (same 0700 posture)."""
     from ._sessions_fs import _sessions_dir
     d = os.path.join(_sessions_dir(), "_images")
-    os.makedirs(d, exist_ok=True, mode=0o700)
-    os.chmod(d, 0o700)
+    private_dir(d)
     return d
 
 
