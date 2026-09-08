@@ -292,7 +292,7 @@ def _repl() -> None:
             _record_input(user, state.history)
         print()  # breathing room before the spinner/text starts
         state.messages.append({"role": "user", "content": user if wake
-                               else expand_at_mentions(user)})
+                               else expand_at_mentions(user)})  # str or parts (@image)
         try:
             st._TURN_ACTIVE = True
             # Clear the wake flag at turn start, not only on the wake path:
