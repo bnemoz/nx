@@ -139,13 +139,15 @@ def test_loop_continues_and_finishes():
         assert summary["status"] == "done", summary
         assert calls["n"] == 2, "the stream should re-open exactly once"
         roles = [msg["role"] for msg in messages]
-        # The partial becomes a real assistant turn; the resume note REWRITES
-        # the existing trailing user turn in place (_nudge_current_user_turn
-        # never appends a new user message), then the continuation follows.
-        assert roles == ["system", "user", "assistant", "assistant"], roles
+        # The partial becomes a real assistant turn and the resume note is its
+        # OWN trailing user message (0.40, append-only): the user's prompt is
+        # never rewritten, so everything the model already saw — including the
+        # server's prefix cache — survives a continuation.
+        assert roles == ["system", "user", "assistant", "user", "assistant"], roles
+        assert messages[1] == {"role": "user", "content": "answer me"}
         assert messages[2]["content"] == "Part one, cut mid-"
-        assert "token limit" in messages[1]["content"], messages[1]["content"]
-        assert messages[1]["content"].startswith("answer me")
+        assert messages[3]["content"].startswith("[Runtime note: ")
+        assert "token limit" in messages[3]["content"], messages[3]["content"]
         assert messages[-1]["content"] == "sentence. All done."
     finally:
         _restore(saved)
@@ -178,8 +180,10 @@ def test_continuation_budget_close_out():
         assert roles[-1] == "assistant"
         assert "chunk 3" in messages[-1]["content"]
         assert "[Truncated by token limit before completion.]" in messages[-1]["content"]
-        # no dangling resume note left as the last message
-        assert roles[-2] == "assistant"
+        # each continuation appends a partial assistant turn plus its own resume
+        # note (0.40), and the close-out lands after the last note — nothing
+        # ends on a dangling note waiting for a reply that never comes
+        assert roles == ["system", "user"] + ["assistant", "user"] * 2 + ["assistant"], roles
     finally:
         m.MAX_CONTINUATIONS = saved_limit
         _restore(saved)

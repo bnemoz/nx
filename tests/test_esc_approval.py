@@ -222,8 +222,13 @@ def test_model_turn_malformed_native_tool_args_retries_cleanly():
                     {"role": "user", "content": "write a large file"}]
         status = m.model_turn(messages)
         assert status == m.TURN_STREAM_CUT, f"expected TURN_STREAM_CUT, got {status!r}"
-        assert len(messages) == 2, f"partial assistant/tool history leaked: {messages!r}"
+        # 0.40: nothing but the nudge is appended — no partial assistant turn,
+        # no tool history — and the user's own prompt is left byte-identical
+        # (the nudge is a NEW tail message, so the prefix cache survives).
+        assert len(messages) == 3, f"partial assistant/tool history leaked: {messages!r}"
+        assert messages[1] == {"role": "user", "content": "write a large file"}
         assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"].startswith("[Runtime note: ")
         assert "malformed or truncated JSON arguments" in messages[-1]["content"]
     finally:
         m.open_stream = saved_open_stream
@@ -740,12 +745,14 @@ def test_text_only_after_stall_nudges_when_nudge_is_last_message():
                     {"role": "user", "content": "[Runtime note: nudge to act]"}]
         status = m.model_turn(messages, reasoning_loop_cut_count=1)
         assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
-        # The intent text is preserved as the assistant turn (now last), and
-        # _nudge_current_user_turn rewrites the prior user message with a fresh
-        # re-nudge (it edits in place rather than appending a new message).
-        assert messages[-1] == {"role": "assistant", "content": "Now I'll write the file next."}
-        assert messages[-2]["role"] == "user"
-        assert "Runtime note" in messages[-2]["content"]
+        # The intent text is preserved as the assistant turn, and the re-nudge
+        # is APPENDED as its own user message (0.40): the note already in the
+        # transcript stays verbatim, so nothing the model has seen is rewritten.
+        assert messages[-2] == {"role": "assistant", "content": "Now I'll write the file next."}
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"].startswith("[Runtime note: ")
+        assert messages[3]["content"] == "[Runtime note: nudge to act]"  # untouched
+        assert "Runtime note" in messages[-1]["content"]
     finally:
         m.open_stream = saved_open_stream
         m._interrupt_watcher = saved_watcher

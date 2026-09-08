@@ -634,7 +634,8 @@ NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)
 
 
 from ._compress import (
-    RUNTIME_NOTE_RE, _nudge_current_user_turn, _flush_pending_background_notice,
+    RUNTIME_NOTE_PREFIX, _is_runtime_note, _nudge_current_user_turn,
+    _flush_pending_background_notice,
     _last_is_dangling_tool, MAX_COMPLETION_TOKENS, RECOVERY_BACKEND,
     RECOVERY_MIN_P, RECOVERY_REPEAT_PENALTY, RECOVERY_REPEAT_LAST_N,
     RECOVERY_DRY_MULTIPLIER, RECOVERY_DRY_BASE, RECOVERY_DRY_ALLOWED_LENGTH,

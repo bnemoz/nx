@@ -240,6 +240,16 @@ as the final answer rather than re-nudged (the old layout-only check missed
 the acts-then-stalls-then-summarizes shape and fired a spurious
 "TEXT-ONLY AFTER STALL NUDGE" on legitimate finished answers).
 
+Every rescue is injected append-only. A nudge is always a NEW trailing
+`[Runtime note:]` user message, never a rewrite of a message the model has
+already been sent, so a recovery storm leaves the server's prompt-prefix cache
+intact (`cached:` in the footer stays green) on exactly the turns that retry
+most. Repeated nudges stack, bounded by each failure family's own retry limit,
+which also makes the transcript an honest record of how many rescues fired.
+Injected notes do not count as conversation turns: the dangling-tool-result
+check looks past them, and `/compress` widens its verbatim keep-window so a
+trailing note cannot fold away your last real tool result.
+
 ### Themes
 
 Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,

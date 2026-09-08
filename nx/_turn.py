@@ -1551,8 +1551,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     #
     # BUT only while the model has not acted since this stall episode began.
     # The last-message check (_last_is_dangling_tool) misses the common
-    # layout: the model acts, then stalls once more — the re-nudge is
-    # rewritten in place as the trailing user message — and then delivers
+    # layout: the model acts, then stalls once more — the re-nudge is appended
+    # as the trailing user message — and then delivers
     # its finished-work summary. st._STALL_EPISODE_ACTED (set by the
     # TURN_TOOL branch of _run_model_turn_loop, cleared when a fresh
     # episode starts) records "acted at any point this episode", so a

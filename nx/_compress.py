@@ -31,16 +31,41 @@ from ._grammar import build_tool_call_grammar
 from . import _state as st
 from . import TOOLS
 
-RUNTIME_NOTE_RE = re.compile(r"\n\n\[Runtime note: .*?\]\s*$", re.DOTALL)
+# Every one-time injection into the model's transcript (recovery nudges,
+# backgrounded-job guidance, async sub-agent answers, verification results) is
+# a user-role message whose content starts with this prefix and ends with `]`.
+RUNTIME_NOTE_PREFIX = "[Runtime note: "
+
+
+def _is_runtime_note(msg: Any) -> bool:
+    """True if `msg` is one of nx's own injected notes rather than something the
+    user or the model wrote. Several places need to know whether a message
+    counts as a real turn boundary (see _last_is_dangling_tool)."""
+    content = msg.get("content")
+    return (msg.get("role") == "user" and isinstance(content, str)
+            and content.lstrip().startswith(RUNTIME_NOTE_PREFIX))
 
 
 def _nudge_current_user_turn(messages: list[dict[str, Any]], nudge: str) -> None:
-    note = f"[Runtime note: {nudge}]"
-    for msg in reversed(messages):
-        if msg.get("role") != "user" or not isinstance(msg.get("content"), str):
-            continue
-        content = RUNTIME_NOTE_RE.sub("", msg["content"]).rstrip()
-        msg["content"] = f"{content}\n\n{note}" if content else note
+    """Inject a recovery nudge as a fresh trailing user message.
+
+    APPEND-ONLY ON PURPOSE (0.40, ROADMAP 1.1). This function used to rewrite
+    the last user turn in place, stripping the previous note with a regex and
+    re-attaching a new one. That is a prompt-cache bullet: the rewritten message
+    is always one the model has ALREADY been sent, so every recovery rung —
+    malformed args, empty turn, reasoning stall, length continuation —
+    invalidated the server's prefix cache from that point on, on exactly the
+    turns with the largest prompt. nx bills itself on `cached:` in the footer
+    and documents append-only staging in _flush_pending_background_notice for
+    precisely this reason; recovery is now consistent with it. A repeated nudge
+    stacks (bounded by each failure family's own retry limit) instead of
+    replacing, which also gives the transcript an honest record of how many
+    rescues fired.
+
+    Notes are still deduped when the identical one is already the pending tail,
+    so a loop that re-enters the same rung with the same text can't double it."""
+    note = f"{RUNTIME_NOTE_PREFIX}{nudge}]"
+    if messages and messages[-1].get("content") == note:
         return
     messages.append({"role": "user", "content": note})
 
@@ -75,15 +100,41 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
             setattr(st, _slot, None)
 
 
+def _keep_past_notes(body: list[dict[str, Any]], keep: int) -> int:
+    """Smallest keep-count whose verbatim tail still holds `keep` real turns.
+
+    Injected runtime-note messages (recovery nudges, background-job and
+    sub-agent announcements) are not conversation turns, and since 0.40 the
+    recovery stack appends one per rescue. `keep` counts MESSAGES, so a couple
+    of trailing notes would otherwise eat the whole verbatim window of a manual
+    /compress (COMPRESS_KEEP=2) and fold away the last real tool result."""
+    if keep <= 0 or not body:
+        return keep
+    real = sum(1 for m in body[-keep:] if not _is_runtime_note(m))
+    size = keep
+    while real < keep and size < len(body):
+        size += 1
+        real = sum(1 for m in body[-size:] if not _is_runtime_note(m))
+    return size
+
+
 def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:
-    """True if the last message is a `tool` result with no assistant turn after it.
+    """True if the last real turn is a `tool` result with no assistant turn after it.
 
     This is the layout right after a tool ran and before the model follows up: an
     empty assistant turn here is most suspicious — the model produced nothing in
     response to a fresh tool result, so the user sees the agent "finish" with no
     answer. Auto-continue is most warranted in exactly this case.
+
+    Trailing runtime notes are skipped (0.40): nudges now arrive as their own
+    user message, and a note is not a turn boundary — the tool result underneath
+    it is still the thing awaiting a follow-up.
     """
-    return bool(messages) and messages[-1].get("role") == "tool"
+    for msg in reversed(messages):
+        if _is_runtime_note(msg):
+            continue
+        return msg.get("role") == "tool"
+    return False
 
 
 MAX_COMPLETION_TOKENS = _env_int("NX_MAX_TOKENS", 16000)
@@ -511,6 +562,8 @@ def compress(
     if auto:
         body_len = len(messages) - (1 if sys_msg else 0)
         keep = max(keep, body_len // 3)
+    # keep counts MESSAGES; injected runtime notes are not turns (0.40)
+    keep = _keep_past_notes(messages[1:] if sys_msg else messages, keep)
     if len(messages) <= 1 + keep:
         return None  # nothing to compress
 
