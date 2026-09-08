@@ -592,6 +592,12 @@ def test_refresh_memory_note_at_resume_updates_stale_titles():
     old = m.st.PROJECT_ROOT
     m.st.PROJECT_ROOT = root
     try:
+        # A global note must exist for the whole test: when the ONLY note is
+        # archived, _load_memory_note() returns None and the transcript note
+        # is DELETED (not replaced) — the idx lookup below needs the marker
+        # to survive via the global scope. (Writing it here, not relying on
+        # another test in this file to have left one: test order varies.)
+        _write_memory("Resume global anchor", "resumeanchor body", scope="global", project_root=None)
         _write_memory("Resume memo one", "resumeone body", scope="project", project_root=root)
         msgs = [{"role": "system", "content": "sys"},
                 {"role": "user", "content": "hi"},
