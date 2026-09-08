@@ -465,6 +465,15 @@ conversation. `nx sessions [query]` lists/filters sessions from the shell
 without entering the REPL; inside the REPL, `/sessions` and `/resume` do the
 same.
 
+Both entry points run the **same** loader (`nx/_resume.py`), so a resume is
+identical whichever way you enter — it expands stored `image_ref` payloads back
+into the live transcript (a resumed session is request-ready, never a 400 on
+the next turn), reselects the recorded source + model + provider routing,
+changes back into the directory the session was recorded in (`NX_RESUME_CWD=0`
+opts out; `st.PROJECT_ROOT` is recomputed for it), drops the saved system
+prompt for the current one, rebuilds the memory/delegation notes, and reloads
+the cumulative token counters so the footer keeps climbing across restarts.
+
 ## Batch mode
 
 `nx run -f tasks.jsonl` is the headless CI/benchmark harness: every line of

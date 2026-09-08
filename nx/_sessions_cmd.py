@@ -19,25 +19,15 @@ import shlex
 import time
 from typing import Any
 
-from ._ansi import DIM, BOLD, RESET, C, strip_ansi_for_display
+from ._ansi import DIM, RESET, C, strip_ansi_for_display
 from ._sessions_io import _flatten_message_text, _short_id
-from ._sources import restore_source, _set_provider_order
 from . import _state as st
 from . import (
     SYSTEM, _active_tools, _sessions_dir, SESSION_HOME,
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT,
     _load_session, _list_sessions, _delete_session, _resolve_session,
 )
-from ._repl_state import _ReplState, _save_current, _fresh_metrics, _reload_metrics_totals
-from ._memory_cmd import _refresh_memory_note
-
-
-def _session_messages(session_id: str) -> list[dict[str, Any]]:
-    """Load just the messages list for a session, with the live SYSTEM prepended."""
-    data = _load_session(session_id) or {}
-    msgs = [m for m in data.get("messages", []) if m.get("role") != "system"]
-    msgs.insert(0, {"role": "system", "content": SYSTEM})
-    return msgs
+from ._repl_state import _ReplState, _save_current
 
 
 def _fmt_when(ts: float | None) -> str:
@@ -389,19 +379,9 @@ def _cmd_resume(user: str, current_id: str | None) -> str | None:
     if sid == current_id:
         print(f"{DIM}  already on that session{RESET}")
         return None
-    data = _load_session(sid)
-    if not data:
-        print(f"{C.WARNING}  ✗ couldn't read session {sid}{RESET}")
-        return None
-    # Reselect the recorded source (and model override) if configured, so a
-    # resume lands on the same endpoint + model the session started on.
-    src = data.get("source")
-    if src and restore_source(src, model=data.get("model")):
-        print(f"{BOLD}{C.WARNING}  → source {src}{RESET} {DIM}({st.MODEL}){RESET}")
-    n_msgs = len([m for m in data.get("messages", []) if m.get("role") != "system"])
-    title = data.get("title") or "(untitled)"
-    print(f"{DIM}  ↻ resumed {sid} ({title!r}, {n_msgs} messages){RESET}")
-    print()
+    # Selection only: loading, endpoint/cwd restore and the transcript banner
+    # all happen in resume_session() (nx/_resume.py), which the handler calls —
+    # the CLI and /resume must not own separate copies of that sequence.
     return sid
 
 
@@ -469,24 +449,10 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     # Persist the outgoing session before switching away.
     if state.session_dirty:
         _save_current(state)
-    state.session_id = new_sid
-    state.messages[:] = _session_messages(new_sid)
-    from . import _messages_show_prior_backgrounding, _messages_show_prior_multi_edit_nudge, _messages_show_prior_delegation_nudge
-    st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(state.messages)
-    st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(state.messages)
-    from ._subagent import _add_delegation_note_if_absent
-    _add_delegation_note_if_absent(state.messages)
-    st._DELEGATION_NUDGED = _messages_show_prior_delegation_nudge(state.messages)
-    # Same staleness the --resume path fixes: the transcript's saved-memories
-    # note lists the store as of the session's last run — optimize in another
-    # session may have archived or merged since. Rebuild from the live store
-    # (no-op when it still matches, keeping the prompt cache intact).
-    _refresh_memory_note(state.messages)
-    state.session_dirty = False
-    # Reload the cumulative-token recorder from the resumed
-    # session's saved totals so they keep climbing from here.
-    st._METRICS = _fresh_metrics(new_sid)
-    _reload_metrics_totals(new_sid)
+    # Same function `nx --resume` runs: images expanded to live form, endpoint +
+    # provider routing + cwd restored, nudge flags re-derived, metrics reloaded.
+    from ._resume import resume_session
+    resume_session(new_sid, state, header="resumed")
 
 
 def _cmd_save(user: str, state: _ReplState) -> None:

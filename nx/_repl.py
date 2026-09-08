@@ -29,18 +29,14 @@ from ._compress import _maybe_autocompress
 from ._input_history import _load_input_history, _record_input
 from . import _state as st
 from . import (
-    SYSTEM, _initial_messages,
-    _load_session, _list_sessions,
-    _resolve_session, _new_session_id, _messages_show_prior_backgrounding,
-    _messages_show_prior_multi_edit_nudge, _messages_show_prior_delegation_nudge,
-    _maybe_refresh_description,
+    _initial_messages, _list_sessions,
+    _resolve_session, _new_session_id, _maybe_refresh_description,
 )
-from ._sources import restore_source, _set_provider_order
-from ._sessions_fs import _deserialize_image_parts
 
-from ._repl_state import _ReplState, _save_current, _fresh_metrics, _reload_metrics_totals
+from ._repl_state import _ReplState, _save_current, _fresh_metrics
+from ._resume import resume_session
 from ._sessions_cmd import (
-    _session_messages, _fmt_when, _print_transcript, _session_list_page_options,
+    _fmt_when, _print_transcript, _session_list_page_options,
     _print_session_list, _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
     _cmd_sessions, _cmd_resume, _cmd_delete,
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
@@ -50,8 +46,7 @@ from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
     _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
     _render_transcript_for_memory, memory_write, memory_search, memory_delete,
-    _load_memory_note, _add_memory_note_if_absent, _write_memory_file,
-    _refresh_memory_note,
+    _load_memory_note, _write_memory_file,
 )
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
 from ._repl_settings_cmds import (
@@ -160,80 +155,30 @@ def _repl() -> None:
     # got any user input is never written to disk.
     session_id = _session_id_from_args()
     _resume_requested = any(a in ("--resume", "-r") for a in sys.argv[1:])
-    if session_id is None:
+    # A resume/--session invocation that named nothing to load (bare
+    # `--resume` with an empty store): start fresh instead of hunting for the
+    # id we are about to mint. `--session <id>` always yields an id — it
+    # legitimately names a session that does not exist yet (it creates one).
+    _wanted_session = session_id
+    if _wanted_session is None:
         if _resume_requested:
-            # bare `nx --resume` but no saved sessions exist — start fresh.
             print(f"{DIM}  no saved sessions to resume — starting fresh{RESET}")
         session_id = _new_session_id()
-    session_dirty = False  # has the in-memory context diverged from disk?
-    if _resume_requested or any(a == "--session" for a in sys.argv[1:]):
-        # Only attempt to load when the user explicitly asked to resume a
-        # specific (or most-recent) session. A plain `nx` run mints a
-        # fresh id above and starts with an empty context.
-        data = _load_session(session_id)
-        if data and isinstance(data.get("messages"), list):
-            messages = data["messages"]
-            # Store → live form for image parts (0.39.0): image_ref sidecar
-            # references become inline image_url parts again, so the resumed
-            # transcript is request-ready. A payload missing from the image
-            # store degrades to a text note — never a 400 on the next turn.
-            _deserialize_image_parts(messages)
-            # Drop the old system prompt and inject the current one so a
-            # resumed session picks up any SYSTEM edits / tool changes.
-            messages = [m for m in messages if m.get("role") != "system"]
-            messages.insert(0, {"role": "system", "content": SYSTEM})
-            # Fresh sessions get the memory-awareness note (titles-only, see
-            # _load_memory_note); give a resumed session the same signal when
-            # its saved transcript predates the feature or the memories.
-            _add_memory_note_if_absent(messages)
-            # A transcript's note snapshots titles as of that session's last
-            # run; /memory optimize in another session may have archived or
-            # merged notes since. Rebuild from the live store (no-op when it
-            # still matches, so the prompt cache survives a normal resume).
-            _refresh_memory_note(messages)
-            st._SESSION_HAS_BACKGROUNDED = _messages_show_prior_backgrounding(messages)
-            st._MULTI_EDIT_NUDGED = _messages_show_prior_multi_edit_nudge(messages)
-            from ._subagent import _add_delegation_note_if_absent
-            _add_delegation_note_if_absent(messages)
-            st._DELEGATION_NUDGED = _messages_show_prior_delegation_nudge(messages)
-            n_msgs = len([m for m in messages if m.get("role") != "system"])
-            title = data.get("title") or "(untitled)"
-            print(f"{DIM}  ↻ resumed session {session_id} ({title!r}, "
-                  f"{n_msgs} messages){RESET}")
-            print()
-            # Show the conversation history so the user immediately remembers
-            # what the session was about before the first prompt.
-            if n_msgs:
-                print(f"{DIM}  ── transcript ──{RESET}")
-                _print_transcript(messages)
-                print(f"{DIM}  ──────────────{RESET}")
-                print()
-            # Restore the active source (and any model override) the session
-            # was started on, so a resume lands on the same endpoint + model.
-            src_name = data.get("source")
-            if src_name:
-                restore_source(src_name, model=data.get("model"))
-                # Re-apply provider routing that was in effect when the session
-                # was saved, so an OpenRouter /provider choice survives a
-                # resume. A saved "provider" list rebuilds the routing object.
-                saved_prov = data.get("provider")
-                if isinstance(saved_prov, list) and st.ACTIVE and src_name in st.SOURCES:
-                    _set_provider_order(st.SOURCES[src_name], saved_prov)
-            session_dirty = False  # just loaded — in sync with disk
-        elif _resume_requested:
-            print(f"{C.WARNING}  ✗ no saved session found for {session_id!r}; "
-                  f"starting fresh{RESET}")
-
-    # --- usage metrics -------------------------------------------------------
-    # Build the cumulative-token recorder for this session. When resuming, we
-    # reload its running totals from the saved session JSON so they keep
-    # climbing across restarts instead of resetting to zero. The optional
-    # HTTP push (NX_METRICS_URL) is off by default — see _Metrics.
-    st._METRICS = _fresh_metrics(session_id)
-    if _resume_requested or any(a == "--session" for a in sys.argv[1:]):
-        _reload_metrics_totals(session_id)
-
-    state = _ReplState(messages, session_id, session_dirty, history)
+    state = _ReplState(messages, session_id, False, history)
+    if _wanted_session is not None and (_resume_requested
+                                        or any(a == "--session" for a in sys.argv[1:])):
+        # Both entry points share resume_session() (nx/_resume.py) — see
+        # ROADMAP 1.4. Only --resume complains when the file isn't there: a
+        # `--session <id>` miss is how session creation is supposed to work.
+        resumed = resume_session(_wanted_session, state,
+                                 announce_missing=_resume_requested)
+    else:
+        resumed = False
+    if not resumed:
+        # Fresh session (or a failed resume): build the cumulative-token
+        # recorder for this id. The optional HTTP push (NX_METRICS_URL) is off
+        # by default — see _Metrics.
+        st._METRICS = _fresh_metrics(session_id)
 
     while True:
         try:

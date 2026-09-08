@@ -683,7 +683,7 @@ from ._chatbox import (
 
 # --- repl -------------------------------------------------------------------
 from ._repl import (
-    _banner, _repl, _session_id_from_args, _session_messages, _fmt_when,
+    _banner, _repl, _session_id_from_args, _fmt_when,
     _print_transcript, _session_list_page_options, _print_session_list,
     _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
     _cmd_sessions, _cmd_resume, _cmd_delete, _cmd_memory, _slugify,
@@ -691,6 +691,9 @@ from ._repl import (
     _render_transcript_for_memory, memory_write, memory_search, memory_delete,
     _load_memory_note, _write_memory_file,
 )
+
+# --- resume (one path for --resume and /resume — see nx/_resume.py) ---------
+from ._resume import resume_session, resumed_messages, restore_endpoint, restore_cwd
 
 
 # --- one-shot (non-interactive) / CLI entry ----------------------------------
