@@ -40,11 +40,16 @@ def _flatten_message_text(
     elif isinstance(content, list):
         # A parts tool result (read_image) flattens to its text parts; an
         # image-only result would render as blank, so name the attachment.
-        has_image = any(isinstance(p, dict) and p.get("type") == "image_url"
-                        for p in content)
+        # Refs (store form) name the original path when one was captured.
+        # (Scan the parts BEFORE `content` is reassigned to a string below.)
+        has_image = any(isinstance(p, dict) and p.get("type") in
+                        ("image_url", "image_ref") for p in content)
+        ref_paths = [p.get("path") for p in content
+                     if isinstance(p, dict) and p.get("type") == "image_ref"
+                     and p.get("path")]
         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         if not content and has_image:
-            content = "[image attached]"
+            content = "[image attached" + (": " + ", ".join(ref_paths) if ref_paths else "") + "]"
     content = (content or "").replace("\n", " ").strip()
     if per_msg is not None and len(content) > per_msg:
         content = content[:per_msg - 1] + "…"

@@ -28,6 +28,11 @@ from typing import Any
 from . import _state as st
 from ._logging import _log_event
 from ._metrics import _record_usage
+from ._images import (
+    IMAGE_REF_TYPE, _data_url_to_ref, _ref_to_data_url_part,
+    _collect_message_image_refs, _gc_image_sidecars,
+)
+from ._env import _env_int
 from ._openai_client import APIConnectionError
 from ._sessions_io import (
     _flatten_message_text, _safe_title, _prune_empty_assistant_messages,
@@ -306,10 +311,16 @@ def _write_session(
         existing_messages = existing.get("messages")
         if not isinstance(existing_messages, list):
             existing_messages = []
+        # Store form (0.39.0) is what hits the disk: image payloads move to
+        # the sidecar dir and messages carry image_ref parts. The COPY is
+        # compared and written — the caller's live history keeps its inline
+        # parts, so live (request) form and store (file) form never mix in
+        # one comparison and a prefix merge stays exact.
+        incoming_store = _store_form_messages(messages)
         # Re-read under the lock and compare with the caller's snapshot. On
         # a stale save, preserve the committed suffix instead of silently
         # letting the last writer replace it.
-        merged_messages = _merge_session_messages(existing_messages, messages)
+        merged_messages = _merge_session_messages(existing_messages, incoming_store)
         data = dict(existing)
         data["id"] = session_id
         data["messages"] = merged_messages
@@ -330,6 +341,99 @@ def _write_session(
             pass
         if update_index:
             _update_index(session_id, data)
+        # Sidecar GC (0.39.0), after the indexed save: live = every sha still
+        # referenced by ANY session file on disk, plus the one just written
+        # (identical anyway — data["messages"] is what went to disk). A 60s
+        # age grace keeps a concurrent save's about-to-be-referenced payload
+        # safe without cross-process coordination; the scan is cheap because
+        # ref-form session files are KB, not MB.
+        if _env_int("NX_SESSION_IMAGES", 1):
+            live = _collect_message_image_refs(merged_messages)
+            live |= _scan_session_image_refs()
+            _gc_image_sidecars(live, min_age_s=60.0)
+
+
+def _scan_session_image_refs() -> set[str]:
+    """Every image sha referenced by any session file currently on disk —
+    the union live-set for sidecar GC. Tolerant: unreadable/invalid files
+    contribute nothing (their payloads age out via the grace window)."""
+    live: set[str] = set()
+    try:
+        names = [n for n in os.listdir(_sessions_dir()) if n.endswith(".json")]
+    except OSError:
+        return live
+    for name in names:
+        try:
+            with open(os.path.join(_sessions_dir(), name), encoding="utf-8") as f:
+                data = json.load(f)
+            msgs = data.get("messages") if isinstance(data, dict) else None
+            if isinstance(msgs, list):
+                live |= _collect_message_image_refs(msgs)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+    return live
+
+
+def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A deep-copied store-form of `messages`: inline image_url parts become
+    image_ref sidecar references. Returns a NEW structure — the caller's live
+    history is never mutated (its parts are shared dicts also held by the
+    request path; writing refs into them would send image_ref parts to the
+    API, which 400s). NX_SESSION_IMAGES=0 returns a plain copy with 0.38.x
+    inline base64. Sidecar write failures keep that part inline (fallback,
+    never data loss). Multi-MB autosaves become KB: the payload is written
+    once per unique image, deduped across all sessions by sha256."""
+    import copy
+    out = copy.deepcopy(messages)
+    if not _env_int("NX_SESSION_IMAGES", 1):
+        return out
+    for m in out:
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, list):
+            continue
+        for i, p in enumerate(c):
+            if isinstance(p, dict) and p.get("type") == "image_url":
+                # provenance: the read_image result carries its own
+                # "[image: <path>, N bytes]" text part (immediately BEFORE
+                # the payload part) — reuse it so /sessions and resume
+                # diagnostics can name the original file
+                sib = None
+                for j in (i - 1, i + 1):
+                    q = c[j] if 0 <= j < len(c) else None
+                    if isinstance(q, dict) and q.get("type") == "text" \
+                            and isinstance(q.get("text"), str) \
+                            and q["text"].startswith("[image: "):
+                        sib = q["text"]
+                        break
+                ref = _data_url_to_ref(p, sibling_text=sib)
+                if ref is not None:
+                    p.clear()
+                    p.update(ref)
+    return out
+
+
+def _deserialize_image_parts(messages: list[dict[str, Any]]) -> int:
+    """Store → live form on resume: image_ref parts become inline image_url
+    parts again (the API never sees a ref). A missing/corrupt sidecar file
+    degrades that part to a text note instead of a 400 on the next request."""
+    n = 0
+    for m in messages:
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, list):
+            continue
+        for p in c:
+            if isinstance(p, dict) and p.get("type") == IMAGE_REF_TYPE:
+                live = _ref_to_data_url_part(p)
+                if live is not None:
+                    p.clear()
+                    p.update(live)
+                else:
+                    p.clear()
+                    p["type"] = "text"
+                    p["text"] = "[image missing from session image store]"
+                n += 1
+    return n
+
 
 def _load_session(session_id: str) -> dict[str, Any] | None:
     """Read a session file. Returns the dict (id, messages, meta…) or None."""

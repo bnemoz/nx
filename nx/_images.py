@@ -24,7 +24,10 @@ refused because most OpenAI-compatible decoders reject them anyway.
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 import os
+import time
 from typing import Any
 
 from ._env import _env_int
@@ -144,7 +147,8 @@ def _parts_preview(result: list) -> str:
     one giant token). The text parts (the '[image: path, N bytes]' marker the
     tool itself emits) are kept so the line stays identifiable."""
     texts = [p.get("text", "") for p in result if isinstance(p, dict)]
-    n_img = sum(1 for p in result if isinstance(p, dict) and p.get("type") == "image_url")
+    n_img = sum(1 for p in result if isinstance(p, dict)
+                and p.get("type") in ("image_url", IMAGE_REF_TYPE))
     head = " ".join(t for t in texts if t)
     if n_img:
         head += (" " if head else "") + f"[image attached — {n_img} part(s), base64 payload not shown]"
@@ -176,3 +180,129 @@ def _strip_image_parts(msgs: list[dict[str, Any]]) -> int:
         if hit:
             changed += 1
     return changed
+
+
+# ---- session storage: payloads in a content-addressed sidecar, not in JSON --
+
+# Store form of an image part, swapped in by _write_session (0.39.0): the
+# base64 lives at <sessions_dir>/_images/<sha256>.b64 — deduped across every
+# session, written once, garbage-collected to the live reference set — and the
+# message carries only this reference. OFF via NX_SESSION_IMAGES=0, which
+# restores 0.38.x inline-base64 storage.
+IMAGE_REF_TYPE = "image_ref"
+
+
+def _images_dir() -> str:
+    """Sidecar dir next to the session files (same 0700 posture)."""
+    from ._sessions_fs import _sessions_dir
+    d = os.path.join(_sessions_dir(), "_images")
+    os.makedirs(d, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    return d
+
+
+def _data_url_to_ref(part: dict[str, Any], sibling_text: str | None = None) -> dict[str, Any] | None:
+    """One image_url part → an image_ref part (payload into the sidecar).
+    Returns None if the payload can't be parsed/stored (caller keeps or
+    degrades the original part). Writes are idempotent per hash.
+    sibling_text: the tool's own "[image: <path>, N bytes]" text part, when
+    the caller has it — reused as best-effort provenance."""
+    url = ""
+    try:
+        url = part["image_url"]["url"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    head, _, b64 = url.partition(",")
+    mime = head[5:].split(";", 1)[0] or "image/png"
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    sha = hashlib.sha256(raw).hexdigest()
+    side = os.path.join(_images_dir(), f"{sha}.b64")
+    if not os.path.exists(side):
+        # private 0600 write regardless of umask (sessions may hold secrets;
+        # image payloads can too — a screenshot of someone's terminal)
+        tmp = f"{side}.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write(b64)
+            os.replace(tmp, side)
+        except OSError:
+            return None
+    ref = {"type": IMAGE_REF_TYPE, "sha256": sha, "mime": mime,
+           "bytes": len(raw)}
+    if isinstance(sibling_text, str) and sibling_text.startswith("[image: ") and "," in sibling_text:
+        ref["path"] = sibling_text[len("[image: "):].split(",", 1)[0].strip()
+    return ref
+
+
+def _ref_to_data_url_part(ref: dict[str, Any]) -> dict[str, Any] | None:
+    """One image_ref part → a live image_url part, or None when the sidecar
+    file is missing/corrupt (caller renders the degrade note)."""
+    sha = ref.get("sha256")
+    # reject anything that could traverse: separators (either kind) or dots
+    if not isinstance(sha, str) or not sha:
+        return None
+    if "/" in sha or chr(92) in sha or "." in sha:
+        return None
+    try:
+        with open(os.path.join(_images_dir(), f"{sha}.b64"), "rb") as f:
+            b64 = f.read().decode("ascii")
+        base64.b64decode(b64, validate=True)
+    except (OSError, ValueError, binascii.Error):
+        return None
+    mime = ref.get("mime") or "image/png"
+    return {"type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def _collect_message_image_refs(msgs: list[dict[str, Any]]) -> set[str]:
+    """Every sha256 currently referenced by image_ref parts in `msgs` — the
+    GC live-set for the sidecar dir."""
+    out: set[str] = set()
+    for m in msgs:
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, list):
+            continue
+        for p in c:
+            if isinstance(p, dict) and p.get("type") == IMAGE_REF_TYPE:
+                sha = p.get("sha256")
+                if isinstance(sha, str) and sha:
+                    out.add(sha)
+    return out
+
+
+def _gc_image_sidecars(live: set[str], min_age_s: float = 0.0) -> int:
+    """Delete sidecar payloads no message references anymore. Best-effort:
+    a crash mid-GC loses nothing that is referenced; returns files removed.
+
+    min_age_s: skip files younger than this many seconds — a GC running
+    concurrently with another session's in-progress save must not delete a
+    payload that save is about to reference (its ref is not on disk yet)."""
+    try:
+        names = os.listdir(_images_dir())
+    except OSError:
+        return 0
+    removed = 0
+    now = time.time()
+    for name in names:
+        if not name.endswith(".b64") or name[: -4] in live:
+            continue
+        side = os.path.join(_images_dir(), name)
+        if min_age_s > 0:
+            try:
+                if now - os.path.getmtime(side) < min_age_s:
+                    continue
+            except OSError:
+                continue
+        try:
+            os.remove(side)
+        except OSError:
+            pass
+        else:
+            removed += 1
+    return removed

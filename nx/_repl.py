@@ -36,6 +36,7 @@ from . import (
     _maybe_refresh_description,
 )
 from ._sources import restore_source, _set_provider_order
+from ._sessions_fs import _deserialize_image_parts
 
 from ._repl_state import _ReplState, _save_current, _fresh_metrics, _reload_metrics_totals
 from ._sessions_cmd import (
@@ -172,6 +173,11 @@ def _repl() -> None:
         data = _load_session(session_id)
         if data and isinstance(data.get("messages"), list):
             messages = data["messages"]
+            # Store → live form for image parts (0.39.0): image_ref sidecar
+            # references become inline image_url parts again, so the resumed
+            # transcript is request-ready. A payload missing from the image
+            # store degrades to a text note — never a 400 on the next turn.
+            _deserialize_image_parts(messages)
             # Drop the old system prompt and inject the current one so a
             # resumed session picks up any SYSTEM edits / tool changes.
             messages = [m for m in messages if m.get("role") != "system"]
