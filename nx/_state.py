@@ -50,6 +50,14 @@ MODEL: str | None = None
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
 _LAST_PROMPT_TOKENS: int = 0
 
+# The installed-loop stack for nx/_recovery.py's per-loop recovery contexts
+# (1.2). Held HERE so a module reload of _recovery — or conftest's post-test
+# eviction of it — can't strand an installed context or fork the resolution
+# the st.* descriptors captured at class-install time.
+import contextvars as _contextvars  # noqa: E402
+_RECOVERY_CURRENT: _contextvars.ContextVar = _contextvars.ContextVar(
+    "nx_recovery_frame", default=None)
+
 # Terminal API-failure marker for the turn path. open_stream() latches
 # "<ExceptionType>: <msg>" here when a request hard-fails (endpoint
 # unreachable, HTTP transport error, API error after all fallbacks) instead of

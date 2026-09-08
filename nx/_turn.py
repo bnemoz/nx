@@ -284,6 +284,8 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     # 0.30.0: one footer field for the self-healing work this turn — args
     # repairs applied + corrective retries — so the knobs are tunable in
     # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
+    # (st._TALLY_* route through nx/_recovery.py's descriptors: the running
+    # loop's private tally, or the module globals outside any loop.)
     tally = ""
     if st._TALLY_ARG_REPAIRS or st._TALLY_RETRIES:
         bits = []
@@ -792,7 +794,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
                 broken.add(tool_name)
         broken_now = _breaker_broken(tool_name)
-        st._TALLY_RETRIES += 1
+        st._TALLY_RETRIES += 1  # routes through _recovery's descriptors
         _repair_log("malformed_args", f"{tool_name}: {detail}")
         if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name and count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
             _repair_log("breaker_open", f"{tool_name}: {count} malformed attempts")
@@ -1647,9 +1649,33 @@ def _report_length_exhausted(quiet: bool, used: int) -> None:
               f"— saved partial answer with truncation marker{RESET}")
 
 
-def _run_model_turn_loop(messages: list[Message], force_final: bool = False, recovery_sampling: bool = False,
+def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
+                         recovery_sampling: bool = False,
                          on_step: Optional[Callable[[], None]] = None,
                          max_turns_override: Optional[int] = None) -> dict:
+    """Runs model_turn() to completion (or MAX_MODEL_TURNS).
+
+    Private recovery state: a per-loop context isolates the tallies, the
+    stall flag, the partial text and the malformed-args breaker from any
+    concurrently running sub-agent loop (1.2), then folds its final values
+    back into the module globals on exit so session-scoped evidence
+    survives. Outside the loop the module globals ARE the store (tests,
+    REPL, model_turn() called directly)."""
+    from . import _recovery
+    _recovery.install()
+    try:
+        return _run_model_turn_loop_inner(messages, force_final, recovery_sampling,
+                                          on_step, max_turns_override)
+    finally:
+        ctx = _recovery.current()
+        if ctx is not None:
+            _recovery.copy_back_and_reset(ctx)
+
+
+def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = False,
+                               recovery_sampling: bool = False,
+                               on_step: Optional[Callable[[], None]] = None,
+                               max_turns_override: Optional[int] = None) -> dict:
     """Runs model_turn() to completion (or MAX_MODEL_TURNS). Returns a summary
     dict {"status": "done"|"esc"|"cap"|"error", "turns": int} — interactive
     callers ignore it, but headless one-shot mode (nx/_cli.py) uses it to
