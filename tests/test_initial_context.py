@@ -11,28 +11,34 @@ WHAT WE MEASURE (the part we control and send to the API):
   - SYSTEM          the system prompt
   - TOOLS           the 7-function tool schema, JSON-encoded
   - "hey"           a minimal first user turn
-That's ~1339 tokens today (chars/3.5; tiktoken counts lower — the floor rose
-when search_files + multi_edit were added). The server's chat template then
-adds ~50 of framing (role tags, <|im_start|>/<|im_end|>, per-tool wrappers)
-that varies by backend and ISN'T part of our payload, so we don't measure
-it here. The README's figure = our content + that ~50.
+The per-turn floor is enforced as a recorded BUDGET, not a soft warn: a new
+tool or a fatter schema fails the suite until the number is consciously
+re-derived (that is the whole point — the 2500→2886 drift of 0.30–0.39 was
+visible for months as a warning nobody read).
 
-THRESHOLDS (on the content we control, ~1339 today):
-  - 1500 ->  WARNING   even fatter descriptions; check the README
-  - 1800 ->  FAIL      the floor has grown again; the README's claim no longer holds
+Measured 0.41, chars/3.5 (see _count_tokens), NX_SUBAGENTS/NX_VISION off —
+17 active schemas: **2879** (SYSTEM 375 + TOOLS 2503 + 'hey' 1). With
+NX_SUBAGENTS on the set gains spawn_agent (330 tok after the 0.41 trim,
+was 396) → 3210. The old soft warn at 2500 predates the schema rewrite and
+fired on every run, which is the same as having no line at all.
+
+BUDGET covers the 17-tool default set because that is what a fresh session
+pays; enabling sub-agents is a deliberate, user-visible choice. A PR that
+moves the floor past BUDGET_TOKENS must either trim elsewhere or raise the
+number here — with the justification in the ledger below.
 
 TOKENIZER: prefers tiktoken (cl100k_base) when installed for a real count;
 falls back to a conservative chars/3.5 estimate otherwise so the guard still
 runs with zero extra dependencies, and we don't add one for a test. The
-fallback over-counts ~7% vs cl100k on
-code/JSON, which is the safe direction for a guard — it trips slightly
-early, never late.
+fallback over-counts ~7% vs cl100k on code/JSON, which is the safe
+direction for a guard — it trips slightly early, never late.
 """
 import json
 import os
 import sys
 import tempfile
-import warnings
+
+from nx._env import _env_int
 
 # Keep nx from touching ~/.nx — same convention as the other tests,
 # even though this one never writes a session.
@@ -63,8 +69,14 @@ import nx as m  # noqa: E402
 # 0.26 schema rewrite moved characters from terse abbreviation blobs into
 # per-PROPERTY guidance (an undocumented `old_lines`/`timeout`/`scope` is a
 # guessed-at argument), landing ~2835 — still warning, still under the ceiling.
-WARN_TOKENS = 2500  # soft: warn (don't fail) — check the README still holds
-FAIL_TOKENS = 2900  # hard: the floor has roughly grown again; README is fiction
+# 0.41: the 2500 warn line — set when the active set was 7 tools — had been
+# firing on every run for months, which is a warning nobody reads. Replaced by
+# a recorded budget: BUDGET_TOKENS below, with this ledger as its justification.
+# The 0.41 trim pass took spawn_agent 396→330 (trigger-list and async mechanics
+# moved to the one-time Delegation note) and edit_file/plan_edit down a few
+# dozen; the 17-tool floor now measures 2879.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 2900)  # hard: recorded, justified
+SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 
 def _count_tokens(text):
@@ -122,23 +134,21 @@ def test_initial_context_floor():
         "wait_background tool schema"
     )
 
-    # Hard ceiling: a ~doubled payload means the README's '~625' is fiction.
-    assert total < FAIL_TOKENS, (
+    # Recorded budget (see the ledger above BUDGET_TOKENS): the floor may not
+    # grow silently. Raising this number is a deliberate act that must say why
+    # in the ledger comment; NX_FLOOR_BUDGET exists for CI experiments, not
+    # for shipping past the budget.
+    assert total <= BUDGET_TOKENS, (
         f"initial context content is {total} tokens "
-        f"(>= {FAIL_TOKENS}) — the README's ~625 claim no longer holds. "
-        f"{breakdown}"
+        f"> budget {BUDGET_TOKENS} — trim a schema or raise the recorded "
+        f"budget WITH a ledger justification. {breakdown}"
     )
 
-    # Soft ceiling: warn (don't fail) past WARN_TOKENS. pytest surfaces
-    # warnings in its end-of-run summary, so this is visible without
-    # failing the suite.
-    if total >= WARN_TOKENS:
-        warnings.warn(
-            f"initial context content is {total} tokens (>= {WARN_TOKENS}). "
-            f"Check the README still holds; a new tool or fatter descriptions "
-            f"may have pushed the floor up. {breakdown}",
-            stacklevel=2,
-        )
+    # Advisory: 50 tokens of headroom left. Still passes, but this is the
+    # point to trim the fattest description rather than land on the budget.
+    if total >= SOFT_TOKENS:
+        print(f"NOTE: initial context {total} tok is within 50 of the "
+              f"{BUDGET_TOKENS}-tok floor budget. {breakdown}")
 
 
 if __name__ == "__main__":

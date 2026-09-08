@@ -118,7 +118,10 @@ DELEGATION_GUIDANCE = (
     "- Map an unfamiliar repo, trace a behavior across modules, or enumerate a "
     "symbol's callers: delegate the sweep, keep the answer.\n"
     "- Do it yourself for a file you've already read, one targeted "
-    "search_files/read_file, and every edit you're making.]"
+    "search_files/read_file, and every edit you're making.\n"
+    "- spawn_agent is backgrounded by default: you get a job id now and the "
+    "answer arrives as a [Runtime note] plus report path on a later turn; "
+    "async=false runs it in the foreground instead.]"
 )
 
 
@@ -188,7 +191,7 @@ def _subagent_max_turns() -> int:
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Hand one investigation to a read-only sub-agent that searches and reads on its own and returns only its findings (it changes no files). Your default for multi-file work you haven't read: PROACTIVELY spawn one per independent area -- map an unfamiliar codebase, trace behavior across modules, list callers/uses of a symbol, or split unrelated questions (issue ONE CALL PER QUESTION in the same turn; they run concurrently). Keep to yourself: edits already under way, one known file, one targeted search. Backgrounded by default -- job id now, answer as a [Runtime note] plus report path on a later turn.",
+    "description": "Hand one investigation to a read-only sub-agent (changes no files) that returns only its findings. PROACTIVELY spawn one per independent area for multi-file work you haven't read -- callers/uses of a symbol, cross-module traces, unfamiliar code. ONE CALL PER QUESTION, all in one turn; they run concurrently. Not for: one known file, one targeted search, edits in progress.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
