@@ -586,6 +586,14 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     req_err = check_required(name, args)
     if req_err:
         return f"[arg repair: {', '.join(arg_notes)}] {req_err}" if arg_notes else req_err
+    # Hard write fence (2.1): a deterministic boundary, not a judgement —
+    # before hook, cache, undo snapshot, approval and body. The classifier and
+    # the Y/n prompt stay downstream for everything the fence allows through
+    # (see nx/_fence.py's docstring for why a fence is not a risk level).
+    from ._fence import check_write_fence
+    fence = check_write_fence(name, args)
+    if fence:
+        return fence
     # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
     # exit vetoes the call. Checked before any cache/approval machinery so a
     # policy can block even cached reads — and (since 0.29.5) AFTER arg repair,

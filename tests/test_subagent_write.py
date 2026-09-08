@@ -35,12 +35,20 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
+    # These tests dispatch REAL write_file/edit_file/delete_file calls to tmp_path,
+    # outside the freshly-reloaded nx's project root (this repo). The shipped
+    # fence (2.1) would refuse them before the body runs — and the behavior
+    # under test is the approval/tag/wrapper layer, not the fence (pinned in
+    # tests/test_write_fence.py). Re-enable the fence per-test where needed:
+    # tests/test_write_fence.py's dispatch tests monkeypatch st.PROJECT_ROOT
+    # already, and the default-on posture is asserted there.
+    os.environ["NX_WRITE_FENCE"] = "0"
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
     importlib.reload(nx)
     yield nx
     for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
-              "NX_SUBAGENTS", "NX_SUBAGENT_WRITE", "NX_SUBAGENT_ASYNC"):
+              "NX_SUBAGENTS", "NX_SUBAGENT_WRITE", "NX_SUBAGENT_ASYNC", "NX_WRITE_FENCE"):
         os.environ.pop(k, None)
 
 

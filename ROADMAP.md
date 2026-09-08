@@ -369,13 +369,21 @@ floor enforced as recorded BUDGET_TOKENS=2900, 17-tool floor measured 2879),
 1.2 (3144f5c — RecoveryContext per loop, contextvar-resolved), 1.5 (404d369 —
 parity tests + the drift fixed; the full four-table registry merge was
 deliberately NOT done: the parity tests buy the same correctness without
-moving 60+ rows across three modules).
+moving 60+ rows across three modules). **Phase 2 opens at 0.43.0 with 2.1
+shipped:** a hard write fence in `run_tool()` (`nx/_fence.py`, env
+`NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session
+home + extras), every structured write candidate judged at fence time
+(sed_edit glob matches, apply_patch `+++` targets), symlink-through targets
+judged where the write actually lands, a denylist for credential/shell-config
+destinations even from inside a root, and run_bash deliberately left to the
+classifier+approval story pending P3-1.
 
 | Minor | Contents |
 | --- | --- |
 | **0.40** | 1.1 cache-safe recovery · 1.3 breaker integrity · 1.4 one resume path · 1.6 private sinks + redaction |
 | **0.41** | 1.8 two-tier overflow · window-aware max_tokens |
-| **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests · 2.1 write fence *(next)* |
+| **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests |
+| **0.43** | 2.1 hard write fence *(shipped)* |
 | **0.43–0.44** | 2.3a/b store index + GC · 2.5 cost correctness · P3-5 `run_tests` |
 | **0.45–0.46** | 2.4 compression v2 · 2.6 memory v2 · P3-4 one dialect |
 | **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |

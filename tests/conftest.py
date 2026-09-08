@@ -51,6 +51,13 @@ _DEFAULTS = {
     # pre/post tool-hook subprocess timeout: default 10s; the hung-hook test uses
     # a `sleep 30` script and only needs the veto message
     "NX_HOOK_TIMEOUT": "1",
+    # The 2.1 hard write fence is OFF in the suite's baseline: most test files
+    # exercise tool BODIES directly (unfenced by design — the fence lives in
+    # run_tool), and the dispatch-level ones write to tmp dirs outside the
+    # imported nx's project root. tests/test_write_fence.py opts back in by
+    # setting NX_WRITE_FENCE=1 in its autouse fixture, so the shipped default
+    # (on) is what's actually tested.
+    "NX_WRITE_FENCE": "0",
 }
 # Baseline every test's env is rewound to (AGENTS.md: tests must be immune to
 # the developer's real NX_* credentials).
