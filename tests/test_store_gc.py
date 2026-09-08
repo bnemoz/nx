@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""2.3a store GC: index-driven image-ref scan, GC regardless of
+"""2.3a/2.3b store GC: index-driven image-ref scan, GC regardless of
 NX_SESSION_IMAGES, GC-on-delete, size quota, `nx sessions --prune`.
+
+Since 2.3b the live-set comes from the consolidated SQLite store's rows
+(nx/_storeindex.py) — one query instead of a JSON read per session — and
+the store is written by every indexed save, so a stale row (session gone
+crash/rm) is swept on the next indexed save as well as by --prune.
 
 The invariants that matter (per the 0.39.0 sidecar memory note):
 - a save must never collect an image another session still references
@@ -81,7 +86,7 @@ def _make_sidecar(sha):
     return p
 
 
-# --- shard summaries carry sha256s --------------------------------------------
+# --- row summaries carry sha256s --------------------------------------------
 
 def test_summary_includes_sha256s():
     _clear()
@@ -101,40 +106,31 @@ def test_summary_sha256s_empty_without_images():
 
 # --- index-driven scan ---------------------------------------------------------
 
-def test_scan_reads_shards_not_transcripts():
-    """The live-set must come from shards: a session whose TRANSCRIPT is
-    unreadable but whose shard is intact still protects its images."""
+def test_scan_reads_rows_not_transcripts():
+    """The live-set must come from store rows: a session whose TRANSCRIPT is
+    unreadable but whose row is intact still protects its images."""
     _clear()
     sid = "20250101-120000-gcaaa3"
     _write_session_with_refs(sid, ["c" * 64])
-    # corrupt the transcript, keep the shard
+    # corrupt the transcript, keep the store row
     with open(m._session_path(sid), "w") as f:
         f.write("{not json")
     live = fs._scan_session_image_refs()
     assert "c" * 64 in live
 
 
-def test_scan_falls_back_for_pre_23a_shard():
-    """A shard without a sha256s field (old store) must not blind the GC to
-    that session's refs — its transcript is parsed instead."""
-    _clear()
-    sid = "20250101-120000-gcaaa4"
-    _write_session_with_refs(sid, ["d" * 64])
-    # rewrite the shard in pre-2.3a shape (no sha256s)
-    entry_path = os.path.join(m._index_dir(), f"{sid}.json")
-    shard = json.load(open(entry_path))
-    shard.pop("sha256s")
-    with open(entry_path, "w") as f:
-        json.dump(shard, f)
-    live = fs._scan_session_image_refs()
-    assert "d" * 64 in live
-
-
-def test_scan_falls_back_for_missing_shard():
+def test_scan_falls_back_for_missing_row():
+    """A session with no store row (e.g. written by an older nx, or the row
+    was lost) must not blind the GC to its refs — its transcript is
+    parsed instead."""
     _clear()
     sid = "20250101-120000-gcaaa5"
     _write_session_with_refs(sid, ["e" * 64])
-    os.remove(os.path.join(m._index_dir(), f"{sid}.json"))
+    from nx import _storeindex
+    conn = _storeindex._connect()
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+    conn.commit()
+    conn.close()
     live = fs._scan_session_image_refs()
     assert "e" * 64 in live
 
@@ -167,15 +163,29 @@ def test_prune_removes_orphans_no_grace(monkeypatch):
     assert not os.path.exists(fresh)
 
 
-def test_prune_drops_shards_without_session_file():
+def test_prune_drops_rows_without_session_file():
     _clear()
     sid = "20250101-120000-gcaaa7"
     m._write_session(sid, [{"role": "user", "content": "bye"}], {})
-    # simulate a crash/manual rm of the transcript, shard left behind
+    # simulate a crash/manual rm of the transcript, store row left behind
     os.remove(m._session_path(sid))
     stats = fs._prune_sessions_store()
-    assert stats["shards_dropped"] == 1
+    assert stats["rows_pruned"] == 1
     assert sid not in m._load_index()
+
+
+def test_indexed_save_sweeps_stale_rows():
+    """The opportunistic half of the prune: the next indexed save after a
+    crash/manual rm drops the dead session's row without waiting for
+    --prune."""
+    _clear()
+    dead = "20250101-120000-gcaac"
+    live = "20250101-120000-gcaad"
+    m._write_session(dead, [{"role": "user", "content": "doomed"}], {})
+    os.remove(m._session_path(dead))
+    m._write_session(live, [{"role": "user", "content": "alive"}], {})
+    assert dead not in m._load_index()
+    assert live in m._load_index()
 
 
 # --- GC-on-delete ----------------------------------------------------------------

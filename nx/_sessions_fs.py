@@ -1,6 +1,6 @@
-"""Session persistence: the filesystem side (directory layout, the sidecar
-listing index, atomic read/write/delete, and the model-generated one-line
-description refresh).
+"""Session persistence: the filesystem side (directory layout, the
+consolidated SQLite store index, atomic read/write/delete, and the
+model-generated one-line description refresh).
 
 The pure-logic helpers (id generation, title sanitizing, message pruning,
 listing-summary shaping) live in _sessions_io.py instead, since they don't
@@ -75,15 +75,11 @@ def _session_path(session_id: str) -> str:
 
 
 def _index_dir() -> str:
-    """Sharded sidecar index: one small JSON file per session under here,
-    instead of one big .index.json every save has to read-modify-write.
-
-    A single shared index file means every session save contends for the
-    same lock and rewrites every other session's summary too — cost scales
-    with total session count, not just this session's size. Sharding makes
-    a save touch only this session's own shard file: no shared lock, and
-    the write cost is O(1) in the number of other sessions.
-    """
+    """Pre-2.3b sidecar index dir: one small JSON file per session. 2.3b
+    folded this index into the consolidated SQLite store
+    (<sessions_dir>/.store.sqlite, nx/_storeindex.py); the dir remains only
+    as a migration source — migrate_legacy() imports any shards it finds on
+    the first save/list after an upgrade, then removes the dir."""
     return os.path.join(_sessions_dir(), ".index")
 
 
@@ -124,70 +120,51 @@ def _exclusive_file_lock(path: str):
 
 
 def _load_index() -> dict[str, Any]:
-    """The sidecar listing index: {session_id: summary dict}, assembled by
-    reading every per-session shard under _index_dir(). A missing directory
-    or an individually corrupt shard just degrades that entry (or the whole
-    index, if the dir is gone) to a full per-file parse — same as before
-    this index existed."""
-    out: dict[str, Any] = {}
+    """The listing index: {session_id: summary dict}, now read from the
+    consolidated SQLite store (2.3b — was one JSON shard per session under
+    _index_dir()). An unavailable store degrades to an empty dict, which
+    makes every listing fall back to a full per-file parse — same as a
+    missing index always has."""
+    from . import _storeindex
     try:
-        with os.scandir(_index_dir()) as entries:
-            for entry in entries:
-                if not entry.name.endswith(".json"):
-                    continue
-                try:
-                    with open(entry.path, encoding="utf-8") as f:
-                        data = json.load(f)
-                except (OSError, IOError, json.JSONDecodeError):
-                    continue  # this session's shard is corrupt — fall back for it only
-                if isinstance(data, dict):
-                    out[entry.name[:-len(".json")]] = data
-    except OSError:
+        _storeindex.migrate_legacy()
+        return _storeindex.load_index()
+    except Exception:
         return {}
-    return out
-
-
-def _write_index_entry(session_id: str, summary: dict[str, Any]) -> None:
-    d = _index_dir()
-    try:
-        private_dir(d)
-    except OSError:
-        return
-    path = _index_entry_path(session_id)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with _open_private(tmp) as f:
-            json.dump(summary, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError:
-        pass  # best-effort — a stale/missing shard just falls back to a full parse
 
 
 def _write_index(idx: dict[str, Any]) -> None:
-    """Rewrite every per-session shard from a full {id: summary} dict.
+    """Rebuild the whole listing table from a full {id: summary} dict.
 
     Only used where callers still think in terms of one big index (tests,
     reconstruction after loss); normal per-save updates go through
-    _update_index, which touches just the one shard that changed.
-    """
-    for session_id, summary in idx.items():
-        _write_index_entry(session_id, summary)
+    _update_index, which touches just the one row that changed."""
+    from . import _storeindex
+    try:
+        _storeindex.write_full_index(idx)
+    except Exception:
+        pass  # best-effort — a stale/missing store just falls back to full parses
 
 
 def _update_index(session_id: str, data: dict[str, Any]) -> None:
-    """Refresh this session's entry in the sidecar listing index so
+    """Refresh this session's entry in the consolidated store index so
     `nx sessions [query]` can list/search without json.load-ing every
     full transcript on disk (some can be large — tool outputs, diffs, …).
     Called from _write_session on every save, so the index stays at least
-    as fresh as the file it mirrors.
+    as fresh as the file it mirrors. 2.3b: one upsert updates BOTH the
+    listing row and the FTS body row — the two indexes cannot drift.
 
-    Writes only this session's own shard file — no shared lock and no
-    read-modify-write of every other session's summary. Safe without an
-    extra lock because _write_session already holds this session_id's own
-    file lock for the duration of this call, and no other session_id can
-    write this shard file.
-    """
-    _write_index_entry(session_id, _summarize_session_data(session_id, data))
+    Safe without an extra lock because _write_session already holds this
+    session_id's own file lock for the duration of this call, and no other
+    session_id can write this row; SQLite's busy_timeout absorbs
+    cross-session contention on the one database file."""
+    from . import _storeindex
+    try:
+        _storeindex.migrate_legacy()
+        _storeindex.update_session(
+            session_id, data, float(data.get("updated_at") or time.time()))
+    except Exception:
+        pass  # best-effort — a stale/missing store just falls back to a full parse
 
 
 _SUMMARY_HEADER_RE = re.compile(
@@ -343,14 +320,24 @@ def _write_session(
             pass
         if update_index:
             _update_index(session_id, data)
-        # Sidecar GC (0.39.0), after the indexed save. Since 2.3a the
-        # live-set comes from the .index shards (each summary carries the
-        # session's sha256s) — no transcript re-parse per save. The just-merged
-        # messages are unioned in: an unindexed mid-turn autosave may have
-        # added refs whose shard is stale, and a concurrent writer's payload
-        # gets the same 60s age grace as before. Runs whenever image sidecars
-        # exist: gating it on NX_SESSION_IMAGES=0 used to orphan every
-        # already-stored payload the moment the rollback flag flipped.
+            # 2.3b: rows whose session JSON vanished (crash, manual rm) are
+            # swept on the next indexed save, so listings and the GC
+            # live-set stop counting dead sessions without waiting for
+            # `nx sessions --prune`.
+            try:
+                from . import _storeindex
+                _storeindex.prune_stale()
+            except Exception:
+                pass
+        # Sidecar GC (0.39.0), after the indexed save. Since 2.3b the
+        # live-set comes from the store's `sessions` rows (each carries the
+        # session's sha256s) — no transcript re-parse per save. The
+        # just-merged messages are unioned in: an unindexed mid-turn
+        # autosave may have added refs whose row is stale, and a concurrent
+        # writer's payload gets the same 60s age grace as before. Runs
+        # whenever image sidecars exist: gating it on NX_SESSION_IMAGES=0
+        # used to orphan every already-stored payload the moment the
+        # rollback flag flipped.
         live = _collect_message_image_refs(merged_messages)
         live |= _scan_session_image_refs()
         _gc_image_sidecars(live, min_age_s=60.0)
@@ -435,34 +422,21 @@ def _scan_session_image_refs() -> set[str]:
     """Every image sha referenced by any session file currently on disk —
     the union live-set for sidecar GC.
 
-    Since 2.3a this reads the .index shards (each carries the session's
-    `sha256s`), so the cost is O(#sessions) small JSON reads instead of a
-    full transcript parse per save. A session with no shard, a shard without
-    a sha256s field (pre-0.45 files), or a corrupt shard falls back to
+    Since 2.3b this reads the consolidated store's rows (each carries the
+    session's `sha256s`), so the cost is one SQLite query instead of a
+    small JSON read per session per save. A session with no row (legacy
+    file not yet migrated, mid-write) or a corrupt row falls back to
     parsing that one transcript — tolerant, never lossy: an unreadable
     file contributes nothing to the live-set, exactly as before."""
     live: set[str] = set()
-    covered: set[str] = set()  # ids whose shard gave us a trustworthy sha256s
+    covered: set[str] = set()  # ids whose row gave us a trustworthy sha256s
     try:
-        with os.scandir(_index_dir()) as entries:
-            for entry in entries:
-                if not entry.name.endswith(".json"):
-                    continue
-                try:
-                    with open(entry.path, encoding="utf-8") as f:
-                        shard = json.load(f)
-                except (OSError, json.JSONDecodeError, ValueError):
-                    continue
-                shas = shard.get("sha256s") if isinstance(shard, dict) else None
-                if isinstance(shas, list):
-                    live.update(s for s in shas if isinstance(s, str) and s)
-                    covered.add(entry.name[:-len(".json")])
-                # else: pre-2.3a shard (no ref list) — its transcript is
-                # parsed by the loop below, like a session with no shard.
-    except OSError:
-        pass
-    # Anything the shards could not answer (missing shard, corrupt shard,
-    # pre-2.3a shard) falls back to parsing that one transcript.
+        from . import _storeindex
+        live, covered = _storeindex.image_live_set()
+    except Exception:
+        covered = set()
+    # Anything the store could not answer (missing row, corrupt row, a
+    # session written by an older nx) falls back to parsing that transcript.
     try:
         names = [n for n in os.listdir(_sessions_dir()) if n.endswith(".json")]
     except OSError:
@@ -641,14 +615,22 @@ def _list_sessions(limit: int | None = 20, offset: int = 0, query: str | None = 
 
 
 def _prune_sessions_store() -> dict[str, int]:
-    """`nx sessions --prune` (2.3a): reconcile the store by hand.
+    """`nx sessions --prune` (2.3a/2.3b): reconcile the store by hand.
 
-    1. A shard whose session JSON is gone (crash, manual rm — /delete
-       already removes both) is dropped, so listings and the GC live-set
-       stop counting a dead session. 2. Unreferenced image payloads are
-       collected immediately, no age grace. 3. The size quota runs last.
-    Returns a small stats dict for the CLI to print."""
-    # 1. orphaned shards
+    1. Store rows (and any legacy shards) whose session JSON is gone
+       (crash, manual rm — /delete already removes both) are dropped, so
+       listings, search and the GC live-set stop counting a dead session.
+       2. Unreferenced image payloads are collected immediately, no age
+       grace. 3. The size quota runs last. Returns a small stats dict for
+       the CLI to print."""
+    from . import _storeindex
+    # 0. consolidated store: stale listing rows + their FTS bodies
+    try:
+        _storeindex.migrate_legacy()
+        rows_pruned = _storeindex.prune_stale()
+    except Exception:
+        rows_pruned = 0
+    # 1. orphaned legacy shards (pre-2.3b store)
     shards_dropped = 0
     try:
         shard_names = [n for n in os.listdir(_index_dir()) if n.endswith(".json")]
@@ -672,16 +654,19 @@ def _prune_sessions_store() -> dict[str, int]:
     # 3. quota
     quota_removed = _gc_image_quota()
     return {"shards_dropped": shards_dropped, "images_removed": images_removed,
-            "images_kept": kept, "quota_removed": quota_removed}
+            "images_kept": kept, "quota_removed": quota_removed,
+            "rows_pruned": rows_pruned}
 
 
 def _delete_session(session_id: str) -> bool:
     """Remove a session file. Returns True if something was deleted.
 
-    2.3a: removes the index shard as before, then runs the sidecar GC
-    immediately — a deleted session's images used to linger until some
-    *other* session happened to save. The shard removal MUST precede the
-    GC (it is the ref list being dropped); the scan covers every other
+    2.3a removed the index shard; 2.3b removes the session's consolidated-
+    store rows (listing + FTS) — a deleted id can no longer surface in
+    `/sessions <query>` via a stale FTS row — then runs the sidecar GC
+    immediately: a deleted session's images used to linger until some
+    *other* session happened to save. The row removal MUST precede the GC
+    (it is the ref list being dropped); the scan covers every other
     session, and the 60s grace protects concurrent writers."""
     path = _session_path(session_id)
     try:
@@ -689,10 +674,11 @@ def _delete_session(session_id: str) -> bool:
     except OSError:
         return False
     try:
-        os.remove(_index_entry_path(session_id))
-    except OSError:
+        from . import _storeindex
+        _storeindex.delete_session_row(session_id)
+    except Exception:
         pass
-    # GC-on-delete: with the shard gone, nothing (else) references the
+    # GC-on-delete: with the rows gone, nothing (else) references the
     # session's unique images. Best-effort, never raises.
     try:
         live = _scan_session_image_refs()

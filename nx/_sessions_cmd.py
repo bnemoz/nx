@@ -220,13 +220,14 @@ def _cli_sessions(args: list[str]) -> bool:
 def _cli_prune_sessions(args: list[str]) -> bool:
     """`nx sessions --prune` — run the store's own GC by hand and exit.
 
-    What it does, in order: (1) reconcile shards whose session JSON vanished
-    without a /delete (crash, manual rm) — their shard is removed so
-    listings and the GC live-set stay truthful; (2) drop sidecar image
-    payloads nothing references anymore (immediate, no age grace — this is
-    an explicit user request, not a mid-save sweep); (3) enforce the
-    NX_IMAGES_QUOTA_MB cap. Prints one line per action. Returns True if it
-    handled the invocation (caller exits)."""
+    What it does, in order: (1) reconcile store rows (and any pre-2.3b
+    legacy shards) whose session JSON vanished without a /delete (crash,
+    manual rm) — they are removed so listings, search and the GC live-set
+    stay truthful; (2) drop sidecar image payloads nothing references
+    anymore (immediate, no age grace — this is an explicit user request,
+    not a mid-save sweep); (3) enforce the NX_IMAGES_QUOTA_MB cap. Prints
+    one line per action. Returns True if it handled the invocation (caller
+    exits)."""
     if not args or args[0] not in ("--prune", "prune"):
         return False
     if args[0] == "prune" and args != ["prune"]:
@@ -236,8 +237,10 @@ def _cli_prune_sessions(args: list[str]) -> bool:
         return True
     from ._sessions_fs import _prune_sessions_store
     stats = _prune_sessions_store()
+    if stats["rows_pruned"]:
+        print(f"  pruned {stats['rows_pruned']} stale index row(s) with no session file")
     if stats["shards_dropped"]:
-        print(f"  dropped {stats['shards_dropped']} index shard(s) with no session file")
+        print(f"  dropped {stats['shards_dropped']} legacy index shard(s) with no session file")
     print(f"  collected {stats['images_removed']} unreferenced image payload(s)"
           f" from {_sessions_dir()}/_images")
     if stats["quota_removed"]:

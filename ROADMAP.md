@@ -179,10 +179,13 @@ postures assume. **Payoff:** `/undo` means what users think it means.
 ### 2.3 Session store: index consolidation and the per-save rewrite **[M→L]**
 Every autosave deep-copies the whole transcript, re-parses the existing file,
 rewrites it, and re-parses **every session file in the directory** for image refs
-(`_sessions_fs.py:350-374`, `:386`) — quadratic in session length. Two indexes
+(`_sessions_fs.py:350-374`, `:386`) — quadratic in session length. ~~Two indexes
 (`.index/` shards + FTS5) never reconcile; stale FTS rows are never pruned, so
-`/sessions <query>` can offer a deleted id. `NX_SESSION_IMAGES=0` (the
-documented rollback) disables image GC entirely, orphaning every payload.
+`/sessions <query>` can offer a deleted id~~ **[v] 2.3a/2.3b (0.45.0/0.46.0):
+index-driven GC, GC-on-delete, quota, and one SQLite store (`.store.sqlite`)
+written by every indexed save with stale-row pruning**. `NX_SESSION_IMAGES=0`
+~~(the documented rollback) disables image GC entirely, orphaning every
+payload~~ **[v] fixed in 2.3a**.
 `/export` is one-way markdown that always prints "(untitled session)" —
 `getattr(state, "title")` can never be non-None because `_ReplState.__slots__`
 has no `title`**[v]** — and writes live-form messages (inline base64) into it.

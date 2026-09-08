@@ -2,14 +2,15 @@
 
 `nx sessions <query>` and `/sessions <query>` have always filtered by title/
 description substring only — the answer to "which session touched _turn.py?"
-was scrolling. `search_sessions()` builds (and incrementally maintains) a
-SQLite FTS5 index over session bodies under `<sessions_dir>/.search.sqlite`,
-so a content query scans every saved chat in milliseconds. Pure stdlib
-(sqlite3 ships FTS5 in every CPython ≥3.7 build nx supports).
+was scrolling. `search_sessions()` queries the FTS5 table of the consolidated
+session store (`<sessions_dir>/.store.sqlite`, see _storeindex — 2.3b folded
+the old .search.sqlite into it), so a content query scans every saved chat in
+milliseconds. Pure stdlib (sqlite3 ships FTS5 in every CPython ≥3.7 build nx
+supports).
 
 The index is a cache, never the source of truth: any session file newer than
 its indexed row is re-indexed on the next search, a missing row is backfilled
-on demand, and deleting the .search.sqlite file is always safe.
+on demand, and deleting the .store.sqlite file is always safe.
 
 `export_markdown()` renders a session JSON as a readable markdown transcript
 for /export md.
@@ -24,7 +25,7 @@ from typing import Any, Optional
 
 from . import _state as st
 
-_INDEX_FILENAME = ".search.sqlite"
+_INDEX_FILENAME = ".store.sqlite"
 
 
 def _index_path() -> str:
@@ -33,9 +34,10 @@ def _index_path() -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_index_path())
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    # The FTS table lives in the consolidated store (2.3b) — nx._storeindex
+    # owns the connection/schema so both indexes cannot drift apart.
+    from . import _storeindex
+    return _storeindex._connect()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -61,12 +63,14 @@ def _session_body(data: dict[str, Any]) -> str:
 
 def index_session(session_id: str, data: dict[str, Any], mtime: float,
                   conn: Optional[sqlite3.Connection] = None) -> None:
-    """Insert/replace one session's row. Caller owns the connection unless
-    given none (then a short-lived one is used)."""
+    """Insert/replace one session's FTS row. Caller owns the connection
+    unless given none (then a short-lived one is used). The listing row is
+    updated separately by _storeindex.update_session from _write_session."""
     own = conn is None
     if own:
-        conn = _connect()
-        _ensure_schema(conn)
+        conn = _open_store()
+        if conn is None:
+            return
     try:
         title = str(data.get("title") or "")
         desc = str(data.get("description") or "")
@@ -79,6 +83,20 @@ def index_session(session_id: str, data: dict[str, Any], mtime: float,
     finally:
         if own:
             conn.close()
+
+
+def _open_store() -> Optional[sqlite3.Connection]:
+    """Connection with the FTS schema ensured, or None when the store
+    can't serve this call (callers degrade to substring search)."""
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        _ensure_schema(conn)
+    except sqlite3.DatabaseError:
+        conn.close()
+        return None
+    return conn
 
 
 def _iter_session_files() -> list[tuple[str, float]]:
@@ -107,14 +125,27 @@ def _indexed_mtime(conn: sqlite3.Connection, session_id: str) -> Optional[float]
 
 
 def _refresh_index(force: bool = False) -> int:
-    """Re-index session files that are newer than their indexed row. Returns
-    the number of sessions (re)indexed. Cheap: untouched sessions are skipped
-    after a single mtime comparison."""
-    from ._sessions_fs import _load_session
-    conn = _connect()
-    _ensure_schema(conn)
+    """Re-index session files that are newer than their indexed row, and
+    drop FTS rows whose session JSON is gone (the 2.3b stale-row prune the
+    old .search.sqlite never did — /sessions <query> could offer a deleted
+    id). Returns the number of sessions (re)indexed. Cheap: untouched
+    sessions are skipped after a single mtime comparison."""
+    from ._sessions_fs import _load_session, _sessions_dir
+    conn = _open_store()
+    if conn is None:
+        return 0
     n = 0
     try:
+        d = _sessions_dir()
+        # prune FTS rows for deleted sessions (keep listing rows authoritative
+        # to _storeindex.prune_stale — this only mirrors the deletion into FTS)
+        stale = [r[0] for r in conn.execute(
+            "SELECT session_id FROM sessions_fts").fetchall()
+            if not os.path.exists(os.path.join(d, f"{r[0]}.json"))]
+        for sid in stale:
+            conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (sid,))
+        if stale:
+            conn.commit()
         for sid, mtime in _iter_session_files():
             if not force:
                 seen = _indexed_mtime(conn, sid)
@@ -142,8 +173,9 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
         n = _refresh_index()
     except sqlite3.OperationalError:
         return []
-    conn = _connect()
-    _ensure_schema(conn)
+    conn = _open_store()
+    if conn is None:
+        return []
     try:
         try:
             rows = conn.execute(
@@ -170,10 +202,11 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
 def index_stats() -> dict[str, int]:
     """{sessions_indexed} for the /sessions status line."""
     try:
-        conn = _connect()
-        _ensure_schema(conn)
+        conn = _open_store()
+        if conn is None:
+            return {"sessions_indexed": 0}
         try:
-            row = conn.execute("SELECT COUNT(*) FROM sessions_fts").fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
             return {"sessions_indexed": row[0] if row else 0}
         finally:
             conn.close()

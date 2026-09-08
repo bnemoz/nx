@@ -155,9 +155,10 @@ def test_memory_and_history_sinks_stay_private():
 
 def test_session_file_and_index_are_private():
     from nx import _sessions_fs as sf
+    from nx import _storeindex
     sid = sf._new_session_id() if hasattr(sf, "_new_session_id") else "s-priv-4413"
     sf._write_session(sid, [{"role": "user", "content": "hi"}])
     assert _mode(sf._session_path(sid)) == 0o600
-    sf._write_index_entry(sid, {"title": "t", "mtime": 0})
-    assert _mode(sf._index_entry_path(sid)) == 0o600
-    assert _mode(sf._index_dir()) == 0o700
+    store = _storeindex._store_path()
+    assert _mode(store) == 0o600
+    assert _mode(os.path.dirname(store)) == 0o700

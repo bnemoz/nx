@@ -136,6 +136,12 @@ from ._sessions_fs import (
     _delete_session, _maybe_refresh_description, _resolve_session,
     _merge_session_messages, _is_compaction_rewrite,
 )
+from ._storeindex import (  # noqa: F401  (public store surface, 2.3b)
+    STORE_FILENAME, update_session as _store_update_session,
+    load_index as _store_load_index, delete_session_row as _store_delete_row,
+    prune_stale as _store_prune_stale, store_stats as _store_stats,
+    migrate_legacy as _store_migrate_legacy,
+)
 from ._input_history import (
     _load_input_history, _record_input, INPUT_HISTORY_LINES_DEFAULT,
     INPUT_HISTORY_ENTRY_CHARS,

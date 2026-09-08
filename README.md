@@ -149,9 +149,9 @@ disables the probe and the attach.
 
 `nx sessions [query]` is a shell subcommand (not a flag): it lists/filters saved
 sessions and exits without entering the REPL. `nx sessions --prune` reconciles
-the store by hand: drops listing-index shards whose session file vanished,
-collects unreferenced image payloads immediately (no age grace), and enforces
-the `NX_IMAGES_QUOTA_MB` cap — one line per action.
+the store by hand: drops index rows (and any pre-0.46 legacy index shards)
+whose session file vanished, collects unreferenced image payloads immediately
+(no age grace), and enforces the `NX_IMAGES_QUOTA_MB` cap — one line per action.
 
 ### Key environment variables
 
@@ -471,6 +471,13 @@ call.
 Every chat auto-saves to `~/.nx/sessions/` as one human-readable JSON file per
 session (message array + id/title/description/source/timestamps + cumulative
 token usage). Auto-save happens after every turn, so a crash never loses work.
+Listings, body search and image GC read a consolidated SQLite index next to
+the transcripts (`~/.nx/sessions/.store.sqlite` — 0600, rebuilt from the
+transcripts if deleted) that every indexed save updates; rows for sessions
+deleted out-of-band are pruned on the next save, so a deleted id can't
+resurface in a listing or a body search. Sessions dirs written by nx ≤ 0.45
+(per-session `.index/` shards + `.search.sqlite`) are migrated into the store
+on first use and the legacy files retired.
 
 `nx --resume <target>` (short id, prefix, title, or bare for most recent)
 restores it, reselects the original source, and replays a recap of the
