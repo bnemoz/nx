@@ -522,6 +522,10 @@ def open_stream(
             request_opts["max_tokens"] = token_limit
         if recovery_sampling:
             request_opts.update(_recovery_sampling_opts())
+        elif st.TEMPERATURE is not None and st.TEMPERATURE >= 0:
+            request_opts["temperature"] = st.TEMPERATURE
+        elif st.TOP_P is not None and st.TOP_P >= 0:
+            request_opts["top_p"] = st.TOP_P
         if tool_choice is not None:
             request_opts["tool_choice"] = tool_choice
         # Per-request body fields (e.g. OpenRouter provider routing) ride in

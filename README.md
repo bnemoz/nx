@@ -204,6 +204,7 @@ sessions and exits without entering the REPL.
 | `NX_TOKENS_MARGIN` / `NX_MIN_COMPLETION_TOKENS` | when the source's context window is known (probed at startup), every request's `max_tokens` is clamped to `window - prompt_estimate - margin` (default margin 2048) instead of sending the flat `NX_MAX_TOKENS` — on small-window local models this stops the request itself from causing the context 400 and the manufactured length cuts; clamped values are floored at `NX_MIN_COMPLETION_TOKENS` (default 256). An unknown window leaves requests untouched |
 | `NX_TOKENIZE_PREFLIGHT` | `1` (default) sizes the prompt for that clamp with the server's exact `/tokenize` endpoint on local sources (never a remote round-trip); `0` uses the chars/4 estimate only |
 | `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 2900, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
+| `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
@@ -342,7 +343,8 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/approval allow …` | manage the persistent allowlist: `list`, `forget <n>`, `forget-all`, or save `<tool> <pattern>` |
 | `/theme [name]` | list color themes, or switch to one |
 | `/reasoning on\|off\|last` | toggle or show the reasoning trace |
-| `/tooloutput on\|off\|last` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
+| `/help` | list all slash commands (this table; the dropdown offers them too) |
+| `/tooloutput on\|off\|last` / `/tools` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
 | `/toolcalls [text\|native\|auto] [reset [tool]]` | bare: show the session's tool-calling mode and the malformed-args breaker streaks per tool (marked `[broken]` when dropped from the tool list); `reset` clears every streak and re-offers every tool, `reset <tool>` re-arms just that one; `text` forces the grammar-constrained text protocol for this session (the rung past the breaker — an endpoint whose NATIVE args keep truncating gets the client-repairable protocol back without switching sources), `native` re-arms the native flag, `auto` returns to the reactive default |
 | `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search) |
 | `/export [md] [path]` | write the current session to a markdown transcript |
@@ -359,7 +361,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/undo` | revert the last write/edit (LIFO) |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
 | `/bg [kill <pid>]` | list background `run_bash` jobs, or kill one |
-| `/resources` | show this nx process's CPU% and RSS memory |
+| `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |
 | `/todo` | show the model's current `todo_write` list |
 | `/plan [goal\|done\|off\|discard]` | plan mode: `/plan <goal>` writes `.nx/<slug>.md` and gates every mutating tool call (`write_file`, `edit_file`, `multi_edit`, `sed_edit`, `apply_patch`, `delete_file`, `run_bash`, `memory_write/delete`) behind a gate message until you run `/plan done`; the model refines the plan with `plan_edit` while gated; `discard` also deletes the file |

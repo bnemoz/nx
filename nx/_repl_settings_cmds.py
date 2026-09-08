@@ -42,7 +42,8 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/source [name] [model]", "list or switch model source/backend"),
     ("/theme [name]", "list or switch color theme"),
     ("/reasoning [on|off|show|hide|last]", "toggle/show reasoning-content visibility"),
-    ("/tooloutput [on|off|show|hide|last]", "toggle/show tool-call result visibility"),
+    ("/tooloutput [on|off|show|hide|last], /tools", "toggle/show tool-call result visibility"),
+    ("/toolcalls [text|native|auto] [reset [tool]]", "show/set tool-calling mode, or clear the malformed-args breaker streaks"),
     ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>]", "list/kill background bash jobs"),
@@ -55,7 +56,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/recover [note]", "force a visible recovery checkpoint turn"),
     ("/undo [--list]", "undo last file change / list undo checkpoints"),
     ("/compress, /compact", "fold older turns into a summary"),
-    ("/ctx [pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
+    ("/ctx [all|pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
     ("/cost", "session usage + per-source cost scoreboard"),
     ("/budget [<tokens|off>]", "cap the model's reasoning phase (reasoning token budget)"),
     ("/autocompress [percent|on|off]", "configure automatic compression threshold"),
@@ -314,6 +315,22 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
                 print(f"{DIM}  unpinned {len(removed)} turn(s) ({len(remaining)} pinned remain){RESET}")
         except (ValueError, TypeError) as e:
             print(f"{C.WARNING}  {e} — want e.g. /ctx pin 12  or  /ctx pin 4,8,12-15{RESET}")
+        return
+    if sub == "all":
+        # Every message row, none rolled up (0.42): the compact default hides
+        # small turns behind a count; this is the full dump the hint names.
+        report = _messages_token_report(messages)
+        rows = report["rows"]
+        cache = report.get("cache") or []
+        print(f"{DIM}  context by message — ALL {len(rows)} messages, "
+              f"~{report['total_est']} total est{RESET}")
+        for i, role, t, preview, pinned in rows:
+            mark = "📌" if pinned else " "
+            hit = cache[i] if i < len(cache) else None
+            hit_s = "—" if hit is None else f"{hit * 100:.0f}%"
+            print(f"{DIM}  {mark}{i + 1:>4}  {role:<9} {t:>6}  {hit_s:>4}  {preview}{RESET}")
+        for line in _overhead_lines(report["total_est"], report.get("overhead_est", 0)):
+            print(f"{DIM}{line}{RESET}")
         return
     # default: the report
     report = _messages_token_report(messages)

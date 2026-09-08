@@ -455,12 +455,18 @@ from ._special_tokens import (
     _strip_leaked_tokens, _is_leak_chunk,
 )
 
-# Default sampling params for normal (non-recovery) completions.
-# Set these to get deterministic/greedy output: NX_TEMPERATURE=0
-# NX_TOP_P is only relevant when temperature > 0; set to 1 for full
-# probability mass, or lower for nucleus sampling.
-# Set either to a negative value to omit it from the request (let the
-# server use its own default, typically temperature=1.0 / top_p=1.0).
+# Default sampling params for normal (non-recovery) completions — wired for
+# real in 0.42 (the comment here documented them since 0.2x but nothing read
+# them). Applied in open_stream() next to the recovery-sampling branch:
+#   NX_TEMPERATURE=0           deterministic/greedy output (local evals)
+#   NX_TOP_P=1                 full probability mass; lower = nucleus sampling
+#                              (only relevant when temperature > 0)
+# Set either to a negative value to omit it from the request entirely (let
+# the server use its own default, typically temperature=1.0 / top_p=1.0).
+# A per-source NX_SOURCE_<NAME>_EXTRA_BODY temperature/top_p wins: the global
+# is applied first and extra_request_kwargs() overrides it.
+st.TEMPERATURE = _env_float("NX_TEMPERATURE", -1.0)
+st.TOP_P = _env_float("NX_TOP_P", -1.0)
 st.RISK_CONNECTION_RETRIES = _env_int("NX_RISK_RETRIES", 3)
 st.RISK_CONNECTION_RETRY_SECONDS = _env_int("NX_RISK_RETRY_SECONDS", 1)
 # Resolved here (not at the sessions-section top) because _env_int() is
