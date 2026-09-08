@@ -31,6 +31,7 @@ class UsageDelta(TypedDict):
     output_tokens: int
     cache_read_tokens: int
     reasoning_tokens: int
+    estimated: int  # 1 = chars//4 fallback (no server usage), 0 = measured
 
 
 def _normalize_usage(
@@ -52,8 +53,11 @@ def _normalize_usage(
       cache_read_tokens   cached prompt tokens (prompt_tokens_details.cached
                           on OpenAI; cache_n on llama.cpp)
       output_tokens       completion tokens, MINUS reasoning
-      reasoning_tokens    completion_tokens_details.reasoning_tokens, if any
-                          (reasoning models: MiniMax-M3, DeepSeek-R1, …)
+      reasoning_tokens    reasoning split, if the server reports one — read
+                          from output_tokens_details.reasoning_tokens (OpenAI
+                          compat / vLLM / Z.ai) or, failing that,
+                          completion_tokens_details.reasoning_tokens (OpenAI's
+                          own schema); 0 when neither is present
 
     When neither `usage` nor `timings` is available, a rough estimate is
     derived from `fallback_chars` (client-side character count of streamed
@@ -75,9 +79,12 @@ def _normalize_usage(
             "output_tokens": gen_n,
             "cache_read_tokens": cache_n,
             "reasoning_tokens": 0,
+            "estimated": 0,
         }
     if not usage:
-        # Fallback: estimate from client-side character count (~4 chars/token)
+        # Fallback: estimate from client-side character count (~4 chars/token).
+        # Flagged `estimated: 1` so accounting (and /cost) can show the
+        # provenance instead of billing an estimate as a measured number.
         if fallback_chars > 0 or fallback_prompt_chars > 0:
             estimated_out = max(1, fallback_chars // 4) if fallback_chars > 0 else 0
             estimated_in = max(1, fallback_prompt_chars // 4) if fallback_prompt_chars > 0 else 0
@@ -86,6 +93,7 @@ def _normalize_usage(
                 "output_tokens": estimated_out,
                 "cache_read_tokens": 0,
                 "reasoning_tokens": 0,
+                "estimated": 1,
             }
         return None
     prompt_total = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -99,14 +107,22 @@ def _normalize_usage(
     ptd = getattr(usage, "prompt_tokens_details", None)
     cached_raw = getattr(ptd, "cached_tokens", None) if ptd is not None else None
     cache_n = -1 if cached_raw is None else int(cached_raw)
-    # Reasoning models break completion into content + reasoning.
+    # Reasoning models break completion into content + reasoning. Two shapes
+    # exist in the wild: output_tokens_details (OpenAI-compat servers, vLLM,
+    # Z.ai) and completion_tokens_details (OpenAI's own field name — the
+    # docstring always claimed that one; pre-0.43.1 the code only read the
+    # former, so the reasoning column sat at 0 on OpenAI-shaped backends).
     otd = getattr(usage, "output_tokens_details", None)
     reasoning_n = int(getattr(otd, "reasoning_tokens", 0) or 0) if otd else 0
+    if not reasoning_n:
+        ctd = getattr(usage, "completion_tokens_details", None)
+        reasoning_n = int(getattr(ctd, "reasoning_tokens", 0) or 0) if ctd else 0
     return {
         "input_tokens": max(0, prompt_total - max(0, cache_n)),
         "output_tokens": max(0, completion_total - reasoning_n),
         "cache_read_tokens": cache_n,
         "reasoning_tokens": reasoning_n,
+        "estimated": 0,
     }
 
 
@@ -129,6 +145,24 @@ def _record_usage(
             fallback_chars=fallback_chars,
             fallback_prompt_chars=fallback_prompt_chars,
         ))
+
+
+def _record_api_call(
+    resp: Any,
+    fallback_chars: int = 0,
+    fallback_prompt_chars: int = 0,
+) -> None:
+    """_record_usage for a non-streaming response object: takes the usage off
+    `resp` (falling back to the chars//4 estimate, flagged `estimated`, when
+    the server sent none). Exists so auxiliary model calls — the risk
+    classifier, the capability/thinking probes, a ctx-window probe that a
+    clamping server actually executes — land in the same totals /cost prints
+    instead of vanishing from the bill."""
+    _record_usage(
+        getattr(resp, "usage", None),
+        fallback_chars=fallback_chars,
+        fallback_prompt_chars=fallback_prompt_chars,
+    )
 
 
 # Cap on the per-turn ring buffer _Metrics keeps for /ctx's cache column.
@@ -167,6 +201,12 @@ class _Metrics:
         self.cache_read_tokens = 0
         self.reasoning_tokens = 0
         self.api_calls = 0
+        # Provenance (2.5): how many of those api_calls were ESTIMATED by the
+        # chars//4 fallback instead of measured from a server usage object.
+        # /cost prints the split so an estimate never masquerades as a bill.
+        self.estimated_calls = 0
+        self.estimated_input_tokens = 0
+        self.estimated_output_tokens = 0
         # Per-call ring buffer (newest last, capped) for /ctx's per-turn
         # cache-read column: each entry is one settled model call with its
         # prompt total (input + cache_read, per the OpenAI convention where
@@ -191,6 +231,10 @@ class _Metrics:
         self.cache_read_tokens += max(0, delta.get("cache_read_tokens") or 0)
         self.reasoning_tokens += delta.get("reasoning_tokens") or 0
         self.api_calls += 1
+        if delta.get("estimated"):
+            self.estimated_calls += 1
+            self.estimated_input_tokens += delta.get("input_tokens") or 0
+            self.estimated_output_tokens += delta.get("output_tokens") or 0
         self.turns.append({
             "prompt_tokens": (delta.get("input_tokens") or 0)
                               + max(0, delta.get("cache_read_tokens") or 0),
@@ -200,15 +244,19 @@ class _Metrics:
         src = st.ACTIVE.name if st.ACTIVE is not None else (self.source or "unknown")
         bucket = self.by_source.setdefault(src, {
             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
-            "reasoning_tokens": 0, "api_calls": 0})
+            "reasoning_tokens": 0, "api_calls": 0, "estimated_calls": 0})
         bucket["input_tokens"] += delta.get("input_tokens") or 0
         bucket["output_tokens"] += delta.get("output_tokens") or 0
         bucket["cache_read_tokens"] += max(0, delta.get("cache_read_tokens") or 0)
         bucket["reasoning_tokens"] += delta.get("reasoning_tokens") or 0
         bucket["api_calls"] += 1
+        if delta.get("estimated"):
+            bucket["estimated_calls"] += 1
 
     def as_meta(self) -> dict[str, Any]:
-        """The fields merged into the session JSON on save."""
+        """The fields merged into the session JSON on save. by_source rides
+        along since 0.43.1 (2.5): a resume used to wipe the /cost scoreboard's
+        per-source attribution while keeping the header totals — half a bill."""
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -216,6 +264,7 @@ class _Metrics:
             "reasoning_tokens": self.reasoning_tokens,
             "api_calls": self.api_calls,
             "started_at": self.started_at,
+            "by_source": self.by_source,
         }
 
     def flush(self) -> None:

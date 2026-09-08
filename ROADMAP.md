@@ -376,15 +376,22 @@ home + extras), every structured write candidate judged at fence time
 (sed_edit glob matches, apply_patch `+++` targets), symlink-through targets
 judged where the write actually lands, a denylist for credential/shell-config
 destinations even from inside a root, and run_bash deliberately left to the
-classifier+approval story pending P3-1.
+classifier+approval story pending P3-1. Then 2.5 cost correctness (0.44.0):
+reasoning_tokens now reads BOTH field shapes (output_tokens_details and
+completion_tokens_details), every side-call (risk classifier, capability /
+thinking probes, the ctx-overrun POST a clamping server executes) is
+_record_usage'd via _record_api_call, chars//4 estimates carry a provenance
+flag surfaced by /cost (~N est), by_source survives resume (saved+reloaded
+in the session JSON), and pricing gained optional per-model keys
+NX_PRICE_<SOURCE>_<MODEL>_<KIND>.
 
 | Minor | Contents |
 | --- | --- |
 | **0.40** | 1.1 cache-safe recovery · 1.3 breaker integrity · 1.4 one resume path · 1.6 private sinks + redaction |
 | **0.41** | 1.8 two-tier overflow · window-aware max_tokens |
 | **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests |
-| **0.43** | 2.1 hard write fence *(shipped)* |
-| **0.43–0.44** | 2.3a/b store index + GC · 2.5 cost correctness · P3-5 `run_tests` |
+| **0.43** | 2.1 hard write fence *(shipped)* · 2.5 cost correctness *(0.44.0)* |
+| **0.43–0.44** | 2.3a/b store index + GC · P3-5 `run_tests` |
 | **0.45–0.46** | 2.4 compression v2 · 2.6 memory v2 · P3-4 one dialect |
 | **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
 

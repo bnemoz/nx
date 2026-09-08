@@ -377,6 +377,15 @@ def _assess_risk(action: str) -> tuple[str, str]:
             except Exception:
                 pass
             text = (resp.choices[0].message.content or "").strip()
+            # 2.5: side-calls are real usage. The risk classifier runs up to
+            # three parse retries per approval, every one on the user's bill —
+            # record it into the same totals /cost prints.
+            from ._metrics import _record_api_call
+            _record_api_call(
+                resp,
+                fallback_chars=len(text),
+                fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+            )
             level, reason = None, ""
             try:
                 obj = json.loads(text)

@@ -80,6 +80,8 @@ def _probe_native(src: "Source", mid: str) -> bool:
             stream=False, max_tokens=64, timeout=20)
     except Exception:
         return False
+    from ._metrics import _record_api_call
+    _record_api_call(resp, fallback_chars=64, fallback_prompt_chars=64)
     try:
         msg = resp.choices[0].message
     except (AttributeError, IndexError):
@@ -113,6 +115,8 @@ def _probe_grammar(src: "Source", mid: str) -> bool:
             timeout=20, extra_body=extra_body)
     except Exception:
         return False
+    from ._metrics import _record_api_call
+    _record_api_call(resp, fallback_chars=128, fallback_prompt_chars=64)
     try:
         text = resp.choices[0].message.content or ""
     except (AttributeError, IndexError):

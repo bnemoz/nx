@@ -75,9 +75,13 @@ def _probe_kwargs_for(src: "Source", mid: str) -> dict[str, Any] | None:
         return bool(msg.get("reasoning_content") or msg.get("reasoning"))
 
     def _create(extra_body: dict[str, Any] | None):
-        return src.client.chat.completions.create(
+        resp = src.client.chat.completions.create(
             model=mid, messages=_PROBE_MESSAGES, stream=False,
             max_tokens=_PROBE_MAX_TOKENS, timeout=20, extra_body=extra_body)
+        from ._metrics import _record_api_call
+        _record_api_call(resp, fallback_chars=_PROBE_MAX_TOKENS,
+                         fallback_prompt_chars=64)
+        return resp
 
     try:
         # Baseline: does this model already separate its reasoning?

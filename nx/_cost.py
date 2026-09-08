@@ -15,8 +15,23 @@ from ._ansi import DIM, RESET, C
 from ._metrics import _abbr
 
 
-def _price_for(source: str, kind: str) -> float | None:
-    """$/1M tokens for source+kind (input|output|cache), or None."""
+def _price_for(source: str, kind: str, model: str | None = None) -> float | None:
+    """$/1M tokens for source+kind (input|output|cache), or None.
+
+    Since 0.43.1 (2.5) a model-specific key wins over the source-wide one:
+    NX_PRICE_<SOURCE>_<MODEL>_<KIND> first (model name upper-cased with
+    non-alphanumerics folded to _), then the existing source-wide key. A
+    /source <name> <model> pin on a multi-model host bills a different price
+    per model, which the source-wide key cannot express."""
+    if model:
+        mslug = "".join(c if c.isalnum() else "_" for c in model.upper())
+        v = os.environ.get(f"NX_PRICE_{source.upper()}_{mslug}_{kind.upper()}", "")
+        try:
+            f = float(v)
+            if f > 0:
+                return f
+        except (TypeError, ValueError):
+            pass
     v = os.environ.get(f"NX_PRICE_{source.upper()}_{kind.upper()}", "")
     try:
         f = float(v)
@@ -25,13 +40,14 @@ def _price_for(source: str, kind: str) -> float | None:
         return None
 
 
-def _source_cost(bucket: dict[str, int], source: str) -> float | None:
-    """Total $ for one source's usage bucket, or None when unpriced."""
-    in_p = _price_for(source, "input")
-    out_p = _price_for(source, "output")
+def _source_cost(bucket: dict[str, int], source: str, model: str | None = None) -> float | None:
+    """Total $ for one source's usage bucket, or None when unpriced. `model`
+    selects the optional NX_PRICE_<SOURCE>_<MODEL>_* per-model key."""
+    in_p = _price_for(source, "input", model)
+    out_p = _price_for(source, "output", model)
     if in_p is None or out_p is None:
         return None
-    cache_p = _price_for(source, "cache")
+    cache_p = _price_for(source, "cache", model)
     if cache_p is None:
         cache_p = in_p
     cost = 0.0
@@ -58,9 +74,14 @@ def print_cost_report(metrics: Any) -> None:
         return
     total_in = metrics.input_tokens + metrics.cache_read_tokens
     total_out = metrics.output_tokens + metrics.reasoning_tokens
+    est_note = ""
+    if getattr(metrics, "estimated_calls", 0):
+        est_note = (f" · {metrics.estimated_calls} call(s) estimated "
+                    f"(server sent no usage — chars//4, marked ~ below)")
     print(f"{DIM}  session usage: {metrics.api_calls} model calls · "
           f"in {_abbr(total_in)} (cache {_abbr(metrics.cache_read_tokens)}) · "
-          f"out {_abbr(total_out)} (reasoning {_abbr(metrics.reasoning_tokens)}){RESET}")
+          f"out {_abbr(total_out)} (reasoning {_abbr(metrics.reasoning_tokens)})"
+          f"{est_note}{RESET}")
     buckets = getattr(metrics, "by_source", None) or {}
     if not buckets:
         print(f"{DIM}  (no per-source data — nothing has run yet){RESET}")
@@ -72,22 +93,27 @@ def print_cost_report(metrics: Any) -> None:
     any_price = False
     any_unpriced = False
     for name, b in rows:
-        cost = _source_cost(b, name)
+        model = st_active_model(name)
+        cost = _source_cost(b, name, model)
         if cost is not None:
             any_price = True
         else:
             any_unpriced = True
         tin = b.get("input_tokens", 0) + b.get("cache_read_tokens", 0)
         tout = b.get("output_tokens", 0) + b.get("reasoning_tokens", 0)
-        model_note = ""
-        if st_active_model(name):
-            model_note = f"  {DIM}({st_active_model(name)}){RESET}"
+        model_note = f"  {DIM}({model}){RESET}" if model else ""
+        est_calls = b.get("estimated_calls", 0)
+        if est_calls:
+            model_note += f"{DIM} ~{est_calls} est{RESET}"
         print(f"{DIM}    {name:<14} {b.get('api_calls', 0):>5} "
               f"{_abbr(tin):>8} {_abbr(tout):>8} {C.STATUS_BAR}{_fmt_cost(cost)}{RESET}{DIM}{model_note}{RESET}")
     if not any_price:
-        print(f"{DIM}    (no $ — set NX_PRICE_<SOURCE>_INPUT/_OUTPUT per 1M tokens){RESET}")
+        print(f"{DIM}    (no $ — set NX_PRICE_<SOURCE>_INPUT/_OUTPUT per 1M tokens;"
+              f" optionally NX_PRICE_<SOURCE>_<MODEL>_* when one source hosts"
+              f" several models){RESET}")
     elif any_unpriced:
-        print(f"{DIM}    (— = unpriced; set NX_PRICE_<SOURCE>_INPUT/_OUTPUT per 1M tokens){RESET}")
+        print(f"{DIM}    (— = unpriced; set NX_PRICE_<SOURCE>_INPUT/_OUTPUT per 1M tokens;"
+              f" optionally NX_PRICE_<SOURCE>_<MODEL>_* per model){RESET}")
 
 
 def st_active_model(name: str) -> str | None:
@@ -103,4 +129,7 @@ def st_active_model(name: str) -> str | None:
 def price_doc_line() -> str:
     """The README-facing summary of the price env vars."""
     return ("NX_PRICE_<SOURCE>_INPUT / _OUTPUT / _CACHE — $ per 1M tokens, "
-            "feeds /cost's $ column; unset sources show token totals only.")
+            "feeds /cost's $ column; unset sources show token totals only. "
+            "NX_PRICE_<SOURCE>_<MODEL>_<KIND> (model slug upper-cased, "
+            "non-alphanumerics folded to _) overrides per model on a "
+            "multi-model host.")

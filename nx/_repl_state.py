@@ -123,3 +123,13 @@ def _reload_metrics_totals(session_id: str) -> None:
         st._METRICS.api_calls = int(saved.get("api_calls") or 0)
         if saved.get("started_at"):
             st._METRICS.started_at = float(saved["started_at"])
+        # by_source rides along since 0.43.1 (2.5): the /cost scoreboard kept
+        # its per-source attribution across a resume instead of printing
+        # "(no per-source data)" forever after. Older session files have no
+        # by_source — leave the fresh (empty) buckets in that case.
+        saved_by_source = saved.get("by_source")
+        if isinstance(saved_by_source, dict) and saved_by_source:
+            st._METRICS.by_source = {
+                str(name): dict(bucket) if isinstance(bucket, dict) else {}
+                for name, bucket in saved_by_source.items()
+            }

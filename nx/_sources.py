@@ -507,6 +507,13 @@ class Source:
                 stream=False,
                 timeout=30,
             )
+            # A server that CLAMPS instead of rejecting (LM Studio does; see
+            # _ctx_from_lmstudio's note) just executed a real, billed
+            # completion. Record it — 2.5: side-calls are real usage.
+            from ._metrics import _record_api_call
+            class _R:  # minimal response shim for the recorder
+                usage = None
+            _record_api_call(_R(), fallback_chars=1, fallback_prompt_chars=8)
         except Exception as e:
             msg = str(e)
             body = getattr(e, "body", None)
