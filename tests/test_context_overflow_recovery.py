@@ -226,17 +226,24 @@ def test_loop_second_refusal_is_error_not_done(nx_fresh, monkeypatch):
     assert summary["status"] == "error", summary
     assert "context window overflow" in summary["error"]
     assert "maximum context length" in summary["error"]
-    assert summary["turns"] == 1  # terminal: no burn of the remaining cap
+    # terminal once the escalation ladder is exhausted (0.41): each tier
+    # attempts a fold and is refused again, so turns burned = TIERS + 1
+    # (the initial refused turn + one per fold tier)
+    assert summary["turns"] == nx.st.OVERFLOW_FOLD_TIERS + 1
 
 
-def test_loop_overrun_compresses_only_once(nx_fresh, monkeypatch):
+def test_loop_overrun_compresses_once_per_tier(nx_fresh, monkeypatch):
+    """The fold ladder escalates one tier per refusal and then stops (0.41):
+    tiers are driven by refusals, not by fold success, so a compress that
+    cannot help burns exactly OVERFLOW_FOLD_TIERS attempts before the error."""
     nx, _ = nx_fresh
     _install_source(nx)
     _quiet(monkeypatch)
-    calls = {"n": 0}
+    calls = {"n": 0, "keeps": []}
 
     def fake_compress(msgs, keep=None, auto=False):
         calls["n"] += 1
+        calls["keeps"].append((keep, auto))
         return None  # always refuses to fold
 
     monkeypatch.setattr(nx, "compress", fake_compress)
@@ -244,7 +251,11 @@ def test_loop_overrun_compresses_only_once(nx_fresh, monkeypatch):
     messages = nx._initial_messages() + [{"role": "user", "content": "x"}]
     summary = nx._run_model_turn_loop(messages, max_turns_override=99)
     assert summary["status"] == "error"
-    assert calls["n"] == 1, "exactly one fold attempt, then give up"
+    assert calls["n"] == nx.st.OVERFLOW_FOLD_TIERS, \
+        "one fold attempt per tier, then give up"
+    # tier 0 uses the conservative auto keep; tiers 1+ pass the halved keep
+    assert calls["keeps"][0][1] is True
+    assert calls["keeps"][1][0] is not None, "tier 1+ must pin an explicit keep"
 
 
 # --- cheap in-loop guard -----------------------------------------------------------

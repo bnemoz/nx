@@ -1718,14 +1718,20 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         if status == TURN_CONTEXT_OVERRUN:
             # The server refused the prompt outright with a context-length 400:
             # nothing was appended to `messages`, so the ONLY way forward is to
-            # shrink them. Fold the older turns into a summary (the same
-            # _drop_leading_dangling_tool_turns safety compress() already
-            # applies keeps the tail template-renderable) and re-run the turn.
-            # Once only: a second refusal means even the folded prompt doesn't
-            # fit (e.g. a task whose tail alone exceeds the window) — report
-            # the failure honestly instead of looping.
+            # shrink them. Escalate one tier per refusal: fold ~1/3, then
+            # halve the kept tail, then halve again + spill-evict the largest
+            # tool results. Exhausting the ladder means even an evicted,
+            # heavily folded prompt doesn't fit — report the failure honestly
+            # instead of looping.
             steps += 1
-            if context_retries < 1 and _m._compress_for_overrun(messages):
+            # Escalate one tier per REFUSAL — not per successful fold: tier 1's
+            # smaller keep can fold what tier 0's conservative keep couldn't
+            # (compress returns None only when there is truly nothing to fold
+            # at that keep, so a False tier-0 fold must still open tier 1).
+            # The ladder ends at OVERFLOW_FOLD_TIERS exhausted, or when a tier
+            # both folded and got refused again (handled by the continue).
+            if context_retries < st.OVERFLOW_FOLD_TIERS:
+                _m._compress_for_overrun(messages, tier=context_retries)
                 context_retries += 1
                 prev_prompt_tokens = -1  # the next settled reading is post-fold; re-evaluate
                 continue
@@ -1869,15 +1875,21 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False, rec
         if on_step is not None:
             on_step()
         if final_status == TURN_CONTEXT_OVERRUN:
-            # The rescue prompt itself can overflow after a long run. One fold
-            # + retry, then give up honestly rather than mislabel a refused
-            # answer as a completed one.
-            if _m._compress_for_overrun(messages):
+            # The rescue prompt itself can overflow after a long run: same
+            # escalation ladder as the main loop, one tier per refusal, then
+            # give up honestly rather than mislabel a refused answer as a
+            # completed one.
+            rescue_retries = 0
+            while (rescue_retries < st.OVERFLOW_FOLD_TIERS
+                   and _m._compress_for_overrun(messages, tier=rescue_retries)):
+                rescue_retries += 1
                 final_status = _m.model_turn(messages, reasoning_loop_cuts,
                            malformed_stream_cuts, empty_turn_count=empty_turn_cuts,
                            forced_final=True, recovery_sampling=recovery_sampling)
                 if on_step is not None:
                     on_step()
+                if final_status != TURN_CONTEXT_OVERRUN:
+                    break
             if final_status == TURN_CONTEXT_OVERRUN:
                 return {"status": "error",
                         "error": ("context window overflow: the prompt exceeded the "

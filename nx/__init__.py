@@ -509,6 +509,34 @@ st.EMPTY_TURN_RETRY_LIMIT = _env_int("NX_EMPTY_TURN_RETRIES", 3)
 # with a truncation marker (as before). 0 disables the auto-continue.
 st.MAX_CONTINUATIONS = _env_int("NX_MAX_CONTINUATIONS", 2)
 
+# --- context-window-aware request sizing (0.41) ------------------------------
+# A request's max_tokens used to be a flat NX_MAX_TOKENS (16000) regardless of
+# how much window was left — on an 8k-window local model that manufactures
+# finish_reason=length cuts on nearly every turn, and with a 25k prompt in a
+# 32k window the request itself triggers the very context-overflow 400 the
+# fold machinery exists to recover from. When the source's context window is
+# known (probed at startup), requests are clamped to
+#   window - prompt_estimate - TOKENS_MARGIN
+# floored at MIN_COMPLETION_TOKENS so room<=0 can't produce a degenerate
+# request (the fold machinery owns that case instead). Unknown window =
+# exactly the old behavior.
+st.TOKENS_MARGIN = _env_int("NX_TOKENS_MARGIN", 2048)
+st.MIN_COMPLETION_TOKENS = _env_int("NX_MIN_COMPLETION_TOKENS", 256)
+# 0 = estimate-only pre-flight (chars/4); 1 (default) also tries the exact
+# /tokenize endpoint for local sources (never remote — see Source._is_local).
+st.TOKENIZE_PREFLIGHT = _env_int("NX_TOKENIZE_PREFLIGHT", 1)
+
+# --- two-tier context-overflow recovery (0.41) -------------------------------
+# A context-length 400 folds the older turns once (tier 0: keep ~1/3). If the
+# prompt 400s AGAIN, the kept tail itself is too big: tier 1 halves the kept
+# tail (body//6), tier 2 halves it again (body//12) AND spill-evicts the
+# largest tool results to disk (head/tail + spill path, same contract as the
+# arrival-time cap). 0 restores the old single-fold-and-die.
+st.OVERFLOW_FOLD_TIERS = _env_int("NX_OVERFLOW_FOLD_TIERS", 3)
+st.OVERFLOW_FOLD_KEEP_FLOOR = _env_int("NX_OVERFLOW_FOLD_KEEP_FLOOR", 1)
+st.OVERFLOW_EVICT_MIN_CHARS = _env_int("NX_OVERFLOW_EVICT_MIN_CHARS", 4000)
+st.OVERFLOW_EVICT_MAX = _env_int("NX_OVERFLOW_EVICT_MAX", 8)
+
 # --- auto context-compression -----------------------------------------------
 # When the context window fills past this fraction (default 85%), the next
 # settled model turn silently compresses the older history so the chat can

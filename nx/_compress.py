@@ -139,6 +139,50 @@ def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:
 
 MAX_COMPLETION_TOKENS = _env_int("NX_MAX_TOKENS", 16000)
 
+
+def _prompt_estimate(messages: list[dict[str, Any]]) -> int:
+    """Best-effort prompt size in tokens for the max_tokens clamp: the exact
+    server /tokenize count when the source is local and has one (never a
+    remote round-trip), else the chars/4 estimate — the same estimator /ctx
+    reports with, plus the per-turn tools-schema overhead it adds."""
+    try:
+        from ._ctxreport import _message_tokens, _tokenize_total, _turn_overhead_est
+        if st.TOKENIZE_PREFLIGHT and st.ACTIVE is not None:
+            n = _tokenize_total(messages)
+            if isinstance(n, int) and n > 0:
+                return n
+        body = sum(_message_tokens(m) for m in messages)
+        return body + (_turn_overhead_est() if st.ACTIVE is not None else 0)
+    except Exception:  # noqa: BLE001 — an estimate must never break the request
+        return 0
+
+
+def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
+    """Clamp `requested` to what the source's context window can actually
+    answer: window - prompt_estimate - margin, never above `requested`.
+
+    The window comes from the source's startup probe (resolve_context_window);
+    when it is unknown — remote aggregator, probes skipped — the clamp is a
+    no-op and the request is exactly what it was before 0.41. The floor keeps
+    a degenerate (room <= 0) request well-formed: an 8k window with a 7.9k
+    prompt still asks for a minimum-sized answer and lets the overflow-retry
+    machinery handle the refusal, instead of sending max_tokens=0."""
+    if requested <= 0:
+        return requested  # 0 = "omit the field" contract in open_stream
+    src = st.ACTIVE
+    if src is None:
+        return requested
+    window = None
+    try:
+        window = src.resolve_context_window()
+    except Exception:  # noqa: BLE001 — probe failures must not break requests
+        window = None
+    if not isinstance(window, int) or window <= 0:
+        return requested
+    room = window - _prompt_estimate(messages) - st.TOKENS_MARGIN
+    floor = max(1, st.MIN_COMPLETION_TOKENS)
+    return max(floor, min(requested, room))
+
 # Backend hint. Set NX_BACKEND=vllm to disable llama.cpp-only recovery
 # knobs (min_p, repeat_penalty, DRY) that vLLM's speculative decoder rejects.
 RECOVERY_BACKEND = os.environ.get("NX_BACKEND", "").strip().lower()
@@ -356,13 +400,16 @@ def _is_context_overflow_error(e: BaseException) -> bool:
     return bool(_CTX_OVERFLOW_RE.search(text))
 
 
-def _compress_for_overrun(messages: list[dict[str, Any]]) -> bool:
+def _compress_for_overrun(messages: list[dict[str, Any]], tier: int = 0) -> bool:
     """Attempt to free context after a context-length rejection.
 
-    Fold the older turns into a summary (auto=True keeps ~1/3 verbatim) so the
-    SAME task can be retried on the same `messages` list. Returns True iff a
-    fold happened (messages mutated) — the caller retries the open once and
-    falls back to the terminal-error path when it was already tried.
+    Tier 0 (the first refusal): fold the older turns into a summary
+    (auto=True keeps ~1/3 verbatim). Tier 1+: the kept tail itself is too big
+    (a second refusal proves it) — halve the kept tail each rung (floored at
+    OVERFLOW_FOLD_KEEP_FLOOR) and, from OVERFLOW_FOLD_TIERS-2 on, also spill-
+    evict the largest tool results. Returns True iff anything changed
+    (messages mutated) — the caller retries the open once per tier and falls
+    back to the terminal-error path when the ladder is exhausted.
     """
     # Via the top-level package so a test stubbing nx.compress takes effect,
     # mirroring _maybe_autocompress below.
@@ -376,8 +423,47 @@ def _compress_for_overrun(messages: list[dict[str, Any]]) -> bool:
     # retry), then fold. The marker keeps the model's memory of what it saw.
     from ._images import _strip_image_parts
     stripped = _strip_image_parts(messages)
-    folded = _m.compress(messages, auto=True) is not None
-    return folded or stripped > 0
+    if tier <= 0:
+        folded = _m.compress(messages, auto=True) is not None
+    else:
+        # The refusal came back AFTER a fold, so the conservative auto keep
+        # (~1/3) is provably too much: halve it per tier. compress()'s auto
+        # raise (`max(keep, body_len // 3)`) would defeat a small explicit
+        # keep, which is why tiers pass keep= explicitly with auto=True.
+        sys_msg = messages[0] if messages and messages[0].get("role") == "system" else None
+        body_len = len(messages) - (1 if sys_msg else 0)
+        keep = max(st.OVERFLOW_FOLD_KEEP_FLOOR, body_len // (3 * (2 ** tier)))
+        folded = _m.compress(messages, keep=keep, auto=True) is not None
+    evicted = _evict_largest_tool_results(messages) if tier >= 2 else 0
+    return folded or stripped > 0 or evicted > 0
+
+
+def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
+    """Spill the biggest tool results to disk (tail 0.41): replace the body
+    with head + tail + spill path, exactly like the arrival-time cap does, but
+    driven by a context overflow instead of a single result's size.
+
+    Replace-in-place ONLY — a tool message must stay beside its assistant
+    tool_calls pair or the chat template can't render the history at all.
+    Skips pinned turns (user said keep) and anything already carrying a spill
+    note (evicting it again would only shrink the head/tail)."""
+    from ._overflow import build_overflow_result, spill_to_disk
+    pins = set(_pinned_indexes())
+    cands = sorted(
+        ((len(m["content"]), i) for i, m in enumerate(messages)
+         if m.get("role") == "tool" and isinstance(m.get("content"), str)
+         and i not in pins and "saved to:" not in m["content"]),
+        reverse=True)
+    n = 0
+    for size, i in cands:
+        if size < st.OVERFLOW_EVICT_MIN_CHARS or n >= st.OVERFLOW_EVICT_MAX:
+            break
+        full = messages[i]["content"]
+        path = spill_to_disk(full)  # never raises; None on I/O error
+        if path:
+            messages[i]["content"] = build_overflow_result(full, path)
+            n += 1
+    return n
 
 
 def open_stream(
@@ -430,6 +516,7 @@ def open_stream(
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens
+        token_limit = _clamp_max_tokens(messages, token_limit)
         request_opts: dict[str, Any] = {}
         if token_limit > 0:
             request_opts["max_tokens"] = token_limit
@@ -555,13 +642,17 @@ def compress(
     assert st.client is not None and st.MODEL is not None
     if keep is None:
         keep = st.COMPRESS_KEEP
-    # Layout: [system?, ..., user, assistant, tool, ..., user, assistant(tool_calls)?, ...]
-    # We assume messages[0] is the system prompt (matches how main() builds it).
-    # Anything before the "tail" we want to summarize; the tail stays verbatim.
+        # Auto-compress is conservative: keep roughly the last third of the
+        # conversation verbatim so in-progress work and recent tool results
+        # survive the fold. messages[0] is the system prompt and does not count.
+        if auto:
+            sys_msg0 = messages[0] if messages and messages[0].get("role") == "system" else None
+            body_len = len(messages) - (1 if sys_msg0 else 0)
+            keep = max(keep, body_len // 3)
+    # An explicit keep= with auto=True means "the conservative fold, but with
+    # THIS keep" — the overflow tiers rely on it (0.41); auto's raise-to-1/3
+    # would otherwise defeat a halved keep on a second refusal.
     sys_msg = messages[0] if messages and messages[0].get("role") == "system" else None
-    if auto:
-        body_len = len(messages) - (1 if sys_msg else 0)
-        keep = max(keep, body_len // 3)
     # keep counts MESSAGES; injected runtime notes are not turns (0.40)
     keep = _keep_past_notes(messages[1:] if sys_msg else messages, keep)
     if len(messages) <= 1 + keep:
