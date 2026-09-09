@@ -245,7 +245,10 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
 
     Flow:
       1. YOLO → True (no call, no prompt). `preview` is still printed so
-         diffs stay colored instead of falling back to plain tool-output text.
+         diffs stay colored instead of falling back to plain tool-output text
+         — unless TOOL_OUTPUT_VISIBLE is off, which collapses previews too
+         (0.53.1: a git_commit diff used to print in full even with
+         /tooloutput collapsed, defeating the toggle).
       2. A saved allow rule (from a previous `A` / /approval allow) matching
          this action → True, before any classifier round-trip.
       3. Ask the model for a risk level (skipped in step 1).
@@ -274,8 +277,12 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
         if st.YOLO:
             return True
         return False
+    # The approval preview is tool output on screen too (git_commit's staged
+    # diff, edit_file's before/after), so /tooloutput collapsed must collapse
+    # it like any other result body — the decision is unchanged either way.
+    show_preview = bool(preview) and st.TOOL_OUTPUT_VISIBLE
     if st.YOLO:
-        if preview:
+        if show_preview:
             print(preview)
         return True
     # Saved allow rules ("A" at a previous prompt, /approval allow) come
@@ -287,7 +294,7 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
         pattern, scope = hit
         short = action if len(action) <= 80 else action[:77] + "..."
         print(f"{DIM}  ↳ auto-allow [rule: {pattern!r} ({scope})] {short}{RESET}")
-        if preview:
+        if show_preview:
             print(preview)
         return True
     # If a tool spinner is running, keep it alive during the risk-classifier
@@ -315,13 +322,13 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             short = reason if len(reason) <= 80 else reason[:77] + "..."
             pause_spinner()
             print(f"{DIM}  ↳ auto-allow [{level}] {action}  ({short}){RESET}")
-            if preview:
+            if show_preview:
                 print(preview)
             return True
         short = reason if len(reason) <= 80 else reason[:77] + "..."
         lvl_color = {"low": DIM, "medium": C.WARNING, "high": C.ERROR}[level]
         pause_spinner()
-        if preview:
+        if show_preview:
             print(preview)
         choice = _m._ask_approval(
             f"{C.WARNING}  allow {action}? {lvl_color}[risk: {level.upper()} — {short}]{RESET} "
@@ -336,7 +343,7 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             rule = add_rule(*_rule_from_action(action))
             print(f"{DIM}  ↳ always allowing {rule['tool']} {rule['pattern']!r} "
                   f"({rule['scope']}) — /approval allow list to review{RESET}")
-            if preview:
+            if show_preview:
                 print(preview)
             return True
         return choice != "n"

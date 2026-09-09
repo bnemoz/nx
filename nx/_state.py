@@ -268,7 +268,10 @@ THINKING_MODE: str = "off" if _mode in ("off", "0", "false", "no") else "auto"
 # box header + args lines always show, so you still see *what* was called;
 # only the result body is hidden). Toggled by /tooloutput (the /tools command is
 # kept as a legacy alias) — persisted to ~/.env as NX_TOOL_OUTPUT_VISIBLE, same
-# renders its colored list regardless of this flag. The last tool's sanitized
+# renders its colored list regardless of this flag. Approval previews ride the
+# same flag (0.53.1): a git_commit staged diff or an edit_file before/after is
+# tool output on screen too, so collapsed hides them like any other result
+# body. The last tool's sanitized
 # result is captured into _LAST_TOOL_OUTPUT so /tooloutput last can replay it even
 # while collapsed.
 TOOL_OUTPUT_VISIBLE: bool = os.environ.get("NX_TOOL_OUTPUT_VISIBLE", "0") not in ("0", "false", "off")
