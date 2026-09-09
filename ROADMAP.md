@@ -255,7 +255,7 @@ Config surface is **143** `NX_*` vars, up from ~119 at audit time.
 | --- | --- | --- | --- |
 | 1 | **P3-2** honest timeout + step-level transient retry *(shipped 0.51.0)* | S/M | Live mis-score: a mid-task timeout returns `TURN_DONE` and batch scores `done`. Smallest pure-correctness win left; the existing HTTP retry layer is the substrate to extend to the step boundary. |
 | 2 | **P3-6** `git_commit` with staged-diff review *(shipped 0.51.0)* | S/M | Half-built already (read-only git tools in `TOOLS`); routes the most common write-without-review path through review, the 2.1 fence, and the 1.6 secret scan. |
-| 3 | **P3-9** `nx config` viewer + `/status` | S/M | 141 vars and growing; every later item adds more. Land the viewer/doctor *before* the additions so each new tunable ships visible. |
+| 3 | **P3-9** `nx config` viewer + `/status` *(shipped 0.52.0)* | S/M | 141 vars and growing; every later item adds more. Land the viewer/doctor *before* the additions so each new tunable ships visible. |
 | 4 | **P3-14** eval harness: seed corpus + scored batch runs | M, then continuous | The project's own velocity lever (would have caught the floor drift as a failure, not a warning). Seed it early, then score every later P3 item against it. |
 | 5 | **P3-1** sandbox tier for `run_bash` + writes | L | The containment substrate: env passlist, cwd pin, rlimits, optional bwrap/landlock. Makes YOLO-without-sandbox harder and — since batch/eval runs execute unapproved shell today — is what makes item 4's own batch posture safe. |
 | 6 | **P3-3** provider abstraction: Anthropic-native + Responses | L | Explicit `cache_control` is the project-thesis lever (theme 1) and cannot be proxied in. Excludes structured outputs per the 2026-09 decision. |
@@ -384,7 +384,7 @@ paste (drains ≤8 bytes then re-prompts per byte) while the chatbox handles
 bracketed paste properly. Prerequisite for most of this: split `_chatbox_raw`
 (400 lines, 10 `nonlocal`s) into editor model + renderer.
 
-### P3-9 Config surface: `nx config` over the env layer **[M]**
+### P3-9 Config surface: `nx config` over the env layer **[M]** *(shipped 0.52.0)*
 ~119 vars, four incompatible boolean idioms, no name sanitization (a source
 named `my-llm` yields an unsettable `NX_SOURCE_MY-LLM_*`), and README literally
 tells users to grep source. Policy stays "env vars, not config files" — add a

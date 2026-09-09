@@ -215,7 +215,8 @@ if not _start or _start not in st.SOURCES:
 # assert that wiring. Per-probe skipping — resolve_model's network fallback,
 # the capability/thinking background probes, the ctx overrun probe — is what
 # NX_SKIP_STARTUP_PROBES (nx/_sources.py) gates instead.
-if _start and not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])):
+if _start and not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])) \
+        and sys.argv[1:2] != ["config"]:
     switch_source(_start)
 
 # --- approval gating --------------------------------------------------------
@@ -766,6 +767,9 @@ from ._chatbox import (
     _raw_read_key, _raw_read_available, _chatbox_raw, read_multiline,
 )
 
+
+# --- config viewer (P3-9): the module behind `nx config` + /status ----------
+from ._config_cmd import _cli_config, render_status
 
 # --- repl -------------------------------------------------------------------
 from ._repl import (

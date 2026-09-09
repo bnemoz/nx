@@ -27,6 +27,7 @@ _HELP_TEXT = """\
 usage: nx [flags]
        nx run -f tasks.jsonl [flags]
        nx sessions [query]
+       nx config list [filter] / get NAME / set NAME VALUE / path / doctor
 
 flags:
   --yolo                          start in never-prompt mode (auto-approve everything)
@@ -52,8 +53,9 @@ Per-task exit codes: 0 done, 3 turn cap, 4 error. `nx run --help` for details.
   -h, --help                      show this help and exit
   --version / -v                  show the version and exit
 
-Run `nx sessions` to list saved sessions, or `/help` in the REPL for the
-full in-session command list. See README.md for the full NX_* env var table.
+Run `nx sessions` to list saved sessions, `nx config doctor` to check the env
+layer, or `/help` in the REPL for the full in-session command list. See
+README.md for the full NX_* env var table.
 """
 
 
@@ -229,6 +231,13 @@ def main() -> None:
     if sys.argv[1:2] == ["run"]:
         from ._batch import run_batch
         sys.exit(run_batch(sys.argv[2:]))
+    # `nx config list|get|set|path|doctor` — viewer/doctor over the env layer
+    # (P3-9). Read-only except `set`, which goes through _env._set_env_var.
+    # Never touches the network: nx/__init__.py skips switch_source()'s
+    # startup probes for this verb, so it works against a dead endpoint.
+    if sys.argv[1:2] == ["config"]:
+        from ._config_cmd import _cli_config
+        sys.exit(_cli_config(sys.argv[2:]))
     # --prompt-file: headless single-shot mode — run one turn and exit.
     import nx as _m
     # Recover any undo checkpoints a previous session left behind (0.47.0,

@@ -58,6 +58,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/compress, /compact", "fold older turns into a summary"),
     ("/ctx [all|pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
     ("/cost", "session usage + per-source cost scoreboard"),
+    ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
     ("/budget [<tokens|off>]", "cap the model's reasoning phase (reasoning token budget)"),
     ("/autocompress [percent|on|off]", "configure automatic compression threshold"),
     ("/sessions [...]", "list/manage sessions (non-title query → full-text body search)"),
@@ -373,6 +374,13 @@ def _cmd_cost(user: str, state: _ReplState) -> None:
     NX_PRICE_<SOURCE>_* is set)."""
     from ._cost import print_cost_report
     print_cost_report(st._METRICS)
+
+
+def _cmd_status(user: str, state: _ReplState) -> None:
+    """/status — P3-9 snapshot of the session posture a doctor would check:
+    source, model, caps, budgets, fence, approval. No args, no state change
+    (rendered by nx/_config_cmd.render_status)."""
+    print(render_status())
 
 
 def _cmd_bg(user: str, state: _ReplState) -> None:

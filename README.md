@@ -64,6 +64,17 @@ If `NX_MODEL` is unset, nx asks the server what it's serving.
 nx reads config from environment variables and auto-loads `~/.env` at
 startup (override the file with `NX_ENV_FILE`). No config file format.
 
+`nx config` is a viewer/doctor over that same layer (added 0.52.0, P3-9) —
+`nx config list [filter]` shows every var in effect (secrets masked),
+`nx config get NAME` prints one value, `nx config set NAME VALUE` persists to
+the env file and applies immediately (the only writer, same one as
+`/theme`), `nx config path` prints the file being read, and
+`nx config doctor` flags contradictions: unreadable env file, unparseable or
+double-quoted keys, hyphenated source names whose `NX_SOURCE_*` vars no
+shell can set, `NX_VISION` without native tool calls, legacy `NX_BASE_URL`/
+`NX_MODEL` silently shadowed by `NX_SOURCE_*` sources. It never touches the
+network. `/status` shows the session's view of the same state.
+
 **Single source:**
 
 ```
@@ -372,6 +383,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
+| `/status` | one-screen snapshot of the session posture: source, model, tool-calling capability, budgets, write fence, approval mode (same state `nx config doctor` checks) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold; every fold auto-pins the latest `todo_write` turn so the live task plan survives compression |
 | `/budget [<tokens\|off>]` | cap the model's reasoning phase in tokens (rides as `{"reasoning": {"max_tokens": N}}`; `off` clears; session-only unless `NX_REASONING_BUDGET` is set) |
 | `/verify [cmd\|off\|run]` | show/set/clear or force-run the post-edit verify command (`NX_VERIFY_CMD`) — when set, every edited `.py` also gets an in-process `ast.parse` whose verdict rides on the edit's own tool result |
