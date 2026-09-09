@@ -290,27 +290,30 @@ class StreamParser:
             if self.reasoning_only_start is None:
                 self.reasoning_only_start = time.time()
         if LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT:
-            print()
-            print(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
-                  f"special-token chunks; cutting stream now{RESET}")
+            if not self.quiet:
+                print()
+                print(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
+                      f"special-token chunks; cutting stream now{RESET}")
             self.loop_cut = True
             return True
         if (st.REASONING_ONLY_CHAR_LIMIT > 0 and not self.content and not self.tcs
                 and self.reasoning_only_chars >= st.REASONING_ONLY_CHAR_LIMIT):
-            print()
-            print(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
-                  f"{_abbr(self.reasoning_only_chars)} reasoning chars with no "
-                  f"answer/tool call — cutting stream now{RESET}")
+            if not self.quiet:
+                print()
+                print(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
+                      f"{_abbr(self.reasoning_only_chars)} reasoning chars with no "
+                      f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
             return True
         if (REASONING_ONLY_TIME_LIMIT > 0 and not self.content and not self.tcs
                 and self.reasoning_only_start is not None
                 and time.time() - self.reasoning_only_start >= REASONING_ONLY_TIME_LIMIT):
             elapsed_reason = time.time() - self.reasoning_only_start
-            print()
-            print(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
-                  f"{elapsed_reason:.0f}s of reasoning with no "
-                  f"answer/tool call — cutting stream now{RESET}")
+            if not self.quiet:
+                print()
+                print(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
+                      f"{elapsed_reason:.0f}s of reasoning with no "
+                      f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
             return True
         return False
@@ -403,8 +406,9 @@ class StreamParser:
             if self.say_live is not None:
                 self.say_live.stop()
                 self.say_live = None
-            print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
-                  f"discarding degenerated output{RESET}")
+            if not self.quiet:
+                print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
+                      f"discarding degenerated output{RESET}")
             self.loop_cut = True
             return True
         return False

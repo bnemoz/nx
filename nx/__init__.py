@@ -216,7 +216,7 @@ if not _start or _start not in st.SOURCES:
 # the capability/thinking background probes, the ctx overrun probe — is what
 # NX_SKIP_STARTUP_PROBES (nx/_sources.py) gates instead.
 if _start and not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])) \
-        and sys.argv[1:2] != ["config"]:
+        and sys.argv[1:2] not in (["config"], ["eval"]):
     switch_source(_start)
 
 # --- approval gating --------------------------------------------------------

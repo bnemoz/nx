@@ -28,6 +28,7 @@ usage: nx [flags]
        nx run -f tasks.jsonl [flags]
        nx sessions [query]
        nx config list [filter] / get NAME / set NAME VALUE / path / doctor
+       nx eval list / run
 
 flags:
   --yolo                          start in never-prompt mode (auto-approve everything)
@@ -48,6 +49,10 @@ Batch mode — run every task in a JSONL file and emit JSONL results:
   nx run -f tasks.jsonl [--parallel N] [--continue-on-error]
 
 Per-task exit codes: 0 done, 3 turn cap, 4 error. `nx run --help` for details.
+
+`nx eval run` replays the offline stub-server eval corpus through the same
+harness and scores each scenario (exit 0 when all pass); `nx eval list`
+shows the corpus.
 
   --tokens / --bench               print the exact prompt-token floor and exit
   -h, --help                      show this help and exit
@@ -238,6 +243,14 @@ def main() -> None:
     if sys.argv[1:2] == ["config"]:
         from ._config_cmd import _cli_config
         sys.exit(_cli_config(sys.argv[2:]))
+    # `nx eval list|run` — offline eval corpus (P3-14): recorded stub-server
+    # scenarios replayed through the real batch harness and scored. Builds its
+    # own loopback stub source; never touches the configured endpoints. Like
+    # `config`, import skips switch_source() for this verb so it works against
+    # a dead endpoint.
+    if sys.argv[1:2] == ["eval"]:
+        from ._eval_cmd import _eval_main
+        sys.exit(_eval_main(sys.argv[2:]))
     # --prompt-file: headless single-shot mode — run one turn and exit.
     import nx as _m
     # Recover any undo checkpoints a previous session left behind (0.47.0,

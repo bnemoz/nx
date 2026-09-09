@@ -256,7 +256,7 @@ Config surface is **143** `NX_*` vars, up from ~119 at audit time.
 | 1 | **P3-2** honest timeout + step-level transient retry *(shipped 0.51.0)* | S/M | Live mis-score: a mid-task timeout returns `TURN_DONE` and batch scores `done`. Smallest pure-correctness win left; the existing HTTP retry layer is the substrate to extend to the step boundary. |
 | 2 | **P3-6** `git_commit` with staged-diff review *(shipped 0.51.0)* | S/M | Half-built already (read-only git tools in `TOOLS`); routes the most common write-without-review path through review, the 2.1 fence, and the 1.6 secret scan. |
 | 3 | **P3-9** `nx config` viewer + `/status` *(shipped 0.52.0)* | S/M | 141 vars and growing; every later item adds more. Land the viewer/doctor *before* the additions so each new tunable ships visible. |
-| 4 | **P3-14** eval harness: seed corpus + scored batch runs | M, then continuous | The project's own velocity lever (would have caught the floor drift as a failure, not a warning). Seed it early, then score every later P3 item against it. |
+| 4 | **P3-14** eval harness: seed corpus + scored batch runs *(seed shipped 0.53.0)* | M, then continuous | The project's own velocity lever (would have caught the floor drift as a failure, not a warning). Seed it early, then score every later P3 item against it. |
 | 5 | **P3-1** sandbox tier for `run_bash` + writes | L | The containment substrate: env passlist, cwd pin, rlimits, optional bwrap/landlock. Makes YOLO-without-sandbox harder and — since batch/eval runs execute unapproved shell today — is what makes item 4's own batch posture safe. |
 | 6 | **P3-3** provider abstraction: Anthropic-native + Responses | L | Explicit `cache_control` is the project-thesis lever (theme 1) and cannot be proxied in. Excludes structured outputs per the 2026-09 decision. |
 | 7 | **P3-10** capability manifest per (source, model) | M | Natural consumer of P3-3: one cached, model-keyed manifest (probe TTL, `/source` display) deleting the opt-in archaeology. |
@@ -415,7 +415,7 @@ No fetch/search tool exists; the only egress "policy" is classifier prose, and
 the classifier forces `curl` to high, so web access is simultaneously loud and
 unconfined. Land after P3-1 so egress has somewhere to be enforced.
 
-### P3-14 Eval harness: golden transcripts + scored batch runs **[M]**
+### P3-14 Eval harness: golden transcripts + scored batch runs **[M]** *(seed shipped 0.53.0)*
 The `nx run` harness is benchmark-shaped (JSONL results, exit codes, per-task
 token accounting) but there is no corpus: zero golden tasks, no recorded
 transcripts, no regression scoring. A small corpus (10–20 tasks: refactor,
@@ -424,6 +424,17 @@ recorded stub servers is what turns the recovery stack's heuristics from
 anecdote-driven into measured. Arguably the highest-leverage item in this phase
 for the *project's own* velocity — it is also where the 2500→2886 floor drift
 would have been caught by a test rather than a warning.
+
+Shipped at 0.53.0: the seed corpus (`nx/_eval_cmd.py`, 7 scenarios) + `nx eval
+list|run`. Recordings are per-scenario scripted turns (one final-answer turn,
+sequences of tool calls with real schemas, empty turns, a leaked-token
+collapse, a stream that stops delivering mid-answer) served as OpenAI-style
+SSE by a loopback stub server keyed on the task instruction, so one server
+serves a whole batch. `nx eval run` seeds a throwaway workspace, runs the real
+harness inside it (--yolo, confined), and scores each scenario against its
+expectation (status, final answer, error shape, workspace file state) into
+`summary.json`; exit 0 only when all pass. Continuous scoring (every P3 item
+lands with a corpus run) is the next band.
 
 ---
 
@@ -445,6 +456,18 @@ would have been caught by a test rather than a warning.
   model to follow.
 
 ## Suggested ordering (semver per AGENTS.md)
+
+**STATUS (0.53.0): P3-14 seed corpus shipped** — `nx eval list|run`: a 7-scenario
+stub-server corpus (happy path, one real write, a real multi-file read+edit,
+exploration, two silent empty turns, a special-token collapse, a mid-stream
+read timeout) replayed through the real `nx run` batch harness against a
+loopback stub endpoint and scored per scenario (status / final answer / error
+shape / workspace file effects). The seed's first catch: the vendored client
+passed `timeout=None` into `build_request`, which httpx reads as *disable
+timeouts* — every request ran with no read/connect timeout, `NX_HTTP_TIMEOUT_READ`
+was dead for the request path, and P3-2's mid-stream ladder was unreachable.
+Fixed (`timeout` kwarg attached only when set); four unquiet-gated
+`_stream_parse` collapse banners that leaked into batch JSONL stdout gated.
 
 **STATUS (0.51.0): Phase 3, priority band 1–2 shipped.** **P3-2** (honest
 timeout + step-level retry: `TURN_TIMED_OUT_RETRY`/`TURN_TIMED_OUT`,

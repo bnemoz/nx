@@ -258,8 +258,20 @@ class _Completions:
         payload.update(kwargs)  # max_tokens, temperature, sampler overrides, ...
         if extra_body:
             payload.update(extra_body)
-        req = self._client._client.build_request(
-            "POST", "/chat/completions", json=payload, timeout=timeout)
+        # httpx semantics gotcha (found by the eval corpus, P3-14): an explicit
+        # timeout=None passed to build_request DISABLES the timeout entirely —
+        # the client's configured Timeout only applies when the per-request
+        # kwarg is ABSENT. Passing None unconditionally turned every request
+        # (models.list's 3s/10s caps included) into a no-timeout request: the
+        # connect-fail-fast and NX_HTTP_TIMEOUT_READ deadlocks never fired and
+        # the mid-stream timeout recovery ladder (P3-2) was unreachable. Only
+        # attach the per-request timeout when the caller actually set one.
+        if timeout is not None:
+            req = self._client._client.build_request(
+                "POST", "/chat/completions", json=payload, timeout=timeout)
+        else:
+            req = self._client._client.build_request(
+                "POST", "/chat/completions", json=payload)
         resp = self._client._send(req, stream=stream)
         if stream:
             return _ChatStream(resp)
@@ -276,7 +288,9 @@ class _Models:
         self._client = client
 
     def list(self, timeout: float | httpx.Timeout | None = None) -> _Obj:
-        req = self._client._client.build_request("GET", "/models", timeout=timeout)
+        req = self._client._client.build_request(
+            "GET", "/models",
+            **({} if timeout is None else {"timeout": timeout}))
         resp = self._client._send(req, stream=False)
         return _Obj(resp.json())
 

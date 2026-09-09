@@ -154,6 +154,7 @@ disables the probe and the attach.
 | `--prompt-file <path>` / `-f <path>` | headless one-shot mode: run one turn and exit (`-` reads stdin) |
 | `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat; exits `4` when the run errors (endpoint unreachable, API rejects the request) and `0` otherwise |
 | `nx run -f tasks.jsonl` | headless batch mode: every JSONL line is one task — emits one JSON result line per task on stdout, one process exit code for the run (see "Batch mode" below) |
+| `nx eval list` / `nx eval run` | offline eval corpus: replays recorded stub-server scenarios through the real batch harness and scores each against its expectation (see "Eval corpus" below) |
 | `--tokens` / `--bench` | print the exact prompt-token floor and exit |
 | `-h` / `--help` | print flag usage and exit |
 | `--version` / `-v` | print the installed version and exit |
@@ -586,6 +587,39 @@ async-note channel is process-global, so prefer `--parallel 1` when a task
 relies on background agents.
 `NX_VERIFY_CMD` and the interactive background-completion scan stay off for
 batch workers (they're parent-loop machinery).
+
+## Eval corpus
+
+`nx eval run` is the offline regression harness (added 0.53.0, P3-14): a seed
+corpus of scripted stub-server scenarios replayed through the *real* `nx run`
+batch machinery, each scored against its expectation. The stub serves
+OpenAI-style SSE turns from a per-scenario script — tool calls with real
+schemas, silent empty turns, a leaked-token collapse, a stream that stops
+delivering mid-answer — keyed on the task instruction, so one loopback server
+serves the whole batch and no configured endpoint is ever touched.
+
+```
+$ nx eval list                 # show the corpus: ids, scripts, expectations
+$ nx eval run                  # run + score; exit 0 only when all pass
+$ nx eval run --filter e-timeout --json
+```
+
+Flags: `--source NAME` (model-source name to shadow while the stub source is
+registered; default shadows the active source), `--out DIR` (artifact
+directory, default `<cwd>/.nx/eval`), `--parallel N`, `--filter ID`, `--json`.
+Artifacts land in `<out>/`: `tasks.jsonl`, `results.jsonl` (verbatim harness
+lines), `summary.json` (scored), and `workspace/` — a seeded directory the
+tasks run inside with `--yolo` (headless), so their real tool effects (the
+corpus includes real `write_file`/`edit_file` calls) stay confined there.
+
+Scoring pins the harness and recovery contracts, not model quality: a task
+that recovers from two silent empty turns must still finish `done` with its
+recovery answer, a collapsed stream must cut and recover, and a mid-stream
+read timeout must score `status: "error"` naming the timeout — never `done`
+(the 0.51.0 honest-timeout contract, enforced here end to end). The seed's
+first catch was nx's own: the vendored client disabled every httpx timeout by
+passing `timeout=None` into `build_request` (httpx reads an explicit `None`
+as "no timeout"), so `NX_HTTP_TIMEOUT_READ` never applied to real requests.
 
 ## Tools
 
