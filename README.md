@@ -215,8 +215,9 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 2900, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
 | `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
+| `NX_MEMORY_FTS` | `1` (default) keeps a trigram FTS5 index per memories dir (`.memindex.sqlite`, a self-healing cache reconciled by mtime on every search) so `memory_search` answers from the index instead of reading every note; `0` always runs the plain substring scan. The index only widens recall a little (whitespace folding between query characters) and never changes ranking or the result cap; a sqlite build without FTS5 falls back silently |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
-| `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews, newest first (default 120; `0` = all) — the unreviewed remainder is reported, never silently skipped |
+| `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews — the **oldest** first, so the best retirement candidates are always in view while the newest notes (the ones the session-start note shows) stay visible (default 120; `0` = all); the unreviewed remainder is reported, never silently skipped |
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer; an answer that *was* cut off (`finish_reason=length`) is retried once at 3× this budget |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
@@ -360,7 +361,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|delete\|list` | manage persistent memory |
-| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (newest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
+| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -659,7 +660,12 @@ notes that `/memory optimize` has since archived or merged don't linger as
 phantom titles for the model to chase. Searches require every query term to
 match, rank title hits above body
 hits, and cap results at `NX_MEMORY_SEARCH_LIMIT` (default 8) so a large
-store can't flood a turn with snippets.
+store can't flood a turn with snippets. Search is served from a trigram FTS5
+index per memories dir (`.memindex.sqlite`, cache-only — NX_MEMORY_FTS=0 or a
+sqlite build without FTS5 falls back to reading every note) reconciled by
+mtime on every search, so a growing store keeps answering without a
+full-store read per query. `/memory list` shows both scopes, each row
+labelled `[global]`/`[project]`.
 
 Memories live in two scopes:
 
@@ -673,7 +679,9 @@ Each memory is a markdown file (`<timestamp>_<slug>.md`) starting with a
 `# Title`. All writes go through one shared writer: files are created
 `0600` (dirs `0700`) regardless of umask, written atomically (tmp + rename),
 and never clobber — a same-second same-title collision gets a `-2`, `-3`…
-suffix instead of overwriting. `memory_write` and `memory_delete` go through
+suffix instead of overwriting, and the collision check is part of the atomic
+publication itself, so concurrent writers (memory-merge workers) can't erase
+each other's note. `memory_write` and `memory_delete` go through
 the approval gate like `write_file`/`delete_file`; `memory_search` is
 read-only. The manual `/memory save|remember|delete|list` slash commands
 remain for distilling a whole session at once (project scope, same
@@ -715,10 +723,11 @@ by moving the files back. The plan is printed in full before anything happens
 and goes through the approval gate once, so `/approval` rules and yolo apply
 as they do elsewhere; `/memory optimize dry` prints the plan and writes
 nothing, and a trailing argument guides the review ("focus on the build
-notes"). Reviews run newest first over at most `NX_MEMORY_OPTIMIZE_MAX_NOTES`
-notes (default 120), so in a bigger store the oldest notes — the strongest
-retirement candidates — are never seen; run `/memory optimize` with the
-cap set to `0` (all notes) periodically to reach them. Each round-trip sends
+notes"). Reviews cover at most `NX_MEMORY_OPTIMIZE_MAX_NOTES` notes
+(default 120) and take the OLDEST first — the strongest retirement
+candidates — so a store bigger than the cap no longer hides its stale notes;
+the newest tail is reported as unreviewed. Run with the cap set to `0`
+(all notes) to review everything at once. Each round-trip sends
 `max_tokens` (`NX_MEMORY_OPTIMIZE_MAX_TOKENS`, default 36K) so a reasoning
 model can't burn a small server-side cap on thinking and return an empty
 answer, and allows `NX_MEMORY_OPTIMIZE_TIMEOUT` seconds per call (default

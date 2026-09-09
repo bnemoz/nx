@@ -21,6 +21,7 @@ helpers don't cover, e.g. the archive's nested dir move).
 from __future__ import annotations
 
 import os
+import threading
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -71,11 +72,13 @@ def touch_private(path: str) -> str:
 def atomic_write_private(path: str, data: str) -> None:
     """Atomically write `data` to `path` at 0600 (temp file in the same dir +
     os.replace, so a concurrent reader never sees a half-written file). The
-    pattern _sessions_fs and _overflow hand-roll; new sinks should call this."""
+    pattern _sessions_fs and _overflow hand-roll; new sinks should call this.
+    Replaces an existing `path` — see atomic_write_private_noreplace for the
+    must-not-clobber variant."""
     parent = os.path.dirname(path)
     if parent:
         private_dir(parent)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         with open_private(tmp) as f:
             f.write(data)
@@ -86,3 +89,39 @@ def atomic_write_private(path: str, data: str) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_private_noreplace(path: str, data: str) -> None:
+    """Atomically write `data` to `path` at 0600 WITHOUT clobbering an
+    existing file. The final publication is `os.link` (atomic; fails with
+    FileExistsError when the target already exists — no check-then-write
+    race), then the temp file is removed. Raises FileExistsError when `path`
+    already exists; the caller decides on a new name.
+
+    Why not os.replace: the writer's collision loop checks-then-writes, and
+    two concurrent writers (memory merge workers) can both pass the check and
+    then replace each other's note — the loser's bytes are silently gone.
+    With the link, exactly one of them publishes and the other sees
+    FileExistsError.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        private_dir(parent)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open_private(tmp) as f:
+            f.write(data)
+        try:
+            os.link(tmp, path)
+        except OSError:
+            # No hard links on this filesystem: fall back to rename, but
+            # refuse to clobber (the check is not atomic — the link path
+            # above is what normal local filesystems take).
+            if os.path.exists(path):
+                raise FileExistsError(path)
+            os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass

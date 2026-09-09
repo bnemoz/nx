@@ -214,19 +214,24 @@ into server totals with no provenance flag; unknown cache is billed as uncached.
 **Ship as:** per-model price keys, account side-calls + probes, provenance tags
 (`measured|estimated`) in `/cost`.
 
-### 2.6 Memory retrieval v2 **[L]**
-`memory_search` is substring, all-terms-must-match, over a full read of every
-note, with the store re-scanned four separate ways across `_memory_cmd`/
-`_memory_optimize`. `/memory list` reads the **global dir only**
-(`_memory_cmd.py:262`)**[v]** — a project-only repo reports "no memories saved
-yet". Filename creation is `os.path.exists`-then-write (TOCTOU under the merge
-workers), archive stamps are second-granularity across processes. The session
-note shows 5 titles/scope, so past ~10 notes discovery is only the keyword path.
-`/memory optimize` reviews only the **newest 120** notes — the best retirement
-candidates are never seen.
-**Ship as:** one scanner + FTS5 index over both scopes (shared with the 2.3b
-index), fix `/memory list` scope and the writer race first (S), embeddings only
-if an embeddings-capable source is configured (provider item P3-3).
+### 2.6 Memory retrieval v2 **[L]** *(shipped 0.48.0)*
+`memory_search` was substring, all-terms-must-match, over a full read of every
+note, with the store re-scanned five separate ways across `_memory_cmd`/
+`_memory_optimize`. `/memory list` read the **global dir only** — a
+project-only repo reported "no memories saved yet". Filename creation was
+`os.path.exists`-then-write (TOCTOU under the merge workers), archive stamps
+were second-granularity across processes. The session note showed 5
+titles/scope, so past ~10 notes discovery was only the keyword path.
+`/memory optimize` reviewed only the newest 120 notes — the best retirement
+candidates were never seen.
+**Shipped:** one scanner (`_memory_cmd._iter_notes`) under every reader; an
+FTS5 (trigram) index per memories dir (`.memindex.sqlite`, mtime-reconciled
+cache, `NX_MEMORY_FTS=0`/no-FTS5 falls back to the plain scan, hits re-scored
+by the unchanged `_rank_hit`); `/memory list` covers both scopes; the writer
+claims its filename atomically (`os.link` no-clobber) so concurrent merge
+workers can't erase each other's notes; `NX_MEMORY_OPTIMIZE_MAX_NOTES` now
+takes the OLDEST tail. Embeddings deferred to P3-3 (provider item) — no
+embeddings-capable source is configurable today.
 
 ---
 
@@ -381,9 +386,13 @@ the auto probe), the foldable region's biggest tool results are spilled to
 disk before summarizing (NX_COMPRESS_SPILL_MIN_CHARS/_MAX, core shared with
 the 0.41 overflow evictor), the fold call routes to a cheaper endpoint
 (NX_COMPRESS_SOURCE/_MODEL) and is max_tokens-bounded
-(NX_COMPRESS_SUMMARY_TOKENS, window-clamped). **Previously:** Phase 1 DONE
+(NX_COMPRESS_SUMMARY_TOKENS, window-clamped). Then **2.6 memory v2 at
+0.48.0**: one scanner under every memory reader, a trigram FTS5 cache per
+memories dir (NX_MEMORY_FTS), both-scope `/memory list`, a no-clobber
+atomic memory writer, and an oldest-first NX_MEMORY_OPTIMIZE_MAX_NOTES.
+**Previously:** Phase 1 DONE
 at 0.42; 2.1 (0.43.0), 2.5 (0.44.0), 2.3a (0.45.0), 2.3b (0.46.0) as detailed
-below. Still open in Phase 2: **2.6 memory v2** (then P3-5/P3-4).
+below. Still open in Phase 2: **P3-5 (run_tests) and P3-4 (one dialect)**.
 
 Then 2.1 (0.43.0): a hard write fence in `run_tool()` (`nx/_fence.py`, env
 `NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session
@@ -415,8 +424,8 @@ immediate collect, quota).
 | **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests |
 | **0.43** | 2.1 hard write fence *(shipped)* · 2.5 cost correctness *(0.44.0)* |
 | **0.43–0.44** | 2.3a store GC *(0.45.0)* · P3-5 `run_tests` |
-| **0.45–0.46** | 2.4 compression v2 · 2.6 memory v2 · P3-4 one dialect |
-| **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
+| **0.45–0.46** | 2.4 compression v2 *(0.47.0)* · 2.6 memory v2 *(0.48.0)* · P3-4 one dialect |
+| **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-5 run_tests · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
 
 **Sequencing rationale:** Phase 1 items are each <1 day–3 days, independently
 releasable, and several are *tested-wrong* today (1.1, 1.3, 1.4, 1.5) — meaning

@@ -16,13 +16,25 @@ lists saved titles so the model knows memories exist without burning tokens
 on the full bodies.
 
 Every write — tool or slash command — goes through `_write_memory_file`: one
-filename convention (`<timestamp>_<slug>.md`, `-2`/`-3`… on a same-second
+filename convention (`<timestamp>_<slug>.md`, `-2`/`-3`... on a same-second
 same-title collision), one footer convention (`_scope:`/`_saved:`), atomic
 tmp+rename, private 0600 permissions (memories are distilled from sessions
 and may contain paths/commands/credentials; same posture as session files).
+Publication is claim-based (`atomic_write_private_noreplace`): the filename
+is not picked by an exists-then-write check that two concurrent writers (the
+memory-merge workers) can both pass — the first to publish the bytes wins
+and the loser takes the next suffix.
 
-Searches go through `_memory_scan`: every query term must appear, title hits
-rank above body hits, newest wins ties, and results are capped at
+Every read goes through `_iter_notes` — the one scanner over a memories dir —
+so title extraction, mtime handling and unreadable-file tolerance live in
+exactly one loop. `memory_search` accelerates its per-dir scan with the FTS5
+index in `nx/_memindex.py` (a self-healing cache; NX_MEMORY_FTS=0, or a
+sqlite build without FTS5/trigram, falls back to the plain scan); hits from
+either path are re-scored by the same `_rank_hit`, so ranking, the cap and
+the overflow note are identical whichever path served the rows.
+
+Searches keep the contract: every query term must appear, title hits rank
+above body hits, newest wins ties, and results are capped at
 NX_MEMORY_SEARCH_LIMIT so a big store can't dump an unbounded context blob
 into a turn. `/memory remember` shares the scan (unlimited) for its previews.
 
@@ -41,7 +53,8 @@ from ._ansi import DIM, RESET, C
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
-from ._private import atomic_write_private, private_dir
+from ._private import (atomic_write_private, atomic_write_private_noreplace,
+                       private_dir)
 from ._sessions_io import _flatten_message_text
 from . import _state as st
 from . import _memories_dir, _project_memories_dir
@@ -257,29 +270,13 @@ def _cmd_memory_delete(target: str) -> None:
 
 
 def _cmd_memory_list() -> None:
-    """List all saved memories with titles and dates."""
-    memories_dir = _memories_dir()
-    if not os.path.isdir(memories_dir):
-        print(f"{DIM}  no memories saved yet{RESET}")
-        return
-
+    """List all saved memories with titles and dates — both scopes (global
+    first, the same order every scanner uses), each row labelled. A
+    project-only repo used to report "no memories saved yet" here."""
     files = []
-    try:
-        for name in os.listdir(memories_dir):
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(memories_dir, name)
-            try:
-                mtime = os.path.getmtime(path)
-                with open(path, encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-                title = first_line[2:] if first_line.startswith("# ") else name
-                files.append((mtime, name, title))
-            except OSError:
-                continue
-    except OSError:
-        print(f"{DIM}  no memories saved yet{RESET}")
-        return
+    for d, label in _iter_memory_dirs("project"):
+        for name, _path, mtime, title, _content in _iter_notes(d):
+            files.append((mtime, name, title, label))
 
     if not files:
         print(f"{DIM}  no memories saved yet{RESET}")
@@ -287,9 +284,9 @@ def _cmd_memory_list() -> None:
 
     files.sort(key=lambda x: x[0], reverse=True)
     print(f"{DIM}  memories ({len(files)}):{RESET}")
-    for i, (mtime, name, title) in enumerate(files, 1):
+    for i, (mtime, name, title, label) in enumerate(files, 1):
         date = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-        print(f"  {C.SUCCESS}{i:>2}.{RESET} {title}  {DIM}({date}){RESET}")
+        print(f"  {C.SUCCESS}{i:>2}.{RESET} [{label}] {title}  {DIM}({date}){RESET}")
 
 
 _MEMORY_TRANSCRIPT_CHARS = 48000  # hard cap on the /memory save distillation input
@@ -405,79 +402,52 @@ def _rank_hit(content: str, query: str) -> float:
     return score
 
 
-def _memory_scan(
-    query: str, scope: str, limit: int
-) -> tuple[list[_MemoryHit], int, int]:
-    """Scan the memory dirs for `query`. Every term must appear; ranking is
-    title-hits above body-hits, then newest first. Returns
-    (hits, overflow, total): overflow = how many ranked hits the cap removed
-    (0 when unlimited or nothing cut), total = matches before the cap.
-    limit=0 → unlimited. Empty query → newest-first index of every note."""
-    terms = query.lower().split()
-    hits: list[_MemoryHit] = []
-    for d, label in _iter_memory_dirs(scope):
-        try:
-            names = sorted(os.listdir(d), reverse=True)
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(d, name)
-            read = _read_memory_file(path, name)
-            if read is None:
-                continue
-            title, content = read
-            if terms:
-                low = content.lower()
-                if not all(t in low for t in terms):
-                    continue
-                score = _rank_hit(content, query)
-            else:
-                score = 0.0
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                mtime = 0.0
-            hits.append(_MemoryHit(
-                mtime, name, title, _memory_snippet(content, query), label, score))
-    hits.sort(key=lambda h: (-h.score, -h.mtime))
-    total = len(hits)
-    if limit and total > limit:
-        return hits[:limit], total - limit, total
-    return hits, 0, total
-
-
-def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
-    """Every saved memory as a hit — no query, no snippet, no limit. The
-    resolver behind memory_delete and `/memory delete`."""
-    hits: list[_MemoryHit] = []
-    for d, label in _iter_memory_dirs(scope):
-        try:
-            names = sorted(os.listdir(d), reverse=True)
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(d, name)
-            read = _read_memory_file(path, name)
-            if read is None:
-                continue
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                mtime = 0.0
-            hits.append(_MemoryHit(mtime, name, read[0], "", label, 0.0))
-    hits.sort(key=lambda h: -h.mtime)  # newest first, same order memory_search uses
-    return hits
-
-
 def _atomic_write_private(path: str, content: str) -> None:
     """Write `content` to `path` 0600 (regardless of umask, via
     _private.atomic_write_private) and atomically — tmp file + os.replace, so
     a crash mid-write can't leave a truncated memory behind."""
     atomic_write_private(path, content)
+
+
+def _publish_memory(path: str, content: str) -> bool:
+    """Publish one memory note 0600 and atomically, WITHOUT clobbering: the
+    final step is a claim (os.link fails with FileExistsError when another
+    writer just took this exact filename — the old exists-then-write race
+    under the merge workers), not a replace that would silently drop the
+    other writer's bytes. Returns False when the name was taken."""
+    try:
+        atomic_write_private_noreplace(path, content)
+        return True
+    except FileExistsError:
+        return False
+
+
+def _iter_notes(d: str) -> list[tuple[str, str, float, str, str]]:
+    """The one scanner over a memories dir: every readable note as
+    (name, path, mtime, title, content), sorted newest-name first (the
+    `<timestamp>_` prefix makes name order the creation order). Unreadable
+    files (missing, permissions, non-UTF-8) are skipped — every other
+    scanner builds on this, so they all tolerate a broken note identically.
+    The `archive/` subdir is invisible by construction (a directory never
+    ends in `.md`)."""
+    out: list[tuple[str, str, float, str, str]] = []
+    try:
+        names = sorted(os.listdir(d), reverse=True)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(d, name)
+        read = _read_memory_file(path, name)
+        if read is None:
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        out.append((name, path, mtime, read[0], read[1]))
+    return out
 
 
 def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) -> tuple[str, str] | None:
@@ -488,7 +458,9 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
     Resolves project→global fallback (no project root), avoids a doubled H1
     when the body already starts with its own title, makedirs 0700, and never
     clobbers: a same-second same-title write gets a `-2`/`-3`… suffix instead
-    of silently overwriting its predecessor.
+    of silently overwriting its predecessor — and because publication is a
+    claim (see _publish_memory), two concurrent writers that pick the same
+    name cannot erase each other's note.
 
     gate=True runs the approval gate (same action shape write_file uses — the
     risk classifier's `write memory <path> (N bytes)` regex) after the path is
@@ -521,15 +493,21 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     slug = _slugify(title)
     base = os.path.join(memories_dir, f"{time.strftime('%Y%m%d-%H%M%S')}_{slug}.md")
+    content = f"# {title}\n\n{body}\n\n---\n_scope: {scope}  _saved: {stamp}\n"
+
+    # Claim a name. The loop is only the suffix walk; publication itself is
+    # atomic and refuses to clobber (see _publish_memory), so a concurrent
+    # writer that picked the same name cannot erase our note — moving the
+    # uniqueness check into the claim is what fixed the merge-workers TOCTOU.
     path, n = base, 1
-    while os.path.exists(path):
+    while True:
+        if gate and not _confirm_memory(
+                f"write memory {path} ({len(content)} bytes)", preview=None):
+            return None
+        if _publish_memory(path, content):
+            return path, scope
         n += 1
         path = f"{base[:-3]}-{n}.md"
-    content = f"# {title}\n\n{body}\n\n---\n_scope: {scope}  _saved: {stamp}\n"
-    if gate and not _confirm_memory(f"write memory {path} ({len(content)} bytes)", preview=None):
-        return None
-    _atomic_write_private(path, content)
-    return path, scope
 
 
 def memory_write(
@@ -585,6 +563,75 @@ def _memory_snippet(content: str, query: str, max_lines: int = 4) -> str:
         if len(out) >= max_lines:
             break
     return " / ".join(out)
+
+
+def _memory_scan(
+    query: str, scope: str, limit: int
+) -> tuple[list[_MemoryHit], int, int]:
+    """Scan the memory dirs for `query`. Every term must appear; ranking is
+    title-hits above body-hits, then newest first. Returns
+    (hits, overflow, total): overflow = how many ranked hits the cap removed
+    (0 when unlimited or nothing cut), total = matches before the cap.
+    limit=0 → unlimited. Empty query → newest-first index of every note.
+
+    Per dir, `nx._memindex.search_dir` (an mtime-reconciled FTS5 cache over
+    the notes) supplies candidate rows without reading any file; the rows
+    still pass the same lowercase-substring predicate and `_rank_hit`
+    scoring, so results are identical to the plain scan up to whitespace
+    folding between query characters (trigram matching is character-adjacent,
+    not whitespace-exact) — the accelerator can only widen recall slightly.
+    When it is off, unsupported, or returns no rows for a dir, the plain
+    `_iter_notes` scan runs for that dir.
+    """
+    terms = query.lower().split()
+    hits: list[_MemoryHit] = []
+    for d, label in _iter_memory_dirs(scope):
+        fts_rows = None
+        if terms and all(len(t) >= 3 for t in terms):
+            try:
+                from ._memindex import search_dir
+                fts_rows = search_dir(d, query)
+            except Exception:
+                fts_rows = None
+        if fts_rows is not None:
+            for name, mtime, title, body, snip in sorted(
+                    fts_rows, key=lambda r: r[0], reverse=True):
+                low = body.lower()
+                if not all(t in low for t in terms):
+                    continue
+                snippet = " / ".join(
+                    p.strip() for p in snip.split("\n") if p.strip())
+                if not snippet:
+                    snippet = _memory_snippet(body, query)
+                hits.append(_MemoryHit(
+                    mtime, name, title, snippet, label, _rank_hit(body, query)))
+            continue
+        for name, _path, mtime, title, content in _iter_notes(d):
+            if terms:
+                low = content.lower()
+                if not all(t in low for t in terms):
+                    continue
+                score = _rank_hit(content, query)
+            else:
+                score = 0.0
+            hits.append(_MemoryHit(
+                mtime, name, title, _memory_snippet(content, query), label, score))
+    hits.sort(key=lambda h: (-h.score, -h.mtime))
+    total = len(hits)
+    if limit and total > limit:
+        return hits[:limit], total - limit, total
+    return hits, 0, total
+
+
+def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
+    """Every saved memory as a hit — no query, no snippet, no limit. The
+    resolver behind memory_delete and `/memory delete`."""
+    hits: list[_MemoryHit] = []
+    for d, label in _iter_memory_dirs(scope):
+        for name, _path, mtime, title, _content in _iter_notes(d):
+            hits.append(_MemoryHit(mtime, name, title, "", label, 0.0))
+    hits.sort(key=lambda h: -h.mtime)  # newest first, same order memory_search uses
+    return hits
 
 
 def memory_search(query: str, scope: str = "project", **_: Any) -> str:
@@ -756,21 +803,10 @@ def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, 
     overflow = False
     for d in roots:
         label = "project" if d == _project_memories_dir(project_root) else "global"
-        try:
-            names = sorted(os.listdir(d), reverse=True)
-        except OSError:
-            continue
-        md_names = [n for n in names if n.endswith(".md")]
-        overflow = overflow or len(md_names) > 5
-        for name in md_names[:5]:
-            path = os.path.join(d, name)
-            try:
-                with open(path, encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-            except OSError:
-                continue
-            t = first_line[2:].strip() if first_line.startswith("# ") else name[:-3]
-            titles.append(f"[{label}] {t}")
+        notes = _iter_notes(d)
+        overflow = overflow or len(notes) > 5
+        for _name, _path, _mtime, title, _content in notes[:5]:
+            titles.append(f"[{label}] {title}")
     if not titles:
         return None
     lines = list(titles)

@@ -59,8 +59,7 @@ from ._openai_client import APIConnectionError
 from ._private import private_dir
 from . import _state as st
 from ._memory_cmd import (
-    _first_title, _iter_memory_dirs, _read_memory_file, _refresh_memory_note,
-    _write_memory_file,
+    _first_title, _iter_memory_dirs, _iter_notes, _refresh_memory_note, _write_memory_file,
 )
 
 # Notes reviewed per librarian call. 0 (the default since 0.34.1) = ONE pass
@@ -192,26 +191,12 @@ def _digest(content: str, max_chars: int = _NOTE_DIGEST_CHARS) -> str:
 
 def _collect_notes(scope: str = "project") -> list[_OptNote]:
     """Every saved note, newest first, with the fields a librarian pass needs.
-    The `archive/` subdirs are invisible here by construction (a directory
-    never ends in `.md`), so an optimize run never re-ingests its own backups."""
+    Built on the one scanner (`_memory_cmd._iter_notes`) — the `archive/`
+    subdirs stay invisible by construction (a directory never ends in
+    `.md`), so an optimize run never re-ingests its own backups."""
     notes: list[_OptNote] = []
     for d, label in _iter_memory_dirs(scope):
-        try:
-            names = sorted(os.listdir(d), reverse=True)
-        except OSError:
-            continue
-        for name in names:
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(d, name)
-            read = _read_memory_file(path, name)
-            if read is None:
-                continue
-            title, content = read
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                mtime = 0.0
+        for name, _path, mtime, title, content in _iter_notes(d):
             notes.append(_OptNote(name, title, label, d, mtime, len(content), _digest(content)))
     notes.sort(key=lambda n: -n.mtime)
     return notes
@@ -771,7 +756,11 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     unexamined = 0
     if cap and len(notes) > cap:
         unexamined = len(notes) - cap
-        notes = notes[:cap]
+        # Review the OLDEST `cap` notes, not the newest: retirement/merge
+        # candidates are the stale ones, and the newest notes are the ones the
+        # session-start note still shows the model. Since 2.6 the unreviewed
+        # remainder is the store's newest tail, reported as such.
+        notes = notes[len(notes) - cap:]
     batch = _optimize_batch(len(notes))
     known = {n.name: n for n in notes}
 
@@ -803,8 +792,8 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
         print(f"{DIM}  librarian found nothing to change ({len(notes)} notes reviewed){RESET}")
         return
     if unexamined:
-        print(f"{DIM}  {unexamined} older notes not reviewed "
-              f"(raise NX_MEMORY_OPTIMIZE_MAX_NOTES){RESET}")
+        print(f"{DIM}  {unexamined} newest note{'s' if unexamined != 1 else ''} not reviewed "
+              f"(raise NX_MEMORY_OPTIMIZE_MAX_NOTES to include them){RESET}")
 
     print(f"{DIM}  plan:{RESET}")
     _print_plan(plan, known)
