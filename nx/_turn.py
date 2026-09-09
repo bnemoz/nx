@@ -1003,21 +1003,20 @@ def _maybe_arm_native_escalation() -> None:
     """After a stall/empty nudge, make the retry open with tool_choice="auto"
     when the just-failed request was sent with "none".
 
-    Two preconditions, both read at nudge time (the request that stalled is
-    the evidence): native must not already be confirmed (nothing to escalate)
-    and the capability probe must not have classified this source NATIVE
-    (its verdict is authoritative; a None verdict means still pending/unknown,
-    which is exactly the window where the first user prompt beats the probe
-    and stalls on servers where "none" suppresses the model's only action
-    channel — glm/qwen behind vLLM).
+    Since 0.54.0 "auto" is the default posture, so this only fires when the
+    session explicitly disabled native tool calls — /toolcalls text, or
+    NX_NATIVE_TOOLS=0 — and the stall is evidence that disabling it took away
+    the model's only action channel (glm/qwen behind vLLM never fall back to
+    the text-protocol tags when native calls are suppressed: they think, emit
+    nothing, and every "act now" nudge is unanswerable). A user-forced text
+    protocol is left alone (they chose it); only the env-gated posture is
+    escalated, once per episode, with a visible line saying so.
     """
-    if st._NATIVE_TOOL_CALLS_CONFIRMED or st._STALL_FORCE_NATIVE:
-        return
-    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
-    if capability is not None:
-        from ._capability import CAPABILITY_NATIVE
-        if capability == CAPABILITY_NATIVE:
-            return  # probe already answered: native is on for every request
+    from ._compress import NX_NATIVE_TOOLS, toolcalls_mode
+    if st._STALL_FORCE_NATIVE or not NX_NATIVE_TOOLS:
+        return  # already armed / posture is already "auto"
+    if toolcalls_mode() == "text":
+        return  # user-forced text protocol — respect it, don't override
     st._STALL_FORCE_NATIVE = True
     if not _subagent_quiet():
         print(f"{DIM}  ↳ retrying with native tool-calling enabled "

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Regression tests for the stall/empty-turn → native tool_choice escalation.
+"""Regression tests for the default tool_choice="auto" posture (0.54.0) and
+the stall/empty-turn → native escalation that backs it up when native is
+explicitly disabled.
 
 glm-5.3 / qwen3.8-flash-next behind a vLLM proxy only ever act through the
-native tool_calls channel. Until the capability probe lands (or when its
-max_tokens budget was too small for the model's reasoning phase — see
-tests/test_capability_probe_budget.py), open_stream() sends tool_choice="none",
-which on those servers suppresses the model's ONLY action path: the turn
-streams reasoning, emits nothing, and every "act now" nudge is unsatisfiable.
-The ladder then climbed to a forced final whose salvage printed the model's
-reasoning as the user-visible answer.
+native tool_calls channel. The pre-0.54 default posture — tool_choice="none"
+until native tool-calling was confirmed — suppressed that channel, so a fresh
+session's first prompt (which regularly beat the startup capability probe)
+stalled reasoning-only with no action path, and the ladder climbed to a
+forced final whose salvage printed the model's reasoning as the answer.
 
-These tests pin the recovery: a stall or an empty turn under the "none"
-posture arms st._STALL_FORCE_NATIVE, open_stream() honors it with
-tool_choice="auto", and a successful tool call (or a settled turn) clears it.
+0.54.0 flips the default: tool_choice="auto" from the very first request,
+opted out only via /toolcalls text or NX_NATIVE_TOOLS=0. The escalation
+(armed by a stall/empty nudge while "none" is in effect) remains as the
+recovery for the opted-out case.
 """
 import os
 import sys
@@ -53,14 +54,35 @@ class _Chunk:
 
 
 def _reset_state():
+    from nx import _compress
     m.st._NATIVE_TOOL_CALLS_CONFIRMED = False
     m.st._STALL_FORCE_NATIVE = False
+    _compress.set_toolcalls_mode("auto")
     if m.st.ACTIVE is not None:
         m.st.ACTIVE._capability = None
 
 
-def test_stall_arms_native_escalation():
-    """A reasoning-only stall under tool_choice=none arms the escalation."""
+def test_default_posture_is_auto():
+    """The whole point of 0.54.0: a fresh session's first request already
+    carries tool_choice="auto" — nothing to confirm, no probe to race."""
+    _reset_state()
+    assert m._default_tool_choice() == "auto"
+
+
+def test_toolcalls_text_pins_none():
+    """/toolcalls text (the rung past the malformed-args breaker) restores
+    tool_choice="none" for the session."""
+    _reset_state()
+    from nx import _compress
+    assert _compress.set_toolcalls_mode("text") is True
+    assert m._default_tool_choice() == "none"
+    assert _compress.set_toolcalls_mode("auto") is True
+    assert m._default_tool_choice() == "auto"
+
+
+def test_stall_does_not_escalate_under_auto_posture():
+    """With "auto" already the posture, a stall is a model problem, not a
+    posture problem — the (now pointless) escalation must not arm."""
     _reset_state()
     messages = [{"role": "user", "content": "do the thing"}]
 
@@ -73,108 +95,84 @@ def test_stall_arms_native_escalation():
         m.open_stream = orig
 
     assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
-    assert m.st._STALL_FORCE_NATIVE is True, \
-        "a stall under the none posture must arm the native escalation"
+    assert m.st._STALL_FORCE_NATIVE is False
 
 
-def test_default_tool_choice_reflects_escalation():
-    """_default_tool_choice(): none by default, auto once the escalation arms,
-    auto when native is confirmed, auto when the probe says native."""
+def test_stall_escalates_when_native_disabled():
+    """NX_NATIVE_TOOLS=0 restores the old "none" posture — and the stall
+    ladder re-arms the native channel rather than nudging unsatisfiably."""
     _reset_state()
+    from nx import _compress
+    saved = _compress.NX_NATIVE_TOOLS
+    _compress.NX_NATIVE_TOOLS = True  # True now MEANS "opted out" (0.54.0)
     assert m._default_tool_choice() == "none"
-    m.st._STALL_FORCE_NATIVE = True
-    assert m._default_tool_choice() == "auto"
-    m.st._STALL_FORCE_NATIVE = False
-    m.st._NATIVE_TOOL_CALLS_CONFIRMED = True
-    assert m._default_tool_choice() == "auto"
-    m.st._NATIVE_TOOL_CALLS_CONFIRMED = False
-    if m.st.ACTIVE is not None:
-        m.st.ACTIVE._capability = "native"
-        assert m._default_tool_choice() == "auto"
-        m.st.ACTIVE._capability = None
-
-
-def test_empty_turn_arms_native_escalation():
-    """An empty turn (no reasoning, no content, no call) arms it too."""
-    _reset_state()
-    messages = [{"role": "user", "content": "go"}]
-
-    orig = m.open_stream
-    m.open_stream = lambda *a, **k: iter([])
+    messages = [{"role": "user", "content": "do the thing"}]
     try:
-        status = m.model_turn(messages, empty_turn_count=0)
+        orig = m.open_stream
+        m.open_stream = lambda *a, **k: iter(
+            [_Chunk({"reasoning_content": "thinking about it"})])
+        try:
+            status = m.model_turn(messages, reasoning_loop_cut_count=0)
+        finally:
+            m.open_stream = orig
     finally:
-        m.open_stream = orig
+        _compress.NX_NATIVE_TOOLS = saved
 
-    assert status == m.TURN_EMPTY, f"expected TURN_EMPTY, got {status!r}"
-    assert m.st._STALL_FORCE_NATIVE is True
+    assert status == m.TURN_STALL
+    assert m.st._STALL_FORCE_NATIVE is True, \
+        "a stall under the opted-out none posture must arm the escalation"
 
 
 def test_escalated_retry_opens_with_auto():
-    """Once armed, open_stream() must send tool_choice="auto"."""
+    """Once armed, the retry opens with tool_choice="auto" — overriding even
+    the NX_NATIVE_TOOLS=0 opt-out (the stall is evidence it went wrong)."""
     _reset_state()
     m.st._STALL_FORCE_NATIVE = True
-    messages = [{"role": "user", "content": "go"}]
-    captured = {}
-
-    def fake_open_stream(messages, tools=None, tool_choice=None,
-                         max_tokens=None, recovery_sampling=False):
-        captured["tool_choice"] = tool_choice
-        return iter([_Chunk({"content": "done: the thing"})])
-
-    orig = m.open_stream
-    m.open_stream = fake_open_stream
-    try:
-        status = m.model_turn(messages)
-    finally:
-        m.open_stream = orig
-
-    assert status == m.TURN_DONE
-    # model_turn calls open_stream with tool_choice=None; the posture is
-    # applied inside — verify through the helper the real path uses.
-    assert m._default_tool_choice() == "auto", \
-        "armed escalation must open the retry with tool_choice=auto"
+    assert m._default_tool_choice() == "auto"
 
 
-def test_no_escalation_when_native_confirmed():
-    """If native is already confirmed, a stall has nothing to escalate."""
+def test_user_forced_text_protocol_is_respected():
+    """/toolcalls text is a user decision — a stall under it must NOT
+    re-enable native behind their back."""
     _reset_state()
-    m.st._NATIVE_TOOL_CALLS_CONFIRMED = True
+    from nx import _compress
+    assert _compress.set_toolcalls_mode("text") is True
     messages = [{"role": "user", "content": "go"}]
 
     orig = m.open_stream
     m.open_stream = lambda *a, **k: iter(
         [_Chunk({"reasoning_content": "thinking"})])
     try:
-        status = m.model_turn(messages)
+        status = m.model_turn(messages, reasoning_loop_cut_count=0)
     finally:
         m.open_stream = orig
+        _compress.set_toolcalls_mode("auto")
 
     assert status == m.TURN_STALL
     assert m.st._STALL_FORCE_NATIVE is False, \
-        "native already confirmed — the stall is a model problem, not a posture one"
+        "user-forced text protocol must not be overridden by the escalation"
 
 
-def test_no_escalation_when_probe_says_native():
-    """A landed CAPABILITY_NATIVE verdict means every request already used
-    tool_choice=auto; a stall there must not arm the (no-op) escalation."""
+def test_empty_turn_arms_escalation_when_disabled():
+    """An empty turn (no reasoning, no content, no call) arms it too, under
+    the opted-out posture."""
     _reset_state()
-    if m.st.ACTIVE is None:
-        return  # no source configured in this environment — nothing to pin
-    m.st.ACTIVE._capability = "native"
+    from nx import _compress
+    saved = _compress.NX_NATIVE_TOOLS
+    _compress.NX_NATIVE_TOOLS = True
     messages = [{"role": "user", "content": "go"}]
-
-    orig = m.open_stream
-    m.open_stream = lambda *a, **k: iter(
-        [_Chunk({"reasoning_content": "thinking"})])
     try:
-        status = m.model_turn(messages)
+        orig = m.open_stream
+        m.open_stream = lambda *a, **k: iter([])
+        try:
+            status = m.model_turn(messages, empty_turn_count=0)
+        finally:
+            m.open_stream = orig
     finally:
-        m.open_stream = orig
-        m.st.ACTIVE._capability = None
+        _compress.NX_NATIVE_TOOLS = saved
 
-    assert status == m.TURN_STALL
-    assert m.st._STALL_FORCE_NATIVE is False
+    assert status == m.TURN_EMPTY, f"expected TURN_EMPTY, got {status!r}"
+    assert m.st._STALL_FORCE_NATIVE is True
 
 
 def test_settled_turn_clears_escalation():

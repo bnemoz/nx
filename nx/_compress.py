@@ -234,18 +234,28 @@ RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", 
 # attached, regardless of this env var — see _grammar_extra_body() below.
 NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not in ("", "0")
 
-# Native tool_calls (server-side JSON-args generation) is off by default: it
-# bypasses our own text-protocol tag parsing entirely, and several servers/
-# models (e.g. glm) advertise structured tool_calls support but routinely
-# emit malformed JSON in the `arguments` field with no repair path available
-# to us (unlike our own <tool_call> tag body, which we parse ourselves and
-# can patch up). Default posture is tool_choice="none" on normal turns (see
-# open_stream): tools= is still sent so the schema renders into the prompt,
-# but the server can't hand back native tool_calls, so the model is left
-# with the plain-text <tool_call> protocol (_text_fallback.py) described in
-# SYSTEM. Opt back into native tool_calls with NX_NATIVE_TOOLS=1 for servers
-# known to emit well-formed arguments.
-NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0")
+# Native tool_calls (server-side JSON-args generation): since 0.54.0 the
+# default posture is tool_choice="auto" (see open_stream) — a server MAY hand
+# back structured tool_calls. Before that the default was "none" because
+# several servers/models (notably glm) advertise structured tool_calls
+# support but routinely emit malformed JSON in the `arguments` field with no
+# repair path available client-side (unlike our own <tool_call> tag body,
+# which we parse ourselves and can patch up). The "none" posture turned out
+# to be the worse failure: on hybrid reasoning models behind vLLM it left the
+# model with NO action path at all (see open_stream's comment), so "auto" won
+# and malformed native args are handled by the recovery ladder instead
+# (arg repair -> truncated-args salvage -> malformed-args breaker -> the
+# /toolcalls text escape hatch).
+#
+# NX_NATIVE_TOOLS keeps its name for compatibility but flips meaning:
+# unset / "1" / "auto" (the default) -> tool_choice="auto";
+# "0" -> the old "none" posture for a source/model whose native args are
+# unusable, without giving up the text-protocol fallback.
+NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0", "auto", "1")
+# Renamed mirror with the post-0.54 semantics (True = tool_choice="auto" is
+# the default posture). Kept as a separate name so the config viewer/doctor
+# and the vision gate read intent, not a double negative.
+NATIVE_TOOLS_DEFAULT = not NX_NATIVE_TOOLS
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
 # 0.30.0: /toolcalls text|native|auto — the escalation ladder's rung PAST the
 # breaker. Once native tool-calling is confirmed, _grammar_extra_body() stops
@@ -449,16 +459,20 @@ def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
 
 def _default_tool_choice() -> str:
     """The tool_choice open_stream() applies when the caller didn't force one:
-    "auto" once native tool-calling is confirmed / probed / stall-escalated,
-    "none" otherwise (the text-protocol default posture — see the long comment
-    in open_stream)."""
-    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
-    from ._capability import CAPABILITY_NATIVE
-    if (NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED
-            or st._STALL_FORCE_NATIVE
-            or (capability == CAPABILITY_NATIVE and toolcalls_mode() != "text")):
+    "auto" unless (a) the session explicitly forced the text protocol
+    (/toolcalls text — the rung past the malformed-args breaker) or (b)
+    NX_NATIVE_TOOLS=0 opted the source out of native tool_calls entirely.
+    A stall/empty-escalated retry (st._STALL_FORCE_NATIVE, set by
+    _turn._maybe_arm_native_escalation) overrides (b): the stall is evidence
+    the opt-out took away the model's only action channel. See open_stream's
+    long comment for why "auto" is the default."""
+    if toolcalls_mode() == "text":
+        return "none"
+    if st._STALL_FORCE_NATIVE:
         return "auto"
-    return "none"
+    if NX_NATIVE_TOOLS:
+        return "none"
+    return "auto"
 
 
 def open_stream(
@@ -479,31 +493,28 @@ def open_stream(
     from ._turn import _LoggingStream
     assert st.client is not None and st.MODEL is not None
     if tool_choice is None and tools:
-        # Default posture (see NX_NATIVE_TOOLS above): keep tools= so the
-        # schema still renders into the prompt (that's the model's only
-        # source of tool names/params — dropping tools= entirely blinds it,
-        # it's not redundant with SYSTEM's one-line example), but set
-        # tool_choice="none" so the server can't hand back a native
-        # tool_calls object. That leaves the text-protocol <tool_call> tag
-        # (which we parse and can repair ourselves) as the only way for the
-        # model to actually invoke a tool. A caller that forces tool_choice
-        # (e.g. the forced-final-answer path) already opted into native for
-        # that one call, so it's left untouched.
-        #
-        # Exception: once the startup capability probe (_capability.py) has
-        # classified this source as CAPABILITY_NATIVE, forcing tool_choice="none"
-        # is actively harmful, not just redundant — some models (e.g. GLM/Qwen
-        # generations tested against the bubbles proxy) only ever honor tools
-        # via the native tool_calls machinery and completely ignore the
-        # prompt-instructed <tool_call> tag convention once native tool_calls
-        # are suppressed. On those servers "none" doesn't fall back to the
-        # text protocol, it just produces prose narration with no tool call
-        # at all. So: native-confirmed sources (probed, or reactively via
-        # st._NATIVE_TOOL_CALLS_CONFIRMED, or a stall-escalated retry — see
-        # _default_tool_choice) get tool_choice="auto"; everyone else keeps
-        # the old "none" default.
-        if tool_choice is None and tools:
-            tool_choice = _default_tool_choice()
+        # Default posture (0.54.0): tool_choice="auto". The pre-0.54 default
+        # was "none" — send tools= so the schema renders into the prompt, but
+        # suppress server-side native tool_calls so the model could only act
+        # through the text-protocol <tool_call> tag (which nx parses and can
+        # repair itself; several models, notably glm, advertise structured
+        # tool_calls but emit malformed JSON arguments nx can't patch up).
+        # That posture had a fatal interaction with hybrid reasoning models
+        # behind vLLM (glm-5.3, qwen3.8-flash-next): they only ever act via the
+        # native tool_calls machinery, so "none" didn't fall back to the text
+        # protocol — it produced reasoning-only turns with no action path, and
+        # the stall ladder climbed to a forced final whose salvage printed the
+        # model's reasoning as the answer. It also raced the startup capability
+        # probe: the first prompt of a fresh session regularly beat the probe
+        # and burned its whole stall ladder under the "none" posture.
+        # "auto" permits native calls without forcing them — a model that
+        # prefers the text protocol still emits text-protocol tags as content,
+        # and nx parses/repairs those exactly as before. Malformed native args
+        # keep their existing recovery (arg repair, salvage, breaker, and the
+        # /toolcalls text escape hatch that pins "none" for the session).
+        # A caller that forces tool_choice (the forced-final-answer path) is
+        # left untouched.
+        tool_choice = _default_tool_choice()
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens

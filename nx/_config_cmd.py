@@ -218,10 +218,9 @@ def _cmd_doctor(_args: list[str]) -> int:
             pass
     if os.environ.get("NX_VISION", "") not in ("", "0"):
         from . import _compress as _c
-        if not getattr(_c, "NX_NATIVE_TOOLS", False):
-            bad("NX_VISION=1 but native tool calls are off (NX_NATIVE_TOOLS=0 "
-                "or unconfirmed) — image mentions will carry a gate note "
-                "instead of the picture")
+        if getattr(_c, "NX_NATIVE_TOOLS", False):
+            bad("NX_VISION=1 but native tool calls are off (NX_NATIVE_TOOLS=0) — "
+                "image mentions will carry a gate note instead of the picture")
 
     # --- report ------------------------------------------------------------------
     print(f"{BOLD}nx config doctor{RESET} {DIM}— env file {path} · "
@@ -287,7 +286,8 @@ def render_status() -> str:
     cap = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
     if cap is None:
         from . import _compress as _c
-        cap = ("native" if getattr(_c, "NX_NATIVE_TOOLS", False)
+        cap = ("none (NX_NATIVE_TOOLS=0)" if getattr(_c, "NX_NATIVE_TOOLS", False)
+               else "native (auto)" if getattr(_c, "NATIVE_TOOLS_DEFAULT", True)
                else ("grammar" if getattr(_c, "NX_GRAMMAR", False) else "pending"))
     lines.append(f"{DIM}  tools{RESET}     {cap}"
                  + (f"{sep}vision on" if os.environ.get("NX_VISION", "") not in ("", "0")

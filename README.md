@@ -19,11 +19,12 @@ mechanically-counted floor for your active backend/model — system prompt +
 active tool schemas + a one-token "hey" — instead of an eyeballed number
 that drifts as tools are added or removed.
 
-It's also built to survive the rough edges of self-hosted models: falls back
-to text-parsed tool-call tags when a server doesn't support native
-tool-calling, recovers from malformed streams and reasoning-only stalls
-automatically, and probes each source's tool-calling capability at startup so
-the right protocol is picked without hand-tuning.
+It's also built to survive the rough edges of self-hosted models: accepts
+native `tool_calls` by default (`tool_choice="auto"`) and falls back to
+text-parsed tool-call tags when a server or model doesn't use them, recovers
+from malformed streams and reasoning-only stalls automatically, and probes
+each source's tool-calling capability at startup so the right protocol is
+picked without hand-tuning.
 
 Every write/edit/bash call is risk-classified and gated by an approval prompt
 (unless you pass `--yolo`); every session auto-saves so you can `--resume` it
@@ -248,7 +249,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_SKIP_STARTUP_PROBES` | skip every startup probe — `resolve_model()`'s `/v1/models` + `/props` round-trip, the capability/thinking fingerprint probes, the context-window metadata probes and the over-max_tokens overrun probe (default off; `1` disables). Startup becomes instant but model autodetection is off: set the model explicitly (`NX_MODEL` / `NX_SOURCE_<NAME>_MODEL`); tool-calling falls back to reactive text-protocol parsing until a turn reveals better. Also what keeps `import nx` network-free in test runs |
 | `NX_PROBE_QUIET` | keep background probes' transient-retry notices out of the terminal (default `1`; `0` restores them when debugging a probe that keeps failing). Only stderr is silenced — probe retries still reach the traffic log. Probes also drop their remaining retries as soon as a `/source` switch supersedes them, regardless of this setting: before 0.53.2 a dead endpoint kept emitting retry notices naming the model you had just switched off, and slept out the whole backoff curve while holding the startup-probe lock, so the source you switched to stayed unprobed behind it |
 | `NX_BACKEND` | `vllm` to disable llama.cpp-only recovery samplers (min_p / repeat_penalty / DRY) that vLLM rejects |
-| `NX_NATIVE_TOOLS` | opt into server-side native `tool_calls` (default off — text-protocol fallback is parsed and repaired client-side) |
+| `NX_NATIVE_TOOLS` | native `tool_calls` posture (0.54.0 flip): unset / `1` / `auto` (the default) sends `tool_choice="auto"` — the server MAY return structured `tool_calls`, and text-protocol models are unaffected (`auto` permits, never forces; malformed native args keep the full repair/salvage/breaker ladder, and `/toolcalls text` pins `"none"` for the session). `0` restores the pre-0.54 `tool_choice="none"` posture — text-protocol only — for a source/model whose native arguments are unusable; a reasoning-stall under it re-arms `auto` once per episode with a visible line |
 | `NX_MALFORMED_TOOL_BREAKER` | malformed-args circuit breaker: after N malformed/truncated `tool_calls` argument payloads naming the SAME tool (default 3), that tool is dropped from the tool list and the retry nudge steers the model to a sibling tool instead — an endpoint that keeps truncating one tool's args (observed: a local server dying right before `multi_edit`'s `[` array literal) stops being offered it. Since 0.29.9 the breaker DECAYS: one clean execution of the tool (its args parsed and the body ran without error) clears the streak and re-arms it, so two flaky truncations no longer cost the tool for the whole session; since 0.40 it is also scoped to the active `(source, model)` — switching endpoints (including a `/source <name> <model>` override) drops the previous endpoint's streaks and re-offers everything, because truncation is evidence about a server, not about a tool; `0` disables; `/toolcalls` shows the streaks, `/toolcalls reset [tool]` clears them, `/reset` re-arms everything |
 | `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
 | `NX_SEARCH_EXCLUDE_DIRS` | space-separated dirs the `grep` fallback skips (mirrors ripgrep's `.gitignore` handling; default includes `.venv node_modules __pycache__ build dist`) |
@@ -266,17 +267,19 @@ turn going — the counter stays pinned at the last rung so any fresh stall
 escalates straight back to forced-final instead of re-climbing the ladder.
 
 Before any of that ladder climbs, nx checks the one posture that makes every
-rung unsatisfiable: a stall (or an empty turn) on a request that went out with
-`tool_choice="none"` — the default until native tool-calling is confirmed —
-means the server may be suppressing the model's only action channel. Some
-models (glm / qwen generations behind vLLM) never fall back to the
-text-protocol tags when native calls are off; they think, emit nothing, and
-every "act now" nudge is unanswerable. The retry re-opens the stream with
-`tool_choice="auto"` (a `↳ retrying with native tool-calling enabled` line
-says so), which either un-stalls the model or changes nothing for a
-text-protocol model — `auto` permits native calls, it doesn't force them. A
-successful tool call or a settled turn drops the escalation; the next stall,
-if any, re-derives it from its own evidence.
+rung unsatisfiable: a stall (or an empty turn) on a request that went out
+with `tool_choice="none"` — since 0.54.0 only possible when native tool
+calls were explicitly disabled (`NX_NATIVE_TOOLS=0`) — means the server may
+be suppressing the model's only action channel. Some models (glm / qwen
+generations behind vLLM) never fall back to the text-protocol tags when
+native calls are off; they think, emit nothing, and every "act now" nudge
+is unanswerable. The retry re-opens the stream with `tool_choice="auto"` (a
+`↳ retrying with native tool-calling enabled` line says so), which either
+un-stalls the model or changes nothing for a text-protocol model — `auto`
+permits native calls, it doesn't force them. A `/toolcalls text` override is
+never escalated past (you chose it); the flag clears on a successful tool
+call or a settled turn, and the next stall re-derives it from its own
+evidence.
 
 Episode awareness also shapes the mid-ladder nudge: once a real tool call has
 run since the first stall, a fresh stall is read as the model stalling while
@@ -361,11 +364,23 @@ versions; an unsupported server just has the field ignored or rejected
 (falling back automatically, same as an `NX_SOURCE_*_EXTRA_BODY` a server
 doesn't recognize).
 
-By default nx sends `tools=` so the schema renders into the prompt but sets
-`tool_choice="none"`, leaving the text-protocol tag as the only way to invoke
-a tool — which nx parses and can repair itself. Set `NX_NATIVE_TOOLS=1` to
-opt into server-side native `tool_calls` for backends known to emit
-well-formed arguments.
+Since 0.54.0 nx sends `tools=` with `tool_choice="auto"` on every normal
+turn: a server MAY hand back structured `tool_calls`, and a model that
+prefers the prompt-taught text protocol still emits `to-text` tags as
+`content`, which nx parses and repairs exactly as before. (`auto` permits
+native calls, it doesn't force them.) The pre-0.54 default was
+`tool_choice="none"` — text-protocol only, opted into native with
+`NX_NATIVE_TOOLS=1` — but that posture was fatal for hybrid reasoning models
+behind vLLM (glm-5.3, qwen3.8-flash-next): they only ever act through the
+native tool_calls machinery, so `"none"` didn't fall back to the text
+protocol, it left them with no action path at all, and a fresh session's
+first prompt (which can beat the startup capability probe) burned its whole
+reasoning-stall ladder until the forced-final salvage printed the model's
+thinking as the answer. Malformed native arguments keep their full recovery
+ladder (arg repair → truncated-args salvage → per-tool circuit breaker → the
+`/toolcalls text` escape hatch, which pins `"none"` for the session), and
+`NX_NATIVE_TOOLS=0` restores the old text-protocol-only posture if a
+source's native args are unusable.
 
 Qwen-style chat templates (qwen3.8-27b, Qwen3.8-flash-next, …) interleave a
 literal newline as a `content` delta between their native `tool_calls`; nx

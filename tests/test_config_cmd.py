@@ -121,7 +121,9 @@ def test_doctor_flags_legacy_vars_and_vision_gate(monkeypatch):
     monkeypatch.setenv("NX_VISION", "1")
     from nx import _compress as c
     saved_gates = (c.NX_NATIVE_TOOLS, c.NX_GRAMMAR)
-    c.NX_NATIVE_TOOLS = False
+    # 0.54.0: NX_NATIVE_TOOLS flipped meaning — True now means the user
+    # OPTED OUT (NX_NATIVE_TOOLS=0), which is what the vision gate flags.
+    c.NX_NATIVE_TOOLS = True
     c.NX_GRAMMAR = False
     try:
         code, out, _e = _run(["doctor"])

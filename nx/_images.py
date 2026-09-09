@@ -4,8 +4,10 @@ Returns an OpenAI content-parts array ({"type": "image_url", "image_url":
 {"url": "data:image/<fmt>;base64,..."}}) as the tool result, which
 _handle_native_tool_calls() stores in the tool message. Servers/models without
 vision will error on the next request — that's the user's signal to not enable
-NX_VISION on that backend (opt-in for exactly that reason, same posture as
-NX_NATIVE_TOOLS).
+NX_VISION on that backend (opt-in for exactly that reason; the read_image
+schema is additionally gated on native tool_calls being CONFIRMED this
+session, see _dispatch._active_tools — with 0.54's tool_choice="auto"
+default that confirmation arrives on the first native call).
 
 Read-only like read_file; never goes through approval. Size-capped by
 NX_IMAGE_MAX_BYTES (default 8 MB — beyond that, base64 would blow the

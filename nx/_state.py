@@ -235,15 +235,16 @@ _STALL_EPISODE_ACTED: bool = False
 
 # --- stall/empty retry → native escalation ------------------------------------
 # Set when a reasoning-only stall or an empty turn happens while the request
-# went out with tool_choice="none" (the default posture until native
-# tool-calling is confirmed — see open_stream). On servers whose models only
-# ever act through the native tool_calls channel (glm/qwen behind vLLM), that
-# posture suppresses the model's ONLY action path: it thinks, emits nothing,
-# and every "act now" nudge is unsatisfiable, so the ladder climbs to a forced
-# final whose salvage prints the model's reasoning as the answer. A retry with
-# tool_choice="auto" re-opens the native channel; a model that prefers the
-# text protocol still works (auto permits, it doesn't force). Cleared when a
-# native tool call confirms, or when a turn completes normally.
+# went out with tool_choice="none" — which since 0.54.0 only happens when
+# native tool calls were explicitly disabled (NX_NATIVE_TOOLS=0). On servers
+# whose models only ever act through the native tool_calls channel (glm/qwen
+# behind vLLM), that posture suppresses the model's ONLY action path: it
+# thinks, emits nothing, and every "act now" nudge is unsatisfiable, so the
+# ladder climbs to a forced final whose salvage prints the model's reasoning
+# as the answer. A retry with tool_choice="auto" re-opens the native channel;
+# a model that prefers the text protocol still works (auto permits, it doesn't
+# force). Cleared when a native tool call confirms, or when a turn completes
+# normally.
 _STALL_FORCE_NATIVE: bool = False
 
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----

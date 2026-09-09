@@ -689,7 +689,7 @@ from ._tool_cache import (  # noqa: F401 (re-export for tests)
 # reads (find X, summarize module Y, list callers of Z) don't bloat the main
 # context with intermediate tool output. Schema above; machinery in
 # nx/_subagent.py. OFF by default (NX_SUBAGENTS=1 to enable) — it adds a tool
-# schema to every turn's floor, so it's opt-in like NX_GRAMMAR/NX_NATIVE_TOOLS.
+# schema to every turn's floor, so it's opt-in like NX_GRAMMAR.
 NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
 # Sub-agent default execution mode (NX_SUBAGENT_ASYNC, default 1): a spawn runs
 # in the background by default — quiet worker thread, answer lands as a short
