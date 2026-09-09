@@ -79,7 +79,10 @@ import nx as m  # noqa: E402
 # (a single optional `targets` string, ~131 tok measured by tiktoken on the
 # 18-function set); BUDGET_TOKENS rises 2900→3020 by that deliberate,
 # verifiable cost.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3020)  # hard: recorded, justified
+# 0.51: git_commit (ROADMAP P3-6) joins the always-on set — files/message/path
+# strings, ~157 tok measured by the suite's chars//3.5 method; BUDGET_TOKENS
+# rises 3020→3180 by that deliberate, verifiable cost.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3180)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

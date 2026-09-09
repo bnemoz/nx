@@ -108,7 +108,7 @@ def test_run_loop_nudges_then_escalates_to_forced_final():
 
     def fake_model_turn(messages, rl, ms, empty_turn_count=0,
                         forced_final=False, recovery_sampling=False,
-                        malformed_call_count=0):
+                        malformed_call_count=0, step_retries=0):
         i = state["i"]
         state["i"] += 1
         if i < len(script):
@@ -141,7 +141,7 @@ def test_successful_tool_resets_empty_counter():
 
     def fake_model_turn(messages, rl, ms, empty_turn_count=0,
                         forced_final=False, recovery_sampling=False,
-                        malformed_call_count=0):
+                        malformed_call_count=0, step_retries=0):
         seen.append(empty_turn_count)
         # empty, empty, TOOL, empty, DONE. The empty *after* the TOOL must see
         # count 0 — that's the reset we're proving (the final DONE call carries
@@ -168,7 +168,7 @@ def test_recovery_sampling_enabled_on_empty_turn():
 
     def fake_model_turn(messages, rl, ms, empty_turn_count=0,
                         forced_final=False, recovery_sampling=False,
-                        malformed_call_count=0):
+                        malformed_call_count=0, step_retries=0):
         sampled.append(recovery_sampling)
         return m.TURN_EMPTY if len(sampled) == 1 else m.TURN_DONE
 

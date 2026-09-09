@@ -93,6 +93,8 @@ TURN_MALFORMED_CALL = "malformed_call"  # text-protocol tag(s) present but unpar
 TURN_API_ERROR = "api_error"  # request hard-failed before any chunk (endpoint down, 4xx/5xx) — never retried
 TURN_CONTEXT_OVERRUN = "context_overrun"  # 400: prompt exceeded the context window — recoverable via one compress+retry
 TURN_LENGTH_CUT = "length_cut"  # finish_reason=length: the model's response budget ran out mid-stream — auto-continue it
+TURN_TIMED_OUT = "timed_out"  # mid-stream timeout after the step-retry ladder was exhausted — a real failure, scored as one
+TURN_TIMED_OUT_RETRY = "timed_out_retry"  # mid-stream timeout with ladder left — the loop backs off and re-opens the same request
 TRUNCATION_MARKER = "\n\n[Truncated by token limit before completion.]"
 
 
@@ -1201,7 +1203,7 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
 # --- one model turn (streamed), returns TURN_* status -----------------------
 def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malformed_stream_cut_count: int = 0,
                empty_turn_count: int = 0, forced_final: bool = False, recovery_sampling: bool = False,
-               malformed_call_count: int = 0) -> str:
+               malformed_call_count: int = 0, step_retries: int = 0) -> str:
     # Start the spinner BEFORE open_stream() so the HTTP-handshake + interrupt-
     # watcher-setup window (which can be tens of ms on a warm local server but
     # seconds on a cold/wake-from-sleep one) isn't a frozen green-text gap.
@@ -1382,15 +1384,33 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     )
     if stream_error is not None:
         if isinstance(stream_error, httpx.TimeoutException):
+            # P3-2 (0.51.0): a mid-stream timeout is a FAILURE, not a completed
+            # turn — it used to return TURN_DONE here, which headless callers
+            # scored as a clean pass on truncated output. First spend the
+            # step-level retry ladder (transient busy-server timeouts, the same
+            # ladder _send uses pre-first-byte); only exhaustion returns the
+            # honest TURN_TIMED_OUT.
+            if step_retries < _step_retry_limit():
+                if not quiet:
+                    if parser.mode in ("think", "say"):
+                        print()
+                    parser.close_think_block()
+                    print(RESET)
+                    delay = _step_backoff_delay(step_retries, None)
+                    print(f"{C.WARNING}  ↻ STREAM TIMEOUT — server stopped delivering chunks; "
+                          f"discarding partial output and retrying "
+                          f"({step_retries + 1}/{_step_retry_limit()} in {delay:.1f}s){RESET}")
+                return TURN_TIMED_OUT_RETRY
             if not quiet:
                 if parser.mode in ("think", "say"):
                     print()
                 parser.close_think_block()
                 print(RESET)
-                print(f"{C.WARNING}  ✂ STREAM TIMEOUT — server stopped delivering chunks; "
-                      f"discarded partial output and returned to chat input{RESET}")
+                print(f"{C.ERROR}  ✗ STREAM TIMEOUT after {step_retries} "
+                      f"retr{_plural_ies(step_retries)} — server stopped delivering chunks; "
+                      f"the task did NOT complete{RESET}")
                 print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
-            return TURN_DONE
+            return TURN_TIMED_OUT
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
             if not quiet:
@@ -1649,6 +1669,30 @@ def _report_length_exhausted(quiet: bool, used: int) -> None:
               f"— saved partial answer with truncation marker{RESET}")
 
 
+# --- P3-2 step-level transient retry (0.51.0) -------------------------------
+# The HTTP layer (_openai_client._send) backs off 429/5xx/broken connections
+# before the FIRST byte; a timeout after the stream has begun is structurally
+# unreplayable there (a partially-consumed stream can't be re-sent), so the
+# turn loop owns it: model_turn() returns TURN_TIMED_OUT_RETRY / TURN_TIMED_OUT
+# and this loop applies the same ladder at the step boundary.
+
+def _step_retry_limit() -> int:
+    from ._openai_client import _HTTP_RETRIES_DEFAULT
+    return max(0, _env_int("NX_TURN_RETRIES", _HTTP_RETRIES_DEFAULT))
+
+
+def _step_backoff_delay(attempt: int, retry_after: float | None) -> float:
+    """Same curve as the HTTP layer's pre-first-byte backoff (Retry-After wins,
+    else base * 2**attempt, same cap) so a stream timeout and a connection
+    retry behave identically."""
+    from ._openai_client import _backoff_delay
+    return _backoff_delay(attempt, retry_after)
+
+
+def _plural_ies(n: int) -> str:
+    return "y" if n == 1 else "ies"
+
+
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
                          recovery_sampling: bool = False,
                          on_step: Optional[Callable[[], None]] = None,
@@ -1690,6 +1734,7 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
     steps = 0
     reasoning_loop_cuts = 0
     malformed_stream_cuts = 0
+    timed_out_retries = 0  # P3-2: mid-stream-timeout step retries spent
     empty_turn_cuts = 0
     malformed_call_cuts = 0
     continuation_cuts = 0  # finish_reason="length" auto-continues (st.MAX_CONTINUATIONS budget)
@@ -1723,7 +1768,8 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
                             recovery_sampling=recovery_sampling,
-                            malformed_call_count=malformed_call_cuts)
+                            malformed_call_count=malformed_call_cuts,
+                            step_retries=timed_out_retries)
         if on_step is not None:
             on_step()
         if _task_deadline_exceeded():
@@ -1810,6 +1856,27 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             malformed_call_cuts += 1
             sub_rescue_turns += sub_loop
             continue
+        if status == TURN_TIMED_OUT_RETRY:
+            # Mid-stream timeout with ladder left: burn a bounded retry, not a
+            # turn of the model's budget (steps was not incremented — this
+            # failure is ours, not the model's) and re-enter the loop. The
+            # stream was cut before anything was appended to `messages`, so a
+            # clean re-open replays the exact same request.
+            timed_out_retries += 1
+            delay = _step_backoff_delay(timed_out_retries - 1, None)
+            if not _subagent_quiet():
+                print(f"{DIM}  ↻ step retry {timed_out_retries}/"
+                      f"{_step_retry_limit()} in {delay:.1f}s…{RESET}")
+            if delay > 0:
+                time.sleep(delay)
+            continue
+        if status == TURN_TIMED_OUT:
+            # Ladder exhausted: report the failure honestly. Headless callers
+            # map this to status "error" (exit 4) — never "done".
+            return {"status": "error",
+                    "error": "stream timeout: the server stopped delivering chunks "
+                             f"after {timed_out_retries} step retries",
+                    "turns": steps + 1}
         if status == TURN_LENGTH_CUT:
             # The response budget (NX_MAX_TOKENS, or a server-side cap) ran out
             # mid-answer. model_turn() appended nothing; it handed the partial
@@ -1925,6 +1992,14 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         if final_status == TURN_API_ERROR:
             return {"status": "error",
                     "error": f"API request failed: {st._LAST_API_ERROR}",
+                    "turns": steps + 1}
+        if final_status in (TURN_TIMED_OUT_RETRY, TURN_TIMED_OUT):
+            # A rescue turn that times out mid-stream is also a failure (the
+            # ladder is not re-armed here: the main loop's retries were already
+            # spent getting to this point).
+            return {"status": "error",
+                    "error": ("stream timeout: the server stopped delivering "
+                              "chunks during the forced-final answer turn"),
                     "turns": steps + 1}
         if final_status == TURN_DONE:
             return {"status": "cap", "turns": steps + 1}

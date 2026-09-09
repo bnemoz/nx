@@ -237,6 +237,48 @@ embeddings-capable source is configurable today.
 
 ## Phase 3 — Capability expansion (0.47+, only after Phase 1–2)
 
+### P3 priority order (set 2026-09, phase 2 complete at 0.50.0)
+
+Re-verified against the tree at 0.50.0: P3-1/3/7/8/9/11/12/13/14 are
+**absent**; P3-2 is **partial** (HTTP-layer backoff exists but only before the
+first byte, `_openai_client.py:14-18`; a mid-stream timeout still prints
+"discarded partial output" and returns `TURN_DONE`, `_turn.py:1393`); P3-6 is
+**partial** (read-only `git_status`/`git_diff`/`git_log` shipped in `TOOLS`;
+commit is still classifier prose); P3-10 is **partial** (capability cached per
+`Source` instance, reset on model pin, no TTL, not shown by `/source`).
+Floor ledger: **3177 tok measured** against the enforced `NX_FLOOR_BUDGET`=3180
+(`tests/test_initial_context.py` — 1.7's tripwire is now a budget; 0.51's
+git_commit schema cost ~157 tok, ledger updated).
+Config surface is **143** `NX_*` vars, up from ~119 at audit time.
+
+| # | Item | Effort | Why here |
+| --- | --- | --- | --- |
+| 1 | **P3-2** honest timeout + step-level transient retry *(shipped 0.51.0)* | S/M | Live mis-score: a mid-task timeout returns `TURN_DONE` and batch scores `done`. Smallest pure-correctness win left; the existing HTTP retry layer is the substrate to extend to the step boundary. |
+| 2 | **P3-6** `git_commit` with staged-diff review *(shipped 0.51.0)* | S/M | Half-built already (read-only git tools in `TOOLS`); routes the most common write-without-review path through review, the 2.1 fence, and the 1.6 secret scan. |
+| 3 | **P3-9** `nx config` viewer + `/status` | S/M | 141 vars and growing; every later item adds more. Land the viewer/doctor *before* the additions so each new tunable ships visible. |
+| 4 | **P3-14** eval harness: seed corpus + scored batch runs | M, then continuous | The project's own velocity lever (would have caught the floor drift as a failure, not a warning). Seed it early, then score every later P3 item against it. |
+| 5 | **P3-1** sandbox tier for `run_bash` + writes | L | The containment substrate: env passlist, cwd pin, rlimits, optional bwrap/landlock. Makes YOLO-without-sandbox harder and — since batch/eval runs execute unapproved shell today — is what makes item 4's own batch posture safe. |
+| 6 | **P3-3** provider abstraction: Anthropic-native + Responses | L | Explicit `cache_control` is the project-thesis lever (theme 1) and cannot be proxied in. Excludes structured outputs per the 2026-09 decision. |
+| 7 | **P3-10** capability manifest per (source, model) | M | Natural consumer of P3-3: one cached, model-keyed manifest (probe TTL, `/source` display) deleting the opt-in archaeology. |
+| 8 | **P3-11** provider fallback ladder | M | Declared source chain on 429/5xx/overrun for unattended `nx run`; wants P3-10's health/cap signals and P3-14's scoring. |
+| 9 | **P3-7** read-back UX: pager, `/diff`, highlighting | L | Biggest daily-driver trust gap; independent of 5–8 — interleave by demand. |
+| 10 | **P3-8** chatbox editor completion | M→L | Split `_chatbox_raw` first; independent — interleave by demand. |
+| 11 | **P3-12** multi-root / worktree isolation | L | Prerequisite for parallel batch + write-tier sub-agents; low urgency until fan-out is actually wanted. |
+| 12 | **P3-13** web tools behind an egress policy | L | Last: needs P3-1's sandbox so egress is enforced rather than loud. |
+
+**Minor bands (semver):** 0.51 P3-2 + P3-6 · 0.52 P3-9 · 0.53 P3-14 seed
+corpus (then continuous) · 0.54–0.55 P3-1 · 0.56–0.57 P3-3 · 0.58 P3-10 +
+P3-11 · 0.59+ P3-7/P3-8 by demand · 0.60+ P3-12, then P3-13.
+
+**Sequencing rationale:** 1–3 each close a live gap (mis-scored timeouts,
+unreviewed commits, invisible config) in a few days each, with no new
+subsystem surface; 4 lands before the heavy items so they ship measured; 5
+precedes 6 because the sandbox also hardens the batch/eval posture that 4
+introduces; 7 rides on 6 (a manifest keyed per model needs the model
+abstraction underneath); 9–10 are isolated UX tracks that can interleave after
+0.52; 11–12 stay last because their demand (parallel batch, web access) is
+speculative until the correctness tier exists.
+
 ### P3-1 Sandbox tier for `run_bash` + writes **[L]**
 Zero occurrences of `bwrap/unshare/landlock/seccomp/setrlimit` repo-wide. Today's
 confinement is `setsid` (terminal-signature protection, not containment), full
@@ -249,13 +291,17 @@ deny `~/.ssh`/`~/.aws`, optional no-network), scrubbed `env=` with an explicit
 passlist, `cwd` pinning, `RLIMIT_AS/CPU/NOFILE`. Gate per-tier: YOLO without a
 sandbox should become *harder*, not louder.
 
-### P3-2 Honest timeout + turn-level transient retry **[M]**
+### P3-2 Honest timeout + turn-level transient retry **[M]** *(shipped 0.51.0)*
 `httpx.TimeoutException` mid-stream prints "discarded partial output" and
 returns **`TURN_DONE`** (`_turn.py:1377-1387`)**[v]** — a mid-task timeout is
 reported as a completed answer, and in batch mode a `done` line with truncated
-output. `TURN_API_ERROR` is terminal. **Ship as:** backoff-retry 429/5xx at the
-step boundary; timeout → a distinct status that scores `error`/`timeout`, never
-`done`.
+output. `TURN_API_ERROR` is terminal. **Shipped:** the mid-stream timeout is a
+real status now — `TURN_TIMED_OUT_RETRY` while `NX_TURN_RETRIES` (default =
+the HTTP layer's `NX_HTTP_RETRIES`, same `_backoff_delay` curve) has ladder
+left, `TURN_TIMED_OUT` once exhausted; the loop retries the same request at
+the step boundary without burning a model turn, and exhaustion maps to a
+status-"error" summary (batch/one-shot exit 4, `timed_out`-adjacent scoring,
+never `done`). `NX_TURN_RETRIES=0` restores fail-fast.
 
 ### P3-3 Provider abstraction: Anthropic-native + Responses API **[L]**
 Only `/chat/completions` + `/models`, Bearer-only auth, `choices[0]`,
@@ -306,11 +352,21 @@ A `run_tests(scope)` tool (detect pytest/cargo/npm/go, run targeted, parse
 structured failures, offer them as a tail note) is the loop every edit-heavy
 session wants and the verification tier write-sub-agents need.
 
-### P3-6 Git workflow tool **[S/M]**
+### P3-6 Git workflow tool **[S/M]** *(shipped 0.51.0)*
 `git commit/add/worktree` exist only as classifier prose. Committing is raw
 `run_bash` reviewed as nothing; `apply_patch` has no stage/commit surface. A
 `git_commit` with staged-diff review (and a pre-commit secret scan from 1.6)
-removes the most common write-without-review path.
+removes the most common write-without-review path. **Shipped:** `git_commit`
+(`nx/_gitcommit.py`) — the model stages paths explicitly (`git add --`), the
+POST-stage `git diff --staged` becomes the approval `preview` (always exactly
+what the commit will contain), and the same text is secret-scanned
+(`_bash_jobs._contains_secret`, the run_bash patterns) before the confirm
+round-trip; a hit refuses without prompting. Fixed argv shapes only
+(`add`/`commit -m`, `NX_GITCOMMIT_TIMEOUT`), no free-text shell. Plan-gated,
+in the sub-agent write tier, "git commit: <subject>" has a local medium risk
+hint, and `_allowlist_tool` maps it for `A`-key saves. Denial leaves the
+index staged, commits nothing. `run_bash` stays the tool for every other git
+operation (worktree/branch/rebase remain classifier prose).
 
 ### P3-7 Read-back UX: output pager + `/diff` **[L]**
 Tool output preview is hard-capped at 8 lines (`_dispatch.py:693-696`);
@@ -390,6 +446,14 @@ would have been caught by a test rather than a warning.
 
 ## Suggested ordering (semver per AGENTS.md)
 
+**STATUS (0.51.0): Phase 3, priority band 1–2 shipped.** **P3-2** (honest
+timeout + step-level retry: `TURN_TIMED_OUT_RETRY`/`TURN_TIMED_OUT`,
+`NX_TURN_RETRIES`, exhaustion scores `error`/exit 4 in batch and one-shot —
+the live mis-scored mid-task timeout is closed) and **P3-6** (`git_commit`
+with post-stage staged-diff review + pre-confirm secret scan, plan-gated,
+sub-agent write tier, local medium risk hint) shipped together at 0.51.0;
+the P3 priority table below is updated in place per item.
+
 **STATUS (0.47.0): Phase 2 continues.** Shipped this session: **2.2** (0.47.0)
 — undo correctness + durability: one approved call = one checkpoint (dispatcher
 pushes via `push_if_absent`, which dedups against body-pushed checkpoints and
@@ -419,7 +483,8 @@ plan-gated, in the sub-agent write tier. NX_VERIFY_CMD stays the hands-off
 post-edit loop. **Previously:** Phase 1 DONE
 at 0.42; 2.1 (0.43.0), 2.5 (0.44.0), 2.3a (0.45.0), 2.3b (0.46.0) as detailed
 below. **P3-4 (one dialect) closed at 0.50.0**, which empties Phase 2's open
-list; what remains is Phase 3.
+list; what remains is Phase 3, now priority-ordered (see "P3 priority order",
+the first subsection under Phase 3).
 
 Then 2.1 (0.43.0): a hard write fence in `run_tool()` (`nx/_fence.py`, env
 `NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session

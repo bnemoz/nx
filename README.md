@@ -224,6 +224,8 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
+| `NX_GITCOMMIT_TIMEOUT` | wall-clock ceiling for one `git_commit` call (the stage + diff + commit sequence) in seconds (default 60) |
+| `NX_TURN_RETRIES` | step-level retries for a mid-stream timeout (the server stopped delivering chunks after the stream began — the one failure the HTTP layer's `NX_HTTP_RETRIES` cannot replay). Same backoff curve and default as the HTTP layer (default 2 beyond the first attempt; `0` restores fail-fast). When the ladder is exhausted the turn reports a real error: batch scores it `error`/exit 4, never `done` |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_CONTINUATIONS` | auto-continues a reply that ended with `finish_reason="length"` (the token cap cut it mid-answer): the partial text becomes a real assistant turn, a resume note is appended, and the stream re-opens (default 2; `0` keeps the old single-turn behavior and marks the partial with a truncation marker) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 500) |
@@ -595,6 +597,7 @@ go through the approval gate above.
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
+| `git_commit` | `files`, `message`, `path?` | stage `files` (space-separated; `.` = every change) and commit `message` after the user reviews the staged diff. See below |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only; ends with the absolute dirs holding the shown hits, because the listed `(name)` is a bare filename — `read_file` needs the full path |
@@ -625,7 +628,20 @@ command is restricted to that file). The `git_status`/`git_diff`/`git_log`
 cache entries carry a
 fingerprint of `.git` state (HEAD/index/`ORIG_HEAD` mtimes) and are dropped by
 any edit tool or `run_bash` too — a commit in another terminal, or `git reset`
-via `run_bash`, is never served stale. `wait_background` is omitted from the
+via `run_bash`, is never served stale. `git_commit` (0.51.0, ROADMAP P3-6)
+completes the git surface: it stages the paths the model names (`git add --
+<files>`, the only argv shape it can run), shows the **staged** diff (taken
+after staging, so it is always exactly what the commit will contain) as the
+approval `preview`, and scans that same text for secret-shaped strings
+(OpenAI/GitHub/Slack/GitLab tokens, AWS key ids, PEM blocks — the same
+patterns `run_bash`'s own guard uses) before any confirmation round-trip. A
+hit refuses the commit outright; nothing is committed until the user accepts
+the diff they were shown. Denial leaves the changes staged (review with
+`git_diff` staged=true) and commits nothing. Plan mode gates it, it joins
+the sub-agent write tier, and the "git commit: <subject>" action carries a
+local medium risk verdict — the model cannot reach `git commit` unreviewed
+anymore; `run_bash` stays the tool for every other git operation.
+`wait_background` is omitted from the
 tool schemas sent to
 the model until a `run_bash` has actually backgrounded, so a session where
 nothing ever backgrounds doesn't pay tokens for a tool it will never call.

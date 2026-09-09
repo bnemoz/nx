@@ -379,7 +379,7 @@ def test_repl_breaks_on_esc():
     call_count = {"n": 0}
     def fake_model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
                         empty_turn_count=0, forced_final=False, recovery_sampling=False,
-                        malformed_call_count=0):
+                        malformed_call_count=0, step_retries=0):
         call_count["n"] += 1
         # first turn: model emits a tool call, user escapes it
         if call_count["n"] == 1:
@@ -635,7 +635,7 @@ def test_repl_recover_command_forces_visible_checkpoint():
 
     def fake_model_turn(messages, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
                         empty_turn_count=0, forced_final=False, recovery_sampling=False,
-                        malformed_call_count=0):
+                        malformed_call_count=0, step_retries=0):
         calls.append({
             "forced_final": forced_final,
             "recovery_sampling": recovery_sampling,

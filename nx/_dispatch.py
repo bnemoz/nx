@@ -38,6 +38,7 @@ from ._subagent import spawn_agent, _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._testrunner import run_tests
+from ._gitcommit import git_commit
 from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, push_if_absent as _undo_push_once
 
@@ -50,7 +51,7 @@ DISPATCH = {
     "memory_write": memory_write, "memory_search": memory_search,
     "memory_delete": memory_delete,
     "spawn_agent": spawn_agent, "read_image": read_image,
-    "plan_edit": plan_edit, "run_tests": run_tests,
+    "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
 }
 
 # spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH

@@ -218,6 +218,13 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
         # already a list when it reaches the tool, so the string here is the
         # joined form with no room for a metacharacter trick.
         return ("medium", "contained test run")
+    if action.startswith("git commit: "):
+        # git_commit's fixed shape (nx/_gitcommit.py): the message is not a
+        # shell — there is nothing to inject. Committing IS the write, and it
+        # is reviewed via the staged-diff preview (with the secret scan in
+        # front of it), so medium is the honest floor: no classifier
+        # round-trip for a shape the user is already looking at a diff for.
+        return ("medium", "commit with staged-diff review")
     # delete_file: removal is the action the risk buckets call out — a project
     # file delete is at least medium (reversible only via /undo, which is
     # in-memory), anything outside the project or a home dotdir stays a

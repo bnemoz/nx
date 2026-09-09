@@ -390,6 +390,17 @@ from ._testrunner import run_tests
 RUN_TESTS_TOOL = {"type": "function", "function": {"name": "run_tests", "description": "Detect and run the project's test suite (pytest/go/cargo/npm), returning a failure-focused summary. Pass targets for a scoped re-run; use run_bash for any other shell command.", "parameters": {"type": "object", "properties": {"targets": {"type": "string", "description": "Optional: a tests dir, test file, or node id to scope the run (default = whole suite at the project root)"}}}}}
 TOOLS.append(RUN_TESTS_TOOL)
 
+# Commit tool (schema here, body in nx/_gitcommit.py, 0.51.0 / ROADMAP P3-6):
+# stages paths explicitly, shows the staged diff as the approval preview, and
+# secret-scans it before the confirm round-trip. The commit itself is the unit
+# of review — `git commit` via run_bash was the last common write-without-review
+# path. Plan mode gates it (it mutates the repo); it joins the sub-agent write
+# tier (an agent that edits but cannot land its work is stuck).
+from ._gitcommit import git_commit
+
+GIT_COMMIT_TOOL = {"type": "function", "function": {"name": "git_commit", "description": "Stage `files` (space-separated; `.` = all changes) and commit with `message` after the user reviews the staged diff. Any other git operation -> run_bash.", "parameters": {"type": "object", "properties": {"files": {"type": "string", "description": "Files to stage, space-separated; `.` = every change"}, "message": {"type": "string", "description": "Commit message (first line, verbatim)"}, "path": {"type": "string", "description": "Repo/directory (default: project root)"}}, "required": ["files", "message"]}}}
+TOOLS.append(GIT_COMMIT_TOOL)
+
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
     "description": "End the turn with the answer the user sees; it must stand on its own, since the transcript before it is not re-shown. Call it when the work is done or when you need something from the user. Stop by calling this, not by replying with plain text.",
@@ -735,7 +746,8 @@ from ._verify import (
 from ._turn import (
     _LoggingStream, TURN_DONE, TURN_TOOL, TURN_STREAM_CUT,
     TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL,
-    TURN_API_ERROR, TURN_LENGTH_CUT, CONTINUATION_NUDGE, TRUNCATION_MARKER,
+    TURN_API_ERROR, TURN_LENGTH_CUT, TURN_TIMED_OUT, TURN_TIMED_OUT_RETRY,
+    CONTINUATION_NUDGE, TRUNCATION_MARKER,
     _ctx_field,
     _ensure_ctx_probe, _print_stats_footer, _handle_forced_final_tool_call,
     _handle_native_tool_calls, _handle_text_tool_calls, _handle_loop_cut,

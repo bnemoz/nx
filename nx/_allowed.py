@@ -164,6 +164,8 @@ def _allowlist_tool(action: str) -> str:
                 else "write_file")
     if action.startswith("write memory"):
         return "memory_write"
+    if action.startswith("git commit: "):
+        return "git_commit"
     return "*"
 
 

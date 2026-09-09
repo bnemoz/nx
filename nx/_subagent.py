@@ -227,8 +227,11 @@ _SUBAGENT_TLS = threading.local()
 # parent's run_tests hits (the wrapper tears down the sub-agent context), so
 # it is exactly as approved as a parent run — just tagged (sub-agent). It
 # stays refused for READ-ONLY agents: their table never contains it.
+# git_commit IS included (0.51.0): an agent that edits but cannot land its
+# work strands its changes. Same gate: the parent's _confirm shows the staged
+# diff (and the secret scan runs before it) exactly as a parent call would.
 _WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit",
-                          "run_tests")
+                          "run_tests", "git_commit")
 
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
