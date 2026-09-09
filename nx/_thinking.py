@@ -43,6 +43,7 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from . import _state as st
+from ._env import _env_int
 from ._openai_client import probe_scope
 
 if TYPE_CHECKING:
@@ -58,7 +59,12 @@ _THINKING_KWARG_CANDIDATES: tuple[dict[str, Any], ...] = (
 )
 
 _PROBE_MESSAGES = [{"role": "user", "content": "hi"}]
-_PROBE_MAX_TOKENS = 48
+# Generous for the same reason as _capability._PROBE_MAX_TOKENS: a reasoning
+# model's thinking phase counts against max_tokens, so a tight budget can cut
+# the probe response mid-think before ANY reasoning_content token lands — the
+# separation check then reads "no reasoning" and the probe records the wrong
+# answer for the (source, model) pair.
+_PROBE_MAX_TOKENS = _env_int("NX_THINKING_PROBE_MAX_TOKENS", 256)
 
 
 def _probe_kwargs_for(src: "Source", mid: str) -> dict[str, Any] | None:
@@ -78,7 +84,7 @@ def _probe_kwargs_for(src: "Source", mid: str) -> dict[str, Any] | None:
     def _create(extra_body: dict[str, Any] | None):
         resp = src.client.chat.completions.create(
             model=mid, messages=_PROBE_MESSAGES, stream=False,
-            max_tokens=_PROBE_MAX_TOKENS, timeout=20, extra_body=extra_body)
+            max_tokens=_PROBE_MAX_TOKENS, timeout=30, extra_body=extra_body)
         from ._metrics import _record_api_call
         _record_api_call(resp, fallback_chars=_PROBE_MAX_TOKENS,
                          fallback_prompt_chars=64)

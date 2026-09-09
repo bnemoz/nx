@@ -31,6 +31,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from . import _state as st
+from ._env import _env_int
 from ._grammar import build_tool_call_grammar
 from ._openai_client import probe_scope
 from ._text_fallback import parse_text_calls_with_errors
@@ -74,13 +75,25 @@ def _valid_probe_tool_call(name: str | None, raw_args: str | None) -> bool:
     return isinstance(args, dict) and "echo" in args
 
 
+# Probe token budget. Generous on purpose: on a hybrid reasoning model (glm
+# / qwen / R1-style) the server counts the thinking phase against max_tokens,
+# and a reasoning-first probe prompt can easily burn 100+ tokens before the
+# first tool-call token. A small budget (the old 64) cut the stream mid-think,
+# returned no tool_calls, and misclassified a NATIVE server as TEXT — pinning
+# tool_choice=none for the whole session (the model could then never emit a
+# native call to reactively un-confirm it, so every turn stalled in
+# reasoning-only until the forced-final salvage). One-shot, non-streaming,
+# once per (source, model) — the extra budget costs nothing in the common case.
+_PROBE_MAX_TOKENS = _env_int("NX_CAPABILITY_PROBE_MAX_TOKENS", 768)
+
+
 def _probe_native(src: "Source", mid: str) -> bool:
     """One non-streaming request with tools=[_PROBE_TOOL]. Returns True if the
     server answers with a structurally valid native tool_calls entry."""
     try:
         resp = src.client.chat.completions.create(
             model=mid, messages=_PROBE_MESSAGES, tools=[_PROBE_TOOL],
-            stream=False, max_tokens=64, timeout=20)
+            stream=False, max_tokens=_PROBE_MAX_TOKENS, timeout=30)
     except Exception:
         return False
     from ._metrics import _record_api_call
@@ -121,8 +134,8 @@ def _probe_grammar(src: "Source", mid: str) -> bool:
     }
     try:
         resp = src.client.chat.completions.create(
-            model=mid, messages=_PROBE_MESSAGES, stream=False, max_tokens=128,
-            timeout=20, extra_body=extra_body)
+            model=mid, messages=_PROBE_MESSAGES, stream=False,
+            max_tokens=_PROBE_MAX_TOKENS, timeout=30, extra_body=extra_body)
     except Exception:
         return False
     from ._metrics import _record_api_call

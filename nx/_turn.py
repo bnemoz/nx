@@ -999,6 +999,31 @@ def _strip_unterminated_tool_call(text: str) -> str:
     return text
 
 
+def _maybe_arm_native_escalation() -> None:
+    """After a stall/empty nudge, make the retry open with tool_choice="auto"
+    when the just-failed request was sent with "none".
+
+    Two preconditions, both read at nudge time (the request that stalled is
+    the evidence): native must not already be confirmed (nothing to escalate)
+    and the capability probe must not have classified this source NATIVE
+    (its verdict is authoritative; a None verdict means still pending/unknown,
+    which is exactly the window where the first user prompt beats the probe
+    and stalls on servers where "none" suppresses the model's only action
+    channel — glm/qwen behind vLLM).
+    """
+    if st._NATIVE_TOOL_CALLS_CONFIRMED or st._STALL_FORCE_NATIVE:
+        return
+    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+    if capability is not None:
+        from ._capability import CAPABILITY_NATIVE
+        if capability == CAPABILITY_NATIVE:
+            return  # probe already answered: native is on for every request
+    st._STALL_FORCE_NATIVE = True
+    if not _subagent_quiet():
+        print(f"{DIM}  ↳ retrying with native tool-calling enabled "
+              f"(tool_choice=auto){RESET}")
+
+
 def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
                      leaked_token_run: int, repeat_chunk_run: int, reasoning_only_start: Optional[float],
                      reasoning_only_chars: int, reasoning_parts: list[str],
@@ -1177,6 +1202,7 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; "
               f"{'nudging to wrap up' if wrapup_note else 'nudging to act'} "
               f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
+    _maybe_arm_native_escalation()
     if wrapup_note is not None:
         if reasoning_text.strip():
             messages.append({"role": "user", "content": f"[Runtime note: {wrapup_note}]"})
@@ -1561,6 +1587,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                       f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
                       f"; nudging the model to continue "
                       f"({empty_turn_count + 1}/{_subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)}){RESET}")
+            _maybe_arm_native_escalation()
             _nudge_current_user_turn(messages, EMPTY_TURN_NUDGE)
             return TURN_EMPTY
         if not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0:
@@ -1781,6 +1808,9 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         force_final = False
         recovery_sampling = False
         if status == TURN_DONE:
+            # A settled turn: whatever posture produced it works. The next
+            # stall, if any, re-derives the escalation from its own evidence.
+            st._STALL_FORCE_NATIVE = False
             if not _subagent_active() and not _batch_active():
                 # Only the parent loop fires NX_VERIFY_CMD — concurrent
                 # sub-agents or batch-task threads hitting this line together
@@ -1919,6 +1949,12 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             recovery_sampling = True
             continue
         if status == TURN_TOOL:
+            # The native-channel escalation served its purpose: a real native
+            # tool call just ran, so _handle_native_tool_calls() set
+            # _NATIVE_TOOL_CALLS_CONFIRMED (the session-sticky version of this
+            # flag). Drop the per-episode one so a later text-protocol turn
+            # isn't needlessly forced onto the native channel.
+            st._STALL_FORCE_NATIVE = False
             # A real tool call just ran. If a stall-recovery episode is in
             # progress (reasoning_loop_cuts > 0), mark it: any later text-only
             # turn is a legitimate final summary of completed work, not a

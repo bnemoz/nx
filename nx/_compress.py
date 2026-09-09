@@ -447,6 +447,20 @@ def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
                                st.OVERFLOW_EVICT_MIN_CHARS, st.OVERFLOW_EVICT_MAX)
 
 
+def _default_tool_choice() -> str:
+    """The tool_choice open_stream() applies when the caller didn't force one:
+    "auto" once native tool-calling is confirmed / probed / stall-escalated,
+    "none" otherwise (the text-protocol default posture — see the long comment
+    in open_stream)."""
+    capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+    from ._capability import CAPABILITY_NATIVE
+    if (NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED
+            or st._STALL_FORCE_NATIVE
+            or (capability == CAPABILITY_NATIVE and toolcalls_mode() != "text")):
+        return "auto"
+    return "none"
+
+
 def open_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] = TOOLS,
@@ -485,15 +499,11 @@ def open_stream(
         # are suppressed. On those servers "none" doesn't fall back to the
         # text protocol, it just produces prose narration with no tool call
         # at all. So: native-confirmed sources (probed, or reactively via
-        # st._NATIVE_TOOL_CALLS_CONFIRMED) get tool_choice="auto"; everyone
-        # else keeps the old "none" default.
-        capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
-        from ._capability import CAPABILITY_NATIVE
-        if (NX_NATIVE_TOOLS or st._NATIVE_TOOL_CALLS_CONFIRMED
-                or (capability == CAPABILITY_NATIVE and toolcalls_mode() != "text")):
-            tool_choice = "auto"
-        else:
-            tool_choice = "none"
+        # st._NATIVE_TOOL_CALLS_CONFIRMED, or a stall-escalated retry — see
+        # _default_tool_choice) get tool_choice="auto"; everyone else keeps
+        # the old "none" default.
+        if tool_choice is None and tools:
+            tool_choice = _default_tool_choice()
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens

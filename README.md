@@ -180,7 +180,8 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
 | `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users. While a tool runs the line also carries live progress (`· 12s · 2/3 · compiling 3/40`) — see [Live tool progress](#live-tool-progress); under `0` that tail is suppressed, since a redraw-once line cannot show a moving clock |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
-| `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior |
+| `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior. The probe's response budget is `NX_THINKING_PROBE_MAX_TOKENS` (default 256) — generous on purpose: a reasoning model's thinking phase counts against `max_tokens`, and a tight budget cut the probe mid-think before any reasoning token landed, recording the wrong answer for the (source, model) pair |
+| `NX_CAPABILITY_PROBE_MAX_TOKENS` | response budget for the startup tool-calling capability probe (default 768; was a hard-coded 64). On hybrid reasoning models (glm / qwen / R1-style) the thinking phase counts against `max_tokens` and can easily burn 100+ tokens before the first tool-call token — the old 64 cut the probe mid-think, returned no `tool_calls`, and misclassified a NATIVE server as TEXT, pinning `tool_choice=none` for the whole session (the model could then never emit a native call to reactively un-confirm it, so every turn stalled reasoning-only until the forced-final salvage printed its reasoning as the answer). One-shot, non-streaming, once per (source, model) |
 | `NX_REASONING_BUDGET` | cap on the model's reasoning/thinking phase in tokens, sent as `{"reasoning": {"max_tokens": N}}` in the request body (default `0` — off, let the model self-terminate its thinking; ignored by backends that don't consume that field; set per-source with `NX_SOURCE_<NAME>_EXTRA_BODY`; toggle live with `/budget`) |
 | `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders). In a parallel turn the collapse hint appears once on the group footer, not once per call. Approval previews count as tool output too (0.53.1): a `git_commit` staged diff or an `edit_file` before/after shown at the Y/n prompt collapses with the rest — the prompt line itself always shows |
 | `NX_TOOL_RESULT_CHARS` | cap on tool-result characters entering context (default 20000; `0` disables the cap). Oversized results are head/tail-kept and their full text spilled to `~/.nx/overflow/<sha256>.txt` — the result tells the model the path so it can `read_file`/`search_files` the elided middle |
@@ -263,6 +264,19 @@ final answer, the forced turn is a nudge rather than a straitjacket: a
 call instead, nx runs it (through the normal approval gate) and keeps the
 turn going — the counter stays pinned at the last rung so any fresh stall
 escalates straight back to forced-final instead of re-climbing the ladder.
+
+Before any of that ladder climbs, nx checks the one posture that makes every
+rung unsatisfiable: a stall (or an empty turn) on a request that went out with
+`tool_choice="none"` — the default until native tool-calling is confirmed —
+means the server may be suppressing the model's only action channel. Some
+models (glm / qwen generations behind vLLM) never fall back to the
+text-protocol tags when native calls are off; they think, emit nothing, and
+every "act now" nudge is unanswerable. The retry re-opens the stream with
+`tool_choice="auto"` (a `↳ retrying with native tool-calling enabled` line
+says so), which either un-stalls the model or changes nothing for a
+text-protocol model — `auto` permits native calls, it doesn't force them. A
+successful tool call or a settled turn drops the escalation; the next stall,
+if any, re-derives it from its own evidence.
 
 Episode awareness also shapes the mid-ladder nudge: once a real tool call has
 run since the first stall, a fresh stall is read as the model stalling while

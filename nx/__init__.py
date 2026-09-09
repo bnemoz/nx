@@ -728,6 +728,7 @@ from ._compress import (
     RECOVERY_DRY_MULTIPLIER, RECOVERY_DRY_BASE, RECOVERY_DRY_ALLOWED_LENGTH,
     RECOVERY_DRY_SEQUENCE_BREAKERS, _recovery_sampling_opts, open_stream,
     compress, _maybe_autocompress, _compress_for_overrun,
+    _default_tool_choice,
 )
 
 

@@ -41,6 +41,7 @@ FIELDS = (
     "_TALLY_ARG_REPAIRS",            # int: repairs applied this turn (footer)
     "_TALLY_RETRIES",                # int: recovery nudges/cuts this turn (footer)
     "_STALL_EPISODE_ACTED",          # bool: a tool ran after this stall nudge
+    "_STALL_FORCE_NATIVE",           # bool: a stall/empty retry must open with tool_choice="auto"
     "_LAST_PARTIAL_TEXT",            # str: partial answer of the last length cut
     "_NATIVE_TOOL_CALLS_CONFIRMED",  # bool: endpoint uses native tool_calls
     "_MALFORMED_TOOL_FAILURES",      # dict[str, int]: malformed-args streaks
@@ -60,7 +61,10 @@ class RecoveryContext:
             if seed is not None:
                 cur = getattr(seed, f)
             else:
-                cur = vars(st).get(f)
+                # getattr routes the descriptor: a value a no-frame set_() put
+                # into vars(st) wins; the popped-name fallback is the
+                # install-time snapshot in _ROUTED_DEFAULTS.
+                cur = getattr(st, f)
             # Copy session-scoped containers so the sub-loop SEES the parent's
             # breaker evidence but its writes stay private; the copy-back folds
             # final VALUES (not container identity) into the parent.
@@ -95,6 +99,18 @@ class _Frame:
 _CURRENT: contextvars.ContextVar[_Frame | None] = st._RECOVERY_CURRENT
 
 
+# The pre-swap values of every routed field, snapshotted at class-install
+# time. The routed names are popped out of the module dict (see
+# _install_descriptors), so a no-frame fallback can't read them from vars(st)
+# anymore; this is where "the module-global default" lives instead. A value
+# written while no loop is running goes into vars(st) (set_) and takes
+# precedence — the snapshot is only the seed, exactly like the plain module
+# global it replaces. Lives on _state (st._RECOVERY_DEFAULTS), not here, so a
+# conftest-style eviction + re-import of this module can't fork the store the
+# already-installed descriptors read.
+_ROUTED_DEFAULTS: dict[str, Any] = st._RECOVERY_DEFAULTS
+
+
 def current() -> RecoveryContext | None:
     """The calling thread's loop context, or None outside any loop."""
     fr = _CURRENT.get()
@@ -104,6 +120,17 @@ def current() -> RecoveryContext | None:
 def install() -> RecoveryContext:
     """Create + install a fresh context for the calling loop. The caller pairs
     this with copy_back_and_reset() in its finally."""
+    # Re-pop the routed names on every install: conftest's between-test module
+    # rewind restores the module dicts to a pre-_recovery snapshot, which puts
+    # the plain defaults back into vars(st) — exactly the dict entries the
+    # LOAD_ATTR_MODULE specialization hazard needs to serve stale values
+    # (see _install_descriptors). Popping here keeps every in-loop access on
+    # the descriptor path, whatever the test harness did to the dict in
+    # between. A value the rewind restored is folded into _ROUTED_DEFAULTS
+    # first so it isn't lost.
+    for f in FIELDS:
+        if f in st.__dict__:
+            _ROUTED_DEFAULTS[f] = st.__dict__.pop(f)
     parent = current()  # the enclosing loop's context, if any
     ctx = RecoveryContext(parent)
     _CURRENT.set(_Frame(ctx, parent))
@@ -112,14 +139,26 @@ def install() -> RecoveryContext:
 
 def copy_back_and_reset(ctx: RecoveryContext) -> None:
     """Fold the context's final values into its parent (or the module globals
-    at the outermost level) and pop the frame."""
+    at the outermost level) and pop the frame.
+
+    The outermost fold deliberately writes through _recovery.set_ semantics
+    rather than raw vars(st) assignment, and keeps the routed names OUT of the
+    module dict (see _install_descriptors): a plain dict entry re-arms the
+    CPython 3.12+ LOAD_ATTR_MODULE specialization hazard where a hot read site
+    returns the dict value while descriptor-routed writes go to the context."""
     fr = _CURRENT.get()
     if fr is None or fr.ctx is not ctx:
         return  # stale finally after a swapped frame — nothing to unwind
     if fr.prev is not None:
         ctx.copy_back_into(fr.prev)
     else:
-        ctx.copy_back_into(vars(st))
+        for f in FIELDS:
+            # Seed the next no-frame read without leaving a dict entry the
+            # specialized module-attr path could latch onto: the snapshot is
+            # the store; a test's own st.X = v write still lands in vars(st)
+            # and (correctly) wins while present.
+            _ROUTED_DEFAULTS[f] = getattr(ctx, f)
+            vars(st).pop(f, None)
     _CURRENT.set(None)
 
 
@@ -129,7 +168,9 @@ def get(field: str) -> Any:
     fr = _CURRENT.get()
     if fr is not None and fr.ctx is not None:
         return getattr(fr.ctx, field)
-    return vars(st).get(field)
+    if field in vars(st):
+        return vars(st)[field]
+    return _ROUTED_DEFAULTS.get(field)
 
 
 def set_(field: str, value: Any) -> None:
@@ -146,7 +187,18 @@ def set_(field: str, value: Any) -> None:
 # named exactly like the fields on the state module's class. Data descriptors
 # win over dict entries for attribute access, while direct `__dict__` writes
 # (conftest's rewind) still hit the default store underneath.
-
+#
+# 0.53.3: the dict entries are ALSO dropped after the swap. CPython 3.12+
+# specializes LOAD_ATTR_MODULE for plain module attribute reads — a specialized
+# site reads the module __dict__ directly and BYPASSES data descriptors on a
+# swapped module class (stores have no such specialization, so they still hit
+# the descriptor's __set__). A routed name left in the dict therefore made hot
+# read sites (loop code) return the stale dict value while writes landed in the
+# recovery context — st._LAST_PARTIAL_TEXT read '' back right after a turn wrote
+# 'chunk 2 ' into the context. Deleting the dict entry forces every access
+# (specialized or not) through the descriptor; the descriptor's fallback reads
+# the same dict the old default lived in, so a no-frame access still sees the
+# module-global value, and conftest's direct `__dict__` rewind keeps working
 def _install_descriptors() -> None:
     base = type(st)
     if getattr(base, "_RECOVERY_ROUTED", False):
@@ -158,6 +210,8 @@ def _install_descriptors() -> None:
             (lambda _f: lambda self, v: set_(_f, v))(f),
         )
     st.__class__ = type(base.__name__ + "Routed", (base,), ns)
+    for f in FIELDS:
+        _ROUTED_DEFAULTS[f] = st.__dict__.pop(f)
 
 
 _install_descriptors()

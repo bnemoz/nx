@@ -66,6 +66,15 @@ _LAST_PROMPT_TOKENS: int = 0
 import contextvars as _contextvars  # noqa: E402
 _RECOVERY_CURRENT: _contextvars.ContextVar = _contextvars.ContextVar(
     "nx_recovery_frame", default=None)
+# Fallback store for the routed recovery fields when no loop is installed (see
+# nx/_recovery.py's get/set_). Held HERE — not in _recovery — for the same
+# reason as _RECOVERY_CURRENT just above: conftest's between-test module
+# rewind can delete nx._recovery from sys.modules and re-import it, and a
+# second module object's globals would silently fork the store the
+# (first-import) descriptors on this module's class still read. One home here
+# keeps every generation of descriptors, install(), and get()/set_() agreed
+# on where the no-loop defaults live.
+_RECOVERY_DEFAULTS: dict = {}
 
 # Terminal API-failure marker for the turn path. open_stream() latches
 # "<ExceptionType>: <msg>" here when a request hard-fails (endpoint
@@ -223,6 +232,19 @@ _TALLY_RETRIES: int = 0       # corrective nudges / recovery cuts this turn
 # instead of "act now" (see STALL_WRAPUP_NUDGE). Reset when a fresh episode
 # begins (cut_count == 0 in _handle_loop_cut).
 _STALL_EPISODE_ACTED: bool = False
+
+# --- stall/empty retry → native escalation ------------------------------------
+# Set when a reasoning-only stall or an empty turn happens while the request
+# went out with tool_choice="none" (the default posture until native
+# tool-calling is confirmed — see open_stream). On servers whose models only
+# ever act through the native tool_calls channel (glm/qwen behind vLLM), that
+# posture suppresses the model's ONLY action path: it thinks, emits nothing,
+# and every "act now" nudge is unsatisfiable, so the ladder climbs to a forced
+# final whose salvage prints the model's reasoning as the answer. A retry with
+# tool_choice="auto" re-opens the native channel; a model that prefers the
+# text protocol still works (auto permits, it doesn't force). Cleared when a
+# native tool call confirms, or when a turn completes normally.
+_STALL_FORCE_NATIVE: bool = False
 
 # --- recovery / turn-loop tuning (env-configurable, test-monkeypatchable) ----
 # Real defaults (env-resolved) are assigned onto these names at import time
