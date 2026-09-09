@@ -381,6 +381,15 @@ TOOLS.append(IMAGE_VISION_TOOL)
 # is withheld until something backgrounds.
 TOOLS.append(PLAN_EDIT_TOOL)
 
+# Test-run tool (schema here, body in nx/_testrunner.py): the closed-loop
+# verification tier — detect pytest/go/cargo/npm from markers, run the fixed
+# per-ecosystem command, fold the output to the failures. Approval rides the
+# normal gate; plan mode gates it (it writes caches) — see PLAN_GATE_TOOLS.
+from ._testrunner import run_tests
+
+RUN_TESTS_TOOL = {"type": "function", "function": {"name": "run_tests", "description": "Detect and run the project's test suite (pytest/go/cargo/npm), returning a failure-focused summary. Pass targets for a scoped re-run; use run_bash for any other shell command.", "parameters": {"type": "object", "properties": {"targets": {"type": "string", "description": "Optional: a tests dir, test file, or node id to scope the run (default = whole suite at the project root)"}}}}}
+TOOLS.append(RUN_TESTS_TOOL)
+
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
     "description": "End the turn with the answer the user sees; it must stand on its own, since the transcript before it is not re-shown. Call it when the work is done or when you need something from the user. Stop by calling this, not by replying with plain text.",

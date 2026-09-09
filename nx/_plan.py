@@ -39,7 +39,7 @@ from ._ansi import BOLD, DIM, RESET, C
 # to the toolset stays *in* the safe default (deny-by-default for the rest).
 PLAN_GATE_TOOLS = frozenset((
     "write_file", "edit_file", "multi_edit", "sed_edit", "apply_patch",
-    "delete_file", "run_bash", "memory_write", "memory_delete",
+    "delete_file", "run_bash", "run_tests", "memory_write", "memory_delete",
 ))
 
 # Read-only tools are never gated. Listed explicitly (rather than "everything

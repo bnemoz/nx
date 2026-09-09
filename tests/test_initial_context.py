@@ -75,7 +75,11 @@ import nx as m  # noqa: E402
 # The 0.41 trim pass took spawn_agent 396→330 (trigger-list and async mechanics
 # moved to the one-time Delegation note) and edit_file/plan_edit down a few
 # dozen; the 17-tool floor now measures 2879.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 2900)  # hard: recorded, justified
+# 0.49: run_tests (ROADMAP P3-5) joins the always-on set — one small schema
+# (a single optional `targets` string, ~131 tok measured by tiktoken on the
+# 18-function set); BUDGET_TOKENS rises 2900→3020 by that deliberate,
+# verifiable cost.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3020)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

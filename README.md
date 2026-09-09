@@ -223,6 +223,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
+| `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_CONTINUATIONS` | auto-continues a reply that ended with `finish_reason="length"` (the token cap cut it mid-answer): the partial text becomes a real assistant turn, a resume note is appended, and the stream re-opens (default 2; `0` keeps the old single-turn behavior and marks the partial with a truncation marker) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 500) |
@@ -589,6 +590,7 @@ go through the approval gate above.
 | `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
+| `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only; ends with the absolute dirs holding the shown hits, because the listed `(name)` is a bare filename — `read_file` needs the full path |
@@ -597,10 +599,26 @@ go through the approval gate above.
 | `read_image` | `path` | show a local image to a vision-capable model (`NX_VISION=1` + native tool calls). png/jpeg/gif/webp/bmp by extension, with a magic-byte sniff fallback for missing/unknown extensions; `~` works; refusal (not downscale) past `NX_IMAGE_MAX_BYTES`. The base64 rides the tool message; on a text-protocol turn, in `--trace`, or in batch output it renders as a one-line image-attached hint instead. Saved sessions store a hash reference and the payload once in `<sessions>/_images/` (see `NX_SESSION_IMAGES`); if the image contributed to a context overrun, the next auto-compress evicts the payload and keeps its marker line |
 
 `read_file`/`list_dir` results are cached per-path and invalidated on writes
-or any `run_bash`. A `git_*` call that passes a file where the `path`
-directory belongs, or an absolute path as `file`, is repaired in-flight instead
-of erroring (the file's directory is used and the command is restricted to that
-file). The `git_status`/`git_diff`/`git_log` cache entries carry a
+or any `run_bash`.
+
+`run_tests` (0.49.0, ROADMAP P3-5) is the closed-loop verification tier: the
+model runs the suite after edits without spending a turn composing a shell
+command. Detection is marker-based, and the command shape is fixed per
+ecosystem, so the tool never runs free-text shell (that is `run_bash`).
+Output is folded to the failures: one block per pytest failure with its
+traceback middle elided, plus the FAILED and short-summary lines,
+whole-result capped; when anything was folded the raw output is written to
+a temp file whose path rides the result for `read_file`. `targets` scopes
+the run (tests dir, file, node id). Approval rides the normal gate with a
+local risk verdict (medium, no classifier round-trip); plan mode gates it;
+`NX_TESTRUNNER_TIMEOUT` (default 600 s) caps the call; write-tier sub-agents
+get the tool so an agent that edits can verify its own work, read-only
+agents are refused. `NX_VERIFY_CMD` stays the hands-off post-edit loop;
+`run_tests` is the model-invoked, on-demand one. A `git_*` call that passes a
+file where the `path` directory belongs, or an absolute path as `file`, is
+repaired in-flight instead of erroring (the file's directory is used and the
+command is restricted to that file). The `git_status`/`git_diff`/`git_log`
+cache entries carry a
 fingerprint of `.git` state (HEAD/index/`ORIG_HEAD` mtimes) and are dropped by
 any edit tool or `run_bash` too — a commit in another terminal, or `git reset`
 via `run_bash`, is never served stale. `wait_background` is omitted from the

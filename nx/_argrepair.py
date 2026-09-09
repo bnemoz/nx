@@ -76,6 +76,7 @@ _TOOL_ALIASES: dict[str, str] = {
     "edit": "edit_file",
     "write": "write_file", "create_file": "write_file",
     "remove": "delete_file", "rm": "delete_file", "delete": "delete_file",
+    "test": "run_tests", "pytest": "run_tests", "run_test": "run_tests",
 }
 
 # Per-tool ARG aliases for near-miss keys the 0.8 similarity cutoff
@@ -102,6 +103,7 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
     "git_diff": {"staged_only": "staged"},
     "git_log": {"staged_only": "staged"},
     "todo_write": {"items": "todos", "task_list": "todos"},
+    "run_tests": {"target": "targets", "filter": "targets", "path": "targets", "scope": "targets"},
 }
 
 

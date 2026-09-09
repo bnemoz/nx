@@ -278,7 +278,7 @@ assertion in the builder; `_special_tokens.py` hardcodes DeepSeek's `｜`/`▁`
 signatures; repetition detection fires only for chunks ≤40 bytes (tuned for
 Qwen separators). **Payoff:** the repair/breaker/nudge machinery gets less to do.
 
-### P3-5 Closed-loop verification: `run_tests` tool **[M]**
+### P3-5 Closed-loop verification: `run_tests` tool **[M]** *(shipped 0.49.0)*
 `NX_VERIFY_CMD` is one global free-text command, Python-only `ast.parse` + exit
 code, 20 s settle, off in batch, no target/language parsing, no scoped re-run.
 A `run_tests(scope)` tool (detect pytest/cargo/npm/go, run targeted, parse
@@ -390,9 +390,14 @@ the 0.41 overflow evictor), the fold call routes to a cheaper endpoint
 0.48.0**: one scanner under every memory reader, a trigram FTS5 cache per
 memories dir (NX_MEMORY_FTS), both-scope `/memory list`, a no-clobber
 atomic memory writer, and an oldest-first NX_MEMORY_OPTIMIZE_MAX_NOTES.
-**Previously:** Phase 1 DONE
+Then **P3-5 `run_tests` at 0.49.0**: a marker-detecting, fixed-command-shape
+test runner tool (`nx/_testrunner.py`, NX_TESTRUNNER_TIMEOUT) — detect
+pytest/go/cargo/npm, run targeted via `targets`, fold the output to the
+failures with the raw log one read_file away; local risk fast path (medium),
+plan-gated, in the sub-agent write tier. NX_VERIFY_CMD stays the hands-off
+post-edit loop. **Previously:** Phase 1 DONE
 at 0.42; 2.1 (0.43.0), 2.5 (0.44.0), 2.3a (0.45.0), 2.3b (0.46.0) as detailed
-below. Still open in Phase 2: **P3-5 (run_tests) and P3-4 (one dialect)**.
+below. Still open in Phase 2: **P3-4 (one dialect)**.
 
 Then 2.1 (0.43.0): a hard write fence in `run_tool()` (`nx/_fence.py`, env
 `NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session
@@ -423,9 +428,10 @@ immediate collect, quota).
 | **0.41** | 1.8 two-tier overflow · window-aware max_tokens |
 | **0.42** | 1.2 thread-isolated recovery · 1.7 floor budget reset · 1.5 parity tests |
 | **0.43** | 2.1 hard write fence *(shipped)* · 2.5 cost correctness *(0.44.0)* |
-| **0.43–0.44** | 2.3a store GC *(0.45.0)* · P3-5 `run_tests` |
+| **0.43–0.44** | 2.3a store GC *(0.45.0)* · P3-5 `run_tests` *(0.49.0)* |
 | **0.45–0.46** | 2.4 compression v2 *(0.47.0)* · 2.6 memory v2 *(0.48.0)* · P3-4 one dialect |
-| **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-5 run_tests · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
+| **0.49** | P3-5 `run_tests` tool *(shipped)* — the Phase-2-adjacent verification tier |
+| **0.47+** | P3-1 sandbox · P3-3 provider adapters · P3-4 one dialect · P3-6/7/8/9/10/11 as demand dictates · P3-14 early and continuously |
 
 **Sequencing rationale:** Phase 1 items are each <1 day–3 days, independently
 releasable, and several are *tested-wrong* today (1.1, 1.3, 1.4, 1.5) — meaning

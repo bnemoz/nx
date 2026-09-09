@@ -212,6 +212,12 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
     falls through to _assess_risk() exactly as before this existed."""
     if action.startswith("run: "):
         return _local_risk_hint_bash(_strip_shell_comment(action[len("run: "):].strip()))
+    if action.startswith("run tests: "):
+        # run_tests' fixed argv (nx/_testrunner.py) — RISK_SYSTEM's own
+        # "running tests" medium bucket, no shell to parse: the argv is
+        # already a list when it reaches the tool, so the string here is the
+        # joined form with no room for a metacharacter trick.
+        return ("medium", "contained test run")
     # delete_file: removal is the action the risk buckets call out — a project
     # file delete is at least medium (reversible only via /undo, which is
     # in-memory), anything outside the project or a home dotdir stays a

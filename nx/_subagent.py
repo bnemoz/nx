@@ -222,7 +222,13 @@ _SUBAGENT_TLS = threading.local()
 # one edit away from a recreate, but its undo snapshot belongs to the parent);
 # so are apply_patch (one call already covers multi-file restructures),
 # memory_write, and run_bash (the read-only allowlist tier covers inspection).
-_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit")
+# run_tests IS included (0.49.0): a write-tier agent that can edit but not
+# verify can only guess. It runs through the same user-gated _confirm() the
+# parent's run_tests hits (the wrapper tears down the sub-agent context), so
+# it is exactly as approved as a parent run — just tagged (sub-agent). It
+# stays refused for READ-ONLY agents: their table never contains it.
+_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit",
+                          "run_tests")
 
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
