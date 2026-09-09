@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from ._openai_client import APIConnectionError, APIError
+from ._openai_client import APIConnectionError, APIError, probe_scope
 import httpx
 from rich.console import Console
 from ._ansi import (
@@ -147,7 +147,7 @@ def _ctx_field(prompt_n: int) -> str:
     return f"{color}{cur}{RESET}{DIM}/{C.STATUS_BAR}{mx_s}{RESET}{DIM} ctx"
 
 
-_CTX_PROBE_STARTED = set()  # id(Source) currently being probed (avoid dupe threads)
+_CTX_PROBE_STARTED = {}  # id(Source) -> PROBE_GENERATION being probed (no dupes)
 
 
 def _ensure_ctx_probe(src: Any) -> None:
@@ -170,9 +170,10 @@ def _ensure_ctx_probe(src: Any) -> None:
     if getattr(src, "_context_window_probe_attempted", False):
         return
     sid = id(src)
-    if sid in _CTX_PROBE_STARTED:
+    gen = st.PROBE_GENERATION
+    if _CTX_PROBE_STARTED.get(sid) == gen:
         return
-    _CTX_PROBE_STARTED.add(sid)
+    _CTX_PROBE_STARTED[sid] = gen
 
     def _work() -> None:
         try:
@@ -182,11 +183,13 @@ def _ensure_ctx_probe(src: Any) -> None:
             with STARTUP_PROBE_LOCK:
                 if isinstance(src._context_window, int) and src._context_window > 0:
                     return
-                src.resolve_context_window()
+                with probe_scope(lambda: st.PROBE_GENERATION != gen):
+                    src.resolve_context_window()
         except Exception:
             pass  # never raise from a background probe
         finally:
-            _CTX_PROBE_STARTED.discard(sid)
+            if _CTX_PROBE_STARTED.get(sid) == gen:
+                _CTX_PROBE_STARTED.pop(sid, None)
 
     t = threading.Thread(target=_work, daemon=True, name="nx-ctx-probe")
     t.start()

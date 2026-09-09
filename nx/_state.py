@@ -46,6 +46,15 @@ ACTIVE: "Source | None" = None
 client: "OpenAI | None" = None
 MODEL: str | None = None
 
+# Bumped by switch_source() on every swap (source and/or model override).
+# A background probe (capability / thinking / context-window) records the
+# generation it was armed at and aborts its backoff once that number is
+# history: before 0.53.2 a probe armed for a dead endpoint kept printing
+# retry notices naming the abandoned model and slept out the whole curve
+# while holding STARTUP_PROBE_LOCK, delaying the source the user switched
+# TO. Read-only for anything but the probes themselves.
+PROBE_GENERATION: int = 0
+
 # Updated by model_turn() on every turn that reports a prompt-token count.
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
 _LAST_PROMPT_TOKENS: int = 0

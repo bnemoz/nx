@@ -317,9 +317,11 @@ class Source:
             risks that, so it leads even though it costs a multi-second
             TLS round-trip and often returns nothing.
 
-        `model` defaults to the source's configured model, falling back to a
-        live resolve_model() so an auto source is probed against the model it
-        will actually use. The result is keyed to that model id, so a
+        `model` defaults to the active model id when this is the active source
+        (so a `/source <name> <model>` override is probed, not the source's
+        configured default), then the configured model, falling back to a live
+        resolve_model() so an auto source is probed against the model it will
+        actually use. The result is keyed to that model id, so a
         /source <name> <other-model> override should call with force=True.
 
         A failed attempt is also cached. In particular, LM Studio-like
@@ -332,7 +334,13 @@ class Source:
                           self._context_window_probe_attempted):
             return self._context_window
         try:
-            mid = model or self.model or self.resolve_model()
+            # Prefer the ACTIVE model id over the source's configured default:
+            # a /source <name> <model> override pins st.MODEL only, so probing
+            # self.model would measure (and for the overrun probe, bill) a model
+            # the user is not on. An inactive Source has no override to honour,
+            # so the listing's warm-up probes keep using its configured model.
+            mid = (model or (st.MODEL if self is st.ACTIVE else None)
+                   or self.model or self.resolve_model())
             if self._is_local():
                 n = self._ctx_from_models(mid) or self._ctx_from_props() \
                     or self._ctx_from_lmstudio(mid)
@@ -734,6 +742,11 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     if not src:
         print(f"{C.ERROR}  ✗ unknown source {name!r}{RESET}")
         return False
+    # Invalidate any probe armed before this switch (see st.PROBE_GENERATION):
+    # the old source's backoff must neither keep printing notices for a model
+    # the user just abandoned nor hold STARTUP_PROBE_LOCK while the new
+    # source's probes wait behind it.
+    st.PROBE_GENERATION += 1
     st.ACTIVE = src
     st.client = src.client
     st.MODEL = model_override if model_override else src.resolve_model()

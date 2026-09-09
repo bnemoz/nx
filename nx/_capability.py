@@ -30,7 +30,9 @@ import json
 import threading
 from typing import TYPE_CHECKING
 
+from . import _state as st
 from ._grammar import build_tool_call_grammar
+from ._openai_client import probe_scope
 from ._text_fallback import parse_text_calls_with_errors
 
 if TYPE_CHECKING:
@@ -147,7 +149,12 @@ def probe_capability(src: "Source", mid: str) -> str:
     return CAPABILITY_TEXT
 
 
-_PROBE_STARTED: set[int] = set()  # id(Source) currently being probed (avoid dupe threads)
+# id(Source) -> PROBE_GENERATION the probe was armed at (avoid dupe threads).
+# Gen-valued rather than a bare set so a switch past a still-backing-off probe
+# of the OLD source/model can arm its own probe immediately: the dying thread
+# aborts on its next stale check and its guarded pop never clears the fresh
+# thread's slot.
+_PROBE_STARTED: dict[int, int] = {}
 
 # Shared with _turn.py's context-window probe: a local, single-slot inference
 # server serializes requests FIFO, so firing the capability probe and the
@@ -169,9 +176,10 @@ def ensure_capability_probe(src: "Source | None") -> None:
     if src is None or src._capability is not None:
         return
     sid = id(src)
-    if sid in _PROBE_STARTED:
+    gen = st.PROBE_GENERATION
+    if _PROBE_STARTED.get(sid) == gen:
         return
-    _PROBE_STARTED.add(sid)
+    _PROBE_STARTED[sid] = gen
 
     def _work():
         try:
@@ -180,12 +188,18 @@ def ensure_capability_probe(src: "Source | None") -> None:
             with STARTUP_PROBE_LOCK:
                 if src._capability is not None:
                     return
-                mid = src.model or src.resolve_model()
-                src._capability = probe_capability(src, mid)
+                # A /source <name> <model> override pins st.MODEL, not
+                # src.model — probing the source's configured default would
+                # classify (and bill) a model the user is no longer on.
+                with probe_scope(lambda: st.PROBE_GENERATION != gen):
+                    mid = ((st.MODEL if src is st.ACTIVE and st.MODEL else None)
+                           or src.model or src.resolve_model())
+                    src._capability = probe_capability(src, mid)
         except Exception:
             pass  # never raise from a background probe; stays None, re-armed later
         finally:
-            _PROBE_STARTED.discard(sid)
+            if _PROBE_STARTED.get(sid) == gen:
+                _PROBE_STARTED.pop(sid, None)
 
     t = threading.Thread(target=_work, daemon=True, name="nx-capability-probe")
     t.start()

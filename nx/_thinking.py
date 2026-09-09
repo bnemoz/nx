@@ -43,6 +43,7 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from . import _state as st
+from ._openai_client import probe_scope
 
 if TYPE_CHECKING:
     from ._sources import Source
@@ -100,11 +101,13 @@ def _probe_kwargs_for(src: "Source", mid: str) -> dict[str, Any] | None:
     return None
 
 
-# (id(Source), model id) pairs with a probe in flight — model-keyed, not just
-# Source-keyed, so a startup probe for the source's default model doesn't
-# silently swallow a /source <name> <model>-override probe requested a moment
-# later while the first is still running.
-_THINKING_STARTED: set[tuple[int, str]] = set()
+# (id(Source), model id) -> PROBE_GENERATION the probe was armed at —
+# model-keyed, not just Source-keyed, so a startup probe for the source's
+# default model doesn't silently swallow a /source <name> <model>-override
+# probe requested a moment later while the first is still running. Gen-valued
+# so a switch past a still-backing-off probe can arm a fresh one immediately
+# (see _capability._PROBE_STARTED).
+_THINKING_STARTED: dict[tuple[int, str], int] = {}
 
 
 def thinking_kwargs(src: "Source", mid: str) -> dict[str, Any] | None:
@@ -128,9 +131,10 @@ def ensure_thinking_probe(src: "Source | None", mid: str | None = None) -> None:
     if model_id in src._thinking_kwargs:
         return  # already resolved by an earlier probe
     key = (id(src), model_id)
-    if key in _THINKING_STARTED:
+    gen = st.PROBE_GENERATION
+    if _THINKING_STARTED.get(key) == gen:
         return
-    _THINKING_STARTED.add(key)
+    _THINKING_STARTED[key] = gen
 
     def _work():
         try:
@@ -141,11 +145,13 @@ def ensure_thinking_probe(src: "Source | None", mid: str | None = None) -> None:
             with STARTUP_PROBE_LOCK:
                 if model_id in src._thinking_kwargs:
                     return
-                src._thinking_kwargs[model_id] = _probe_kwargs_for(src, model_id)
+                with probe_scope(lambda: st.PROBE_GENERATION != gen):
+                    src._thinking_kwargs[model_id] = _probe_kwargs_for(src, model_id)
         except Exception:
             pass  # never raise from a background probe; stays unprobed, re-armed
         finally:
-            _THINKING_STARTED.discard(key)
+            if _THINKING_STARTED.get(key) == gen:
+                _THINKING_STARTED.pop(key, None)
 
     t = threading.Thread(target=_work, daemon=True, name="nx-thinking-probe")
     t.start()

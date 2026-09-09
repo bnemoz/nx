@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
-from typing import Any, Iterator, Literal, overload
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Literal, overload
 
 import httpx
 
@@ -128,16 +130,84 @@ def _notice(req: httpx.Request, attempt: int, retries: int, why: str,
             delay: float, retry_after: float | None, hint: str = "") -> None:
     """One-line stderr notice + traffic-log entry per retry. stderr, not
     stdout: stdout is strictly chat rendering (and --json harness output).
-    `hint` is appended verbatim when a failure shape has an actionable
-    tunable worth naming (a read timeout, most commonly)."""
+    Silent while a probe_scope() is active on this thread (see below) — but
+    only the print: probe retries stay in the traffic log for debugging.
+    `hint` is appended verbatim when a failure shape has an actionable tunable
+    worth naming (a read timeout, most commonly)."""
+    quiet = _probe_quiet()
     basis = "Retry-After" if retry_after is not None else "backoff"
-    print(f"nx: {req.method} {req.url.path} failed ({why}); retrying "
-          f"{attempt + 1}/{retries} in {delay:.1f}s ({basis}){hint}", file=sys.stderr)
+    if not quiet:
+        print(f"nx: {req.method} {req.url.path} failed ({why}); retrying "
+              f"{attempt + 1}/{retries} in {delay:.1f}s ({basis}){hint}",
+              file=sys.stderr)
     from ._logging import _log_event  # lazy: _logging builds on NX_HOME state
     _log_event("http_retry", {"method": req.method, "url": str(req.url),
                               "why": why, "attempt": attempt + 1,
                               "retries": retries, "delay": delay,
                               "retry_after": retry_after})
+
+
+# --- background-probe mode ---------------------------------------------------
+# The startup and /source probes (capability, thinking, context-window) send
+# real chat-completions requests from daemon threads, each holding a captured
+# Source and model id. Against a dead endpoint that was doubly visible
+# (0.53.2): every backoff pass printed a retry notice from a background thread,
+# landing over a chatbox frame whose rendering had already moved on and naming
+# the model the probe captured rather than the active one; and the loop then
+# slept out the whole curve while holding STARTUP_PROBE_LOCK, so the source the
+# user switched TO stayed unprobed behind the one they switched away from.
+# probe_scope() makes this thread's retry loop silent and abortable. The caller
+# owns the staleness question -- only it knows what this probe was armed for.
+
+
+class _ProbeAbort(Exception):
+    """Raised inside a probe's request loop when its staleness predicate fires.
+    Reaches the probe thread's own `except Exception`, which already treats a
+    failed probe as "stay unprobed and let a later turn re-arm" -- so no probe
+    needs to name it, and it can never surface in a user turn."""
+
+
+# threading.local, not a contextvar: each probe runs in its own daemon thread
+# and a bare Thread does not inherit a contextvar snapshot, so the flag cannot
+# leak into the main thread's user turns.
+_PROBE_MODE = threading.local()
+# NX_PROBE_QUIET=0 restores probe retry notices for debugging. The abort
+# behavior below is not gated by it -- that part is correctness, not noise.
+_PROBE_QUIET_DEFAULT = 1
+
+
+def _probe_active() -> bool:
+    return getattr(_PROBE_MODE, "stale", None) is not None
+
+
+def _probe_quiet() -> bool:
+    return (_probe_active()
+            and _env_int("NX_PROBE_QUIET", _PROBE_QUIET_DEFAULT) != 0)
+
+
+def _probe_stale() -> None:
+    """Abort this thread's probe retry loop if it has been superseded. Safe to
+    call from the main thread's turns: `_probe_active()` is False there, so this
+    is a no-op and a user turn can never be cancelled by it."""
+    fn = getattr(_PROBE_MODE, "stale", None)
+    if fn is not None and fn():
+        raise _ProbeAbort()
+
+
+@contextmanager
+def probe_scope(stale: Callable[[], bool]):
+    """Silence retry notices on this thread and abort backoff while `stale()`
+    is true. Checked before each attempt and before each backoff sleep, so a
+    superseded probe releases STARTUP_PROBE_LOCK promptly instead of sleeping
+    out the rest of the curve against an endpoint the user abandoned.
+
+    Checks land only between attempts, never during a send, so an in-flight
+    request always completes and nothing is cancelled mid-stream."""
+    _PROBE_MODE.stale = stale
+    try:
+        yield
+    finally:
+        _PROBE_MODE.stale = None
 
 
 class _Obj:
@@ -359,6 +429,7 @@ class OpenAI:
         retries = max(0, _env_int("NX_HTTP_RETRIES", _HTTP_RETRIES_DEFAULT))
         attempt = 0
         while True:
+            _probe_stale()
             try:
                 resp = self._client.send(req, stream=stream)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
@@ -375,6 +446,7 @@ class OpenAI:
                                 "NX_HTTP_TIMEOUT_READ raised")
                     _notice(req, attempt, retries, f"connection error: {e}", delay,
                             retry_after, hint)
+                    _probe_stale()
                     attempt += 1
                     time.sleep(delay)
                     continue
@@ -403,6 +475,7 @@ class OpenAI:
                 _notice(req, attempt, retries,
                         f"HTTP {resp.status_code} — {msg[:160]}", delay, retry_after)
                 resp.close()
+                _probe_stale()
                 attempt += 1
                 time.sleep(delay)
                 continue
