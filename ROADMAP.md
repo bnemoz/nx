@@ -268,15 +268,36 @@ merely *disables* knobs). Ranked after the correctness phases because a
 translation proxy covers the feature, while cache-safety and write fences
 cannot be proxied in.
 
-### P3-4 Grammar/prompt/parser: one dialect **[M]**
-The grammar constrains the legacy JSON-in-tag body (`_grammar.py:126-151`)**[v]**
-while `SYSTEM` and the correction nudge teach the XML dialect
-(`__init__.py:404-406`)**[v]** — on a grammar-capable source the model is
-force-constrained into a shape its prompt never asked for. Also: the builder
-requires required-before-optional properties, policed by a test instead of an
-assertion in the builder; `_special_tokens.py` hardcodes DeepSeek's `｜`/`▁`
-signatures; repetition detection fires only for chunks ≤40 bytes (tuned for
-Qwen separators). **Payoff:** the repair/breaker/nudge machinery gets less to do.
+> **Decision (user, 2026-09): no structured outputs (`response_format` /
+> `json_schema` / `guided_json`).** Forcing a JSON schema degrades tool calling
+> on most models — the constrained shape helps only when it matches what the
+> model would have produced anyway, and otherwise fights it. nx's text
+> protocol + repair stack (`NX_ARG_REPAIR`, GBNF grammar, breaker/nudges) is
+> the mitigation, and it degrades gracefully instead of hard-failing a turn.
+> Do not re-propose this as part of P3-3 or as a standalone item; `tools=`
+> stays schema-as-documentation only, with native `tool_calls` (`NX_NATIVE_TOOLS=1`)
+> as the sole server-side-constraint opt-in.
+
+### P3-4 Grammar/prompt/parser: one dialect **[M]** *(shipped 0.50.0)*
+The grammar constrained the legacy JSON-in-tag body while `SYSTEM` and the
+correction nudge taught the XML dialect — on a grammar-capable source the model
+was force-constrained into a shape its prompt never asked for. **Shipped:** the
+grammar now constrains the taught shape — a `<name>` tag carrying the tool name,
+then an `<arguments>` region of one tag per property — with string values as raw
+text per SYSTEM's example, enums as raw literals, array/object properties
+staying strict JSON, and required properties as mandatory tags. An earlier
+attempt constrained the tool name into the element name instead, which is worse
+than no grammar at all: the parser finds the tool by reading the `<name>` tag, so
+every grammar-constrained call came back as a missing-name parse error (pinned as
+a regression test). The capability probe now validates with the real parser
+instead of a probe-only regex — the old regex accepted the JSON body the grammar
+refuses to emit, so it could classify a source grammar-capable on a shape a turn
+could not parse. Required-before-optional moved from a test over `m.TOOLS` into
+the builder, which raises and recurses into array-item schemas. A value needing a
+literal `<` is emitted JSON-quoted with an escape, so the raw form is unsamplable
+rather than silently corrupted. **Left alone deliberately:**
+`_special_tokens.py`'s DeepSeek signatures and the <=40-byte repetition window —
+both tuned to observed collapse modes, not dialect problems.
 
 ### P3-5 Closed-loop verification: `run_tests` tool **[M]** *(shipped 0.49.0)*
 `NX_VERIFY_CMD` is one global free-text command, Python-only `ast.parse` + exit
@@ -397,7 +418,8 @@ failures with the raw log one read_file away; local risk fast path (medium),
 plan-gated, in the sub-agent write tier. NX_VERIFY_CMD stays the hands-off
 post-edit loop. **Previously:** Phase 1 DONE
 at 0.42; 2.1 (0.43.0), 2.5 (0.44.0), 2.3a (0.45.0), 2.3b (0.46.0) as detailed
-below. Still open in Phase 2: **P3-4 (one dialect)**.
+below. **P3-4 (one dialect) closed at 0.50.0**, which empties Phase 2's open
+list; what remains is Phase 3.
 
 Then 2.1 (0.43.0): a hard write fence in `run_tool()` (`nx/_fence.py`, env
 `NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session

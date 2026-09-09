@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NX_ENV_FILE"] = "/dev/null"
 
 from nx._grammar import build_tool_call_grammar
+from nx._text_fallback import parse_text_calls_with_errors
 
 TOOLS = [
     {"type": "function", "function": {
@@ -52,16 +53,77 @@ GBNF_KEYWORDS_OR_LITERALS = {"ws", "true", "false", "null"}
 for r in rule_names:
     assert r in refs  # sanity: every defined rule is referenced somewhere (root or nested)
 
-# --- required-before-optional (read_file: path required, offset optional) ---
-assert '"\\"path\\""' in grammar
-assert "(\",\" ws \"\\\"offset\\\"\"" in grammar or '"," ws "\\"offset\\""' in grammar
+# --- ONE DIALECT (P3-4): the body the grammar forces is the body SYSTEM
+# teaches and the parser reads. A grammar that constrains a shape the prompt
+# never asked for is worse than no grammar: every constrained call comes back
+# as "missing <name>". Asserted as literal tag text, since that is the contract.
+assert '"<name>"' in grammar and '"</name>"' in grammar
+assert '"<arguments>"' in grammar and '"</arguments>"' in grammar
+# the tool name is constrained INSIDE <name>, not as the element name
+assert '"read_file"' in grammar and '"<read_file>"' not in grammar
 
-# --- enum renders as a literal alternation, not a bare string rule ---
-assert '"\\"answered\\""' in grammar and '"\\"blocked\\""' in grammar
+# --- required args are mandatory tags; optional ones a droppable suffix ---
+assert '"<path>"' in grammar
+assert '("<offset>"' in grammar
+# enums render as RAW literals inside a tag body, not quoted JSON forms
+assert '"answered" ws' in grammar and '"\\"answered\\""' not in grammar
+
+# --- the whole point: a grammar-legal call parses with the real parser ---
+for body in (
+    "<tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>",
+    '<tool_call><name>multi_edit</name><arguments><path>a.py</path>'
+    '<edits>[{"old": "x", "new": "y"}]</edits></arguments></tool_call>',
+    # optional property dropped entirely (allowed: only a trailing run is optional)
+    "<tool_call><name>final_answer</name><arguments><answer>done</answer></arguments></tool_call>",
+):
+    calls, errs = parse_text_calls_with_errors(body)
+    assert not errs, (body, errs)
+    assert len(calls) == 1, (body, calls)
+assert parse_text_calls_with_errors(
+    "<tool_call><name>final_answer</name><arguments><answer>ok</answer>"
+    "<status>blocked</status></arguments></tool_call>")[0][0][1]["status"] == "blocked"
+
+# --- the shape the PREVIOUS grammar forced must NOT parse (regression pin) ---
+assert parse_text_calls_with_errors(
+    "<tool_call><read_file>x</read_file><arguments><path>foo.py</path>"
+    "</arguments></tool_call>")[1], "tool-name-as-element body must not parse"
+
+# --- a value needing a literal '<' round-trips as a JSON-quoted escape ---
+assert parse_text_calls_with_errors(
+    '<tool_call><name>edit_file</name><arguments><path>a</path>'
+    '<new>"\\u003cdiv\\u003e"</new></arguments></tool_call>'
+)[0][0][1]["new"] == "<div>"
 
 # --- empty tool list degrades to "no grammar" rather than raising ---
 empty_grammar, _ = build_tool_call_grammar([])
 assert empty_grammar is None
+
+# --- required-before-optional is policed IN THE BUILDER now, not only by a
+# test over m.TOOLS: a violation silently yields a grammar that refuses legal
+# calls, so every schema source (probe, eval, future) must trip it. ---
+_bad = {"type": "function", "function": {
+    "name": "bad", "parameters": {"type": "object",
+        "properties": {"opt": {"type": "string"}, "req": {"type": "string"}},
+        "required": ["req"]}}}
+try:
+    build_tool_call_grammar([_bad])
+except ValueError as e:
+    assert "required property 'req'" in str(e), e
+else:
+    raise AssertionError("required-after-optional schema built without raising")
+
+# ...and the same check recurses into array-item object schemas
+_bad_item = {"type": "function", "function": {
+    "name": "bad2", "parameters": {"type": "object", "properties": {
+        "items": {"type": "array", "items": {"type": "object",
+            "properties": {"opt": {"type": "string"}, "req": {"type": "string"}},
+            "required": ["req"]}}}}}}
+try:
+    build_tool_call_grammar([_bad_item])
+except ValueError as e:
+    assert "bad2.items" in str(e), e
+else:
+    raise AssertionError("required-after-optional item schema built without raising")
 
 # --- open_stream() wiring: opt-in via NX_GRAMMAR, off by default, off for vLLM ---
 os.environ.pop("NX_GRAMMAR", None)

@@ -11,7 +11,8 @@ one-tool schema at startup and classifies the result into one of:
                        argument generation itself once it recognizes the
                        chat template as tool-call-capable.
   CAPABILITY_GRAMMAR — no native tool_calls, but a GBNF-constrained
-                       <tool_call> tag (see _grammar.py) comes back well-formed.
+                       <tool_call> tag (see _grammar.py) comes back well-formed
+                       in the XML dialect nx teaches (SYSTEM + _grammar.py).
                        Worth attaching build_tool_call_grammar() on every turn.
   CAPABILITY_TEXT    — neither works (or the probe itself failed/timed out);
                        fall back to plain-text <tool_call> tag parsing
@@ -26,11 +27,11 @@ after the delay budget, matching the "degrade, don't demand" convention.
 from __future__ import annotations
 
 import json
-import re
 import threading
 from typing import TYPE_CHECKING
 
 from ._grammar import build_tool_call_grammar
+from ._text_fallback import parse_text_calls_with_errors
 
 if TYPE_CHECKING:
     from ._sources import Source
@@ -96,13 +97,20 @@ def _probe_native(src: "Source", mid: str) -> bool:
     return False
 
 
-_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+# P3-4 (0.50.0): the probe validates with the REAL parser rather than a
+# probe-only regex. The grammar constrains the dialect SYSTEM teaches
+# (<name>..</name><arguments><k>v</k>..</arguments>), so "the grammar works
+# here" means exactly "parse_text_calls_with_errors() reads back a real
+# nx_probe call from the constrained output" -- a bespoke pattern here would
+# drift from the parser and could classify a source GRAMMAR-capable on a
+# shape a turn would then fail to parse (which is how this probe worked
+# before: it accepted JSON-in-tag, the grammar now refuses to emit).
 
 
 def _probe_grammar(src: "Source", mid: str) -> bool:
     """One non-streaming request with the GBNF grammar for _PROBE_TOOL
-    attached via extra_body. Returns True if a well-formed <tool_call> tag
-    with valid JSON comes back."""
+    attached via extra_body. Returns True if the reply parses, with the
+    real parser, as a well-formed call in the dialect SYSTEM teaches."""
     if _PROBE_GRAMMAR is None:
         return False
     extra_body = {
@@ -121,15 +129,12 @@ def _probe_grammar(src: "Source", mid: str) -> bool:
         text = resp.choices[0].message.content or ""
     except (AttributeError, IndexError):
         return False
-    m = _TAG_RE.search(text)
-    if not m:
+    calls, _errors = parse_text_calls_with_errors(text)
+    if not calls:
         return False
-    try:
-        obj = json.loads(m.group(1))
-    except json.JSONDecodeError:
-        return False
-    return isinstance(obj, dict) and _valid_probe_tool_call(
-        obj.get("name"), json.dumps(obj.get("arguments") or {}))
+    name, args = calls[0]
+    return _valid_probe_tool_call(name, json.dumps(args if isinstance(args, dict)
+                                            else {"echo": args}))
 
 
 def probe_capability(src: "Source", mid: str) -> str:

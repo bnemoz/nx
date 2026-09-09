@@ -311,7 +311,11 @@ backend, nx probes each source at startup (`switch_source`) and classifies it:
   Nothing extra needed; the server already constrains argument generation.
 - **Grammar** — no native `tool_calls`, but a GBNF-constrained tool-call tag
   (derived from the active tool schemas) comes back well-formed. Worth
-  attaching the grammar on every turn.
+  attaching the grammar on every turn. The grammar constrains the same
+  text-protocol shape the prompt teaches
+  (`<name>tool</name><arguments><arg>value</arg></arguments>`), so constrained
+  output is the shape the parser already reads; a required argument becomes a
+  tag the model cannot omit.
 - **Text** — neither works (or the probe failed); fall back to plain-text
   tool-call tag parsing with no grammar constraint.
 
