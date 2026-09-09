@@ -38,7 +38,7 @@ from ._subagent import spawn_agent, _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._toolblocks import ToolBlock, current_recorder, tool_display
-from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push
+from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, push_if_absent as _undo_push_once
 
 DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
@@ -837,7 +837,12 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # keyed on the repo root dir, which the path-based drop never matches.
         drop_vcs_entries(st._TOOL_RESULT_CACHE)
         if result != "DENIED by user":
-            _undo_push(name, [undo_snapshot])
+            # push_if_absent (0.47.0, ROADMAP 2.2): a body that pushes its own
+            # checkpoint (delete_file, sed_edit, apply_patch) is not stacked
+            # twice — the dispatcher only fills the gap for the single-path
+            # write tools whose bodies don't push. One approved call, one
+            # /undo press, one depth slot.
+            _undo_push_once(name, [undo_snapshot])
     elif name == "run_bash":
         # bash can touch any path; entries whose backing file is unchanged
         # (re-stat) stay valid — only mtime-changed/vanished entries are dropped.

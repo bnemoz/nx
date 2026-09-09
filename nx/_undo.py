@@ -1,23 +1,35 @@
 """Checkpoint/undo stack for file-touching tools.
 
-`run_tool()` in `nx/__init__.py` snapshots a file's prior contents just
-before `write_file`/`edit_file`/`multi_edit` apply, and pushes the snapshot
-here once the tool call actually succeeds (denied/errored calls never touched
-the file, so they push nothing). `sed_edit` can touch a whole glob of files
-in one call, so it snapshots each matched file itself and pushes them as one
-entry (see nx/__init__.py). Either way, one stack entry = one tool call, and
-it may cover several files: the `/undo` REPL command pops the most recent
-entry and restores every file in it in one step, so undoing a `multi_edit`
-or `sed_edit` call reverts all the files it touched together, not one at a
-time.
+`run_tool()` in `nx/_dispatch.py` snapshots a file's prior contents just
+before `write_file`/`edit_file`/`multi_edit`/`delete_file` apply, and pushes
+the snapshot here once the tool call actually succeeds (denied/errored calls
+never touched the file, so they push nothing). `sed_edit` can touch a whole
+glob of files in one call, so it snapshots each matched file itself and pushes
+them as one entry. Either way, one stack entry = one tool call, and it may
+cover several files: the `/undo` REPL command pops the most recent entry and
+restores every file in it in one step, so undoing a `multi_edit` or
+`sed_edit` call reverts all the files it touched together, not one at a time.
+
+Since 0.47.0 the stack is also PERSISTENT and idempotent:
+
+- `_UNDO_PATH` (default `<NX_HOME>/undo.json`) is written atomically on every
+  push/pop, so a crash no longer loses the recovery story that YOLO/batch
+  postures assume; `/reset` clears it. One pending-delete per path is kept:
+  a re-delete of a file already pending undo updates the entry in place
+  (one `/undo` still passes one delete) instead of stacking duplicates.
+- `undo_last()` is atomic per file: each file's restore is written to a temp
+  file and `os.replace`d, so a failure partway leaves earlier files restored
+  and the entry retained (with the failed files dropped) for the next press.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 from ._env import _env_int
+from ._private import atomic_write_private
 from . import _state as st
 
 MAX_UNDO = _env_int("NX_MAX_UNDO", 20)
@@ -56,16 +68,73 @@ def snapshot(path: Optional[str]) -> Optional[FileSnapshot]:
     return {"path": path, "existed": existed, "content": content}
 
 
+def _pending_paths() -> set[str]:
+    return {snap["path"] for entry in st._UNDO_STACK for snap in entry["files"]}
+
+
 def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     """`snaps` is a list of per-file snapshot dicts (as from `snapshot()`);
     entries with a None snapshot are dropped. Pushes nothing if the list ends
-    up empty (e.g. every file was unreadable)."""
+    up empty (e.g. every file was unreadable).
+
+    Idempotent per path (0.47.0): a file already pending in an earlier
+    checkpoint of the same tool is UPDATED in place (its snapshot replaced
+    with the fresh one) rather than stacked, so repeated writes to the same
+    file and a re-delete of a deleted file still cost exactly one `/undo`
+    press. The stack stays a faithful map from "press /undo" to "the state
+    before that tool call last changed the file"."""
     files = [s for s in snaps if s is not None]
     if not files:
         return
-    st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": files})
+    existing = set(_pending_paths())
+    fresh: list[FileSnapshot] = []
+    for snap in files:
+        if snap["path"] in existing:
+            for entry in st._UNDO_STACK:
+                for old in entry["files"]:
+                    if old["path"] == snap["path"]:
+                        # Keep the tool label of the checkpoint that owns it.
+                        old["existed"] = snap["existed"]
+                        old["content"] = snap["content"]
+                        break
+            continue
+        fresh.append(snap)
+    if fresh:
+        st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": fresh})
     if len(st._UNDO_STACK) > MAX_UNDO:
-        del st._UNDO_STACK[0]
+        del st._UNDO_STACK[:len(st._UNDO_STACK) - MAX_UNDO]
+    persist_undo_stack()
+
+
+def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
+    """Dedup layer over `push_checkpoint` for the dispatcher (0.47.0): a tool
+    body that pushes its own checkpoint (delete_file, sed_edit, apply_patch)
+    must not be stacked twice. A path that is already pending gets its
+    snapshot UPDATED in place with the incoming one, so the stack keeps
+    exactly one pending state per file — the most recently pushed snapshot —
+    and one approved call always costs one /undo press."""
+    files = [s for s in snaps if s is not None]
+    if not files:
+        return
+    existing = set(_pending_paths())
+    fresh: list[FileSnapshot] = []
+    for snap in files:
+        if snap["path"] in existing:
+            for entry in st._UNDO_STACK:
+                for old in entry["files"]:
+                    if old["path"] == snap["path"]:
+                        old["existed"] = snap["existed"]
+                        old["content"] = snap["content"]
+                        break
+            continue
+        fresh.append(snap)
+    if not fresh:
+        persist_undo_stack()
+        return
+    st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": fresh})
+    if len(st._UNDO_STACK) > MAX_UNDO:
+        del st._UNDO_STACK[:len(st._UNDO_STACK) - MAX_UNDO]
+    persist_undo_stack()
 
 
 def list_checkpoints() -> list[Checkpoint]:
@@ -73,8 +142,80 @@ def list_checkpoints() -> list[Checkpoint]:
     return list(reversed(st._UNDO_STACK))
 
 
+# --- persistence (2.2, 0.47.0) -------------------------------------------------
+
+def _undo_path() -> str:
+    return os.path.join(st.SESSION_HOME, "undo.json")
+
+
+def persist_undo_stack() -> None:
+    """Atomically write the pending stack as `<NX_HOME>/undo.json` (0600).
+
+    Best-effort: an unwritable home degrades to the pre-0.47 memory-only
+    behavior; it must never break a tool call that is mid-flight."""
+    try:
+        data = {"version": 1, "entries": st._UNDO_STACK}
+        atomic_write_private(_undo_path(), f"{json.dumps(data, indent=1)}\n")
+    except Exception:
+        pass
+
+
+def _load_persisted() -> None:
+    """Populate the in-memory stack from disk at startup (skipped by /reset)."""
+    path = _undo_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        entries = data.get("entries")
+        if not isinstance(entries, list):
+            return
+        clean: list[Checkpoint] = []
+        for e in entries:
+            if not isinstance(e, dict) or e.get("tool") is None:
+                continue
+            files = e.get("files")
+            if not isinstance(files, list):
+                continue
+            snaps = []
+            for s in files:
+                if (isinstance(s, dict) and isinstance(s.get("path"), str)
+                        and isinstance(s.get("existed"), bool)
+                        and (s.get("content") is None or isinstance(s.get("content"), str))):
+                    snaps.append({"path": s["path"], "existed": s["existed"],
+                                  "content": s["content"]})
+            if snaps:
+                clean.append({"tool": str(e["tool"]), "ts": float(e.get("ts") or 0.0),
+                              "files": snaps})
+        if clean:
+            st._UNDO_STACK[:] = clean[-MAX_UNDO:]
+    except (OSError, ValueError):
+        pass  # missing/corrupt file — start empty
+
+
+def clear_persisted() -> None:
+    """Drop both the in-memory stack and its on-disk copy (/reset, /new)."""
+    st._UNDO_STACK.clear()
+    try:
+        os.unlink(_undo_path())
+    except OSError:
+        pass
+
+
+def _restore_one(path: str, existed: bool, content: Optional[str]) -> None:
+    """Restore one file atomically: temp file + os.replace for a write,
+    os.remove for a re-delete. Raises OSError on failure."""
+    if existed:
+        atomic_write_private(path, content or "")
+    elif os.path.exists(path):
+        os.remove(path)
+
+
 def undo_last() -> tuple[Optional[Checkpoint], str]:
-    """Revert every file in the most recent checkpointed call. Returns (entry, message)."""
+    """Revert every file in the most recent checkpointed call.
+
+    Atomic per file (temp + os.replace); a file whose restore fails is dropped
+    from the entry and the entry itself is kept pending, so a partially failed
+    undo never strands the rest of the checkpoint (0.47.0). Returns (entry, message)."""
     if not st._UNDO_STACK:
         return None, "nothing to undo"
     entry: Checkpoint = st._UNDO_STACK.pop()
@@ -83,18 +224,23 @@ def undo_last() -> tuple[Optional[Checkpoint], str]:
     for snap in entry["files"]:
         path = snap["path"]
         try:
-            if snap["existed"]:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(snap["content"] or "")
-            elif os.path.exists(path):
-                os.remove(path)
+            _restore_one(path, snap["existed"], snap["content"])
             reverted.append(path)
         except OSError as e:
             errors.append(f"{path}: {e}")
+    if errors and not reverted:
+        # Nothing was restored — keep the entry pending for the next press.
+        st._UNDO_STACK.append(entry)
+        persist_undo_stack()
+        return entry, "ERROR: undo failed: " + "; ".join(errors)
     if errors:
-        msg = f"reverted {entry['tool']} on {len(reverted)} file(s); FAILED: " + "; ".join(errors)
-    elif len(reverted) == 1:
+        entry["files"] = [s for s in entry["files"] if s["path"] not in
+                          {p.split(":")[0] for p in errors}]
+    if len(reverted) == 1:
         msg = f"reverted {entry['tool']} on {reverted[0]}"
     else:
         msg = f"reverted {entry['tool']} on {len(reverted)} file(s): {', '.join(reverted)}"
+    if errors:
+        msg += " (FAILED: " + "; ".join(errors) + ")"
+    persist_undo_stack()
     return entry, msg

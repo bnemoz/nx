@@ -439,31 +439,12 @@ def _compress_for_overrun(messages: list[dict[str, Any]], tier: int = 0) -> bool
 
 
 def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
-    """Spill the biggest tool results to disk (tail 0.41): replace the body
-    with head + tail + spill path, exactly like the arrival-time cap does, but
-    driven by a context overflow instead of a single result's size.
-
-    Replace-in-place ONLY — a tool message must stay beside its assistant
-    tool_calls pair or the chat template can't render the history at all.
-    Skips pinned turns (user said keep) and anything already carrying a spill
-    note (evicting it again would only shrink the head/tail)."""
-    from ._overflow import build_overflow_result, spill_to_disk
-    pins = set(_pinned_indexes())
-    cands = sorted(
-        ((len(m["content"]), i) for i, m in enumerate(messages)
-         if m.get("role") == "tool" and isinstance(m.get("content"), str)
-         and i not in pins and "saved to:" not in m["content"]),
-        reverse=True)
-    n = 0
-    for size, i in cands:
-        if size < st.OVERFLOW_EVICT_MIN_CHARS or n >= st.OVERFLOW_EVICT_MAX:
-            break
-        full = messages[i]["content"]
-        path = spill_to_disk(full)  # never raises; None on I/O error
-        if path:
-            messages[i]["content"] = build_overflow_result(full, path)
-            n += 1
-    return n
+    """Spill the biggest tool results to disk (tier 0.41): replace-in-place
+    with the on-disk stub, exactly like the arrival-time cap does, but driven
+    by a context overflow instead of a single result's size. Overflow-tier
+    thresholds; the fold path uses the parameterized _spill_tool_results."""
+    return _spill_tool_results(messages, set(_pinned_indexes()),
+                               st.OVERFLOW_EVICT_MIN_CHARS, st.OVERFLOW_EVICT_MAX)
 
 
 def open_stream(
@@ -624,6 +605,88 @@ def open_stream(
 # the model's grip on what it was just doing.
 st.COMPRESS_KEEP = 2  # how many recent turns to leave untouched
 
+# Digest turns open with the same header _sessions_fs._SUMMARY_HEADER_RE pins
+# for the session-merge contract (see _is_summary_msg below).
+_SUMMARY_HEADER_RE = re.compile(r"^\[Compressed context — \d+ earlier turns summarized")
+
+
+def _is_summary_msg(msg: Any) -> bool:
+    """True for the digest turn compress() itself produces — role user, string
+    content opening with the same header _sessions_fs._SUMMARY_HEADER_RE pins.
+    Marked with an `_digest` key when freshly built and re-detected by content
+    shape afterwards so a summary survives a save/load round-trip."""
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    if msg.get("_digest"):
+        return True
+    content = msg.get("content")
+    return isinstance(content, str) and bool(_SUMMARY_HEADER_RE.match(content))
+
+
+def _keep_target_tokens(auto: bool) -> int:
+    """Token floor for the kept tail (2.4a): NX_COMPRESS_KEEP_TOKENS when set
+    (any fold), else — auto folds with a known window — a quarter of the
+    context window. 0 → message-count semantics only."""
+    if st.COMPRESS_KEEP_TOKENS > 0:
+        return st.COMPRESS_KEEP_TOKENS
+    if not auto or st.ACTIVE is None:
+        return 0
+    try:
+        window = st.ACTIVE.resolve_context_window()
+    except Exception:  # noqa: BLE001 — probe failures must not break the fold
+        window = None
+    if not isinstance(window, int) or window <= 0:
+        return 0
+    return window // 4
+
+
+def _compress_call_target() -> tuple[Any, str, dict[str, Any]]:
+    """(client, model, extra_request_kwargs) for the summary call (2.4d).
+    NX_COMPRESS_SOURCE[/NX_COMPRESS_MODEL] routes the fold to a cheaper
+    endpoint; anything unset/unknown falls back to the active source. The
+    fold target is never probed or switched-to — it is used as-is."""
+    name = (st.COMPRESS_SOURCE or "").strip()
+    if name:
+        src = st.SOURCES.get(name)
+        if src is not None:
+            model = st.COMPRESS_MODEL or src.model
+            if model:
+                return src.client, model, src.extra_request_kwargs()
+        from ._subagent import _subagent_quiet
+        if not _subagent_quiet() and not st._COMPRESS_SOURCE_WARNED:
+            st._COMPRESS_SOURCE_WARNED = True
+            print(f"{C.WARNING}  ↳ NX_COMPRESS_SOURCE={name!r} unusable — folding "
+                  f"on {getattr(st.ACTIVE, 'name', 'the active source')}{RESET}")
+    return (st.client, st.MODEL,
+            st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {})
+
+
+def _spill_tool_results(messages: list[dict[str, Any]], pins: set[int],
+                        min_chars: int, max_count: int) -> int:
+    """Core of the 0.41 spill-evictor, parameterized (2.4c): replace the
+    `max_count` biggest unpinned string tool results with on-disk stubs.
+    Replace-in-place ONLY — a tool message must stay beside its assistant
+    tool_calls pair or the chat template can't render the history at all.
+    Skips anything already carrying a spill note (idempotent)."""
+    if max_count <= 0 or min_chars <= 0:
+        return 0
+    from ._overflow import build_overflow_result, spill_to_disk
+    cands = sorted(
+        ((len(m["content"]), i) for i, m in enumerate(messages)
+         if m.get("role") == "tool" and isinstance(m.get("content"), str)
+         and i not in pins and "saved to:" not in m["content"]),
+        reverse=True)
+    n = 0
+    for size, i in cands:
+        if size < min_chars or n >= max_count:
+            break
+        full = messages[i]["content"]
+        path = spill_to_disk(full)  # never raises; None on I/O error
+        if path:
+            messages[i]["content"] = build_overflow_result(full, path)
+            n += 1
+    return n
+
 
 def compress(
     messages: list[dict[str, Any]], keep: int | None = None, auto: bool = False
@@ -644,30 +707,49 @@ def compress(
     in-progress work and recent tool results survive the fold.
     """
     assert st.client is not None and st.MODEL is not None
-    if keep is None:
-        keep = st.COMPRESS_KEEP
-        # Auto-compress is conservative: keep roughly the last third of the
-        # conversation verbatim so in-progress work and recent tool results
-        # survive the fold. messages[0] is the system prompt and does not count.
-        if auto:
-            sys_msg0 = messages[0] if messages and messages[0].get("role") == "system" else None
-            body_len = len(messages) - (1 if sys_msg0 else 0)
-            keep = max(keep, body_len // 3)
     # An explicit keep= with auto=True means "the conservative fold, but with
     # THIS keep" — the overflow tiers rely on it (0.41); auto's raise-to-1/3
     # would otherwise defeat a halved keep on a second refusal.
     sys_msg = messages[0] if messages and messages[0].get("role") == "system" else None
-    # keep counts MESSAGES; injected runtime notes are not turns (0.40)
-    keep = _keep_past_notes(messages[1:] if sys_msg else messages, keep)
-    if len(messages) <= 1 + keep:
-        return None  # nothing to compress
-
     body = messages[1:] if sys_msg else messages
-    if len(body) <= keep:
-        return None
+    # 2.4b: a compress() summary turn at the top of the body is prior art, not
+    # material — it is reused verbatim below and the fresh digest is APPENDED
+    # to it (bytes only ever grow, the same append-only discipline as the 1.1
+    # recovery nudges), so a fold no longer re-bills the prefix cache.
+    prior_summary = body[0] if (body and _is_summary_msg(body[0])) else None
+    fold_body = body[1:] if prior_summary is not None else body
+    if keep is None:
+        keep = st.COMPRESS_KEEP
+        # Auto-compress is conservative: keep roughly the last third of the
+        # conversation verbatim so in-progress work and recent tool results
+        # survive the fold. (fold_body excludes the reused summary turn.)
+        if auto:
+            keep = max(keep, len(fold_body) // 3)
+        # 2.4a: a count-keep can still leave a tail that alone overruns the
+        # window; grow it to a token target (any fold when NX_COMPRESS_KEEP_
+        # TOKENS is set; auto folds derive ~window/4 from the probe).
+        target = _keep_target_tokens(auto)
+        if target > 0:
+            from ._ctxreport import _message_tokens
+            acc = 0
+            size = 0
+            for m in reversed(fold_body):
+                acc += _message_tokens(m)
+                size += 1
+                if acc >= target:
+                    break
+            if size > keep:
+                keep = size
+    # keep counts MESSAGES; injected runtime notes are not turns (0.40)
+    keep = _keep_past_notes(fold_body, keep)
+    if len(fold_body) <= keep:
+        return None  # nothing to compress (reused summary at body[0] doesn't count)
 
-    head, tail = body[:-keep], body[-keep:]
+    head, tail = fold_body[:-keep], fold_body[-keep:]
     summarized_n = len(head)
+    # fold_off: where `head` starts inside `body` (the reused summary turn
+    # sits at body[0] and is neither folded nor re-summarized).
+    fold_off = 1 if prior_summary is not None else 0
 
     # The tail must start on a turn the chat template can render — see
     # _drop_leading_dangling_tool_turns for why. Do not simply discard the
@@ -675,22 +757,32 @@ def compress(
     # "summarized" without putting them in the summary prompt loses data.
     # Move them into `head` so they are actually folded into the summary.
     safe_tail, n_dropped = _drop_leading_dangling_tool_turns(tail)
+    # Dangling leading tail turns are real context: fold them into the summary
+    # prompt rather than discarding them (see _drop_leading_dangling_tool_turns).
+    moved_into_head = list(tail[:n_dropped])
     if n_dropped:
-        head.extend(tail[:n_dropped])
         summarized_n += n_dropped
     tail = safe_tail
+    # 2.4c — spill before summarizing: the bulkiest tool results in the
+    # foldable region become on-disk stubs (readable back via read_file) so
+    # the summary prompt carries pointers instead of megabytes and the fresh
+    # digest summarizes prose. Replace-in-place, so tool_call/tool-result
+    # pairs stay renderable; pins are honored after this (they move to the
+    # tail below), and already-spilled results ("saved to:") are skipped.
+    _spill_tool_results(head, set(), st.COMPRESS_SPILL_MIN_CHARS, st.COMPRESS_SPILL_MAX)
 
     # Auto-pin the latest todo_write turn (if it's about to be folded): the
     # todo list is the model's live task plan, so losing it mid multi-step
     # work makes the model re-derive or forget what it was doing. Reuses the
     # /ctx pin machinery (below) instead of a separate splice path.
-    todo_pin = _latest_todo_turn(head)
+    # Dangling-move turns count too (they are folded in this same call).
+    todo_pin = _latest_todo_turn(head + moved_into_head)
 
     # Auto-pin the latest plan_edit turn the same way: under plan mode the plan
     # file is the gate contract — losing its most recent edit turn makes the
     # post-fold transcript's last-known plan stale (the model may re-attempt a
     # mutation the plan was just edited to forbid).
-    plan_pin = _latest_plan_turn(head)
+    plan_pin = _latest_plan_turn(head + moved_into_head)
 
     # Pinned turns (/ctx pin N) survive every fold: pinned messages move into
     # the kept tail (appended in index order, AFTER the verbatim tail) instead
@@ -701,12 +793,13 @@ def compress(
     # corrupting the tail.
     pins = _pinned_indexes()
     if todo_pin is not None:
-        # pins are messages-indexes; todo_pin is a body index → shift it
-        pins = set(pins) | {todo_pin + (1 if sys_msg else 0)}
+        # pins are messages-indexes; todo_pin is a foldable index → shift it
+        # past system + the reused summary turn
+        pins = set(pins) | {todo_pin + (1 if sys_msg else 0) + fold_off}
     if plan_pin is not None:
-        pins = set(pins) | {plan_pin + (1 if sys_msg else 0)}
+        pins = set(pins) | {plan_pin + (1 if sys_msg else 0) + fold_off}
     if pins:
-        body_start = 1 if sys_msg else 0  # index 0 of `messages` == system
+        body_start = (1 if sys_msg else 0) + fold_off  # foldable region start
         split = len(body) - keep           # body indexes < split are foldable
         pin_idx = {i - body_start for i in pins if body_start <= i < split}
         # expand to complete tool_call/tool-result pairs, then drop orphans
@@ -740,9 +833,18 @@ def compress(
                       f"assistant-tool-call/tool-result pair must be pinned together{RESET}")
         if expanded:
             pinned_msgs = [body[i] for i in sorted(expanded)]
-            head = [m for i, m in enumerate(body[:-keep]) if i not in expanded]
+            head = [m for i, m in enumerate(fold_body[:-keep]) if i not in expanded]
             summarized_n = len(head)
             tail = tail + pinned_msgs
+            # The re-derived head lost its spilled stubs — spill again on the
+            # new material (spill is idempotent on already-stubbed results).
+            _spill_tool_results(head, set(), st.COMPRESS_SPILL_MIN_CHARS,
+                                st.COMPRESS_SPILL_MAX)
+        # Fold the dangling-move turns into the summary prompt material.
+        head = head + moved_into_head
+    else:
+        # No pins: the pre-spill head carries into the summary prompt as-is.
+        head = head + moved_into_head
 
     # Render the head as plain text the model can summarize. Tool outputs are
     # the bulkiest part of a real session — include them but truncate each one
@@ -779,11 +881,17 @@ def compress(
     )
 
     payload = [{"role": "user", "content": summary_prompt}]
+    # 2.4d: route the fold to a cheaper endpoint when configured; the summary
+    # answer itself is bounded (2.4e) by NX_COMPRESS_SUMMARY_TOKENS, clamped
+    # by the same window-aware rule open_stream uses (1.8).
+    _client, _model, _extra = _compress_call_target()
+    _max_tokens = _clamp_max_tokens(payload, st.COMPRESS_SUMMARY_TOKENS)
     try:
-        _log_event("req", {"model": st.MODEL, "messages": payload, "stream": False, "_purpose": "compress"})
-        resp = st.client.chat.completions.create(
-            model=st.MODEL, messages=payload, stream=False,
-            **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
+        _log_event("req", {"model": _model, "messages": payload, "stream": False,
+                           "max_tokens": _max_tokens, "_purpose": "compress"})
+        resp = _client.chat.completions.create(
+            model=_model, messages=payload, stream=False, max_tokens=_max_tokens,
+            **_extra)
         try:
             _log_event("resp", {"_purpose": "compress", "data": resp.model_dump()})
         except Exception:
@@ -812,8 +920,19 @@ def compress(
             print(f"{C.ERROR}  ✗ compress returned empty summary — context unchanged{RESET}")
         return None
 
-    header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
-    new_mid = [{"role": "user", "content": f"{header}\n\n{summary}"}]
+    if prior_summary is not None:
+        # 2.4b — append-only reuse: the fresh digest extends the existing
+        # summary turn instead of replacing it. The message's earlier bytes
+        # stay identical (cache-safe); the frozen first line keeps the
+        # _SUMMARY_HEADER_RE session-merge contract; each continuation carries
+        # its own counts line for the model's benefit.
+        continuation = (f"[Compressed context — {summarized_n} more turns "
+                        f"summarized; last {len(tail)} turns kept verbatim]\n{summary}")
+        prior_summary["content"] = f"{prior_summary['content']}\n\n{continuation}"
+        new_mid = [prior_summary]
+    else:
+        header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
+        new_mid = [{"role": "user", "content": f"{header}\n\n{summary}", "_digest": True}]
     messages[:] = ([sys_msg] if sys_msg else []) + new_mid + tail
     return len(tail), summarized_n, len(summary)
 

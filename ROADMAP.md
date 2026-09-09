@@ -364,16 +364,28 @@ would have been caught by a test rather than a warning.
 
 ## Suggested ordering (semver per AGENTS.md)
 
-**STATUS (0.42): Phase 1 is DONE.** Shipped: 1.1 (db59173), 1.3 (a5f7a5b),
-1.4 (3023b04), 1.6 (7b15594 — sinks *and* the redaction pass via
-NX_TOOL_RESULT_REDACT; the NX_BASH_PROMPT_SECRETS flip stays deferred until
-one release of warning-only mode has shipped), 1.8 (9c75278), 1.7 (5392308 —
-floor enforced as recorded BUDGET_TOKENS=2900, 17-tool floor measured 2879),
-1.2 (3144f5c — RecoveryContext per loop, contextvar-resolved), 1.5 (404d369 —
-parity tests + the drift fixed; the full four-table registry merge was
-deliberately NOT done: the parity tests buy the same correctness without
-moving 60+ rows across three modules). **Phase 2 opens at 0.43.0 with 2.1
-shipped:** a hard write fence in `run_tool()` (`nx/_fence.py`, env
+**STATUS (0.47.0): Phase 2 continues.** Shipped this session: **2.2** (0.47.0)
+— undo correctness + durability: one approved call = one checkpoint (dispatcher
+pushes via `push_if_absent`, which dedups against body-pushed checkpoints and
+updates a re-touched file's snapshot in place), the `delete_file` approval
+guard now reads mtime BEFORE `_confirm` (was a post-confirm tautology),
+`sed_edit` pushes only after its staleness abort passes, `undo_last()` restores
+atomically per file and keeps the entry pending when every restore failed, and
+the stack persists to a 0600 `undo.json` under the session home — loaded at
+startup, wiped by `/reset`. **2.4** (0.47.0) — compression v2: the digest turn
+is reused append-only across folds (frozen header keeps the session-merge
+contract; a continuation block carries the fresh counts; the old digest is
+never re-summarized, so the prefix cache survives every fold), the kept tail
+can be sized by tokens (NX_COMPRESS_KEEP_TOKENS, else ~window/4 derived from
+the auto probe), the foldable region's biggest tool results are spilled to
+disk before summarizing (NX_COMPRESS_SPILL_MIN_CHARS/_MAX, core shared with
+the 0.41 overflow evictor), the fold call routes to a cheaper endpoint
+(NX_COMPRESS_SOURCE/_MODEL) and is max_tokens-bounded
+(NX_COMPRESS_SUMMARY_TOKENS, window-clamped). **Previously:** Phase 1 DONE
+at 0.42; 2.1 (0.43.0), 2.5 (0.44.0), 2.3a (0.45.0), 2.3b (0.46.0) as detailed
+below. Still open in Phase 2: **2.6 memory v2** (then P3-5/P3-4).
+
+Then 2.1 (0.43.0): a hard write fence in `run_tool()` (`nx/_fence.py`, env
 `NX_WRITE_FENCE`/`NX_WRITE_ROOTS`) — realpath-roots (project root + session
 home + extras), every structured write candidate judged at fence time
 (sed_edit glob matches, apply_patch `+++` targets), symlink-through targets

@@ -93,6 +93,10 @@ _STATE_NAMES = frozenset((
     "RECOVERY_TEMPERATURE", "RECOVERY_TOP_P", "MAX_MODEL_TURNS",
     "AUTOCOMPRESS_PERCENT", "AUTOCOMPRESS_DEFAULT", "COMPRESS_KEEP", "_METRICS",
     "_TOOL_RESULT_CACHE",
+    # compression v2 (2.4): token-target tail, append-only digest reuse,
+    # spill-before-summarize, fold-call routing, bounded summary answer
+    "COMPRESS_KEEP_TOKENS", "COMPRESS_SPILL_MIN_CHARS", "COMPRESS_SPILL_MAX",
+    "COMPRESS_SOURCE", "COMPRESS_MODEL", "COMPRESS_SUMMARY_TOKENS",
 ))
 
 
@@ -301,7 +305,8 @@ from ._tools import (
     read_file, _LINE_NUM_PREFIX, _strip_line_numbers, list_dir, search_files,
     git_status, git_diff,
 )
-from ._undo import undo_last, list_checkpoints
+from ._undo import undo_last, list_checkpoints  # noqa: F401 — see nx/_undo.py
+from . import _undo as _undo  # noqa: F401 — module handle so /reset can clear the persisted stack
 
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, delete_file
 from ._garble import garble_signature, garble_check, realign_new, swapped_args
@@ -559,6 +564,26 @@ st.AUTOCOMPRESS_PERCENT = _env_int("NX_AUTOCOMPRESS_PERCENT", 85)
 st.AUTOCOMPRESS_PERCENT = max(0, min(100, st.AUTOCOMPRESS_PERCENT))  # clamp 0–100
 # What `/autocompress on` restores; falls back to 85 when configured off.
 st.AUTOCOMPRESS_DEFAULT = st.AUTOCOMPRESS_PERCENT or 85
+
+# --- compression v2 (2.4, 0.47.0) -------------------------------------------
+# (a) Auto folds size the kept tail by TOKENS, not just message count:
+#     NX_COMPRESS_KEEP_TOKENS sets an explicit floor; the default derives
+#     ~window/4 from the source's startup probe (0 = count semantics only).
+# (b) A summary turn is reused append-only across folds — its earlier bytes
+#     never change, so the server's prefix cache survives every fold (the
+#     same discipline as the 1.1 recovery nudges). No env var: not tunable.
+# (c) The foldable region's biggest tool results are spilled to disk before
+#     summarizing (prose summarizes, bulk evicts — pointer stubs stay
+#     readable via read_file).
+st.COMPRESS_KEEP_TOKENS = _env_int("NX_COMPRESS_KEEP_TOKENS", 0)
+st.COMPRESS_SPILL_MIN_CHARS = _env_int("NX_COMPRESS_SPILL_MIN_CHARS", 8000)
+st.COMPRESS_SPILL_MAX = _env_int("NX_COMPRESS_SPILL_MAX", 6)
+# (d) Optional cheaper-model routing for the fold call itself.
+st.COMPRESS_SOURCE = os.environ.get("NX_COMPRESS_SOURCE", "").strip()
+st.COMPRESS_MODEL = os.environ.get("NX_COMPRESS_MODEL", "").strip()
+st._COMPRESS_SOURCE_WARNED = False
+# (e) Bound the summary answer; the window-aware clamp still applies.
+st.COMPRESS_SUMMARY_TOKENS = _env_int("NX_COMPRESS_SUMMARY_TOKENS", 1536)
 
 # When the model stalls in reasoning-only (thinks and thinks but never
 # produces a tool call or visible text), the first nudge should push it to

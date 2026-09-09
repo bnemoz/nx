@@ -341,17 +341,22 @@ def delete_file(path: str, **_: Any) -> str:
     if not existed:
         return f"ERROR: {path} does not exist"
     snap = _undo_snapshot(path)
-    if not _confirm(f"delete {path}"):
-        return "DENIED by user"
-    try:
-        now = os.stat(path).st_mtime
-    except OSError:
-        now = None
+    # mtime BEFORE _confirm (0.47.0, ROADMAP 2.2): the "changed while awaiting
+    # approval" guard used to take both of its stats after _confirm returned —
+    # a tautology that could never fire. This is the pre-approval reading the
+    # post-approval re-stat below is compared against (same pattern as
+    # edit_file/multi_edit).
     try:
         before_mtime = os.stat(path).st_mtime
     except OSError:
         before_mtime = None
-    if now != before_mtime:
+    if not _confirm(f"delete {path}"):
+        return "DENIED by user"
+    try:
+        now_mtime = os.stat(path).st_mtime
+    except OSError:
+        now_mtime = None
+    if now_mtime != before_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-check and retry"
     try:
         os.remove(path)
@@ -426,7 +431,6 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     action = f"sed_edit {len(changes)} file(s), {total} replacement(s): " + ", ".join(f for f, _, _, _, _ in changes)
     if not _confirm(action, preview="\n".join(previews)):
         return "DENIED by user"
-    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n, _mtime in changes])
     stale = []
     for f, _src, _new_src, _n, mtime in changes:
         try:
@@ -438,6 +442,11 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     if stale:
         return ("ERROR: " + ", ".join(stale) + " changed on disk while awaiting approval; "
                 "re-read and retry (no files were modified)")
+    # After the staleness abort (0.47.0, ROADMAP 2.2): the checkpoint used to
+    # be pushed BEFORE this scan, so a call that aborted without modifying
+    # anything still left a pending undo entry whose restore was a no-op
+    # rewrite. Now nothing is pushed unless the files were actually written.
+    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n, _mtime in changes])
     for f, _src, new_src, _n, _mtime in changes:
         _atomic_write(f, new_src)
     hunks = "\n".join(

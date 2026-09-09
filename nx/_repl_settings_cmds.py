@@ -526,6 +526,9 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     st._SESSION_HAS_BACKGROUNDED = False
     st._MULTI_EDIT_NUDGED = False
     st._CONSECUTIVE_EDITS = 0
+    # A fresh conversation has nothing to un-write from the old one: drop both
+    # the in-memory undo stack and its on-disk copy (0.47.0, ROADMAP 2.2).
+    _m._undo.clear_persisted()
     # Fresh tool list too: a /reset implies a new conversation, and an
     # endpoint-level tool-args quirk may have been transient.
     st._MALFORMED_TOOL_FAILURES = {}

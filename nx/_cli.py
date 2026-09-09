@@ -231,6 +231,12 @@ def main() -> None:
         sys.exit(run_batch(sys.argv[2:]))
     # --prompt-file: headless single-shot mode — run one turn and exit.
     import nx as _m
+    # Recover any undo checkpoints a previous session left behind (0.47.0,
+    # ROADMAP 2.2): a crash no longer loses the /undo story. Never fatal.
+    try:
+        _m._undo._load_persisted()
+    except Exception:
+        pass
     if _m._run_one_shot():
         return
     # `nx sessions [query]` — discover + exit, no REPL. Checked first so
