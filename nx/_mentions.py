@@ -11,8 +11,53 @@ import os
 import re
 
 from ._risk import _detect_project_root, _is_under_path
+from ._env import _env_int
 from ._tools import list_dir, read_file
 from ._images import _resolve_mime, read_image
+
+# Files above this size (bytes) are not inlined by a mention; a stub names the
+# size and points at read_file. CSV/TSV always take the preview path past 1 KB
+# (data files tokenize poorly and their header is almost all that matters).
+def _mention_inline_limit() -> int:
+    return _env_int("NX_MENTION_INLINE_LIMIT", 4096)
+
+
+def _csv_preview(resolved: str, token: str) -> str | None:
+    """Large CSV/TSV: inline only the header + first rows instead of the whole
+    file. A CSV mention nearly always means 'look at the columns', and a big
+    data file inlined whole once cost 45K tokens of context. Returns None when
+    the file turns out not to be tabular text (binary, no header, single row)."""
+    ext = os.path.splitext(resolved)[1].lower()
+    sep = "\t" if ext in (".tsv", ".tab") else ","
+    import csv as _csv
+    try:
+        with open(resolved, encoding="utf-8", newline="") as f:
+            reader = _csv.reader(f, delimiter=sep)
+            header = next(reader, None)
+            if not header:
+                return None
+            rows = []
+            for row, _ in zip(reader, range(10)):
+                rows.append(row)
+            # row count only if the file is small enough to scan (counting a
+            # multi-MB CSV just to print a number is a waste of the read);
+            # past NX_MENTION_CSV_SCAN_BYTES the preview says "10+ rows" instead
+            size = os.path.getsize(resolved)
+            n_rows: int | None = len(rows)
+            if size <= _env_int("NX_MENTION_CSV_SCAN_BYTES", 1 << 20):
+                for n_rows, _ in enumerate(reader, len(rows) + 1):
+                    pass
+            else:
+                n_rows = None
+    except (OSError, UnicodeDecodeError, _csv.Error):
+        return None
+    width = len(header)
+    lines = [sep.join(header)]
+    lines += [sep.join((c if len(c) <= 80 else c[:77] + "...") for c in r[:width])
+              for r in rows]
+    return (f"--- @{token} (large CSV, {n_rows if n_rows is not None else str(len(rows)) + '+'} data rows, NOT inlined) ---\n"
+            "header + first rows only; call read_file with offset/limit to page:\n"
+            + "\n".join(lines))
 
 # A mention is '@' immediately preceded by start-of-string or whitespace (so
 # "user@example.com" doesn't trigger), followed by non-space characters.
@@ -77,6 +122,23 @@ def expand_at_mentions(text: str, cwd: str | None = None) -> str | list[dict]:
                 image_parts.extend(out)
             else:
                 blocks.append(f"\n\n--- @{token} ---\n{out}")
+            continue
+        ext = os.path.splitext(resolved)[1].lower()
+        try:
+            size = os.path.getsize(resolved)
+        except OSError:
+            size = 0
+        if ext in (".csv", ".tsv", ".tab") and size > 1024:
+            preview = _csv_preview(resolved, token)
+            if preview is not None:
+                blocks.append("\n\n" + preview)
+                continue
+        if size > _mention_inline_limit():
+            blocks.append(
+                f"\n\n--- @{token} (large, {size} bytes, NOT inlined) ---\n"
+                "This file is too big to attach with the mention; it is NOT "
+                "in this message. Call read_file (with offset/limit to page) "
+                "or search_files to pull in only what you need.")
             continue
         try:
             content = read_file(resolved)
