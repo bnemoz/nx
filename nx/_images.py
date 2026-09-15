@@ -158,16 +158,23 @@ def _parts_preview(result: list) -> str:
     return head or f"[image attached — {len(result)} part(s), base64 payload not shown]"
 
 
-def _strip_image_parts(msgs: list[dict[str, Any]]) -> int:
+def _strip_image_parts(msgs: list[dict[str, Any]], note: str | None = None) -> int:
     """Swap every image_url part in these messages' tool content for a text
     note, in place. Returns how many messages were changed.
 
     Used by the auto-compress path when a context-length 400 may have been
     CAUSED by image parts: keeping them verbatim in the retry tail would 400
-    again and kill the turn. The model keeps the '[image: path, N bytes]'
-    marker (it saw the picture once and summarized it), the bytes are gone.
-    Mutating the dicts in place matters — compress()'s tail holds references
-    into the caller's live history."""
+    again and kill the turn. And by the turn loop once an image has actually
+    been consumed (PERF.md PF-13) — a payload costs its megabytes on EVERY
+    later request until something evicts it, so it is dropped the turn after it
+    was first sent rather than at the next overflow. The model keeps the
+    '[image: path, N bytes]' marker (it saw the picture once and summarized
+    it), and the session's sidecar image store still holds the bytes for
+    resume; only the wire copy goes. Mutating the dicts in place matters —
+    compress()'s tail and the session writer hold references into the caller's
+    live history."""
+    if note is None:
+        note = IMAGE_EVICTED_NOTE
     changed = 0
     for m in msgs:
         c = m.get("content") if isinstance(m, dict) else None
@@ -178,11 +185,31 @@ def _strip_image_parts(msgs: list[dict[str, Any]]) -> int:
             if isinstance(p, dict) and p.get("type") == "image_url":
                 p.clear()
                 p["type"] = "text"
-                p["text"] = "[image evicted from context to fit the window — re-read the file if needed]"
+                p["text"] = note
                 hit = True
         if hit:
             changed += 1
     return changed
+
+
+# The model-visible replacement for an image part, per eviction reason.
+IMAGE_EVICTED_NOTE = ("[image evicted from context to fit the window — "
+                      "re-read the file if needed]")
+IMAGE_CONSUMED_NOTE = ("[image payload dropped after use to keep the context "
+                       "small — re-read the file if you need to look again]")
+
+
+def _strip_consumed_images(msgs: list[dict[str, Any]], sent_before: int) -> int:
+    """Evict the base64 payload of every image the model has now SEEN (PF-13).
+
+    `sent_before` is the message count when the request was sent, so only
+    msgs[:sent_before] were on the wire — an image appended during the turn
+    itself (a read_image call this very turn) has not been seen yet and is
+    spared until the following turn. Call this right after model_turn() returns.
+    """
+    if sent_before < 0:
+        sent_before = len(msgs)
+    return _strip_image_parts(msgs[:sent_before], IMAGE_CONSUMED_NOTE)
 
 
 # ---- session storage: payloads in a content-addressed sidecar, not in JSON --

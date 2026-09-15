@@ -40,18 +40,31 @@ def resumed_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
       what keeps a normal resume byte-identical (prompt cache intact).
     """
     from ._sessions_fs import _deserialize_image_parts
-    from ._memory_cmd import _add_memory_note_if_absent, _refresh_memory_note
+    from ._memory_cmd import _refresh_memory_note
     from ._subagent import _add_delegation_note_if_absent
+    from ._prefix import is_prefix_note, pin_prefix, prefix_notes
     import nx as _m
 
     msgs = [dict(m) if isinstance(m, dict) else m
             for m in (data.get("messages") or []) if isinstance(m, dict)]
     _deserialize_image_parts(msgs)
     msgs = [m for m in msgs if m.get("role") != "system"]
-    msgs.insert(0, {"role": "system", "content": _m.SYSTEM})
-    _add_memory_note_if_absent(msgs)
+    # The canonical prefix block (PERF.md PF-15): one producer, shared with a
+    # fresh session. A resumed session used to rebuild only the memory and
+    # delegation notes, so it could lack the AGENTS.md and orientation notes a
+    # fresh session carries — different leading bytes, i.e. a prompt-prefix
+    # cache miss for the whole prompt. Any saved copy of a block note is dropped
+    # (wherever it sits) and the live block re-inserted right after SYSTEM; the
+    # pin then records it as the bytes later turns must preserve.
+    msgs = [{"role": "system", "content": _m.SYSTEM}] \
+        + prefix_notes() + [m for m in msgs if not is_prefix_note(m)]
+    # Memory / delegation notes drift: the transcript's snapshot may predate the
+    # current store. Both refresh append-only, so a resume over an untouched
+    # store stays byte-identical (prompt cache intact) — see PF-12. (No-ops when
+    # the block above already carries the up-to-date note.)
     _refresh_memory_note(msgs)
     _add_delegation_note_if_absent(msgs)
+    pin_prefix(msgs)
     return msgs
 
 

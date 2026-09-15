@@ -337,6 +337,21 @@ prefix survives, or accept the bust only on explicit `/memory optimize` and
 never implicitly on resume. At minimum, split "correctness of the note" from
 "position of the note".
 
+**Shipped in 0.58.0.** `_refresh_memory_note` is now **append-only**: it appends
+the fresh note at the TAIL (and a fixed "the store is now empty" note when the
+store went empty, instead of deleting the old one), never writing an existing
+message. It compares against the LAST note (`_last_memory_note_index`) so an
+unchanged store is still a no-op and a resume over an untouched store stays
+byte-identical; a drifted store grows the transcript by one tail note, and the
+tail note is authoritative (a stale mid-transcript note is simply superseded by
+recency). `_add_memory_note_if_absent` collapsed into a thin alias of the same
+tail-append, and resume now calls `_refresh_memory_note` once instead of
+insert-then-refresh (which would otherwise append twice). `/memory optimize`
+uses the same append-only path, so it no longer busts the cache either.
+`tests/test_perf_prefix_cache.py` pins that no pre-existing message mutates
+(T-6) and that index 1 is never written; `tests/test_memory_tools.py` and
+`tests/test_memory_optimize.py` were updated to the tail contract.
+
 **PF-13 · HIGH · `_images.py:136-139` base64 image payloads live in a `tool`
 message and are re-sent on every subsequent request.** Up to
 `NX_IMAGE_MAX_BYTES` (8 MB raw ⇒ ~11 MB base64) per image, per turn, until an
@@ -352,6 +367,20 @@ completes having consumed the image (the `image_consumers` / `_verify.py` model
 already knows what consumed it), instead of waiting for an overrun to force it.
 Add a per-turn payload byte counter to the bench harness so this cannot regress.
 
+**Shipped in 0.58.0.** `_strip_consumed_images` (`_images.py`) is called from the
+turn loop right after `model_turn()` returns (`_turn.py:1827`), with the message
+count snapshot taken before the call — so only the prefix that was actually on
+the wire is stripped, and an image appended by a `read_image` call *during* the
+turn survives until the model has seen it (stripped the turn after). The
+consumed payload swaps to a distinct `IMAGE_CONSUMED_NOTE` (not the overrun
+wording); the session's `image_ref` sidecar still holds the bytes, so resume
+fidelity is unaffected — only the wire copy goes.
+`tests/test_image_consumers.py::test_strip_consumed_images_spares_an_image_not_yet_sent`
+pins the not-yet-sent case. (There is no `image_consumer` symbol in the code —
+PERF.md's "the `image_consumers` / `_verify.py` model already knows" was
+aspirational; `_verify.py` is unrelated, and consumption is inferred from the
+send boundary instead.)
+
 **PF-14 · MED · `_compress.py:451-457` + `:685-709` `_spill_tool_results`
 mutates `messages[i]["content"]` in place** (up to the 6 largest tool results)
 — a mid-transcript rewrite, i.e. a cache bust on exactly the turns where the
@@ -360,6 +389,20 @@ compression v2's "never re-summarize the head" goal. Fix: spill at append time
 (before the result is ever sent) rather than retroactively, so the wire bytes
 never change once sent.
 
+**Shipped in 0.58.0.** `_sanitize_tool_result` (`_text_fallback.py:404`) now
+spills on the way *in*: a result larger than `NX_TOOL_RESULT_SPILL_MIN_CHARS`
+(default 4000 — the smallest retroactive threshold, `OVERFLOW_EVICT_MIN_CHARS`)
+is written to the overflow store and replaced with the same bounded head/tail +
+path stub the arrival-time cap already produced, before it ever enters history.
+Because `_spill_tool_results` skips anything carrying `"saved to:"`, the
+retroactive evictors (`_evict_largest_tool_results`, `compress()`'s fold spill)
+now find nothing to rewrite and return 0 — kept as a last-resort safety net for
+content injected bypassing `run_tool()`, the only remaining (cache-busting)
+spill. So the wire bytes of any result ≥4 KB never change after they are sent.
+`tests/test_tool_overflow.py::test_append_floor_preempts_a_retroactive_spill`
+drives a result through the append path and asserts the evictor then returns 0;
+`test_append_floor_disabled_restores_cap_only` pins the opt-out.
+
 **PF-15 · MED · `_dispatch.py:209-241` `_initial_messages()` appends four notes
 at indices 1–4** (AGENTS.md ≤8000 chars, memory title index, orientation, …) and
 `_resume.py:50-51` rebuilds the system message wholesale on version-skipped
@@ -367,6 +410,21 @@ resumes. Each is a position/content change to the prefix. Fix: a single
 canonical "prefix block" built by one function, byte-stable within a session,
 with an explicit `pin_prefix()` so a regression shows up as a diff rather than a
 mystery `cached: 0%`.
+
+**Shipped in 0.58.0.** New module `nx/_prefix.py` owns the head: `prefix_notes()`
+is the single ordered producer (AGENTS.md, memory, orientation, delegation —
+each only when present), used by both `_dispatch._initial_messages()` and
+`_resume.resumed_messages()`. So a resumed session now gets all four notes a
+fresh one does (the old resume path omitted AGENTS.md and orientation, so the
+two disagreed on the leading bytes) — the saved copies are dropped and the live
+block re-inserted right after SYSTEM, then `pin_prefix()` records it.
+`check_prefix()` runs in `model_turn` immediately before `open_stream`, i.e. the
+one place a moved prefix actually costs: it compares the current head bytes to
+the pinned copy and warns once — naming I-3/I-4 — instead of leaving a silent
+`cached: 0%`. Tests: `tests/test_perf_prefix_cache.py` (T-7's 20-turn
+byte-identical head; the structural guard that neither path re-inlines the
+block). `SYSTEM` remains a static literal and no producer interpolates a date,
+cwd, or branch, so the head is byte-stable by construction.
 
 ---
 
@@ -577,7 +635,7 @@ behavior changes, so minors, with patches for anything that only adds a test.
 | **0.55.0** — *stop the keystroke hitch* | **PF-01** (tree cache + move I/O out of `render()` + memoize project root), **PF-02** (scan watermark) — **shipped** | T-1, T-3, T-4 green (`tests/test_stream_tag_scan_watermark.py`, `tests/test_chatbox_completion_cache.py`). `@`-completion < 1 ms/keystroke on a 20k-file repo; long-answer stream CPU < 50 ms |
 | **0.56.0** — *per-turn tax* | **PF-06** (interrupt handshake), **PF-07** (async metrics push), **PF-08** (bash sleeps — settle sleep only), **PF-09** (background title gen) — **shipped** | T-8/T-13 covered by `tests/test_perf_interrupt_disarm.py` + `tests/test_perf_turn_tax.py`. Disarm→prompt < 50 ms (measured ~1 ms); `flush()` never POSTs inline; `_finish_bg_job` ~5 ms not 200 ms; desc refresh non-blocking. The `_poll_pid` reaper-event rewrite stays open (needs a new mechanism). |
 | **0.57.0** — *render path* | **PF-03** (join instead of `+=`), **PF-04** (incremental clean-string accumulation, size-scaled throttle, no double final parse), **PF-22** (dict access; `iter_raw` half declined — see PF-22) — **shipped** | T-2/T-5 covered by `tests/test_perf_render_path.py`. `StreamParser` linear; `_content_str`/`_clean_str` are properties, not accumulators; rendered bytes 4.6×/71× lower on 17.5 KB/288 KB answers |
-| **0.58.0** — *prefix-cache integrity* | **PF-12** (memory note to the tail), **PF-13** (strip image payloads after consumption), **PF-14** (spill at append time), **PF-15** (single pinned prefix block) | T-6, T-7 green. `cached:` stays non-zero across a recovery storm and across resume; per-turn payload bytes do not grow with attached images |
+| **0.58.0** — *prefix-cache integrity* | **PF-12** (memory note to the tail), **PF-13** (strip image payloads after consumption), **PF-14** (spill at append time), **PF-15** (single pinned prefix block) — **shipped** | T-6, T-7 green (`tests/test_perf_prefix_cache.py`). The head is one producer + a per-session pin checked before every request; the memory note and tool-result stubs are now append-time/tail-only, so `cached:` stays non-zero across a recovery storm and across resume; image payloads stop riding along after the model has seen them |
 | **0.59.0** — *one cached capability manifest* | **PF-10** (stable cache-routing identity), **PF-11** (pin accepted request shape), **PF-21** (memoize `resolve_model`). Pairs with ROADMAP P3-10 | T-11 green (request count pinned). Zero redundant `/v1/models` per turn |
 | **0.60.0** — *bounds and durability* | **PF-16** (bounded caches, agent-record eviction), **PF-17** (sub-agent semaphore), **PF-18** (cache validity anchors), **PF-05** (undo persistence amortized), **PF-19** (diff hunk cap) | T-10, T-12 green. Flat RSS over a 200-turn synthetic session |
 | **0.61.0** — *make features cheap* | Tiered tool registry + `search_tools` meta-tool (§6 items 1-2), docs-parity test for undocumented `NX_*`, `tests/perf/` promoted to a supported target with `baselines.json` | T-9, T-14, T-15 green. Adding a tool costs 0 tokens unless used |

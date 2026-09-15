@@ -325,9 +325,12 @@ def test_optimize_merges_retires_archives_and_refreshes_the_note():
     # The live transcript's memory note now lists only the merged title.
     note_lines = [mm["content"] for mm in messages
                   if isinstance(mm.get("content"), str) and "[Saved memories" in mm["content"]]
-    assert len(note_lines) == 1, messages
-    assert "Build caching in nx" in note_lines[0]
-    assert "Scratch session log" not in note_lines[0]
+    # Append-only refresh (PERF.md PF-12): the session-start note stays where it
+    # was and a fresh one is appended at the tail. The LAST note is the
+    # authoritative one and lists only the merged title.
+    assert len(note_lines) == 2, messages
+    assert "Build caching in nx" in note_lines[-1]
+    assert "Scratch session log" not in note_lines[-1]
     # Approval was asked exactly once.
     assert len(_confirm_calls) == 1, _confirm_calls
 
@@ -907,28 +910,31 @@ def test_plan_prompt_focus_guidance_and_unreviewed_print():
 
 # --- the in-context memory note ----------------------------------------------
 
-def test_refresh_memory_note_replaces_in_place_and_drops_when_empty():
+def test_refresh_memory_note_appends_at_tail_and_survives_an_empty_store():
     root = tempfile.mkdtemp(prefix="nx-opt-note-")
     m.st.PROJECT_ROOT = root
     _note("Kept note", "kept body", scope="project", root=root)
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
     _memory_cmd._add_memory_note_if_absent(msgs)
-    at = _memory_cmd._find_memory_note_index(msgs)
-    assert at == 1, msgs
+    at = _memory_cmd._last_memory_note_index(msgs)
+    assert at == 2, msgs                      # appended at the tail, not index 1
     assert len(msgs) == 3
 
     assert _memory_cmd._refresh_memory_note(msgs) is False   # unchanged store
     _note("Second note", "another body", scope="project", root=root)
     assert _memory_cmd._refresh_memory_note(msgs) is True
-    assert _memory_cmd._find_memory_note_index(msgs) == at   # same index, in place
-    assert "Second note" in msgs[at]["content"]
-    assert len(msgs) == 3
+    assert _memory_cmd._last_memory_note_index(msgs) == at + 1   # appended, not rewritten
+    assert "Second note" in msgs[-1]["content"]
+    assert msgs[at]["content"] != msgs[-1]["content"]          # earlier bytes untouched
+    assert len(msgs) == 4
 
     for f in _md_files(os.path.join(root, ".nx", "memories")):
         os.unlink(os.path.join(root, ".nx", "memories", f))
+    # Store now empty: a note is still appended saying so (so the model stops
+    # reciting archived titles), rather than the stale note being deleted.
     assert _memory_cmd._refresh_memory_note(msgs) is True
-    assert _memory_cmd._find_memory_note_index(msgs) is None
-    assert len(msgs) == 2
+    assert "empty" in msgs[-1]["content"]
+    assert len(msgs) == 5
 
 
 # --- registration ------------------------------------------------------------

@@ -37,8 +37,9 @@ Flow, bounded at every step:
    `<memories_dir>/archive/<run-stamp>/` inside their own scope dir. A bad
    librarian answer is therefore reversible by `mv`, and the scanner can't
    see the archive (it lists `.md` *files*, and `archive` has no suffix).
-5. The live transcript's `[Saved memories …]` note is refreshed, so the
-   model's view of the store matches the store (`_refresh_memory_note`).
+5. The live transcript's memory note is refreshed by APPENDING a fresh note at
+   the tail, never rewriting one in place, so the prompt-prefix cache survives
+   (`_refresh_memory_note`, PERF.md PF-12).
 
 Merges may span scopes; the merged note lands in the scope holding the
 majority of its sources (ties → project), and every source is archived.

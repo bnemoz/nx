@@ -475,7 +475,7 @@ REASONING_CAPTURE_CHARS = _env_int("NX_REASONING_CAPTURE_CHARS", 8000)
 # near-duplicate tool outputs (find/ls/grep path dumps) are the fuel for the
 # context-copying repetition collapse some local models fall into — bounding
 # them is the cheapest prevention. 0 disables the size cap (dedup still runs).
-from ._text_fallback import TOOL_RESULT_CHARS
+from ._text_fallback import TOOL_RESULT_CHARS, TOOL_RESULT_SPILL, APPEND_SPILL_MIN_CHARS
 from ._overflow import (
     overflow_dir, spill_to_disk, build_overflow_result,
     OVERFLOW_TTL_DAYS, MAX_SPILL_ECHO,

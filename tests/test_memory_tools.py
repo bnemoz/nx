@@ -395,13 +395,16 @@ def test_add_memory_note_if_absent_inserts_once_and_skips_existing():
     old = m.st.PROJECT_ROOT
     m.st.PROJECT_ROOT = root
     try:
-        # Resumed transcript predating the feature -> note inserted after system.
+        # Resumed transcript predating the feature -> note appended at the TAIL
+        # (PERF.md PF-12: never inserted mid-history, which would bust the
+        # prompt-prefix cache).
         msgs = [{"role": "system", "content": "S"},
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"}]
         _memory_cmd._add_memory_note_if_absent(msgs)
-        assert msgs[1]["role"] == "user" and "[Saved memories" in msgs[1]["content"]
-        # Transcript already carrying one -> untouched.
+        assert msgs[3]["role"] == "user" and "[Saved memories" in msgs[3]["content"]
+        assert msgs[1] == {"role": "user", "content": "hi"}  # prefix untouched
+        # Transcript already carrying an up-to-date one -> untouched.
         before = list(msgs)
         _memory_cmd._add_memory_note_if_absent(msgs)
         assert msgs == before
@@ -603,20 +606,25 @@ def test_refresh_memory_note_at_resume_updates_stale_titles():
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"}]
         _memory_cmd._add_memory_note_if_absent(msgs)
-        assert "[project] Resume memo one" in str(msgs[1].get("content")), str(msgs[1])
+        assert "[project] Resume memo one" in str(msgs[-1].get("content")), str(msgs[-1])
         # the store moved on: the only note is archived by an optimize elsewhere
         _archive_all_notes(os.path.join(root, ".nx", "memories"), "20260906-000003")
         assert _memory_cmd._refresh_memory_note(msgs) is True
-        assert all("Resume memo one" not in str(x.get("content")) for x in msgs)
+        # Append-only (PF-12): the stale session-start note stays where it was,
+        # and a fresh tail note supersedes it.
+        assert "Resume memo one" not in str(msgs[-1].get("content"))
+        assert "[global] Resume global anchor" in str(msgs[-1].get("content"))
         # refreshing again with an unchanged store must not touch the transcript
         assert _memory_cmd._refresh_memory_note(msgs) is False
-        # a new note lands in the store: the transcript note is replaced IN PLACE
+        # a new note lands in the store: a fresh note is APPENDED at the tail
+        # (the earlier bytes are left untouched — prompt-cache safe).
         _write_memory("Resume memo two", "resumetwo body", scope="project", project_root=root)
-        idx = next(i for i, x in enumerate(msgs) if "[Saved memories" in str(x.get("content")))
+        before = len(msgs)
         assert _memory_cmd._refresh_memory_note(msgs) is True
-        idx2 = next(i for i, x in enumerate(msgs) if "[Saved memories" in str(x.get("content")))
-        assert idx2 == idx  # same slot: turn order and any /ctx pin survive
-        assert "[project] Resume memo two" in str(msgs[idx2].get("content"))
+        assert len(msgs) == before + 1
+        assert "[project] Resume memo two" in str(msgs[-1].get("content"))
+        # refreshing again with the unchanged store is still a no-op
+        assert _memory_cmd._refresh_memory_note(msgs) is False
     finally:
         m.st.PROJECT_ROOT = old
 

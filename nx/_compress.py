@@ -452,7 +452,15 @@ def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
     """Spill the biggest tool results to disk (tier 0.41): replace-in-place
     with the on-disk stub, exactly like the arrival-time cap does, but driven
     by a context overflow instead of a single result's size. Overflow-tier
-    thresholds; the fold path uses the parameterized _spill_tool_results."""
+    thresholds; the fold path uses the parameterized _spill_tool_results.
+
+    Since PF-14 the append-time floor (_text_fallback.APPEND_SPILL_MIN_CHARS,
+    default 4000) already stubs results this large the moment they are
+    produced — before they are ever sent — so in practice this now finds only
+    content injected bypassing run_tool() and returns 0. It is kept as a
+    safety net for that case, and because a mid-flight lowering of the floor
+    should not silently drop the eviction path. It is the LAST-resort, cache-
+    busting spill; prefer spilling at append time (never mutate sent bytes)."""
     return _spill_tool_results(messages, set(_pinned_indexes()),
                                st.OVERFLOW_EVICT_MIN_CHARS, st.OVERFLOW_EVICT_MAX)
 

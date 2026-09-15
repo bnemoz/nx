@@ -118,6 +118,51 @@ def test_spill_purges_stale_files(monkeypatch):
     assert not os.path.exists(path), "stale spill should have been purged"
 
 
+def test_spilled_body_names_the_path_and_holds_the_full_text(monkeypatch):
+    """PF-14: the append-time spill (which replaces the arrival-time cap) keeps
+    the same contract — head + tail + a real, existing path to the full text."""
+    _set_n(monkeypatch, 200)
+    body = "\n".join(f"line {i} {'x' * 200}" for i in range(200))  # ~40KB
+    out = m._sanitize_tool_result(body)
+    assert "saved to:" in out
+    path = _spill_path(out)
+    assert os.path.exists(path)
+    with open(path) as f:
+        assert f.read() == body
+    # the stub is the bounded echo, not the whole 40KB
+    assert len(out) < 5000
+
+    # the normal cap fits the bounded echo stub with room to spare
+    _set_n(monkeypatch, 20000)
+    big = m._sanitize_tool_result(body)
+    assert "saved to:" in big and len(big) < 20000
+
+
+def test_append_floor_preempts_a_retroactive_spill(monkeypatch):
+    """PF-14: a result between the append floor and the cap is stubbed the
+    moment it is produced, so the (cache-busting) retroactive evictor finds
+    nothing left to rewrite."""
+    monkeypatch.setattr(tf, "TOOL_RESULT_CHARS", 20000)
+    monkeypatch.setattr(tf, "APPEND_SPILL_MIN_CHARS", 200)
+    body = _body(n=40)  # ~1.3KB: over the floor, well under the cap
+
+    out = m._sanitize_tool_result(body)
+    assert "saved to:" in out, "append-time floor did not spill"
+
+    from nx import _compress as cp
+    msgs = [{"role": "tool", "tool_call_id": "t", "content": out}]
+    before = msgs[0]["content"]
+    assert cp._evict_largest_tool_results(msgs) == 0, "already-stubbed result re-spilled"
+    assert msgs[0]["content"] == before
+
+
+def test_append_floor_disabled_restores_cap_only(monkeypatch):
+    monkeypatch.setattr(tf, "TOOL_RESULT_CHARS", 20000)
+    monkeypatch.setattr(tf, "APPEND_SPILL_MIN_CHARS", 0)
+    out = m._sanitize_tool_result(_body(n=40))
+    assert "saved to:" not in out and out == _body(n=40)
+
+
 def test_overflow_echo_bounded_by_char_budget(monkeypatch):
     huge = "\n".join("z" * 500 for _ in range(20))
     head, tail, _ = ov._echo_lines(huge)

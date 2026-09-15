@@ -93,6 +93,34 @@ def test_overrun_compress_strips_images_even_without_fold(nx_fresh, monkeypatch)
     assert all(p.get("type") == "text" for p in msgs[0]["content"])
 
 
+def test_strip_consumed_images_spares_an_image_not_yet_sent(nx_fresh):
+    """PF-13: only the messages that were actually on the wire get evicted, so
+    an image read during the current turn survives until the model sees it."""
+    from nx._images import _strip_consumed_images
+    msgs = [
+        {"role": "user", "content": "look"},
+        {"role": "tool", "tool_call_id": "t1", "content": _parts()},
+        {"role": "tool", "tool_call_id": "t2", "content": _parts()},
+    ]
+    # the request was sent with only the first tool result present
+    assert _strip_consumed_images(msgs, sent_before=2) == 1
+    assert all(p["type"] == "text" for p in msgs[1]["content"])
+    assert any(p["type"] == "image_url" for p in msgs[2]["content"]), \
+        "an image appended after the request was stripped before being seen"
+    # next turn it has been consumed too
+    assert _strip_consumed_images(msgs, sent_before=len(msgs)) == 1
+    assert all(p["type"] == "text" for p in msgs[2]["content"])
+
+
+def test_consumed_note_differs_from_the_overrun_note(nx_fresh):
+    from nx._images import IMAGE_CONSUMED_NOTE, _strip_consumed_images
+    msgs = [{"role": "tool", "tool_call_id": "t", "content": _parts()}]
+    _strip_consumed_images(msgs, len(msgs))
+    notes = [p["text"] for p in msgs[0]["content"]]
+    assert IMAGE_CONSUMED_NOTE in notes
+    assert PNG_B64 not in str(msgs[0])
+
+
 def test_overrun_compress_still_folds(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     monkeypatch.setattr(nx, "compress",

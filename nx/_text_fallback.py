@@ -67,6 +67,18 @@ TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
 # 0 disables spilling (plain elision marker, as before).
 TOOL_RESULT_SPILL = _env_int("NX_TOOL_RESULT_SPILL", 1)
 
+# PF-14: the floor at which a tool result is spilled to disk the moment it is
+# produced, BEFORE it is ever sent to the model. This is the smallest of the
+# retroactive evictors' thresholds (OVERFLOW_EVICT_MIN_CHARS 4000,
+# COMPRESS_SPILL_MIN_CHARS 8000), so any result those paths would have spilled
+# for a context overrun already carries its on-disk stub by the time it enters
+# history. That matters for the prompt cache: a retroactive spill rewrites a
+# mid-transcript message's bytes, invalidating the server prefix cache for the
+# whole remaining prompt on exactly the turns it is largest. 0 restores the
+# old arrival-time cap only (>TOOL_RESULT_CHARS), leaving the evictors as the
+# sole (rewriting) spiller.
+APPEND_SPILL_MIN_CHARS = _env_int("NX_TOOL_RESULT_SPILL_MIN_CHARS", 4000)
+
 # First-line secrets hygiene (0.40, roadmap 1.6): mask known token SHAPES in
 # tool results before the result is shown, persisted (sessions, spills,
 # sub-agent reports, bg logs) or cached. Best-effort by construction — it
@@ -433,23 +445,39 @@ def _sanitize_tool_result(text: Any) -> Any:
         i = j
     result = "\n".join(out_lines)
     budget = TOOL_RESULT_CHARS
-    if budget > 0 and len(result) > budget:
+    over_budget = budget > 0 and len(result) > budget
+    over_floor = APPEND_SPILL_MIN_CHARS > 0 and len(result) > APPEND_SPILL_MIN_CHARS
+    # Spill BEFORE the result is ever sent (PERF.md PF-14): once a message is on
+    # the wire its bytes must never change, so the decision to keep only head +
+    # tail + a pointer is made here rather than retroactively by a context-overrun
+    # evictor. It triggers on the arrival cap OR the lower append floor, which
+    # pre-empts those evictors. The stub is bounded (MAX_SPILL_ECHO lines).
+    if TOOL_RESULT_SPILL and (over_budget or over_floor):
+        stub = _spill_with_echo(result)
+        # The stub is bounded (MAX_SPILL_ECHO lines), so at the default cap it
+        # is far smaller than the result it replaces. (A user who lowers
+        # NX_TOOL_RESULT_CHARS below the echo budget still gets the path — the
+        # pointer matters more than the cap, as the arrival-time spill always
+        # did.)
+        if stub is not None:
+            return stub
+    if over_budget:
         head = budget * 2 // 3
         tail = budget - head
         elided = len(result) - head - tail
         marker = (f"\n... [{elided} chars elided to bound context; "
                   f"re-run more narrowly if you need the rest]\n")
-        spill_path = None
-        if TOOL_RESULT_SPILL:
-            # Spill the FULL text to disk first — the model then gets real
-            # head/tail content plus the path instead of a blind cut, and can
-            # read_file/search_files the spill for the elided middle.
-            try:
-                spill_path = spill_to_disk(result)
-                if spill_path:
-                    result = build_overflow_result(result, spill_path)
-            except Exception:  # noqa: BLE001 — spilling must never lose a result
-                spill_path = None
-        if not spill_path:
-            result = (result[:head] + marker + result[-tail:])
+        result = result[:head] + marker + result[-tail:]
     return result
+
+
+def _spill_with_echo(full: str) -> str | None:
+    """Write `full` to the overflow dir and return the bounded stub that
+    replaces it in the message (head lines + tail lines + the path), or None
+    when spilling isn't viable (I/O error). Never raises — spilling must never
+    lose a result."""
+    try:
+        path = spill_to_disk(full)
+        return build_overflow_result(full, path) if path else None
+    except Exception:  # noqa: BLE001 — spilling must never lose a result
+        return None

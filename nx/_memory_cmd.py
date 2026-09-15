@@ -729,23 +729,29 @@ def memory_delete(target: str, scope: str = "project", **_: Any) -> str:
 
 
 def _add_memory_note_if_absent(messages: list[dict[str, Any]]) -> None:
-    """Insert the session-start memory note (see _load_memory_note) unless the
-    transcript already carries one. Fresh sessions get it from
-    _initial_messages(); a resumed session replays a transcript that may
-    predate the feature — or predate the memories it would list."""
-    at = _find_memory_note_index(messages)
-    if at is None:
-        note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
-        if note is not None:
-            at = 1 if (messages and messages[0].get("role") == "system") else 0
-            messages.insert(at, note)
+    """Ensure the transcript carries the session-start memory note (see
+    _load_memory_note). Fresh sessions get it from _initial_messages(); a
+    resumed session replays a transcript that may predate the feature — or
+    predate the memories it would list. A thin alias of _refresh_memory_note
+    (appends at the TAIL, never inserts mid-history — PERF.md PF-12), kept
+    under this name for its marker-scan contract (mirrored by
+    _subagent._add_delegation_note_if_absent)."""
+    _refresh_memory_note(messages)
 
 
 MEMORY_NOTE_MARKER = "[Saved memories"
 
+# Appended in place of the list when the store has gone empty, so the model
+# stops reciting titles that no longer exist. Carries the marker so the next
+# refresh recognises it as the current note.
+MEMORY_NOTE_CLEARED = (
+    "[Saved memories: the store is now empty — the earlier [Saved memories] "
+    "list is stale; don't act on those titles.]"
+)
+
 
 def _find_memory_note_index(messages: list[dict[str, Any]]) -> int | None:
-    """Index of the transcript's memory-awareness note, or None."""
+    """Index of the FIRST memory-awareness note, or None."""
     for i, m in enumerate(messages):
         if (m.get("role") == "user" and isinstance(m.get("content"), str)
                 and MEMORY_NOTE_MARKER in m["content"]):
@@ -753,37 +759,40 @@ def _find_memory_note_index(messages: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def _refresh_memory_note(messages: list[dict[str, Any]]) -> bool:
-    """Rebuild the memory-awareness note that a running session carries, after
-    the store changed underneath it (see /memory optimize). Returns True when
-    the message list changed. An existing entry is replaced at its own index,
-    so turn order and any /ctx pin on that turn survive; when every note has
-    gone the stale entry is dropped; when the transcript somehow has none, the
-    fresh note is inserted where _add_memory_note_if_absent would put it.
+def _last_memory_note_index(messages: list[dict[str, Any]]) -> int | None:
+    """Index of the LAST memory-awareness note, or None. Refresh compares
+    against this one: it is the freshest statement of the store in the
+    transcript."""
+    found = None
+    for i, m in enumerate(messages):
+        if (m.get("role") == "user" and isinstance(m.get("content"), str)
+                and MEMORY_NOTE_MARKER in m["content"]):
+            found = i
+    return found
 
-    Cost, deliberately paid: rewriting a mid-transcript message busts the
-    prompt cache for the next turn (the /undo-style edit the cache-visibility
-    docs warn about). It runs when the user explicitly runs /memory optimize,
-    and at session resume (both --resume and /resume), where the transcript's
-    note snapshots the store as of that session's last run — a /memory optimize
-    in another session may have archived or merged notes since, and the model
-    reciting archived titles for the rest of the session is the worse trade.
-    Both call sites rewrite only when the note actually differs (the store
-    changed underneath it), so a resume over an untouched store stays
-    prompt-cache-clean."""
-    at = _find_memory_note_index(messages)
+
+def _refresh_memory_note(messages: list[dict[str, Any]]) -> bool:
+    """Bring the transcript's view of the memory store up to date by APPENDING
+    a fresh note at the TAIL when it drifted. Returns True when changed.
+
+    APPEND-ONLY ON PURPOSE (PERF.md PF-12, invariant I-3). This used to rewrite
+    the note at its original index — almost always position 1 — which busts the
+    server prompt-prefix cache for the entire remaining prompt on every /memory
+    optimize and every resume over a changed store. Appending leaves every
+    earlier byte untouched, so the prefix survives; the tail note is the
+    authoritative one (a model reading top-to-bottom sees the latest list
+    last, superseding any stale note left mid-transcript). No-op when the last
+    note already matches the store, so a resume over an untouched store stays
+    prompt-cache-clean. When the store went empty a note is still appended
+    saying so, so the model stops reciting archived titles."""
+    at = _last_memory_note_index(messages)
     note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
-    if at is None:
-        if note is None:
-            return False
-        messages.insert(1 if (messages and messages[0].get("role") == "system") else 0, note)
-        return True
-    if note is None:
-        del messages[at]
-        return True
-    if messages[at].get("content") == note["content"]:
+    if at is None and note is None:
         return False
-    messages[at] = note
+    fresh = note["content"] if note is not None else MEMORY_NOTE_CLEARED
+    if at is not None and messages[at].get("content") == fresh:
+        return False
+    messages.append({"role": "user", "content": fresh})
     return True
 
 

@@ -187,6 +187,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_TOOL_OUTPUT_VISIBLE` | render each tool call's result body (default `0` — collapsed, only the call header shows; `1` renders the result body — toggle live with `/tooloutput` (`/tools` legacy alias); `todo_write` always renders). In a parallel turn the collapse hint appears once on the group footer, not once per call. Approval previews count as tool output too (0.53.1): a `git_commit` staged diff or an `edit_file` before/after shown at the Y/n prompt collapses with the rest — the prompt line itself always shows |
 | `NX_TOOL_RESULT_CHARS` | cap on tool-result characters entering context (default 20000; `0` disables the cap). Oversized results are head/tail-kept and their full text spilled to `~/.nx/overflow/<sha256>.txt` — the result tells the model the path so it can `read_file`/`search_files` the elided middle |
 | `NX_TOOL_RESULT_SPILL` | write oversized tool results to `~/.nx/overflow/` (default `1`; `0` falls back to the old blind elision marker). Spill files are created `0600` regardless of umask, like every other nx sink |
+| `NX_TOOL_RESULT_SPILL_MIN_CHARS` | append-time spill floor: a tool result larger than this (default 4000) is written to the overflow store the moment it is produced, *before* it is ever sent, and the model gets the bounded head/tail + path stub instead. This pre-empts the context-overrun evictors, which rewrite already-sent bytes and so bust the server prompt-prefix cache (`cached: 0%`) on exactly the turns the prompt is largest. `0` restores the old behaviour (spill only above `NX_TOOL_RESULT_CHARS`; the evictors remain as the last-resort spiller) |
 | `NX_TOOL_RESULT_REDACT` | mask known credential shapes in tool results before they are shown, capped, spilled, or persisted (default `1`; `0` = pass-through). The same token shapes the approval-side `NX_BASH_PROMPT_SECRETS` gate checks on the way in, covering the way out: a result that printed a key is replaced with a `[redacted:api-key]`-style placeholder (kind kept, value gone) |
 | `NX_ARG_REPAIR` | schema-level argument and tool-name repair before a tool body runs (default `1`; `0` = strict pass-through). Coerces wrong-typed args against the tool's declared schema (`"5"` to `5`, `"true"` to `true`, `42` to `"42"`), case-folds a unique enum match (`"In_Progress"` to `"in_progress"`), renames a near-miss key (`maxresults` to `max_results`; difflib similarity 0.8+ and unambiguous only) plus curated per-tool aliases similarity can't reach (`cmd` to `command`, `old_str` to `old`, `file_path` to `path`) — and repairs the tool NAME itself: one alias (`bash` to `run_bash`, `grep` to `search_files`, `str_replace_editor` to `edit_file`) or one unambiguous close match executes under the real name. A missing required argument is refused up front with the declared schema (`ERROR: read_file missing required "path" — schema: …`) instead of a TypeError from the body; values are never fabricated. Every fix is reported in the tool result as an `[arg repair: <note>]` prefix, never applied silently |
 | `NX_OVERFLOW_TTL_DAYS` | purge spill files older than N days (default 7, like bg-logs) |
@@ -479,6 +480,23 @@ frame already covers every byte received. A 4000-token answer renders in roughly
 a quarter of the previous CPU, and a 36x longer answer no longer costs ~600x the
 rendered bytes. The SSE reader also stops re-wrapping every JSON object per
 attribute read.
+
+**Prefix-cache integrity (0.58.0).** The server's prompt cache keys on the exact
+bytes of the prompt prefix, and four paths used to move them mid-session — each
+invisible except as a mysterious `cached: 0%`. The memory-awareness note was
+rewritten in place at index 1 on every `/memory optimize` and every resume over
+a changed store; it now **appends a fresh note at the tail** instead, leaving
+every earlier byte untouched. A context-overrun evictor no longer rewrites tool
+results that were already sent — oversized results are spilled to disk the
+moment they are produced (`NX_TOOL_RESULT_SPILL_MIN_CHARS`, default 4000), so
+their wire bytes never change after the fact. A fresh session and a resumed one
+now build the head (SYSTEM + the AGENTS.md / memory / orientation / delegation
+notes) from one shared producer (`nx/_prefix.py`) instead of two that disagreed,
+and the head is **pinned per session** and checked before every request: if a
+future change moves it, you get one warning naming the cause instead of a silent
+cache miss. Image payloads are likewise dropped the turn after the model has
+seen them, rather than riding along at megabytes per request until an overflow
+happens to evict them.
 
 ## Approval modes
 

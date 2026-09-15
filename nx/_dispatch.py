@@ -28,9 +28,8 @@ from ._tool_cache import (
 from ._approval import _EscToChat
 from ._bash_jobs import run_bash, wait_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
-from ._memory_cmd import memory_write, memory_search, memory_delete, _load_memory_note
+from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
-from ._orientation import _load_orientation_note
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, plan_active, check_gate
@@ -207,37 +206,19 @@ def _messages_show_prior_delegation_nudge(messages: list[dict[str, Any]]) -> boo
 
 
 def _initial_messages() -> list[dict[str, Any]]:
-    """Fresh-session message list: SYSTEM, plus a one-time AGENTS.md note
-    (project-root convention, same idea as CLAUDE.md) if one exists. Kept out
-    of SYSTEM itself so the per-turn token floor doesn't grow with project
-    size — see _agents.py."""
-    from ._agents import _load_agents_md_note
+    """Fresh-session message list: SYSTEM followed by the canonical prefix block
+    (AGENTS.md note, memory index, orientation, delegation guidance). The block
+    itself is built by _prefix.prefix_notes() — the single source of truth shared
+    with the resume path (PERF.md PF-15) — and each note is kept out of SYSTEM so
+    the per-turn token floor doesn't grow with project size (see _agents.py).
+
+    Also (re)pins the block: a fresh session defines the bytes every later
+    request must still open with (see _prefix.pin_prefix)."""
+    from ._prefix import pin_prefix, prefix_notes
     import nx as _m
     messages = [{"role": "system", "content": _m.SYSTEM}]
-    note = _load_agents_md_note(getattr(st, "PROJECT_ROOT", None))
-    if note is not None:
-        messages.append(note)
-    # Memory-awareness note: titles only (capped) so the model knows what's
-    # already remembered without paying for the bodies — see _memory_cmd.py.
-    # Paid once per fresh session, not folded into SYSTEM so the per-turn
-    # token floor stays flat when no memories exist (see test_initial_context).
-    mem_note = _load_memory_note(getattr(st, "PROJECT_ROOT", None))
-    if mem_note is not None:
-        messages.append(mem_note)
-    # Orientation note: the real cwd (SYSTEM only says "cwd = user's current
-    # directory" without the actual path) plus a pointer at the approval-free
-    # read-only tools. Paid once per fresh session, not folded into SYSTEM so
-    # the per-turn token floor stays flat. Suppressed by NX_ORIENTATION=0.
-    orient_note = _load_orientation_note()
-    if orient_note is not None:
-        messages.append(orient_note)
-    # Delegation guidance note: only paid when the spawn_agent schema is
-    # actually offered (NX_SUBAGENTS=1), so the default (sub-agents off)
-    # session still costs nothing. See _subagent.DELEGATION_GUIDANCE.
-    from ._subagent import _load_delegation_note
-    deleg_note = _load_delegation_note()
-    if deleg_note is not None:
-        messages.append(deleg_note)
+    messages.extend(prefix_notes())
+    pin_prefix(messages)
     return messages
 
 

@@ -38,6 +38,8 @@ from ._compress import (
 )
 from ._env import _env_float, _env_int
 from ._verify import _launch_verify_if_settled
+from . import _prefix
+from ._images import _strip_consumed_images
 from . import _state as st
 from . import (
     FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
@@ -1254,6 +1256,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     t0 = time.time()
     st._LAST_API_ERROR = None  # cleared before every open; set by open_stream() on a terminal failure
     st._LAST_CONTEXT_OVERRUN = None  # ditto, for the context-length-400 branch of open_stream()
+    # PERF.md I-4: the request is about to be sent, so this is the one place a
+    # moved prompt prefix actually costs. Verifies the head still matches the
+    # bytes pinned at session start and warns once when it doesn't (a mid-history
+    # rewrite shows up as a mystery `cached: 0%` otherwise). A no-op off the
+    # pinned path (sub-agent turns, tests).
+    _prefix.check_prefix(messages)
     # 0.30.0: the tally counts ONE turn's self-healing work (the footer prints
     # it after this stream settles); a multi-recovery turn keeps accumulating
     # across its retry cycles until the next model_turn() starts.
@@ -1804,12 +1812,19 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             if steps >= max_turns - 1 or (sub_rescue_turns >= max(0, _subagent_scoped_retry(1))
                                           and steps >= max_turns - 2):
                 force_final = True
+        _sent_len = len(messages)
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
                             forced_final=force_final,
                             recovery_sampling=recovery_sampling,
                             malformed_call_count=malformed_call_cuts,
                             step_retries=timed_out_retries)
+        # PF-13: any image that was on the wire for that request has now been
+        # consumed — drop its base64 so it costs nothing on later turns instead
+        # of riding along until an overflow happens to evict it. Only the
+        # prefix that was actually sent is stripped (an image appended during
+        # the turn just now has not been seen yet).
+        _strip_consumed_images(messages, _sent_len)
         if on_step is not None:
             on_step()
         if _task_deadline_exceeded():
