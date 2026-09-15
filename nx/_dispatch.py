@@ -22,7 +22,7 @@ from . import _state as st
 from ._env import _env_int
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._tool_cache import (
-    cache_valid, drop_changed_entries,
+    cache_touch, cache_valid, drop_changed_entries,
     drop_vcs_entries, store_cacheable_result,
 )
 from ._approval import _EscToChat
@@ -405,8 +405,36 @@ def _invalidate_tool_cache_path(path: str | None) -> None:
     except (TypeError, ValueError):
         return
     for key, entry in list(st._TOOL_RESULT_CACHE.items()):
-        if entry.path == norm:
+        # Match ANY anchor, not just the primary path (PF-18): a multi-path
+        # read_file anchored on every path must be dropped when any of them is
+        # edited, and a search_files entry whose primary anchor is the tree
+        # root must be dropped when an edited path lives under it.
+        paths = getattr(entry, "paths", None) or (entry.path,)
+        if entry.path == norm or norm in paths:
             del st._TOOL_RESULT_CACHE[key]
+            continue
+        if getattr(entry, "tree_stamp", None) is not None:
+            try:
+                if os.path.commonpath([norm, entry.path]) == entry.path:
+                    del st._TOOL_RESULT_CACHE[key]
+            except (ValueError, TypeError):
+                continue
+
+
+def _commit_tool_cache() -> None:
+    """Sweep the read-only cache after a mutating tool body has committed.
+
+    PF-18 (0.61.0): the pre-body path drop stays (it is deterministic and
+    covers the not-yet-written cases), and the committed case gets a truthful
+    pass here:
+
+    - `drop_changed_entries` re-stats every backing path, so a multi-path
+      `read_file` (anchored on every path) and a commit-dirtied `search_files`
+      tree stamp really drop, while an unrelated cached read stays valid (no
+      needless re-read of the whole session);
+    - `drop_vcs_entries` drops git_* unconditionally (a stamp can miss)."""
+    drop_changed_entries(st._TOOL_RESULT_CACHE)
+    drop_vcs_entries(st._TOOL_RESULT_CACHE)
 
 
 def _withheld_tool_error(name: str) -> str:
@@ -624,6 +652,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         cache_key = _tool_cache_key(name, args)
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
         if cached is not None and cache_valid(cached):
+            # LRU: a hit refreshes recency, so eviction drops genuinely cold
+            # entries rather than whatever was read first (PF-16).
+            cache_touch(st._TOOL_RESULT_CACHE, cache_key)
             # A cache hit is still a read that happened: fire the post-hook
             # (with "cached": true) so an audit trail sees every read, not
             # just the miss that populated the entry. Pre-hook already ran
@@ -814,11 +845,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # stamps them so a hit can detect a commit/checkout that happened
         # behind the cache's back.
         store_cacheable_result(st._TOOL_RESULT_CACHE, cache_key, name, args, result)
-    elif name in ("write_file", "edit_file", "multi_edit", "delete_file") and not result.startswith("ERROR"):
+        # store_cacheable_result re-bounds the cache (PF-16/I-8) — both the
+        # entry cap and the byte cap, oldest first.
+    elif name in ("write_file", "edit_file", "multi_edit", "delete_file",
+                  "sed_edit", "apply_patch") and not result.startswith("ERROR"):
         _invalidate_tool_cache_path(args.get("path"))
-        # an edit changes git state (status/diff at least) — git_* entries are
-        # keyed on the repo root dir, which the path-based drop never matches.
-        drop_vcs_entries(st._TOOL_RESULT_CACHE)
+        # PF-18: the pre-body path drop is deterministic (the write is not on
+        # disk yet); the post-commit sweep is what catches every-other-path
+        # anchors and a commit-dirtied search_files tree stamp.
+        _commit_tool_cache()
         if result != "DENIED by user":
             # push_if_absent (0.47.0, ROADMAP 2.2): a body that pushes its own
             # checkpoint (delete_file, sed_edit, apply_patch) is not stacked

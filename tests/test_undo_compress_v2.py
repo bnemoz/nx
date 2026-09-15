@@ -179,6 +179,9 @@ def test_undo_stack_persists_and_reloads(nx_env):
     p = tmp / "persist.txt"
     p.write_text("keep me")
     _undo.push_checkpoint("write_file", [_undo.snapshot(str(p))])
+    # PF-05 (0.61.0): pushes are amortized, so the turn-boundary flush is what
+    # writes undo.json — flush explicitly here, as the REPL does per turn.
+    _undo.flush_undo_stack()
     path = _undo._undo_path()
     assert os.path.exists(path)
     assert (os.stat(path).st_mode & 0o777) == 0o600, oct(os.stat(path).st_mode)
@@ -201,6 +204,7 @@ def test_clear_persisted_wipes_disk_state(nx_env):
     from nx import _undo
     _undo.push_checkpoint("write_file", [{"path": "/tmp/x", "existed": False,
                                           "content": None}])
+    _undo.flush_undo_stack()
     assert os.path.exists(_undo._undo_path())
     _undo.clear_persisted()
     assert not os.path.exists(_undo._undo_path())

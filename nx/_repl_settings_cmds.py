@@ -412,6 +412,8 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
         for a in agents:
             if a["alive"]:
                 status = f"{C.SUCCESS}running{RESET}"
+            elif a["status"] == "queued":
+                status = f"{DIM}queued{RESET}"
             elif a["status"] == "done":
                 status = f"{C.SUCCESS}done{RESET}"
             else:

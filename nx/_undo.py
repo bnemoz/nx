@@ -34,6 +34,14 @@ from . import _state as st
 
 MAX_UNDO = _env_int("NX_MAX_UNDO", 20)
 
+# PF-05 (0.61.0): persist_undo_stack() used to re-serialize the WHOLE stack —
+# up to MAX_UNDO entries holding whole file contents — on every single edit,
+# so twenty edits to a 200 KB file rewrote tens of MB of JSON. Persistence is
+# now amortized: a push marks the stack dirty and the write happens once at
+# the turn boundary (_flush_undo_stack); undo_last/clear_persisted still write
+# inline, where the on-disk state must match the user's just-observed action.
+_UNDO_DIRTY = False
+
 
 class FileSnapshot(TypedDict):
     path: str
@@ -103,7 +111,7 @@ def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
         st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": fresh})
     if len(st._UNDO_STACK) > MAX_UNDO:
         del st._UNDO_STACK[:len(st._UNDO_STACK) - MAX_UNDO]
-    persist_undo_stack()
+    _mark_dirty()
 
 
 def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
@@ -129,12 +137,12 @@ def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
             continue
         fresh.append(snap)
     if not fresh:
-        persist_undo_stack()
+        _mark_dirty()  # a dedup UPDATE changed the stack in place
         return
     st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": fresh})
     if len(st._UNDO_STACK) > MAX_UNDO:
         del st._UNDO_STACK[:len(st._UNDO_STACK) - MAX_UNDO]
-    persist_undo_stack()
+    _mark_dirty()
 
 
 def list_checkpoints() -> list[Checkpoint]:
@@ -148,14 +156,35 @@ def _undo_path() -> str:
     return os.path.join(st.SESSION_HOME, "undo.json")
 
 
+def _mark_dirty() -> None:
+    """Flag the stack as needing a write at the next turn boundary (PF-05)."""
+    global _UNDO_DIRTY
+    _UNDO_DIRTY = True
+
+
+def flush_undo_stack() -> None:
+    """Write the stack if a push since the last flush left it dirty. Called
+    once per turn (same place as the session autosave) instead of once per
+    edit — this is the amortization that keeps a burst of edits from
+    re-serializing every snapshot each time."""
+    global _UNDO_DIRTY
+    if _UNDO_DIRTY:
+        _UNDO_DIRTY = False
+        persist_undo_stack()
+
+
 def persist_undo_stack() -> None:
     """Atomically write the pending stack as `<NX_HOME>/undo.json` (0600).
 
     Best-effort: an unwritable home degrades to the pre-0.47 memory-only
-    behavior; it must never break a tool call that is mid-flight."""
+    behavior; it must never break a tool call that is mid-flight. `indent` is
+    deliberately off the persist path (PF-05): the file is machine-written and
+    a 40 MB pretty-print costs write amplification for nothing."""
+    global _UNDO_DIRTY
+    _UNDO_DIRTY = False
     try:
         data = {"version": 1, "entries": st._UNDO_STACK}
-        atomic_write_private(_undo_path(), f"{json.dumps(data, indent=1)}\n")
+        atomic_write_private(_undo_path(), f"{json.dumps(data)}\n")
     except Exception:
         pass
 
@@ -194,7 +223,9 @@ def _load_persisted() -> None:
 
 def clear_persisted() -> None:
     """Drop both the in-memory stack and its on-disk copy (/reset, /new)."""
+    global _UNDO_DIRTY
     st._UNDO_STACK.clear()
+    _UNDO_DIRTY = False
     try:
         os.unlink(_undo_path())
     except OSError:

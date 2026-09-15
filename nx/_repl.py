@@ -279,6 +279,11 @@ def _repl() -> None:
         # turn so a crash / accidental close never loses work.
         state.session_dirty = True
         _save_current(state)
+        # PF-05 (0.61.0): the undo stack is written amortized — once per turn
+        # here, alongside the session autosave, instead of re-serializing every
+        # checkpoint on every edit.
+        from ._undo import flush_undo_stack
+        flush_undo_stack()
         # Maybe auto-compress: if the context window is over the configured
         # fill threshold, silently fold the older turns so the chat can keep
         # going. Done after the save so the pre-compression state is on disk;

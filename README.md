@@ -206,6 +206,11 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
 | `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and spawns run in the background by default (job id now, answer as a short `[Runtime note]` + report path on a later turn; `/bg` lists them; full answer in `~/.nx/agents/<job>.md`). Enabled sessions also get a one-time `[Delegation note:]` steering the model to spawn agents proactively, plus the `NX_DELEGATION_NUDGE_READS` streak nudge |
 | `NX_SUBAGENT_ASYNC` | sub-agent execution default (`1` = background, the default): a spawn returns a job id immediately and its answer arrives as a head + report-path `[Runtime note]`, so the parent TUI stays quiet during a fan-out. `0` restores the old foreground default, which renders the sub-agent's search/tool activity live and returns its answer inline |
+| `NX_SUBAGENT_MAX_CONCURRENT` | how many background sub-agents may stream at once (default `4`; `0` = unbounded). Each async agent is its own thread + HTTP stream + parser, so a spawn beyond the cap parks as `queued` (shown by `/bg`) and starts when a running one finishes (PF-17) |
+| `NX_SUBAGENT_MAX_FINISHED` | finished async-agent records kept after their answer has been announced (default `20`; `0` = keep all). Older announced records are evicted so a long session's agent ledger does not grow without bound; a finished-but-unannounced answer is never evicted (PF-16) |
+| `NX_TOOL_CACHE_MAX_ENTRIES` / `NX_TOOL_CACHE_MAX_BYTES` | bounds on the read-only tool-result cache (defaults `512` entries / 16 MB of result text; `0` disables that half). A hit refreshes recency, so eviction drops the genuinely cold entries first — this is what keeps a long session's RSS flat (PF-16, invariant I-8) |
+| `NX_TOOL_CACHE_TREE_FILES` | entries in the bounded subtree stamp a cached `search_files` anchors on (default `5000`; `0` disables the stamp). The searched root's own mtime never moves when a file in a subdirectory changes, so the stamp is what makes a search hit honest (PF-18) |
+| `NX_DIFF_HUNK_MAX_CHARS` | cap on the unified diff `edit_file`/`multi_edit`/`sed_edit`/`apply_patch` feed back to the model (default `8192`; `0` = uncapped). An elision notice names the dropped size so the model re-reads instead of assuming it saw the whole change (PF-19) |
 | `NX_SUBAGENT_WRITE` | opt-in write tier for sub-agents (`NX_SUBAGENT_WRITE=1`): `spawn_agent` additionally gets `write_file`/`edit_file`/`multi_edit`/`sed_edit`, each still confirmed by you through the normal approval gate (risk classification + Y/n with a diff preview) and tagged `(sub-agent)` in the tool box. Write-capable agents never run concurrently and cannot delete files or spawn other agents |
 | `NX_SUBAGENT_RECOVERY_RETRIES` | rescue attempts allowed INSIDE a sub-agent loop, per failure family — reasoning-only stalls, empty turns, malformed tool-call streams/collapses, text-protocol corrections (default `1`; the parent keeps its own `NX_REASONING_ONLY_RETRIES`/`NX_EMPTY_TURN_RETRIES`/`NX_MALFORMED_STREAM_RETRIES`). Keeps a flash-tier sub-agent from burning half its `max_turns` on recovery cycles; when a sub-agent has spent its rescue allowance, the loop pre-forces the final answer one turn early so the remaining turns produce an answer, not more recovery. `0` disables the failsafes inside sub-agents entirely |
 | `NX_SUBAGENT_DEFAULT_TURNS` | default `max_turns` for a spawn that doesn't specify one (default `100`; was 12, which left real investigations capping out with no answer). Also a **floor**: a parent that passes a smaller `max_turns` — several models carry their own 5/10/12-scale budget notion and were capping their agents out mid-investigation — is raised to this value, so the only way to run a genuinely short agent is to lower this knob. Also what the tool schema advertises to the parent model |
@@ -518,6 +523,35 @@ opt-out-able with `NX_CACHE_ROUTING=0` (or `NX_SOURCE_<NAME>_CACHE_ROUTING=0`);
 and a successful model autodetect is memoized for the session (a *failed* one
 still re-probes, so a local server that comes up after nx started is still
 found).
+
+**Bounds and durability (0.61.0).** The last phase-3 items were the ones that
+only bite after months: nothing a long session accumulated was ever bounded, and
+the terminal discipline of the earlier phases had no cap where it fed text back
+to the model.
+- The **read-only tool cache is an LRU**, bounded by entries
+  (`NX_TOOL_CACHE_MAX_ENTRIES`, 512) *and* bytes (`NX_TOOL_CACHE_MAX_BYTES`,
+  16 MB); a hit refreshes recency, so eviction drops the cold entries first and
+  a 200-turn session's RSS stays flat instead of growing with every read.
+- **Cache validity is anchored on everything the result depends on**: a
+  multi-path `read_file` is invalidated by *any* of its paths, and a
+  `search_files` hit carries a bounded subtree stamp
+  (`NX_TOOL_CACHE_TREE_FILES`, 5000) so a new or changed file in a
+  subdirectory invalidates it — the root directory's own mtime never moved, so
+  the old anchor served that stale hit forever. Committed edits also re-stat
+  every anchor, so `sed_edit`/`apply_patch` and any unnamed path are covered.
+- **Background sub-agent fan-out is capped** at `NX_SUBAGENT_MAX_CONCURRENT`
+  (4); a spawn past the cap reports `queued` and starts when a slot frees
+  (`/bg` shows it), instead of every spawn paying its own thread + HTTP stream +
+  parser. Finished agent records evict once announced
+  (`NX_SUBAGENT_MAX_FINISHED`, 20), so the agent ledger stops holding every
+  answer forever — an un-announced answer is never evicted.
+- **Undo persistence is amortized**: a burst of edits marks the stack dirty and
+  it is written once per turn (alongside the session autosave) rather than
+  re-serializing every snapshot on every edit; the persisted file is compact
+  JSON.
+- **Diffs fed back to the model are capped** at `NX_DIFF_HUNK_MAX_CHARS`
+  (8192) with an elision notice, so a one-line change in a repetitive 30k-line
+  file no longer ships a 520 KB hunk into context by relying on a later filter.
 
 ## Approval modes
 

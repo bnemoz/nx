@@ -1759,6 +1759,12 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
         return _run_model_turn_loop_inner(messages, force_final, recovery_sampling,
                                           on_step, max_turns_override)
     finally:
+        # PF-05 (0.61.0): amortized undo persistence. A turn is the natural
+        # boundary — the loop is shared by the REPL, batch tasks and sub-agent
+        # loops, so flushing here keeps every driver's crash-durability window
+        # at "one turn" instead of re-serializing the whole stack per edit.
+        from ._undo import flush_undo_stack
+        flush_undo_stack()
         ctx = _recovery.current()
         if ctx is not None:
             _recovery.copy_back_and_reset(ctx)

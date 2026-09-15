@@ -227,6 +227,16 @@ amortize — write the stack at most once per turn (a dirty flag flushed at
 turn end, same place as the session autosave). Keep `indent` off the persist
 path. Cap snapshot size per entry and record that a snapshot was elided.
 
+**Shipped in 0.61.0 (amortize branch).** `push_checkpoint`/
+`push_if_absent` now mark the stack dirty (`_mark_dirty`) instead of writing;
+`flush_undo_stack()` writes once at the turn boundary — the shared
+`_run_model_turn_loop` exits through it, and the REPL also flushes next to its
+per-turn session autosave — so every driver (REPL, batch, sub-agent loop)
+keeps a one-turn durability window at one write per turn. `undo_last` and
+`clear_persisted` still persist inline (the user's next action must see the
+effect), and `indent` is off the persist path. The per-entry snapshot cap is
+deferred (the amortization removes the write amplification the cap targeted).
+
 ---
 
 ### P1 — latency tax paid on *every* turn
@@ -438,9 +448,24 @@ keeps growing). With 8+ concurrent sub-agents this is both a memory and a GIL
 concern. Fix: bounded LRU with a byte budget on the tool cache, and evict
 finished agent records once their result has been delivered to the parent.
 
+**Shipped in 0.61.0.** The tool cache is a plain-dict LRU (a hit re-inserts the
+key; `bound_cache` evicts from the front) bounded by both
+`NX_TOOL_CACHE_MAX_ENTRIES` (512) and `NX_TOOL_CACHE_MAX_BYTES` (16 MB), always
+keeping at least one entry. `_ASYNC_AGENTS` evicts announced finished records
+oldest-first above `NX_SUBAGENT_MAX_FINISHED` (20) — an un-announced answer is
+never evicted, so the parent cannot lose the only copy.
+
 **PF-17 · MED · `_subagent.py:700-726` unbounded async fan-out** — each async
 sub-agent is its own thread + HTTP stream + parser. Fix: a semaphore
 (`NX_SUBAGENT_MAX_CONCURRENT`, default 4) with a queued status message.
+
+**Shipped in 0.61.0.** `_spawn_async` acquires a process-wide
+BoundedSemaphore(`NX_SUBAGENT_MAX_CONCURRENT`, default 4; `0` = unbounded)
+before the worker starts its sub-loop. A spawn issued while the cap is full
+records `status="queued"` and returns that in the tool message; the worker
+blocks on the semaphore and flips to `running` when a slot frees. `/bg` renders
+`queued`, and `_async_running()` accounts for it so the wake poller still holds
+off.
 
 **PF-18 · MED · tool-result cache validity is too weak for two of the seven
 cached read-only tools.** The key is the whole `json.dumps(args)`
@@ -451,12 +476,27 @@ path — so editing file #2..N of a multi-path `read_file` never invalidates.
 a subdirectory changes. These are correctness bugs with a performance shape
 (stale hits), so fix alongside ROADMAP theme 2 (turn opinions into invariants).
 
+**Shipped in 0.61.0.** Entries now carry **every** backing path (`paths` +
+`mtimes`), so a multi-path `read_file` is invalidated by any of them; a
+`search_files` entry carries a bounded `tree_stamp` (a walk recording each
+directory's and file's mtime under `NX_TOOL_CACHE_TREE_FILES`, default 5000)
+so a subdirectory change invalidates it. A committed edit additionally runs
+`drop_changed_entries` (`_dispatch._commit_tool_cache`), so the fix also covers
+`sed_edit`/`apply_patch` and any path the pre-body drop never named.
+
 **PF-19 · LOW-MED · `_approval.py:45-46, :76-77` diffs are unbounded in output
 size.** CPU is fine (9.8 ms on 30k lines) but a one-line change in a repetitive
 30k-line file produces a **520 KB** diff. It is capped downstream by the
 overflow/`TOOL_RESULT_CHARS` path, so it costs CPU + a spill file rather than
 tokens — but `_diff_hunk` output *is* fed back to the model, so a hunk cap
 (~8 KB) would make the behaviour explicit instead of relying on a later filter.
+
+**Shipped in 0.61.0.** `_diff_hunk` caps its output at
+`NX_DIFF_HUNK_MAX_CHARS` (default 8192, `0` disables) and appends an elision
+notice naming the dropped size and pointing at `read_file` — so the cap is
+explicit and the model knows it did not see everything, instead of relying on
+the later overflow filter. `_diff_preview` (the terminal-only approval preview)
+is untouched: it never reaches the model, so it is not a token-cost concern.
 
 **PF-20 · LOW-MED · `_argrepair.py:229, :317` run `difflib.SequenceMatcher`
 over tool-name candidates on every malformed-arg repair.** Bounded (19 tools)
@@ -637,8 +677,8 @@ behavior changes, so minors, with patches for anything that only adds a test.
 | **0.57.0** — *render path* | **PF-03** (join instead of `+=`), **PF-04** (incremental clean-string accumulation, size-scaled throttle, no double final parse), **PF-22** (dict access; `iter_raw` half declined — see PF-22) — **shipped** | T-2/T-5 covered by `tests/test_perf_render_path.py`. `StreamParser` linear; `_content_str`/`_clean_str` are properties, not accumulators; rendered bytes 4.6×/71× lower on 17.5 KB/288 KB answers |
 | **0.58.0** — *prefix-cache integrity* | **PF-12** (memory note to the tail), **PF-13** (strip image payloads after consumption), **PF-14** (spill at append time), **PF-15** (single pinned prefix block) — **shipped** | T-6, T-7 green (`tests/test_perf_prefix_cache.py`). The head is one producer + a per-session pin checked before every request; the memory note and tool-result stubs are now append-time/tail-only, so `cached:` stays non-zero across a recovery storm and across resume; image payloads stop riding along after the model has seen them |
 | **0.59.0** — *one cached capability manifest* | **PF-10** (stable cache-routing identity), **PF-11** (pin accepted request shape), **PF-21** (memoize `resolve_model`). Pairs with ROADMAP P3-10 — **shipped** | T-11 green (`tests/test_perf_capability_manifest.py`). The ladder is walked once per `(source, model)` and the winning rung reused, so a turn that used to cost up to 3 POSTs costs exactly 1; the routing hint is constant within a session; `resolve_model()` pays one `/v1/models` for the session (a failed resolve still re-probes) |
-| **0.60.0** — *bounds and durability* | **PF-16** (bounded caches, agent-record eviction), **PF-17** (sub-agent semaphore), **PF-18** (cache validity anchors), **PF-05** (undo persistence amortized), **PF-19** (diff hunk cap) | T-10, T-12 green. Flat RSS over a 200-turn synthetic session |
-| **0.61.0** — *make features cheap* | Tiered tool registry + `search_tools` meta-tool (§6 items 1-2), docs-parity test for undocumented `NX_*`, `tests/perf/` promoted to a supported target with `baselines.json` | T-9, T-14, T-15 green. Adding a tool costs 0 tokens unless used |
+| **0.61.0** — *bounds and durability* | **PF-16** (bounded caches, agent-record eviction), **PF-17** (sub-agent semaphore), **PF-18** (cache validity anchors), **PF-05** (undo persistence amortized), **PF-19** (diff hunk cap) — **shipped** | T-10, T-12 green (`tests/test_perf_bounds.py`). The tool cache is an LRU bounded by entries *and* bytes; finished agent records evict once announced; a fan-out past `NX_SUBAGENT_MAX_CONCURRENT` queues instead of racing; a multi-path read anchors on every path and `search_files` on a subtree stamp; undo.json is written once per turn, not per edit; `_diff_hunk` is capped with an elision notice |
+| **0.62.0** — *make features cheap* | Tiered tool registry + `search_tools` meta-tool (§6 items 1-2), docs-parity test for undocumented `NX_*`, `tests/perf/` promoted to a supported target with `baselines.json` | T-9, T-14, T-15 green. Adding a tool costs 0 tokens unless used |
 
 Suggested ordering rationale: P0 first because it is cheap, invisible-to-model
 work that removes the two worst measured numbers; the per-turn tax next because

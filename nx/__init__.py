@@ -306,7 +306,7 @@ from ._tools import (
     read_file, _LINE_NUM_PREFIX, _strip_line_numbers, list_dir, search_files,
     git_status, git_diff,
 )
-from ._undo import undo_last, list_checkpoints  # noqa: F401 — see nx/_undo.py
+from ._undo import undo_last, list_checkpoints, flush_undo_stack  # noqa: F401 — see nx/_undo.py
 from . import _undo as _undo  # noqa: F401 — module handle so /reset can clear the persisted stack
 
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, delete_file
@@ -681,6 +681,7 @@ from ._tool_cache import (  # noqa: F401 (re-export for tests)
     git_state_stamp as _tool_cache_git_state_stamp,
     drop_vcs_entries as _tool_cache_drop_vcs_entries,
     store_cacheable_result as _tool_cache_store_result,
+    bound_cache as _tool_cache_bound,
 )
 
 
@@ -699,6 +700,11 @@ NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
 # foreground (synchronous) default, which still shows the sub-agent's tool
 # boxes and reasoning live.
 NX_SUBAGENT_ASYNC = _env_int("NX_SUBAGENT_ASYNC", 1)
+# Concurrency cap for a background fan-out (NX_SUBAGENT_MAX_CONCURRENT, default
+# 4; 0 = unbounded). Each async sub-agent is its own thread + HTTP stream +
+# parser, so a spawn beyond the cap parks as "queued" on a BoundedSemaphore and
+# starts when a running one finishes (PF-17, 0.61.0).
+NX_SUBAGENT_MAX_CONCURRENT = _env_int("NX_SUBAGENT_MAX_CONCURRENT", 4)
 # Opt-in write tier for sub-agents (NX_SUBAGENT_WRITE=1): the four file-mutation
 # tools (write_file/edit_file/multi_edit/sed_edit) are additionally offered
 # inside a sub-agent, bound to wrappers that run the parent's real bodies — so

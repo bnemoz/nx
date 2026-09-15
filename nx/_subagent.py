@@ -571,6 +571,71 @@ _ASYNC_SEQ = 0
 _PENDING_NOTICE_KEY = "_PENDING_SUBAGENT_NOTICE"
 
 
+# Concurrency cap for async fan-out (PF-17, 0.61.0): each background sub-agent
+# is its own thread + HTTP stream + parser, so an unbounded fan-out is a
+# memory and GIL problem as much as a rate-limit one. A spawn beyond the cap
+# parks on this semaphore (its record sits `queued`) instead of racing.
+_ASYNC_SEM: "threading.BoundedSemaphore | None" = None
+_ASYNC_QUEUED: list[str] = []  # job ids parked on the semaphore, in arrival order
+
+# Finished records are evicted once their answer has been delivered AND the
+# parent has moved on (PF-16): the ledger used to hold every answer forever.
+# A small floor keeps recent /bg history in a refresher loop.
+_MAX_FINISHED_AGENTS = _env_int("NX_SUBAGENT_MAX_FINISHED", 20)
+
+
+def _async_max_concurrent() -> int:
+    """How many async sub-agents may stream at once (NX_SUBAGENT_MAX_CONCURRENT,
+    default 4). <=0 means unbounded — the pre-0.61 fan-out."""
+    import nx as _m
+    n = getattr(_m, "NX_SUBAGENT_MAX_CONCURRENT", None)
+    if n is None:
+        return _env_int("NX_SUBAGENT_MAX_CONCURRENT", 4)
+    try:
+        return int(n)
+    except (TypeError, ValueError):
+        return 4
+
+
+def _async_semaphore() -> "threading.BoundedSemaphore | None":
+    """The process-wide fan-out semaphore, built lazily so the (rare) change
+    of the knob between tests is honored rather than frozen at import."""
+    global _ASYNC_SEM
+    n = _async_max_concurrent()
+    if n <= 0:
+        return None
+    with _ASYNC_LOCK:
+        if _ASYNC_SEM is None or _ASYNC_SEM._initial_value != n:  # type: ignore[attr-defined]
+            _ASYNC_SEM = threading.BoundedSemaphore(n)
+        return _ASYNC_SEM
+
+
+def _evict_finished_agents() -> None:
+    """Drop fully-consumed finished records oldest-first (PF-16, I-8). Pinned
+    to a floor of MAX_FINISHED so /bg still has history; running/queued records
+    and un-announced answers are never candidates (the parent still needs
+    them)."""
+    if _MAX_FINISHED_AGENTS <= 0:
+        return
+    done = [jid for jid, rec in _ASYNC_AGENTS.items()
+            if rec.get("status") not in ("running", "queued")
+            and rec.get("announced")]
+    if len(done) <= _MAX_FINISHED_AGENTS:
+        return
+    done.sort(key=lambda jid: _ASYNC_AGENTS[jid].get("finished") or 0)
+    for jid in done[: len(done) - _MAX_FINISHED_AGENTS]:
+        _ASYNC_AGENTS.pop(jid, None)
+
+
+def _prune_queued() -> None:
+    """Stop _ASYNC_QUEUED growing without bound when the parent never reaches
+    the spawn that would dequeue it: drop ids whose record is gone or already
+    finished. Called under _ASYNC_LOCK."""
+    _ASYNC_QUEUED[:] = [jid for jid in _ASYNC_QUEUED
+                        if (rec := _ASYNC_AGENTS.get(jid)) is not None
+                        and rec.get("status") == "queued"]
+
+
 def _async_running() -> bool:
     """True while any async sub-agent of this process is still executing its
     sub-loop. The wake poller (_autowake.wake_due) holds off while this is
@@ -578,7 +643,8 @@ def _async_running() -> bool:
     and waking the parent for an *unfinished* agent would only make it wait
     synchronously — the exact behavior async spawn is meant to avoid."""
     with _ASYNC_LOCK:
-        return any(rec.get("status") == "running" for rec in _ASYNC_AGENTS.values())
+        return any(rec.get("status") in ("running", "queued")
+                   for rec in _ASYNC_AGENTS.values())
 
 
 def _new_job_id() -> str:
@@ -697,15 +763,31 @@ def _stage_subagent_answer(job_id: str) -> None:
         setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
 
 
+def _prune_queued() -> None:
+    """Stop _ASYNC_QUEUED growing without bound when the parent never reaches
+    the spawn that would dequeue it: drop ids whose record is gone or already
+    finished. Called under _ASYNC_LOCK."""
+    _ASYNC_QUEUED[:] = [jid for jid in _ASYNC_QUEUED
+                        if (rec := _ASYNC_AGENTS.get(jid)) is not None
+                        and rec.get("status") == "queued"]
+
+
 def _spawn_async(instruction: str, max_turns: int) -> str:
     """Launch the agent's turn loop on a quiet daemon thread and return the
     job id result the parent's tool message carries."""
     job_id = _new_job_id()
+    sem = _async_semaphore()
     with _ASYNC_LOCK:
+        _prune_queued()
+        queued = sem is not None and sem._value == 0  # type: ignore[attr-defined]
         _ASYNC_AGENTS[job_id] = {
-            "instruction": instruction, "status": "running",
+            "instruction": instruction,
+            "status": "queued" if queued else "running",
             "answer": None, "started": time.time(), "announced": False,
         }
+        if queued:
+            _ASYNC_QUEUED.append(job_id)
+            queue_depth = len(_ASYNC_QUEUED)
 
     # A background agent's whole point is that its answer lands later; without
     # this the finish notice would sit staged until the user typed something.
@@ -716,14 +798,34 @@ def _spawn_async(instruction: str, max_turns: int) -> str:
         # Quiet: this thread never writes the shared terminal (no spinner,
         # no streamed text, no footer) and never arms the interrupt watcher —
         # those belong to the parent's loop while this agent runs.
+        acquired = sem is not None
+        if sem is not None:
+            sem.acquire()
+            with _ASYNC_LOCK:
+                rec = _ASYNC_AGENTS.get(job_id)
+                if rec is not None and rec.get("status") == "queued":
+                    rec["status"] = "running"
+                    rec["started"] = time.time()
+                _prune_queued()
         _ASYNC_QUIET_SLOTS.quiet = True
         try:
             _run_async_agent(job_id, instruction, max_turns)
         finally:
             _ASYNC_QUIET_SLOTS.quiet = False
+            if acquired and sem is not None:
+                sem.release()
+            with _ASYNC_LOCK:
+                _evict_finished_agents()
 
     threading.Thread(target=_worker, daemon=True,
                      name=f"nx-subagent-{job_id}").start()
+    if queued:
+        return (f"[background sub-agent] job {job_id} (queued)\n"
+                f"instruction: {instruction[:200]}\n"
+                f"{queue_depth} sub-agent(s) queued behind the concurrency cap "
+                f"(NX_SUBAGENT_MAX_CONCURRENT={_async_max_concurrent()}). It "
+                "starts as soon as a running one finishes; its answer arrives "
+                "the same way ([Runtime note] + report path).")
     return (f"[background sub-agent] job {job_id}\n"
             f"instruction: {instruction[:200]}\n"
             "The agent is running in the background; continue other work in "

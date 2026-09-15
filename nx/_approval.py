@@ -25,6 +25,7 @@ import sys
 from typing import Optional
 
 from ._ansi import DIM, RESET, C, raw_mode
+from ._env import _env_int
 from ._tty import read_byte, wait_ready
 from ._risk import _local_risk_hint, LEVEL_ORDER
 from . import _state as st
@@ -70,12 +71,26 @@ def _diff_preview(before: str, after: str, *, context: int = _DIFF_CONTEXT) -> s
 def _diff_hunk(before: str, after: str, *, context: int = 3) -> str:
     """Plain (no-ANSI) unified diff of `before` -> `after`, for feeding back to
     the model as tool output so it doesn't need to read_file the whole file
-    again just to see what changed. Returns "" if identical."""
+    again just to see what changed. Returns "" if identical.
+
+    Bounded (PF-19, 0.61.0): a one-line edit in a repetitive 30k-line file can
+    produce a 520 KB diff, and this text *is* fed back to the model. The hunk
+    is capped at NX_DIFF_HUNK_MAX_CHARS (default 8192) — explicit here rather
+    than silently relying on a later overflow filter — and a trailing notice
+    says how much was dropped so the model can read_file the rest instead of
+    assuming it saw everything."""
     if before == after:
         return ""
     lines = difflib.unified_diff(
         before.splitlines(), after.splitlines(), n=context, lineterm="")
-    return "\n".join(line for line in lines if not (line.startswith("+++") or line.startswith("---")))
+    body = "\n".join(line for line in lines
+                     if not (line.startswith("+++") or line.startswith("---")))
+    cap = _env_int("NX_DIFF_HUNK_MAX_CHARS", 8192)
+    if cap > 0 and len(body) > cap:
+        dropped = len(body) - cap
+        note = "\n[diff truncated: " + str(dropped) + " chars elided; read_file for the rest]"
+        body = body[:cap] + note
+    return body
 
 # Accept full words and common abbreviations (med, hi, lo, m, h, l …).
 _LEVEL_ALIASES = {
