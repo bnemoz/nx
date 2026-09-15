@@ -64,6 +64,15 @@ class _LoggingStream:
         self._inner = inner
         self._log = log_file
 
+    @property
+    def dropped_lines(self) -> int:
+        # Proxied, not re-declared as an attribute: _turn.py reads
+        # getattr(stream, "dropped_lines", 0) off THIS object (open_stream
+        # returns the wrapper), so without the proxy the malformed-frame
+        # warning silently reported 0 forever -- exactly the trace that was
+        # missing while truncated tool arguments went undiagnosed.
+        return getattr(self._inner, "dropped_lines", 0)
+
     def __iter__(self):
         for chunk in self._inner:
             try:

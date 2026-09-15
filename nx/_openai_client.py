@@ -210,6 +210,9 @@ def probe_scope(stale: Callable[[], bool]):
         _PROBE_MODE.stale = None
 
 
+_DONE = object()   # _ChatStream._line(): the terminal [DONE] frame was seen
+
+
 class _Obj:
     """Wraps a JSON dict so callers can use attribute access
     (`chunk.choices[0].delta.content`) the way they would against a real
@@ -251,21 +254,61 @@ class _ChatStream:
         self.dropped_lines = 0
 
     def __iter__(self) -> Iterator[_Obj]:
-        for line in self._resp.iter_lines():
-            if not line or not line.startswith("data:"):
+        # NOT iter_lines(): httpx's LineDecoder splits with str.splitlines()
+        # semantics, whose NEWLINE_CHARS are the nine characters
+        # "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029". SSE's only terminators
+        # are \n, \r\n and \r, and a JSON string may legally carry the other
+        # seven as raw UTF-8 -- so one tool-args delta containing U+0085,
+        # U+2028, U+2029 or a vertical tab (all plausible inside an edit
+        # tool's new/diff value) splits ONE frame into two lines: the first
+        # half fails json.loads and is counted as a dropped frame, the second
+        # does not start with the data: prefix and is skipped outright. The
+        # delta is gone, the args stay truncated, and the stream itself
+        # finishes cleanly -- which is why it surfaced as a malformed tool
+        # call with finish_reason=stop rather than as a transport error.
+        # Splitting raw bytes on b"\n" (then trimming a trailing b"\r", which
+        # covers \r\n and a lone \r) is both SSE-correct and immune: those
+        # code points never appear as an ASCII newline byte.
+        buf = b""
+        for raw in self._resp.iter_bytes():
+            if not raw:
                 continue
-            data = line[len("data:"):].strip()
-            if data == "[DONE]":
-                break
-            try:
-                obj = json.loads(data)
-            except json.JSONDecodeError:
-                # A malformed SSE frame here can silently drop a tool-call
-                # argument delta, later surfacing as a bogus "malformed tool
-                # call" JSON error once the truncated buffer is parsed.
-                self.dropped_lines += 1
-                continue
-            yield _Obj(obj)
+            buf += raw
+            while True:
+                i = buf.find(b"\n")
+                if i < 0:
+                    break
+                line, buf = buf[:i], buf[i + 1:]
+                if line.endswith(b"\r"):
+                    line = line[:-1]
+                obj = self._line(line)
+                if obj is _DONE:
+                    return
+                if obj is not None:
+                    yield obj
+        obj = self._line(buf.rstrip(b"\r"))
+        if obj is not None and obj is not _DONE:
+            yield obj
+
+    def _line(self, line: bytes) -> Any:
+        """Decode one SSE line into a chunk, or None for a blank/non-data line
+        and for a malformed frame (counted in `dropped_lines`). `_DONE` tells
+        the iterator to stop."""
+        if not line.startswith(b"data:"):
+            return None
+        data = line[len(b"data:"):].strip()
+        if not data:
+            return None
+        if data == b"[DONE]":
+            return _DONE
+        try:
+            return _Obj(json.loads(data))
+        except json.JSONDecodeError:
+            # A malformed SSE frame here can silently drop a tool-call
+            # argument delta, later surfacing as a bogus "malformed tool
+            # call" JSON error once the truncated buffer is parsed.
+            self.dropped_lines += 1
+            return None
 
     def close(self) -> None:
         self._resp.close()
