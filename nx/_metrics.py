@@ -18,12 +18,75 @@ usage): `input_tokens` EXCLUDES cached tokens (cache is broken out into
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 import urllib.request
 from os import environ
 from typing import Any, TypedDict
 
 from . import _state as st
+
+
+class _AsyncPusher:
+    """PF-07 (0.56.0): the optional dashboard push used to run
+    ``urllib.request.urlopen(req, timeout=1.5)`` INLINE on the REPL thread,
+    1-3 times per turn after the answer rendered — up to ~4.5s of dead time
+    before it self-disabled on an unreachable endpoint. Same queue+thread
+    pattern as `_logging._AsyncLogWriter`: `submit()` is a `queue.put()` and
+    never blocks the caller, so a slow/absent dashboard can never add latency
+    to the prompt.
+
+    """
+
+    def __init__(self) -> None:
+        self._q: queue.Queue[Any] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._disabled = False  # latched off after the first failure
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
+
+    def submit(self, url: str, payload: dict[str, Any], owner: Any) -> None:
+        """Queue a cumulative-totals payload. Drops it silently if the push
+        has been latched off or the queue is saturated."""
+        if self._disabled or not url:
+            return
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, daemon=True, name="nx-metrics-push")
+                self._thread.start()
+        try:
+            self._q.put_nowait((url, payload, owner))
+        except queue.Full:  # unbounded by default — defensive only
+            pass
+
+    def _run(self) -> None:
+        while True:
+            url, payload, owner = self._q.get()
+            try:
+                if not self._disabled:
+                    data = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        url, data=data,
+                        headers={"Content-Type": "application/json"})
+                    urllib.request.urlopen(req, timeout=1.5)
+            except Exception:
+                # Dashboard down / wrong port / not running — stop trying so we
+                # never add latency to the REPL on every turn.
+                self._disabled = True
+                try:
+                    owner._push_disabled = True
+                except Exception:
+                    pass
+            finally:
+                self._q.task_done()
+
+
+_pusher = _AsyncPusher()
 
 
 class UsageDelta(TypedDict):
@@ -268,8 +331,11 @@ class _Metrics:
         }
 
     def flush(self) -> None:
-        """Fire the optional HTTP push. Cumulative totals, so the endpoint
-        can compute its own deltas (agentdash's /api/tokens/push does)."""
+        """Queue the optional HTTP push. Cumulative totals, so the endpoint
+        can compute its own deltas (agentdash's /api/tokens/push does).
+
+        PF-07 (0.56.0): this is now a queue put — the actual POST runs on the
+        `_pusher` background thread, never on the REPL thread."""
         if not self.push_url or self._push_disabled:
             return
         payload = {
@@ -284,16 +350,7 @@ class _Metrics:
             "started_at": self.started_at,
             "ended_at": time.time(),
         }
-        try:
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                self.push_url, data=data,
-                headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=1.5)
-        except Exception:
-            # Dashboard down / wrong port / not running — stop trying so we
-            # never add latency to the REPL on every turn.
-            self._push_disabled = True
+        _pusher.submit(self.push_url, payload, self)
 
 
 # Recorder binding. The REPL's recorder is the module-global `st._METRICS`

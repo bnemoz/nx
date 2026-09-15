@@ -21,7 +21,8 @@ from ._ansi import (
 )
 from ._approval import _EscToChat
 from ._interrupt import (
-    _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED, _ensure_interrupt_watcher,
+    _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
+    _disarm_interrupt_armed, _ensure_interrupt_watcher,
 )
 from ._metrics import _abbr, _record_usage
 from ._special_tokens import (
@@ -1387,14 +1388,15 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # watcher's termios restore is asynchronous (it may still be in
         # select(0.1) when we return) and the chatbox can capture our raw-mode
         # termios as its "old", leaving the terminal stuck in VMIN=0.
-        # The watcher's inner select has a 0.1s timeout, so restore typically
-        # completes in <0.1s. But if a bare Esc just fired, the watcher is
-        # inside _drain_redirect_text, which has its own 2.0s deadline — wait
-        # past that (not just 0.5s) so we never proceed while it still holds
-        # raw termios mid-drain. NX_INTERRUPT_RESTORE_WAIT tunes the wait
+        # The watcher's select has a 0.1s timeout, but we poke its wake pipe
+        # (PF-06) so it notices the disarm immediately; restore typically
+        # completes in single-digit ms. If a bare Esc just fired the watcher is
+        # instead inside _drain_redirect_text, which has its own 2.0s deadline —
+        # wait past that (not just 0.5s) so we never proceed while it still
+        # holds raw termios mid-drain. NX_INTERRUPT_RESTORE_WAIT tunes the wait
         # (nx/_interrupt.py); keep the two call sites' effective values equal.
         if not quiet:
-            _INTERRUPT_ARMED.clear()
+            _disarm_interrupt_armed()
             _INTERRUPT_RESTORED.wait(
                 timeout=_env_float("NX_INTERRUPT_RESTORE_WAIT", 2.5))
             _USER_INTERRUPTED.clear()

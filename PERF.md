@@ -215,6 +215,15 @@ thread set the event directly when the watcher is not mid-drain, or drop the
 watcher's detect interval. Target: this wait should be < 10 ms in the common
 case, and there should be a test asserting it.
 
+**Shipped in 0.56.0.** The watcher now blocks on stdin **and** a wake pipe
+(`_tty.wait_ready_any`, POSIX); `_disarm_interrupt_armed()` clears the arm flag
+and pokes the pipe, so the armed window's `select()` returns at once and
+restores cooked mode instead of waiting out its 0.1 s poll. Both disarm sites
+(`_turn.py`'s turn-end `finally`, `_interrupt._watch_for_interrupts`) go through
+the helper. The armed loop was factored into a testable `_armed_loop`.
+`tests/test_perf_interrupt_disarm.py` drives it over a real pipe and asserts the
+disarm→restore latency is < 50 ms (measured ~1 ms).
+
 **PF-07 · HIGH · `_metrics.py:287-292` via `_repl_state.py:95-96` — synchronous
 dashboard push on the REPL thread.** `urllib.request.urlopen(req, timeout=1.5)`
 runs inline, 1–3 times per turn after the answer renders; a unreachable
@@ -223,6 +232,13 @@ dashboard costs up to ~4.5 s of dead time before it self-disables
 route through the existing `_AsyncLogWriter` pattern (`_logging.py:32-47`) — the
 queue-and-thread already exists in the codebase.
 
+**Shipped in 0.56.0.** `_Metrics.flush()` is now a `queue.put_nowait` onto a
+module-level `_AsyncPusher` (queue + daemon thread, the `_AsyncLogWriter`
+pattern); the actual POST runs off the REPL thread and the worker latches the
+push off (marking its owner) after the first failure.
+`tests/test_perf_turn_tax.py` asserts `flush()` returns in < 50 ms against a
+black-hole endpoint and never calls `urlopen` inline.
+
 **PF-08 · HIGH · `_bash_jobs.py:755` unconditional `time.sleep(0.2)`** (plus
 `time.sleep(0.1)` at `:405` and `NX_BASH_POLL_SECONDS` default 3 at `:587`).
 Two agents independently measured ~200–300 ms of pure sleep charged to every
@@ -230,10 +246,28 @@ short `run_bash`. Fix: replace the settle sleep with a bounded
 wait-for-EOF/flush on the actual pipe, and make completion detection event-based
 (`Event` set by the reaper) rather than poll-based.
 
+**Shipped in 0.56.0 (partial).** The 0.2 s settle is gone: `_finish_bg_job` now
+waits on the actual artifact — the flushed `[exit: N]` trailer the launcher's
+subshell writes last (`_wait_for_log_trailer`, bounded at 0.2 s, polling every
+5 ms). The common case lands in ~5 ms and a truncated log degrades to the old
+behaviour instead of hanging. `_poll_pid`'s 0.1 s tick now waits on
+`_USER_INTERRUPTED` when Esc is being watched, so it is event-driven rather
+than a blind sleep. **Not done:** the watcher itself is still a 0.1 s poll (the
+reaper-event design) — the remaining `XN_BASH_POLL_SECONDS` tick is a liveness
+probe on a detached pid, where no in-process event exists to wait on. Deferred.
+
 **PF-09 · MED · `_sessions_fs.py:692-723` title/description generation is a
 blocking completion on the main thread** every ~6th turn (`NX_SESSION_DESC_REFRESH`,
 20 s timeout), right after the answer renders. Fix: background thread — nothing
 consumes the value inline.
+
+**Shipped in 0.56.0.** `_maybe_refresh_description` keeps the (cheap) threshold
+check and snapshots the transcript, then hands the model call + persist to
+`_run_desc_refresh` on a daemon thread (`nx-session-desc`); the REPL call now
+returns immediately and always returns None. A non-blocking `_DESC_REFRESH_LOCK`
+prevents stacking; `_write_session`'s existing file lock serializes the second
+write with the per-turn save. `tests/test_perf_turn_tax.py` asserts the call
+returns in < 100 ms while the stubbed model call is still sleeping.
 
 **PF-10 · MED · no prompt-cache routing hint is ever sent.** nx *displays*
 `cached:` and documents prefix-cache discipline, but sends no stable session
@@ -498,7 +532,7 @@ behavior changes, so minors, with patches for anything that only adds a test.
 | Release | Contents | Acceptance |
 | --- | --- | --- |
 | **0.55.0** — *stop the keystroke hitch* | **PF-01** (tree cache + move I/O out of `render()` + memoize project root), **PF-02** (scan watermark) — **shipped** | T-1, T-3, T-4 green (`tests/test_stream_tag_scan_watermark.py`, `tests/test_chatbox_completion_cache.py`). `@`-completion < 1 ms/keystroke on a 20k-file repo; long-answer stream CPU < 50 ms |
-| **0.56.0** — *per-turn tax* | **PF-06** (interrupt handshake), **PF-07** (async metrics push), **PF-08** (bash sleeps), **PF-09** (background title gen) | T-8, T-13 green. Measured gap between last token and prompt return < 50 ms; no single command charged > 20 ms of sleep |
+| **0.56.0** — *per-turn tax* | **PF-06** (interrupt handshake), **PF-07** (async metrics push), **PF-08** (bash sleeps — settle sleep only), **PF-09** (background title gen) — **shipped** | T-8/T-13 covered by `tests/test_perf_interrupt_disarm.py` + `tests/test_perf_turn_tax.py`. Disarm→prompt < 50 ms (measured ~1 ms); `flush()` never POSTs inline; `_finish_bg_job` ~5 ms not 200 ms; desc refresh non-blocking. The `_poll_pid` reaper-event rewrite stays open (needs a new mechanism). |
 | **0.57.0** — *render path* | **PF-03** (join instead of `+=`), **PF-04** (incremental clean-string accumulation, size-scaled throttle, no double final parse), **PF-22** (`iter_raw` + dict access) | T-2, T-5 green. `StreamParser` linear; no `_content_str` |
 | **0.58.0** — *prefix-cache integrity* | **PF-12** (memory note to the tail), **PF-13** (strip image payloads after consumption), **PF-14** (spill at append time), **PF-15** (single pinned prefix block) | T-6, T-7 green. `cached:` stays non-zero across a recovery storm and across resume; per-turn payload bytes do not grow with attached images |
 | **0.59.0** — *one cached capability manifest* | **PF-10** (stable cache-routing identity), **PF-11** (pin accepted request shape), **PF-21** (memoize `resolve_model`). Pairs with ROADMAP P3-10 | T-11 green (request count pinned). Zero redundant `/v1/models` per turn |

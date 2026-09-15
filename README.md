@@ -459,6 +459,15 @@ In the REPL input box:
 
 A plain `input()` fallback is used when stdin/stdout isn't a TTY.
 
+**Interrupt latency (0.56.0).** Pressing **Esc** during a turn, and the moment
+a turn hands the prompt back, are now event-driven rather than polled: the
+Esc-watcher is woken by a pipe the instant a turn disarms instead of after its
+next ~100ms tick, so the gap between the last token and the prompt is
+single-digit milliseconds. The optional metrics push (`NX_METRICS_URL`),
+session-description generation (`NX_SESSION_DESC_REFRESH`), and the settle after
+a short `run_bash` all moved off the REPL thread / off fixed sleeps, so no turn
+pays a blocking side-effect after its answer renders.
+
 ## Approval modes
 
 Every write/edit/bash call is risk-classified (`low`/`medium`/`high`) by a

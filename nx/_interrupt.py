@@ -50,9 +50,14 @@ Four events:
                         still be mid-poll when the chatbox runs) and the
                         chatbox can inherit VMIN=0, breaking Enter
                         and leaving the terminal stuck in raw mode.
+
+plus a POSIX wake pipe (PF-06, 0.56.0): the armed window blocks on stdin AND the
+pipe, and main pokes it on disarm so the watcher restores cooked mode in
+single-digit ms instead of after its next 0.1s poll.
 """
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -62,7 +67,8 @@ from typing import Any
 from . import _state as st
 from ._env import _env_float
 from ._tty import (
-    apply_interrupt_mode, capture_input_mode, read_byte, restore_input_mode, wait_ready,
+    IS_WINDOWS, apply_interrupt_mode, capture_input_mode, read_byte,
+    restore_input_mode, wait_ready, wait_ready_any,
 )
 
 _INTERRUPT_ARMED = threading.Event()
@@ -75,6 +81,59 @@ _INTERRUPT_RESTORED.set()  # initially: nothing to restore (OK to proceed)
 _INTERRUPT_CAPTURE_REDIRECT = threading.Event()
 _INTERRUPT_CAPTURE_REDIRECT.set()
 st._INTERRUPT_THREAD = None
+
+# ---------------------------------------------------------------- wake pipe ---
+# PF-06 (0.56.0): disarming used to leave the watcher blocked in a 0.1s
+# wait_ready() poll before it noticed the cleared arm flag and restored cooked
+# input mode — so every turn paid up to 100ms of dead time *after* its last
+# token (2.5s if the watcher was mid-drain). Main now pokes this pipe on disarm
+# so the watcher's select() returns at once. POSIX-only; on Windows (or if the
+# pipe can't be created) _wake_watcher() is a no-op and the watcher falls back
+# to its poll interval, exactly as before.
+if IS_WINDOWS:
+    _WAKE_R: int | None = None
+    _WAKE_W: int | None = None
+else:
+    try:
+        _WAKE_R, _WAKE_W = os.pipe()
+        # Both ends non-blocking: _WAKE_W so a full pipe can never block main,
+        # _WAKE_R so _drain_wake()'s read loop returns instead of blocking on an
+        # empty pipe (select still works fine on a non-blocking fd).
+        os.set_blocking(_WAKE_R, False)
+        os.set_blocking(_WAKE_W, False)
+    except OSError:  # pragma: no cover - fd exhaustion / restricted env
+        _WAKE_R = _WAKE_W = None
+
+
+def _wake_watcher() -> None:
+    """Poke the watcher out of its stdin select. Best-effort, never raises."""
+    if _WAKE_W is None:
+        return
+    try:
+        os.write(_WAKE_W, b"\x00")
+    except (OSError, BlockingIOError, ValueError):
+        pass
+
+
+def _drain_wake() -> None:
+    """Consume any pending wake bytes so a stale poke can't make the next
+    select() return immediately and spin."""
+    if _WAKE_R is None:
+        return
+    try:
+        while os.read(_WAKE_R, 4096):
+            pass
+    except (OSError, BlockingIOError, ValueError):
+        pass
+
+
+def _disarm_interrupt_armed() -> None:
+    """Clear the arm flag AND wake the watcher so it restores cooked input mode
+    immediately instead of on its next poll tick. The disarm→restore wait in
+    model_turn/_watch_for_interrupts then returns in single-digit ms in the
+    common case, which is what PF-06 (0.56.0) is about."""
+    _INTERRUPT_ARMED.clear()
+    _wake_watcher()
 
 
 def _interrupt_watcher() -> None:
@@ -102,64 +161,100 @@ def _interrupt_watcher() -> None:
     old = capture_input_mode(fd)
     if old is None:
         return
-    last_fire = 0.0
     while not _INTERRUPT_EXIT.is_set():
         # Park until a generation arms us. While parked we touch stdin NOT AT
         # ALL — the chatbox owns it. This is the whole point of the redesign.
-        _INTERRUPT_ARMED.wait(0.25)
+        # A 25ms slice bounds how long an _INTERRUPT_EXIT (process shutdown)
+        # can be ignored without paying a wake poke for that path too.
+        _INTERRUPT_ARMED.wait(0.025)
         if not _INTERRUPT_ARMED.is_set() or _INTERRUPT_EXIT.is_set():
             continue
         # We're armed: take stdin into raw mode for the duration of generation.
         # ISIG (POSIX) / ENABLE_PROCESSED_INPUT (Windows) stays ON so Ctrl+C
         # still generates SIGINT instead of arriving as a byte this Esc-only
         # watcher would discard.
-        try:
-            apply_interrupt_mode(fd, old)
-        except Exception:
-            _INTERRUPT_RESTORED.set()  # never armed — nothing to restore
-            return
-        try:
-            while _INTERRUPT_ARMED.is_set() and not _INTERRUPT_EXIT.is_set():
-                if not wait_ready(fd, 0.1):
-                    continue
+        if not _run_armed_session(fd, old):
+            return  # stdin died / could not arm — watcher can't run
+
+
+def _run_armed_session(fd: int, old: Any) -> bool:
+    """Run one armed window: raw input mode, Esc watching, then restore.
+
+    Returns True to stay alive (park again), False to exit the watcher thread
+    entirely (stdin died / apply failed)."""
+    last_fire = 0.0
+    try:
+        apply_interrupt_mode(fd, old)
+    except Exception:
+        _INTERRUPT_RESTORED.set()  # never armed — nothing to restore
+        return False
+    try:
+        _drain_wake()  # drop any stale poke so the first select doesn't spin
+        while _INTERRUPT_ARMED.is_set() and not _INTERRUPT_EXIT.is_set():
+            # Block on stdin AND the wake pipe (PF-06): main pokes the pipe
+            # when it disarms, so we notice immediately instead of after up
+            # to 100ms of poll. Re-check the arm flag even when the wake pipe
+            # (not stdin) fired.
+            ready_fd = _select_stdin_or_wake(fd, 0.1)
+            if ready_fd is None:
+                continue
+            if ready_fd != fd:
+                _drain_wake()
+                continue  # woken to disarm — loop re-checks _INTERRUPT_ARMED
+            try:
+                c = read_byte(fd)
+            except OSError:
+                _INTERRUPT_RESTORED.set()  # dying — unblock main's wait
+                return False
+            if c != b"\x1b":
+                continue  # discard anything that isn't Esc
+            # Could be bare Esc OR the lead byte of an escape sequence
+            # (arrow keys, Home/End, bracketed paste, etc.). Wait up to 50ms
+            # for more bytes; if none arrive, it's a bare Esc.
+            if wait_ready(fd, 0.05):
                 try:
-                    c = read_byte(fd)
+                    read_byte(fd)  # swallow the rest of the sequence
                 except OSError:
-                    _INTERRUPT_RESTORED.set()  # dying — unblock main's wait
-                    return
-                if c != b"\x1b":
-                    continue  # discard anything that isn't Esc
-                # Could be bare Esc OR the lead byte of an escape sequence
-                # (arrow keys, Home/End, bracketed paste, etc.). Wait up to 50ms
-                # for more bytes; if none arrive, it's a bare Esc.
-                if wait_ready(fd, 0.05):
-                    try:
-                        read_byte(fd)  # swallow the rest of the sequence
-                    except OSError:
-                        pass
-                    continue
-                now = time.time()
-                if now - last_fire < 0.25:  # debounce — don't fire twice in a row
-                    continue
-                last_fire = now
-                _USER_INTERRUPTED.set()
-                # Leave _INTERRUPT_ARMED set: main will clear it on disarm,
-                # which exits the inner loop and parks us. In the meantime
-                # (main is closing the stream / breaking out of its chunk
-                # loop), keep reading stdin so a user who immediately starts
-                # typing a redirect ("actually, do X instead") doesn't have
-                # those keystrokes silently discarded — capture them below
-                # instead of just discarding non-Esc bytes.
-                if _INTERRUPT_CAPTURE_REDIRECT.is_set():
-                    st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, old)
-                    st._INTERRUPT_REDIRECT_SUBMITTED = st._INTERRUPT_REDIRECT_TEXT.endswith("\n")
-                    st._INTERRUPT_REDIRECT_TEXT = st._INTERRUPT_REDIRECT_TEXT.rstrip("\n")
-        finally:
-            restore_input_mode(fd, old)
-            # Signal main that input mode has been restored to cooked. main
-            # waits on this after clearing _INTERRUPT_ARMED so the chatbox
-            # never captures our raw-mode attrs as its "old" state.
-            _INTERRUPT_RESTORED.set()
+                    pass
+                continue
+            now = time.time()
+            if now - last_fire < 0.25:  # debounce — don't fire twice in a row
+                continue
+            last_fire = now
+            _USER_INTERRUPTED.set()
+            # Leave _INTERRUPT_ARMED set: main will clear it on disarm,
+            # which exits the inner loop and parks us. In the meantime
+            # (main is closing the stream / breaking out of its chunk
+            # loop), keep reading stdin so a user who immediately starts
+            # typing a redirect ("actually, do X instead") doesn't have
+            # those keystrokes silently discarded — capture them below
+            # instead of just discarding non-Esc bytes.
+            if _INTERRUPT_CAPTURE_REDIRECT.is_set():
+                st._INTERRUPT_REDIRECT_TEXT = _drain_redirect_text(fd, old)
+                st._INTERRUPT_REDIRECT_SUBMITTED = st._INTERRUPT_REDIRECT_TEXT.endswith("\n")
+                st._INTERRUPT_REDIRECT_TEXT = st._INTERRUPT_REDIRECT_TEXT.rstrip("\n")
+    finally:
+        restore_input_mode(fd, old)
+        # Signal main that input mode has been restored to cooked. main
+        # waits on this after clearing _INTERRUPT_ARMED so the chatbox
+        # never captures our raw-mode attrs as its "old" state.
+        _INTERRUPT_RESTORED.set()
+    return True
+
+
+def _select_stdin_or_wake(fd: int, timeout: float) -> int | None:
+    """Return the fd that became readable (stdin `fd` or the wake pipe), or
+    None on timeout. Falls back to a plain stdin poll when there is no wake
+    pipe (Windows, or the pipe could not be created)."""
+    if _WAKE_R is None:
+        return fd if wait_ready(fd, timeout) else None
+    return wait_ready_any([fd, _WAKE_R], timeout)
+
+
+# Exposed for the interrupt-watcher tests (PF-06, T-8): the direct watcher-loop
+# entry point so a test can drive one armed window over a real pipe without a
+# tty, and measure the disarm latency.
+_armed_loop = _run_armed_session
 
 
 def _drain_redirect_text(fd: int, old_mode: Any) -> str:
@@ -259,7 +354,9 @@ def _watch_for_interrupts():
     try:
         yield
     finally:
-        _INTERRUPT_ARMED.clear()
+        # Clear + wake so the watcher restores cooked mode immediately, not on
+        # its next poll tick (PF-06).
+        _disarm_interrupt_armed()
         # _drain_redirect_text's own deadline is 2.0s; wait past it so we never
         # proceed while the watcher still holds raw input mode mid-drain.
         if not _INTERRUPT_RESTORED.wait(timeout=restore_wait):

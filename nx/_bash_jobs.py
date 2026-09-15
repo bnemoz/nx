@@ -402,7 +402,14 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
                             spinner.label = tail[:60]
                             _last_label_at = now
                     last_tail = tail
-            time.sleep(0.1)
+            # Wait between liveness probes on the interrupt event rather than
+            # a blind sleep (PF-08): the loop must notice an Esc within one
+            # poll interval, and this makes that wait event-driven (and still
+            # correct when there is no watcher armed to fire it).
+            if check_esc:
+                _USER_INTERRUPTED.wait(0.1)
+            else:
+                time.sleep(0.1)
     return "timeout"
 
 
@@ -750,9 +757,39 @@ def _mark_log_consumed(log_path: str | None) -> None:
         pass  # a seen-marking hint must never break the tool result
 
 
+def _wait_for_log_trailer(
+    log_path: str, timeout: float = 0.2, interval: float = 0.005,
+) -> int | None:
+    """Poll *log_path* until the trailing [exit: N] marker the launcher's
+    subshell writes as its LAST action is visible (so the output before it is
+    flushed too). Returns the exit code once seen, or None if the marker never
+    appeared within *timeout* (truncated/corrupt log, or a kill that skipped
+    the trailer).
+
+    PF-08 (0.56.0): this replaces a blind fixed settle sleep in
+    ``_finish_bg_job``. The subshell writes the trailer after all command
+    output and the redirection flushes in order, so "marker present on disk"
+    IS the real completion signal: waiting on it lands the common case in a few
+    ms instead of a flat 200ms, while never returning before the output is
+    actually there.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        _out, exit_code = _read_log(log_path)
+        if exit_code is not None:
+            return exit_code
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
+
 def _finish_bg_job(log_path: str) -> str:
     """Read+format the output of a finished background job, deleting its log."""
-    time.sleep(0.2)  # brief settle so the log is flushed
+    # Wait on the actual artifact (the flushed exit trailer) instead of a fixed
+    # settle sleep (PF-08). If the trailer never lands, _read_log still returns
+    # whatever is on disk, so a truncated log degrades to prior behaviour
+    # rather than hanging.
+    _wait_for_log_trailer(log_path)
     out, exit_code = _read_log(log_path)
     try:
         os.remove(log_path)

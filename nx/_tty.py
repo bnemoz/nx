@@ -179,6 +179,23 @@ def wait_ready(fd: int, timeout: float) -> bool:
     return bool(ready)
 
 
+def wait_ready_any(fds: list[int], timeout: float) -> int | None:
+    """Wait until *any* fd in `fds` is readable, up to `timeout` seconds.
+    Returns the first readable fd, or None on timeout.
+
+    POSIX-only (PF-06): the interrupt watcher uses this to block on stdin *and*
+    a wake pipe at once, so a disarm can end its wait immediately instead of
+    after the next poll interval. Non-POSIX callers fall back to polling the
+    first fd, which is the pre-existing behaviour on those platforms.
+    """
+    if IS_WINDOWS or not fds:
+        # Windows console handles can't be select()ed; fall back to the single
+        # -fd poll the watcher used before (the wake pipe is POSIX-only).
+        return fds[0] if fds and wait_ready(fds[0], timeout) else None
+    ready, _, _ = select.select(list(fds), [], [], timeout)
+    return ready[0] if ready else None
+
+
 # ------------------------------------------- interrupt-watcher input mode ---
 # The Esc watcher (_interrupt.py) can't use the `raw_mode` context manager:
 # it sets raw input mode when armed and restores cooked mode when disarmed,

@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -689,16 +690,22 @@ def _delete_session(session_id: str) -> bool:
     return True
 
 
+_DESC_REFRESH_LOCK = threading.Lock()
+
+
 def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) -> str | None:
-    """Ask the model for a one-line session description, if enough turns have
-    passed since the last refresh.
+    """Schedule a one-line session description refresh, if enough turns have
+    passed since the last one.
 
     Refreshes at the configured interval (every SESSION_DESC_REFRESH user
     turns). The description is stored in the session file's `description`
-    field and surfaced in `nx sessions` / `/sessions` listings. A failure
-    (server down, empty response) leaves the existing description untouched.
+    field and surfaced in `nx sessions` / `/sessions` listings.
 
-    Returns the new description string, or None if no refresh happened.
+    PF-09 (0.56.0): this used to make the (20s-timeout) non-streaming model
+    call INLINE on the REPL thread, every SESSION_DESC_REFRESH turns, right
+    after the answer rendered. Nothing consumes the value inline (the REPL
+    discards the return), so the call now runs on a daemon thread and the
+    prompt returns immediately. Always returns None now.
     """
     import nx as _m
     if _m.SESSION_DESC_REFRESH <= 0:
@@ -721,56 +728,81 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
         return None
     if user_turns - last_desc_turns < _m.SESSION_DESC_REFRESH:
         return None
-    # Build a compact transcript for the summarizer — truncate tool outputs
-    # and skip the system prompt to keep the call cheap.
-    def _trim(msgs: list[dict[str, Any]], per_msg: int = 500, cap: int = 20) -> str:
-        out: list[str] = []
-        for m in msgs:
-            if m.get("role") == "system":
-                continue
-            c = _flatten_message_text(m, per_msg=per_msg)
-            out.append(f"[{m.get('role', '?')}] {c}")
-            if len(out) >= cap:
-                break
-        return "\n".join(out)
-    prompt = _trim(messages[-30:])  # last ~30 messages is plenty of context
-    payload = [
-        {"role": "system", "content": _m.DESC_SYSTEM},
-        {"role": "user", "content": prompt},
-    ]
+    # Snapshot the transcript (a shallow copy of the message pointers) so the
+    # background thread never iterates a list the REPL is appending to.
+    snapshot = list(messages)
+    threading.Thread(
+        target=_run_desc_refresh, args=(session_id, snapshot, user_turns),
+        daemon=True, name="nx-session-desc").start()
+    return None
+
+
+def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
+                      user_turns: int) -> str | None:
+    """The background half of the refresh: the model call + the persist.
+
+    A failure (server down, empty response) leaves the existing description
+    untouched and is silent — the title is always present. Returns the new
+    description, or None if no refresh happened. PF-09 (0.56.0).
+    """
+    import nx as _m
+    if not _DESC_REFRESH_LOCK.acquire(blocking=False):
+        return None  # a refresh is already in flight — don't stack them
     try:
-        _log_event("req", {"model": st.MODEL, "messages": payload,
-                           "stream": False, "_purpose": "session_desc"})
-        resp = st.client.chat.completions.create(
-            model=st.MODEL, messages=payload, stream=False, timeout=20,
-            **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
+        # Build a compact transcript for the summarizer — truncate tool outputs
+        # and skip the system prompt to keep the call cheap.
+        def _trim(msgs: list[dict[str, Any]], per_msg: int = 500, cap: int = 20) -> str:
+            out: list[str] = []
+            for m in msgs:
+                if m.get("role") == "system":
+                    continue
+                c = _flatten_message_text(m, per_msg=per_msg)
+                out.append(f"[{m.get('role', '?')}] {c}")
+                if len(out) >= cap:
+                    break
+            return "\n".join(out)
+        prompt = _trim(messages[-30:])  # last ~30 messages is plenty of context
+        payload = [
+            {"role": "system", "content": _m.DESC_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
         try:
-            _log_event("resp", {"_purpose": "session_desc", "data": resp.model_dump()})
+            _log_event("req", {"model": st.MODEL, "messages": payload,
+                               "stream": False, "_purpose": "session_desc"})
+            resp = st.client.chat.completions.create(
+                model=st.MODEL, messages=payload, stream=False, timeout=20,
+                **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
+            try:
+                _log_event("resp", {"_purpose": "session_desc", "data": resp.model_dump()})
+            except Exception:
+                pass
+        except APIConnectionError:
+            return None  # server down — leave existing description as-is
         except Exception:
-            pass
-    except APIConnectionError:
-        return None  # server down — leave existing description as-is
-    except Exception:
-        return None
-    _record_usage(
-        getattr(resp, "usage", None),
-        fallback_chars=len(resp.choices[0].message.content or ""),
-        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
-    )
-    desc = (resp.choices[0].message.content or "").strip().splitlines()
-    desc = desc[0].strip() if desc else ""
-    if not desc:
-        return None
-    desc = _safe_title(desc, maxlen=70) or desc[:70]
-    # Persist the description + the turn count it was generated at so we know
-    # when to refresh next. Merge into existing meta (don't clobber messages).
-    meta = {"description": desc, "desc_turns": user_turns}
-    if st._METRICS is not None:
-        meta.update(st._METRICS.as_meta())
-    _write_session(session_id, messages, meta)
-    if st._METRICS is not None:
-        st._METRICS.flush()
-    return desc
+            return None
+        _record_usage(
+            getattr(resp, "usage", None),
+            fallback_chars=len(resp.choices[0].message.content or ""),
+            fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+        )
+        desc = (resp.choices[0].message.content or "").strip().splitlines()
+        desc = desc[0].strip() if desc else ""
+        if not desc:
+            return None
+        desc = _safe_title(desc, maxlen=70) or desc[:70]
+        # Persist the description + the turn count it was generated at so we
+        # know when to refresh next. Merge into existing meta (don't clobber
+        # messages); the write is lock-guarded inside _write_session, so a
+        # background refresh serializes safely with the REPL's per-turn save.
+        meta = {"description": desc, "desc_turns": user_turns}
+        if st._METRICS is not None:
+            meta.update(st._METRICS.as_meta())
+        _write_session(session_id, messages, meta)
+        if st._METRICS is not None:
+            st._METRICS.flush()
+        return desc
+    finally:
+        _DESC_REFRESH_LOCK.release()
 
 
 def _resolve_session(target: str | None, sessions: list[dict[str, Any]] | None = None) -> str | None:

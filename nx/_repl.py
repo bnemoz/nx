@@ -286,9 +286,10 @@ def _repl() -> None:
         if _maybe_autocompress(state.messages, st._LAST_PROMPT_TOKENS):
             _save_current(state)
         # Maybe refresh the model-generated description (a cheap non-streaming
-        # call every SESSION_DESC_REFRESH turns). Done after the save so the
-        # turn's messages are already on disk; the description lands as a
-        # second write. Failures are silent — the title is always present.
+        # call every SESSION_DESC_REFRESH turns). PF-09 (0.56.0): the model call
+        # now runs on a background thread, so this returns immediately and the
+        # prompt is not blocked on it. The description lands as a second write.
+        # Failures are silent — the title is always present.
         if state.session_id is not None:
             _maybe_refresh_description(state.session_id, state.messages)
         state.session_dirty = False
