@@ -22,6 +22,7 @@ import urllib.request
 from typing import Any
 
 from ._env import _env_float, _env_int
+from ._manifest import routing_kwargs
 from ._openai_client import OpenAI
 
 from ._ansi import RESET, C
@@ -75,6 +76,17 @@ class Source:
         # /source <name> <model> override pins a different model id).
         self._context_window = None
         self._context_window_probe_attempted = False
+        # PF-21 (0.59.0): the last successful auto-detected model id. Without
+        # it every /source, resume, and resolve_context_window() fallback paid
+        # a fresh /v1/models (10 s cap) + /props (5 s) round trip. The failure
+        # placeholder ("local-model") is deliberately NOT memoized, so a local
+        # server that comes up after nx started is still resolvable by the next
+        # /source.
+        self._resolved_model: str | None = None
+        # PF-11 (0.59.0): model id -> the request shape (tools/tool_choice/
+        # extra_body) this endpoint accepted, learned once and reused by
+        # open_stream()'s fallback ladder. See nx/_manifest.py.
+        self._request_shapes: dict[str, tuple[bool, bool, bool]] = {}
         # Optional user-pinned list of model ids for this source (sorted,
         # de-duplicated). Set via NX_SOURCE_<NAME>_MODELS (comma-separated)
         # when the server's GET /models is stale — proxies that keep retired
@@ -149,9 +161,21 @@ class Source:
         # "reasoning" object always wins over the global budget.
         if st.REASONING_BUDGET_TOKENS and st.REASONING_BUDGET_TOKENS > 0:
             body.setdefault("reasoning", {"max_tokens": int(st.REASONING_BUDGET_TOKENS)})
-        if not body:
-            return {}
-        return {"extra_body": body}
+        # PF-10 (0.59.0): a stable per-session routing identity so a vLLM /
+        # SGLang / llama.cpp router can pin this session to a replica or KV
+        # block instead of re-prefilling on a cold worker every turn. Merged
+        # (setdefault) so a source's own EXTRA_BODY/`user` always wins, and
+        # never derived from anything that varies within a session.
+        out: dict[str, Any] = {}
+        for k, v in routing_kwargs(self).items():
+            if k == "extra_body":
+                for bk, bv in v.items():
+                    body.setdefault(bk, bv)
+            else:
+                out[k] = v
+        if body:
+            out["extra_body"] = body
+        return out
 
     # Server-advertised ids that carry no real identity — when /v1/models
     # returns one of these (bare llama.cpp with no --alias, or a generic
@@ -197,6 +221,9 @@ class Source:
     def resolve_model(self) -> str:
         if self.model:
             return self.model
+        # PF-21 (0.59.0): a successful resolution is memoized for the session.
+        if self._resolved_model:
+            return self._resolved_model
         if _startup_probes_skipped():
             # NX_SKIP_STARTUP_PROBES: no live /v1/models or /props round-trip
             # (see the gate's docstring) — keep the configured model or the
@@ -208,13 +235,17 @@ class Source:
         except Exception:
             advertised = None
         if advertised and advertised.strip().lower() not in self._GENERIC_MODEL_IDS:
-            return self._clean_model_id(advertised) or advertised
+            self._resolved_model = self._clean_model_id(advertised) or advertised
+            return self._resolved_model
         # The endpoint gave us nothing useful. Many local servers (llama.cpp's
         # llama-server) expose the actually-loaded model file at /props even
         # when /v1/models only advertises a generic id — recover the real name
         # (incl. quant) from there. Best-effort; any failure keeps the old value.
         probed = self._probe_loaded_model()
-        return probed or advertised or "local-model"
+        result = probed or advertised or "local-model"
+        if result != "local-model":
+            self._resolved_model = result
+        return result
 
     def _probe_loaded_model(self) -> str | None:
         """Best-effort GET <server>/props for the loaded model path/alias.
@@ -765,6 +796,10 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     # already-probed source's default model keeps its prior answer.
     if model_override:
         src._capability = None
+        # PF-11 (0.59.0): a different model on the same endpoint may accept a
+        # different request shape — the old model's 400 says nothing about it.
+        from ._manifest import reset as _reset_shape
+        _reset_shape(src, st.MODEL)
     if not _startup_probes_skipped():
         from ._capability import ensure_capability_probe
         ensure_capability_probe(src)

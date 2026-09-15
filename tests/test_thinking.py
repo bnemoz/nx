@@ -174,6 +174,7 @@ src._thinking_kwargs["glm-5.3-flash"] = {"chat_template_kwargs": {"thinking": Tr
 src.extra_body = {"provider": {"order": ["x"]},  # must survive alongside
                   "chat_template_kwargs": {"other": 1}}
 m.st.MODEL = "glm-5.3-flash"
+m.st._METRICS = None  # PF-10: no session recorder -> no routing hint attached
 try:
     out = src.extra_request_kwargs()
 finally:
@@ -188,6 +189,7 @@ assert src.extra_body["chat_template_kwargs"] == {"other": 1}, \
 # …and a source with no probe result yet passes its configured body untouched.
 src2 = _make_source(_Recorder(merged_handler))
 src2.extra_body = {"temperature": 0.2}
+m.st._METRICS = None  # PF-10: the routing hint is session-scoped
 assert src2.extra_request_kwargs() == {"extra_body": {"temperature": 0.2}}
 print("  PASS\n")
 

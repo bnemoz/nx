@@ -255,6 +255,8 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_NATIVE_TOOLS` | native `tool_calls` posture (0.54.0 flip): unset / `1` / `auto` (the default) sends `tool_choice="auto"` — the server MAY return structured `tool_calls`, and text-protocol models are unaffected (`auto` permits, never forces; malformed native args keep the full repair/salvage/breaker ladder, and `/toolcalls text` pins `"none"` for the session). `0` restores the pre-0.54 `tool_choice="none"` posture — text-protocol only — for a source/model whose native arguments are unusable; a reasoning-stall under it re-arms `auto` once per episode with a visible line |
 | `NX_MALFORMED_TOOL_BREAKER` | malformed-args circuit breaker: after N malformed/truncated `tool_calls` argument payloads naming the SAME tool (default 3), that tool is dropped from the tool list and the retry nudge steers the model to a sibling tool instead — an endpoint that keeps truncating one tool's args (observed: a local server dying right before `multi_edit`'s `[` array literal) stops being offered it. 0.56.1 removed one real cause of that truncation: the SSE reader split frames with `str.splitlines()` semantics, so a tool-call delta carrying a character JSON allows raw but Python treats as a line break (U+0085, U+2028, U+2029 — all plausible inside file content an edit tool echoes back) cut one frame in half, dropping that delta while the stream itself ended cleanly at `finish_reason="stop"`. The reader now splits on SSE's own terminators, and the accompanying `⚠ malformed SSE frame(s) dropped` notice actually fires again (it read a counter the logging wrapper never exposed, so it always reported 0). If a breaker trip predates that fix, `/toolcalls reset` re-arms the tool. Since 0.29.9 the breaker DECAYS: one clean execution of the tool (its args parsed and the body ran without error) clears the streak and re-arms it, so two flaky truncations no longer cost the tool for the whole session; since 0.40 it is also scoped to the active `(source, model)` — switching endpoints (including a `/source <name> <model>` override) drops the previous endpoint's streaks and re-offers everything, because truncation is evidence about a server, not about a tool; `0` disables; `/toolcalls` shows the streaks, `/toolcalls reset [tool]` clears them, `/reset` re-arms everything |
 | `NX_GRAMMAR` | grammar-constrain text-protocol tool calls on llama.cpp servers (opt-in; see below) |
+| `NX_CACHE_ROUTING` | attach a stable per-session routing hint to every request — `user` (plus `prompt_cache_key` in the body) derived from the session id, so a vLLM / SGLang / llama.cpp prefix-cache router can pin this session to a replica or KV block instead of cold-prefilling on a different worker each turn (default on; `0` disables). Constant within a session by construction, and a source that sets its own `user` / `prompt_cache_key` via `EXTRA_BODY` always wins. Per-source: `NX_SOURCE_<NAME>_CACHE_ROUTING` |
+| `NX_SOURCE_<NAME>_CACHE_ROUTING` | per-source override of `NX_CACHE_ROUTING` (e.g. `0` for an aggregator that rejects unknown body fields) |
 | `NX_SEARCH_EXCLUDE_DIRS` | space-separated dirs the `grep` fallback skips (mirrors ripgrep's `.gitignore` handling; default includes `.venv node_modules __pycache__ build dist`) |
 | `NX_<ROLE>_COLOR` | override one of ten semantic roles (see below) |
 
@@ -497,6 +499,23 @@ future change moves it, you get one warning naming the cause instead of a silent
 cache miss. Image payloads are likewise dropped the turn after the model has
 seen them, rather than riding along at megabytes per request until an overflow
 happens to evict them.
+
+**One cached capability manifest (0.59.0).** A handful of costs were paid *per
+turn* to re-learn something nx could only learn by asking: the no-tools /
+no-extra request-shape ladder re-sent the full prompt (up to three POSTs) after
+a 400, even on an endpoint that had rejected that shape an hour earlier; a vLLM
+/ SGLang / llama.cpp router got no stable session identity, so every turn could
+cold-prefill on a different worker; and `resolve_model()` re-paid its
+`/v1/models` + `/props` round trip on every `/source` and resume. All three now
+share one small manifest (`nx/_manifest.py`), keyed per `(source, model)`: the
+accepted shape is **pinned** the first time it is discovered and reused after
+that, so a turn that used to cost up to 3 POSTs costs exactly 1; the routing
+hint rides as `user` (plus `prompt_cache_key` in the body) and is **constant for
+the whole session** — a moving value would itself be a cache-buster —
+opt-out-able with `NX_CACHE_ROUTING=0` (or `NX_SOURCE_<NAME>_CACHE_ROUTING=0`);
+and a successful model autodetect is memoized for the session (a *failed* one
+still re-probes, so a local server that comes up after nx started is still
+found).
 
 ## Approval modes
 

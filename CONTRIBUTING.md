@@ -92,6 +92,35 @@ Per CLAUDE.md: env vars, not config files. New tunables:
 - `NX_*` prefix, read via `_env_int`/`_env_float` with a sane default.
 - Document in the README's environment variables table.
 
+**Per-source variants.** A setting that can differ per endpoint takes the
+`NX_SOURCE_<NAME>_<SETTING>` form (read at call time from the source's `name`,
+as `nx/_manifest.py`'s `cache_routing_enabled()` does) and should also have a
+global `NX_<SETTING>` default. The per-source value, when set, wins.
+
+## Caching what a server tells you
+
+Anything learned by *asking* an endpoint — its accepted request shape, its
+tool-calling protocol, its model id, its context window — is
+**(a) keyed by `(source, model)`, (b) cached on the Source instance, and
+(c) invalidated on the events that change it** (`/source` switches, a
+`/source <name> <model>` override, a `PROBE_GENERATION` bump). `nx/_manifest.py`
+is the shared home for the request-shape half and the routing hint; the
+capability/thinking/context probes cache on `Source` attributes
+(`src._capability`, `src._thinking_kwargs`, `src._context_window`). The rules:
+
+- A cache lives on the `Source`, never in a module global — conftest rewinds
+  `nx.*` module state between tests, but a `Source` built inside a test is the
+  test's own object.
+- A *failure* is cached only when re-probing it would be harmful (a
+  silently-clamped over-max_tokens probe); otherwise leave the miss uncached so
+  a server that comes up later is still found. `resolve_model()` memoizes only
+  a real model id, never the `"local-model"` placeholder.
+- Prefer pinning a learned answer over re-deriving it per request: the
+  no-tools / no-extra ladder is walked **once** per `(source, model)`, then the
+  winning rung is reused (`tests/test_perf_capability_manifest.py`, T-11).
+- Every per-turn HTTP request count is a number we can name; if a change adds
+  one, pin it in a test rather than letting it drift (PERF.md I-9).
+
 ## Adding a new persistent store / index file
 
 Anything that caches state derived from the session transcripts (the

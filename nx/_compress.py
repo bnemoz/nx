@@ -548,64 +548,63 @@ def open_stream(
             # Merge (not overwrite) — a source's own extra_body (e.g.
             # OpenRouter provider routing) must survive alongside grammar.
             request_opts.setdefault("extra_body", {}).update(grammar_extra)
-        try:
-            _log_event("req", {"model": st.MODEL, "messages": messages, "tools": tools, "stream": True, **request_opts})
-            stream = st.client.chat.completions.create(
-                model=st.MODEL, messages=messages, tools=tools, stream=True,
-                stream_options={"include_usage": True}, **request_opts)
-        except APIConnectionError:
-            raise  # server unreachable — don't bother retrying without tools
-        except httpx.HTTPError:
-            raise  # transport failure — retrying without tools won't help
-        except Exception as e:  # reachable but rejected tools= → text-protocol fallback
-            # Context-window overrun: the prompt + tools no longer fit. Retrying
-            # without tools (or without extra_body) only shrinks the request by
-            # a few KB of schema — it cannot fit an over-length prompt, and it
-            # would burn seconds on fallback attempts that must also 400.
-            # Signal the caller instead (TURN_CONTEXT_OVERRUN → compress+retry).
-            if _is_context_overflow_error(e):
-                st._LAST_CONTEXT_OVERRUN = str(e)
-                return None
-            # Only a FIELD rejection (server parsed the request and objected to
-            # tools=/tool_choice/extra_body) justifies re-sending. Anything else
-            # — a 429/5xx APIError that _send already exhausted NX_HTTP_RETRIES
-            # on, or an unexpected error shape — propagates immediately: the
-            # fallback rungs are fresh multi-attempt _send cycles, so re-sending
-            # here would amplify one degraded turn into up to 9 POSTs against
-            # an endpoint that is already failing for reasons no body-shedding
-            # can fix. (Tradeoff: a server that signals field rejection only
-            # via 5xx now fails fast instead of being rescued.)
-            if not _is_request_field_rejection(e):
-                raise
-            # If extra_body (e.g. min_p / repeat_penalty / dry_*) is also
-            # rejected — vLLM's speculative decoder doesn't support min_p etc. —
-            # strip it too.  Try no-tools first, then no-tools + no-extra.
-            for fallback_keys in ({"tool_choice"}, {"tool_choice", "extra_body"}):
-                fallback_opts = {k: v for k, v in request_opts.items()
-                                 if k not in fallback_keys}
-                try:
-                    _tag = "no-tools" if fallback_keys == {"tool_choice"} else "no-tools-no-extra"
-                    _log_event("req", {"model": st.MODEL, "messages": messages, "stream": True, "_fallback": _tag, **fallback_opts})
-                    stream = st.client.chat.completions.create(
-                        model=st.MODEL, messages=messages, stream=True,
-                        stream_options={"include_usage": True}, **fallback_opts)
-                    break  # succeeded
-                except (APIConnectionError, httpx.HTTPError):
-                    raise  # transport failure — don't retry further
-                except Exception as e2:
-                    # Same rule between rungs: only a field rejection (a 400/422
-                    # naming the field, not the over-length wording checked
-                    # below) advances the ladder; a status/transport-grade
-                    # failure surfaces to the terminal handlers instead of
-                    # re-sending a request that just failed for a bigger reason.
-                    if _is_context_overflow_error(e2):
-                        st._LAST_CONTEXT_OVERRUN = str(e2)
-                        return None
-                    if not _is_request_field_rejection(e2):
-                        raise
-                    continue  # try next fallback level
-            else:
-                raise  # all fallbacks exhausted
+        # PF-11 (0.59.0): start at the rung this (source, model) already told us
+        # it accepts, instead of re-deriving the shape by failing every turn.
+        # A pinned rung means one request where the old code paid up to three
+        # full-prompt POSTs against an endpoint that had already rejected the
+        # first one. pinned_index is a dict read; on a fresh source/model it is
+        # 0 and this loop walks the ladder exactly as before, then remembers.
+        from ._manifest import LADDER, RUNG_TAG, pin as _pin_shape, pinned_index
+        rung = pinned_index(st.ACTIVE, st.MODEL)
+        stream = None
+        while True:
+            tools_ok, extra_ok = LADDER[rung]
+            # A rung that drops extra_body drops it wholesale (grammar, a
+            # source's own body, the recovery samplers) — the pre-0.59.0 ladder
+            # stripped the whole key too. A rung that drops tools drops
+            # tool_choice with it (it is only meaningful alongside tools).
+            opts = {k: v for k, v in request_opts.items()
+                    if extra_ok or k != "extra_body"}
+            if not tools_ok:
+                opts.pop("tool_choice", None)
+            _tag = RUNG_TAG[rung]
+            _log_event("req", {"model": st.MODEL, "messages": messages,
+                               "tools": tools if tools_ok else None, "stream": True,
+                               **({"_fallback": _tag} if _tag else {}), **opts})
+            try:
+                stream = st.client.chat.completions.create(
+                    model=st.MODEL, messages=messages,
+                    tools=tools if tools_ok else None, stream=True,
+                    stream_options={"include_usage": True}, **opts)
+                break  # succeeded — remember the shape for the next turn
+            except (APIConnectionError, httpx.HTTPError):
+                raise  # transport failure — retrying without tools won't help
+            except Exception as e:
+                # Context-window overrun: the prompt + tools no longer fit.
+                # Retrying without tools (or without extra_body) only shrinks
+                # the request by a few KB of schema — it cannot fit an
+                # over-length prompt, and it would burn seconds on fallback
+                # attempts that must also 400. Signal the caller instead
+                # (TURN_CONTEXT_OVERRUN → compress+retry).
+                if _is_context_overflow_error(e):
+                    st._LAST_CONTEXT_OVERRUN = str(e)
+                    return None
+                # Only a FIELD rejection (server parsed the request and objected
+                # to tools=/tool_choice/extra_body) justifies re-sending.
+                # Anything else — a 429/5xx APIError that _send already
+                # exhausted NX_HTTP_RETRIES on, or an unexpected error shape —
+                # propagates immediately: the fallback rungs are fresh
+                # multi-attempt _send cycles, so re-sending here would amplify
+                # one degraded turn into up to 9 POSTs against an endpoint that
+                # is already failing for reasons no body-shedding can fix.
+                # (Tradeoff: a server that signals field rejection only via 5xx
+                # now fails fast instead of being rescued.)
+                if not _is_request_field_rejection(e):
+                    raise
+                if rung >= len(LADDER) - 1:
+                    raise  # all rungs exhausted
+                rung += 1  # try the next reduced shape
+        _pin_shape(st.ACTIVE, st.MODEL, rung)
         # Wrap the stream so every chunk is captured to the log on its way out.
         return _LoggingStream(stream, _llog)
     except (APIConnectionError, httpx.HTTPError) as e:

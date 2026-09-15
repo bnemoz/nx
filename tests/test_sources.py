@@ -312,6 +312,11 @@ os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
 os.environ["OPENROUTER_API_KEY"] = "k"
 importlib.reload(nx)
 print("TEST 18: extra_request_kwargs plumbing")
+# PF-10 (0.59.0): extra_request_kwargs() also carries a per-session routing
+# hint (user / prompt_cache_key) whenever a session recorder exists. This test
+# asserts the extra_body plumbing exactly, so pin the recorder off — an earlier
+# test module in the same pytest process may have left one installed.
+nx.st._METRICS = None
 src = nx.SOURCES["openrouter"]
 # Routed source yields an extra_body kwarg.
 kw = src.extra_request_kwargs()
