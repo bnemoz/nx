@@ -101,7 +101,9 @@ See [`sources.example.env`](sources.example.env) for a full annotated example.
 Context is preserved across `/source` switches (`/reset` for a clean slate).
 
 The `/source <name> <model>` dropdown lists the ids the server advertises
-via `GET /v1/models` and scrolls when the list is long (↑/↓, PageUp/PageDown).
+via `GET /v1/models`. Every dropdown (slash commands, command arguments,
+models, `@file` mentions) uses the same style: long lists scroll instead of
+truncating (↑/↓, PageUp/PageDown, `···` marks hidden rows above/below).
 When a proxy's list is stale (retired models still listed, new ones missing),
 pin the true lineup with `NX_SOURCE_<NAME>_MODELS` — see
 [`sources.example.env`](sources.example.env).

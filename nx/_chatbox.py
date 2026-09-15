@@ -176,9 +176,10 @@ def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:
     return matches
 
 
-# Dropdown rows rendered before the list scrolls. Bigger than the 6-row
-# caps on the slash/arg dropdowns because model lists (multi-model hosts,
-# aggregators) are long, unranked, and often browsed rather than typed.
+# Dropdown rows rendered before the list scrolls. Uniform across every
+# dropdown (slash, arg, arg2/model, @file): nothing is hard-truncated, long
+# lists (multi-model hosts, aggregators, big repos) scroll instead, and the
+# window is generous because these lists are often browsed rather than typed.
 _DROPDOWN_MAX_ROWS = 8
 
 
@@ -407,14 +408,14 @@ def _match_file_paths(prefix: str) -> list[str]:
 
     files = _file_entries(root, directory)
     if not q:
-        return files[:8]
+        return files
     scored = []
     for f in files:
         s = _fuzzy_score(q, f.lower())
         if s is not None:
             scored.append((s, f))
     scored.sort(key=lambda t: -t[0])
-    return [f for _, f in scored[:8]]
+    return [f for _, f in scored]
 
 
 def _accept_file_completion(line: str, col: int, start: int, chosen: str) -> tuple[str, int]:
@@ -561,12 +562,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         kind = None
         at_start = None
         if len(buf) == 1 and buf[0].startswith("/") and " " not in buf[0]:
-            matches = _match_slash_commands(buf[0])[:6]
+            matches = _match_slash_commands(buf[0])
             kind = "slash"
         elif len(buf) == 1 and buf[0].startswith("/") and buf[0].count(" ") == 1 \
                 and buf[0].split(" ", 1)[0] in SLASH_ARG_OPTIONS:
             cmd, rest = buf[0].split(" ", 1)
-            matches = _match_slash_args(cmd, rest)[:6]
+            matches = _match_slash_args(cmd, rest)
             kind = "arg"
         elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
             _cmd, src_name, rest = buf[0].split(" ", 2)
