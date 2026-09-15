@@ -72,6 +72,13 @@ CLAUDE.md. Beyond the schema itself:
   `__init__.py` — the same "prefer a new `nx/_feature.py` over growing
   `__init__.py`" rule from AGENTS.md.
 - Dispatch: wire it into `run_tool()`.
+- Tiering (0.62.0, the feature-cost rule): a new always-on tool costs ~150
+  tokens on EVERY turn forever. Either name the existing always-on tool it
+  displaces into tier 2 (withheld by a `_TOOL_GATES` entry in
+  `nx/_dispatch.py`, surfaced on demand by `search_tools`), or raise
+  `BUDGET_TOKENS` in `tests/test_initial_context.py` with a ledger entry
+  justifying the cost. `tests/perf/baselines.json`'s `active_tools_floor`
+  pins the always-on count.
 - Risk classification: if the tool can write or execute, confirm
   `_assess_risk()` (`nx/_risk.py`) handles it sensibly — don't assume a new
   tool defaults to a safe risk tier.
@@ -90,6 +97,10 @@ CLAUDE.md. Beyond the schema itself:
 Per CLAUDE.md: env vars, not config files. New tunables:
 
 - `NX_*` prefix, read via `_env_int`/`_env_float` with a sane default.
+- README entry: mandatory (0.62.0, I-10). `tests/test_env_docs_parity.py`
+  fails on any `NX_*` read in `nx/` that the README never names; internal
+  tunables that shouldn't be user-facing go on that test's `_ALLOWLIST` with a
+  reason instead.
 - Document in the README's environment variables table.
 
 **Per-source variants.** A setting that can differ per endpoint takes the

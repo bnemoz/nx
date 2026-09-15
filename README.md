@@ -199,7 +199,10 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_MENTION_INLINE_LIMIT` | max size in bytes for a file `@mention` to inline whole (default 4096). Bigger files get a stub naming the size and pointing at `read_file`/`search_files`. CSV/TSV/`.tab` over 1 KB always take the preview path instead: header + first 10 data rows + row count, since the columns are nearly all a data-file mention is about |
 | `NX_MENTION_CSV_SCAN_BYTES` | max CSV/TSV preview size for the row-count scan (default 1048576 = 1 MB); bigger files skip the full read and report `N+` rows instead of an exact count |
 | `NX_READ_FILE_SCAN_LINES` | how far past a windowed `read_file` the header's exact line-count scan may reach (default 200000); beyond it the header reports a lower bound as `N+` instead of scanning an unbounded file |
-| `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables) |
+| `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables). Override the file itself with `NX_INPUT_HISTORY_FILE` |
+| `NX_LOG_MAX_BYTES` | size cap on the per-session request log (`~/.nx/logs`, default 10 MB) — the log rolls rather than growing without bound |
+| `NX_MAX_UNDO` | how many `/undo` checkpoints are kept per session (default 20) |
+| `NX_BASH_POLL_SECONDS` | how long a `run_bash` call polls inline before backgrounding as a fallback beyond its timeout (default 3) |
 | `NX_ORIENTATION` | append a one-time working-directory + read-only-tools note to fresh sessions (default `1`; `0` disables) |
 | `NX_DELEGATION_NUDGE_READS` | how many consecutive self-performed exploration calls (read_file/list_dir/search_files, cache hits included) with no `spawn_agent` in between before a one-time runtime note tells the model to delegate the rest of the sweep (default `8`; only fires while `NX_SUBAGENTS=1`; `0` disables) |
 | `NX_GARBLE_GUARD` | scan every edit's `new` text for model-garble signatures — duplicated lines, stuttered words/phrases, line-boundary splices, mid-sentence abandoned rewrites (default `1`; `0` disables). Unambiguous garble is repaired before the write (the tool result says so); ambiguous garble is refused once, then written as-is if the model resubmits the byte-identical edit |
@@ -774,6 +777,7 @@ go through the approval gate above.
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
 | `git_commit` | `files`, `message`, `path?` | stage `files` (space-separated; `.` = every change) and commit `message` after the user reviews the staged diff. See below |
+| `search_tools` | `pattern?` | list tools withheld this turn (gated/tier-2) with their full schemas, so one can be called next turn — read-only, always offered. This is the tier-2 mechanism (0.62.0): a tool that doesn't need to be always-on costs 0 tokens until the model asks for it here |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?` | save a durable memory note; requires confirmation |
 | `memory_search` | `query`, `scope?` | keyword-search saved memories; title hits rank first; read-only; ends with the absolute dirs holding the shown hits, because the listed `(name)` is a bare filename — `read_file` needs the full path |

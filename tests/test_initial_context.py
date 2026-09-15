@@ -82,7 +82,13 @@ import nx as m  # noqa: E402
 # 0.51: git_commit (ROADMAP P3-6) joins the always-on set — files/message/path
 # strings, ~157 tok measured by the suite's chars//3.5 method; BUDGET_TOKENS
 # rises 3020→3180 by that deliberate, verifiable cost.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3180)  # hard: recorded, justified
+# 0.62: search_tools (PERF §6 item 2, the tier-2 meta-tool) joins the always-on
+# set — one optional `pattern` string, ~118 tok by the chars//3.5 method. The
+# feature-cost rule says a new always-on tool names what it displaces: this one
+# displaces all FUTURE always-on rent (a later tool can ship tier-2 at 0 tok
+# and be surfaced by search_tools on demand instead of riding every request).
+# BUDGET_TOKENS rises 3180→3320 by that deliberate, verifiable cost.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3320)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

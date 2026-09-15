@@ -657,10 +657,31 @@ item in this document:
    simply fails the suite — which is the right forcing function, but make it a
    documented process instead of a surprise.
 
+**Shipped in 0.62.0.** `_active_tools()` is a declarative gate table
+(`_dispatch._TOOL_GATES`, name -> gate callable, with the malformed-args
+breaker as a post-gate veto) memoized on the gate-vector — one tuple rebuild +
+dict hit per turn instead of five sequential O(N) copies. The `search_tools`
+meta-tool (one optional `pattern` string, ~118 tok of floor measured by the
+suite's chars//3.5 method; `BUDGET_TOKENS` 3180→3320 in the ledger) is the
+tier-2 lifter: it returns the full schema of any tool the gate table withheld
+this turn, so the NEXT always-on tool can ship at 0 tokens until used instead
+of ~150 in all sessions. The feature-cost rule (item 4) is enforced by
+`tests/test_perf_tiered_registry.py` (gate coverage) +
+`tests/perf/baselines.json` (`active_tools_floor`).
+
 Secondary: single-source-of-truth for the four hand-synced command lists
 (ROADMAP 1.5 shipped parity *tests*; codegen would also make adding a command
 genuinely free), and extending the docs-parity test to fail on **undocumented**
 `NX_*` vars (I-10).
+
+**Shipped in 0.62.0.** The docs-parity direction I-10 named is live:
+`tests/test_env_docs_parity.py` fails on any `NX_*` read in `nx/` but absent
+from the README (with a reasoned allowlist for non-variables — pricing-family
+instances, test fixtures, compiled-tag identifiers). Four genuinely
+user-facing undocumented tunables (`NX_LOG_MAX_BYTES`, `NX_MAX_UNDO`,
+`NX_BASH_POLL_SECONDS`, `NX_INPUT_HISTORY_FILE`) gained README rows; the
+rest of the gap was internal-tunable or not-a-variable, and is allowlisted
+with a reason each.
 
 ---
 
@@ -679,6 +700,16 @@ behavior changes, so minors, with patches for anything that only adds a test.
 | **0.59.0** — *one cached capability manifest* | **PF-10** (stable cache-routing identity), **PF-11** (pin accepted request shape), **PF-21** (memoize `resolve_model`). Pairs with ROADMAP P3-10 — **shipped** | T-11 green (`tests/test_perf_capability_manifest.py`). The ladder is walked once per `(source, model)` and the winning rung reused, so a turn that used to cost up to 3 POSTs costs exactly 1; the routing hint is constant within a session; `resolve_model()` pays one `/v1/models` for the session (a failed resolve still re-probes) |
 | **0.61.0** — *bounds and durability* | **PF-16** (bounded caches, agent-record eviction), **PF-17** (sub-agent semaphore), **PF-18** (cache validity anchors), **PF-05** (undo persistence amortized), **PF-19** (diff hunk cap) — **shipped** | T-10, T-12 green (`tests/test_perf_bounds.py`). The tool cache is an LRU bounded by entries *and* bytes; finished agent records evict once announced; a fan-out past `NX_SUBAGENT_MAX_CONCURRENT` queues instead of racing; a multi-path read anchors on every path and `search_files` on a subtree stamp; undo.json is written once per turn, not per edit; `_diff_hunk` is capped with an elision notice |
 | **0.62.0** — *make features cheap* | Tiered tool registry + `search_tools` meta-tool (§6 items 1-2), docs-parity test for undocumented `NX_*`, `tests/perf/` promoted to a supported target with `baselines.json` | T-9, T-14, T-15 green. Adding a tool costs 0 tokens unless used |
+
+**0.62.0 shipped.** The gate table + memoization live in `_dispatch.py`
+(`_TOOL_GATES`, `_active_tools()`); `search_tools` is the tier-2 lifter
+(~118 tok of floor, ledger-justified 3180→3320 in
+`tests/test_initial_context.py`). T-9/T-15 run in the normal suite from
+`tests/perf/test_static_budgets.py` with pinned numbers in
+`tests/perf/baselines.json`; T-14 is the raised floor ledger itself. I-10 is
+`tests/test_env_docs_parity.py`. Remaining open from this row: none — but
+tier-2 has no *occupants* yet; the first feature tool that doesn't need to be
+always-on should be the first to use it.
 
 Suggested ordering rationale: P0 first because it is cheap, invisible-to-model
 work that removes the two worst measured numbers; the per-turn tax next because

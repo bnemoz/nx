@@ -350,6 +350,10 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {"name": "memory_write", "description": "Save a note for FUTURE sessions: a gotcha, a decision and why, a command worth keeping. Supersede stale notes instead of duplicating them.", "parameters": {"type": "object", "properties": {"title": {"type": "string", "description": "Short topic title"}, "body": {"type": "string", "description": "Markdown: facts, exact paths/commands, why"}, "scope": {"enum": ["project", "global"], "description": "project = this repo, global = every project"}}, "required": ["title", "body"]}}},
     {"type": "function", "function": {"name": "memory_search", "description": "Find saved notes by keyword, title + snippet, best first.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "All terms must appear; \"\" lists newest titles"}, "scope": {"enum": ["project", "global"], "description": "project (default) = project + global notes"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "memory_delete", "description": "Delete one note. An ambiguous or unknown target deletes nothing and lists candidates.", "parameters": {"type": "object", "properties": {"target": {"type": "string", "description": "Exact title, filename, or unique title prefix"}, "scope": {"enum": ["project", "global"], "description": "project (default) = project + global notes"}}, "required": ["target"]}}},
+    # Tier-2 meta-tool (0.62.0, PERF §6 item 2): the one always-on schema that
+    # keeps every FUTURE always-on tool free — a model that needs a withheld
+    # tool asks for its schema here instead of it riding every request.
+    {"type": "function", "function": {"name": "search_tools", "description": "List tools not offered this turn (tier-2/withheld), with their full schemas so one can be used on the next turn. Returns name + schema JSON per tool.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "Regex (ignored case) matched against tool names and descriptions; empty lists everything withheld"}}}}},
 ]
 
 # Only offered once a run_bash call has actually backgrounded this session
@@ -381,6 +385,13 @@ TOOLS.append(IMAGE_VISION_TOOL)
 # _active_tools() until a plan is active (/plan <goal>), like wait_background
 # is withheld until something backgrounds.
 TOOLS.append(PLAN_EDIT_TOOL)
+
+# Tiered tool registry + the search_tools meta-tool (0.62.0, PERF §6 items
+# 1-2). search_tools is read-only (no approval), always offered, and returns
+# the full schema of any tool the gate table withheld this turn — so the next
+# always-on tool can ship tier-2 (0 tokens until used) instead of ~150 of
+# permanent rent. The gate table itself lives in _dispatch._TOOL_GATES; the
+# feature-cost rule is in CONTRIBUTING.md/PERF.md §6.
 
 # Test-run tool (schema here, body in nx/_testrunner.py): the closed-loop
 # verification tier — detect pytest/go/cargo/npm from markers, run the fixed
@@ -673,6 +684,7 @@ from ._dispatch import (
     BACKGROUND_GUIDANCE, MULTI_EDIT_GUIDANCE, DELEGATION_STREAK_NOTICE,
     _MULTI_EDIT_NUDGE_THRESHOLD, _DELEGATION_NUDGE_THRESHOLD,
     _CACHEABLE_READ_TOOLS, _tool_cache_key, _invalidate_tool_cache_path,
+    _invalidate_tool_list_cache, _TOOL_GATES, search_tools,
     run_tool, _tool_args_parse_error, _run_bg_completion_scan,
 )
 from ._tool_cache import (  # noqa: F401 (re-export for tests)

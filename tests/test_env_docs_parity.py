@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""I-10 (PERF §6): fail on an NX_* var READ in nx/ but not documented in the
+README. The reverse direction (documented but never read) is
+test_docs_parity.test_every_documented_env_var_is_actually_read.
+
+Deliberate non-variables (test fixtures like NX_FOO/NX_MY_TOKEN, the
+NX_PRICE_* pricing table read dynamically, NX_QUOTED/NX_UNQUOTED parser
+vocabulary) are allowlisted with a reason each — an allowlist entry without a
+reason fails, so the list can't become a dumping ground.
+"""
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+sys.path.insert(0, REPO_ROOT)
+
+README = open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8").read()
+
+# name -> why it is deliberately not a README env var
+_ALLOWLIST = {
+    # parser vocabulary / fixture values, not tunables:
+    "NX_EMPTY": "string-literal value in a test, not a variable name",
+    "NX_QUOTED": "parser vocabulary in a test",
+    "NX_UNQUOTED": "parser vocabulary in a test",
+    "NX_FOO": "test fixture",
+    "NX_MY": "test fixture",
+    "NX_MY_TOKEN": "test fixture",
+    "NX_OTHER": "test fixture",
+    "NX_MISSING_API_KEY": "test fixture",
+    "NX_NOPE_XYZ": "test fixture",
+    # pricing keys are looked up dynamically (NX_PRICE_<SOURCE>_<IO> family
+    # shape); the family, not the instances, is what the README documents:
+    "NX_PRICE_HOSTED": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_BIG_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_BIG_MODEL_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_BIG_MODEL_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_BIG_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_HOSTED_QWEN_QWEN3_32B_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_LOCAL_CACHE": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_LOCAL_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_LOCAL_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_ZAI_CACHE": "NX_PRICE_<SOURCE>_<IO> family instance",
+    "NX_PRICE_ZAI_INPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    # NX_KEYS: a comment mention only, not an env read (the real config keys
+    # are NX_API_KEY/NX_SOURCE_*; /config lists provider keys by their real
+    # names) — nothing to document.
+    "NX_KEYS": "comment mention in /config, not a read variable",
+    # protocol tag regex NAMES in _text_fallback/_stream_parse — module-level
+    # compiled-pattern identifiers, not environment variables:
+    "NX_OPEN_TAG": "compiled regex identifier, not an env var",
+    "NX_CLOSE_TAG": "compiled regex identifier, not an env var",
+    "NX_TOOL_TAG": "comment mention of a compiled tag constant, not an env var",
+    # deliberate-internal tunables (power users; keep out of the README table
+    # on purpose — each has a safe default and a code comment):
+    "NX_REASONING_BUDGET_TOKENS": "state attr name; the env var is NX_REASONING_BUDGET",
+    "NX_REASONING_CAPTURE_CHARS": "internal: reasoning capture window (default 8000)",
+    "NX_REASONING_ONLY_CHARS": "internal: reasoning-stall char threshold (default 36000)",
+    "NX_REASONING_ONLY_TIME": "internal: reasoning-stall time threshold s (default 120)",
+    "NX_FORCED_FINAL_MAX_TOKENS": "internal: forced-final answer cap (default 2048)",
+    "NX_RECOVERY_MIN_P": "internal: recovery sampling min_p (default 0.02)",
+    "NX_RECOVERY_REPEAT_PENALTY": "internal: recovery repeat penalty (default 1.2)",
+    "NX_RECOVERY_REPEAT_LAST_N": "internal: recovery repeat window (default 512)",
+    "NX_RECOVERY_DRY_MULTIPLIER": "internal: recovery dry multiplier (default 0.8)",
+    "NX_RECOVERY_DRY_BASE": "internal: recovery dry base (default 1.75)",
+    "NX_RECOVERY_DRY_ALLOWED_LENGTH": "internal: recovery dry length (default 2)",
+    "NX_LEAKED_TOKEN_RUN_LIMIT": "internal: leaked-token degeneration threshold (default 3)",
+    "NX_REPEAT_CHUNK_LIMIT": "internal: repeat-collapse chunk threshold (default 6)",
+    "NX_RISK_RETRIES": "internal: risk-classifier connection retries (default 3)",
+    "NX_RISK_RETRY_SECONDS": "internal: risk-classifier retry backoff s (default 1)",
+    "NX_PRICE_ZAI_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+}
+
+
+def test_every_read_nx_var_is_documented():
+    names = set()
+    for top in ("nx", "tests"):
+        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top)):
+            for f in files:
+                if f.endswith(".py"):
+                    names |= set(re.findall(
+                        r"NX_[A-Z][A-Z0-9_]*",
+                        open(os.path.join(root, f), encoding="utf-8").read()))
+    names = {n for n in names
+             if "<" not in n and not n.endswith("_")
+             and not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
+    documented = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", README))
+    documented = {n for n in documented
+                  if "<" not in n and not n.endswith("_")
+                  and not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
+    undocumented = sorted(names - documented - set(_ALLOWLIST))
+    assert not undocumented, (
+        f"NX_* vars read in nx/ but not in the README's env table: "
+        f"{undocumented} — document each (AGENTS.md: every NX_* tunable gets a "
+        f"README entry) or add it to _ALLOWLIST with a reason if it is not a "
+        f"tunable")
+
+
+def test_allowlist_entries_have_reasons_and_still_exist():
+    for reason in _ALLOWLIST.values():
+        assert reason and reason.strip()
+    # an entry that stops being read anywhere should be pruned
+    stale = [k for k in _ALLOWLIST if not any(
+        k in open(os.path.join(root, f), encoding="utf-8").read()
+        for top in ("nx", "tests")
+        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top))
+        for f in files if f.endswith(".py"))]
+    assert not stale, f"allowlist entries no longer read anywhere: {stale}"
+
+
+if __name__ == "__main__":
+    import pytest
+    sys.exit(pytest.main([__file__, "-v"]))

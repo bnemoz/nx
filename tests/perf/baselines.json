@@ -1,0 +1,16 @@
+{
+  "_comment": "Recorded perf baselines (PERF §5). Each entry: the pinned number, the release that measured it, and what regression looks like. Ratio tests multiply by --perf-tolerance (default 1.25).",
+  "conftest_snapshot": {
+    "baseline_modules": 57,
+    "baseline_entries": 2736,
+    "budget_modules": 80,
+    "budget_entries": 3500,
+    "measured_in": "0.62.0",
+    "note": "T-9: conftest._BASELINE_MODS snapshot size. Growth past the budget means the per-test _restore() cost is drifting up (measured 0.43 ms/test at 57 modules) — trim module state or split a module before adding more."
+  },
+  "active_tools_floor": {
+    "always_on_count": 20,
+    "measured_in": "0.62.0",
+    "note": "The non-gated schema count sent every turn. A new always-on tool must displace one into tier-2 or justify the rise in the test_initial_context ledger (feature-cost rule, PERF §6)."
+  }
+}

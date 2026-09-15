@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from typing import Any
 
@@ -39,7 +40,7 @@ from ._tools import read_file, list_dir, search_files, git_status, git_diff, git
 from ._testrunner import run_tests
 from ._gitcommit import git_commit
 from ._toolblocks import ToolBlock, current_recorder, tool_display
-from ._undo import snapshot as _undo_snapshot, push_checkpoint as _undo_push, push_if_absent as _undo_push_once
+from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
 DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
@@ -52,6 +53,9 @@ DISPATCH = {
     "spawn_agent": spawn_agent, "read_image": read_image,
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
 }
+# defined with the tiered registry below; registered here so `nx`'s import-time
+# `from ._dispatch import (...)` (and any test table) sees one flat dispatch map.
+DISPATCH["search_tools"] = lambda pattern="": search_tools(pattern)
 
 # spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH
 # (plus a per-thread copy in _subagent._SUBAGENT_TLS — concurrent agents each need
@@ -135,30 +139,122 @@ def _breaker_broken(name: str) -> bool:
     return name in _breaker_views()[1]
 
 
-def _active_tools() -> list[dict[str, Any]]:
-    """The tool schema list to send this turn. wait_background is included
-    only once run_bash has actually backgrounded this session — see run_tool();
-    spawn_agent (read-only sub-agent) only when NX_SUBAGENTS=1; read_image
-    only when NX_VISION=1 AND native tool_calls have been confirmed this
-    session (a text-protocol tool result can't carry a content-parts array);
-    plan_edit only while a plan is active (/plan <goal> — see _plan.py)."""
+# --- tiered tool registry (0.62.0, PERF §6 items 1-2) -----------------------
+# A declarative (name -> gate) table replacing five sequential O(N) filter
+# passes over the schema list. `_active_tools()` is memoized on the gate-vector
+# (a tuple of booleans rebuilt per turn is one dict lookup + one list comp).
+#
+# Tier 2 (meta-tool) is not yet occupied by any schema: `search_tools` lifts a
+# tier-2 tool's full schema into context on demand, so a future always-on tool
+# can ship at ~0 token rent instead of ~150 (the 0.62 feature-cost rule).
+_TOOL_GATES: dict[str, Any] = {
+    # name -> callable returning True when the schema should be OFFERED this
+    # turn. Unlisted names are always-on. The malformed-args breaker is a veto
+    # applied after the gates (a broken tool is dropped, not gated in).
+    "wait_background": lambda: st._SESSION_HAS_BACKGROUNDED,
+    "spawn_agent": _delegation_enabled,
+    "read_image": lambda: bool(_m_safe().NX_VISION) and st._NATIVE_TOOL_CALLS_CONFIRMED,
+    "plan_edit": plan_active,
+}
+
+_TOOL_LIST_CACHE: dict[tuple, list] = {}
+
+
+def _m_safe():
     import nx as _m
-    tools = _m.TOOLS
-    if not st._SESSION_HAS_BACKGROUNDED:
-        tools = [t for t in tools if t["function"]["name"] != "wait_background"]
-    if not _m.NX_SUBAGENTS:
-        tools = [t for t in tools if t["function"]["name"] != "spawn_agent"]
-    # Malformed-args circuit breaker: an endpoint that keeps truncating one
-    # tool's JSON args stops being offered that tool for the session (see
-    # st._MALFORMED_TOOL_BROKEN — armed in _turn.py's native parse path).
+    return _m
+
+
+def _gate_vector() -> tuple:
+    import nx as _m
     broken = _breaker_views()[1]
-    if broken:
-        tools = [t for t in tools if t["function"]["name"] not in broken]
-    if not _m.NX_VISION or not st._NATIVE_TOOL_CALLS_CONFIRMED:
-        tools = [t for t in tools if t["function"]["name"] != "read_image"]
-    if not plan_active():
-        tools = [t for t in tools if t["function"]["name"] != "plan_edit"]
+    return (
+        bool(st._SESSION_HAS_BACKGROUNDED),
+        bool(_m.NX_SUBAGENTS),
+        bool(_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED),
+        bool(plan_active()),
+        tuple(sorted(broken)) if broken else (),
+    )
+
+
+def _active_tools() -> list[dict[str, Any]]:
+    """The tool schema list to send this turn (0.62.0 tiered registry).
+
+    wait_background is included only once run_bash has actually backgrounded
+    this session — see run_tool(); spawn_agent (read-only sub-agent) only when
+    NX_SUBAGENTS=1; read_image only when NX_VISION=1 AND native tool_calls have
+    been confirmed this session (a text-protocol tool result can't carry a
+    content-parts array); plan_edit only while a plan is active (/plan <goal> —
+    see _plan.py). Memoized on the gate-vector: one tuple rebuild + dict hit
+    per turn instead of five full list copies (PERF §6 item 1)."""
+    import nx as _m
+    key = _gate_vector()
+    cached = _TOOL_LIST_CACHE.get(key)
+    if cached is not None:
+        return cached
+    broken = set(key[4])
+    tools = []
+    for t in _m.TOOLS:
+        name = t["function"]["name"]
+        gate = _TOOL_GATES.get(name)
+        if gate is not None and not gate():
+            continue
+        if name in broken:
+            continue
+        tools.append(t)
+    _TOOL_LIST_CACHE.clear()  # keep exactly the current gate-vector hot
+    _TOOL_LIST_CACHE[key] = tools
     return tools
+
+
+def _invalidate_tool_list_cache() -> None:
+    """Call when TOOLS membership itself changes (a schema is added/removed at
+    runtime) — the gate-vector key cannot see that."""
+    _TOOL_LIST_CACHE.clear()
+
+
+SEARCH_TOOLS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_tools",
+        "description": "List tools not offered this turn (tier-2/withheld), with their full schemas so one can be used on the next turn. Returns name + schema JSON per tool.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex (ignored case) matched against tool names and descriptions; empty lists everything withheld"},
+            },
+            "required": [],
+        },
+    },
+}
+
+
+def search_tools(pattern: str = "") -> str:
+    """The tier-2 meta-tool (0.62.0, PERF §6 item 2): surfaces the full schema
+    of a tool that `_active_tools()` withheld this turn (gated, broken, or
+    tier-2-only), so the model can call it next turn without it costing tokens
+    in sessions that never need it."""
+    import nx as _m
+    active = {t["function"]["name"] for t in _active_tools()}
+    listed = []
+    for t in _m.TOOLS:
+        name = t["function"]["name"]
+        if name in active:
+            continue
+        if pattern:
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return f"invalid pattern {pattern!r}: {e}"
+            blob = name + " " + json.dumps(t)
+            if not rx.search(blob):
+                continue
+        listed.append(f"{name}: {json.dumps(t)}")
+    if not listed:
+        return "No withheld tools matched" + (f" {pattern!r}." if pattern else ".")
+    return ("Withheld tool schemas (not offered this turn; a call to one next "
+            "turn opens the gate or is refused with its reason):\n"
+            + "\n".join(listed))
 
 
 def _messages_show_prior_backgrounding(messages: list[dict[str, Any]]) -> bool:

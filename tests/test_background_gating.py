@@ -57,7 +57,7 @@ def test_active_tools_excludes_wait_background_by_default():
                           "git_diff", "git_log", "sed_edit", "multi_edit",
                           "apply_patch", "todo_write", "memory_write",
                           "memory_search", "memory_delete", "run_tests",
-                          "git_commit"}
+                          "git_commit", "search_tools"}
 
 
 def test_active_tools_includes_wait_background_once_flag_set():
@@ -71,7 +71,7 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # e.g. --tokens's "full schema" framing and DISPATCH both rely on it.
     names = [t["function"]["name"] for t in m.TOOLS]
     assert names.count("wait_background") == 1
-    assert len(m.TOOLS) == 23  # 16 base + wait_background + spawn_agent + read_image + delete_file + plan_edit + run_tests + git_commit
+    assert len(m.TOOLS) == 24  # 16 base + wait_background + spawn_agent + read_image + delete_file + plan_edit + run_tests + git_commit + search_tools
 
 
 # ---------------------------------------------------------------------------
