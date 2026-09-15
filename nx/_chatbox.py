@@ -903,8 +903,16 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                             line, col, current_at_start or 0, chosen)
                     elif current_kind == "arg" and current_matches:
                         cmd = buf[row].split(" ", 1)[0]
-                        buf[row] = cmd + " " + current_matches[sel_idx][0]
-                        col = len(buf[row])
+                        new_line = cmd + " " + current_matches[sel_idx][0]
+                        if new_line != buf[row]:
+                            buf[row] = new_line
+                            col = len(buf[row])
+                        elif cmd == "/source":
+                            # /source has a second (model) level -- a second
+                            # Tab (exact source name already typed) advances
+                            # to the model dropdown instead of doing nothing.
+                            buf[row] = new_line + " "
+                            col = len(buf[row])
                     elif current_matches:
                         buf[row] = current_matches[sel_idx][0] + " "
                         col = len(buf[row])
