@@ -18,9 +18,11 @@ Falls back to plain `input()` when stdin/stdout is not a TTY.
 """
 from __future__ import annotations
 
+import heapq
 import os
 import shutil
 import sys
+import time
 import unicodedata
 from typing import Callable, cast
 
@@ -216,6 +218,101 @@ def _file_entries(root: str, directory: str) -> list[str]:
 
 _TREE_SCAN_CAP = 20000  # total entries visited per tree-wide fuzzy search
 
+# --- @-mention completion caches (PERF.md PF-01) --------------------------
+#
+# `_match_file_paths` runs once per keystroke while the user types an
+# `@mention`. Before this cache it re-walked the whole project tree (up to
+# _TREE_SCAN_CAP entries) and re-ran `git rev-parse` on EVERY keystroke --
+# measured 38-56 ms/keystroke on a 19.7k-entry repo, the worst interactive
+# number in the codebase. Two module-level caches fix it:
+#   * the tree listing, invalidated by the root dir's mtime and a short TTL;
+#   * the previous prefix's surviving candidate set, so a longer prefix filters
+#     the previous matches (subsequence matching is monotone under prefix
+#     extension) instead of rescanning the tree.
+# Both are process-global and re-warmed at each prompt (see `_bust_tree_cache`).
+_TREE_CACHE_TTL = 0.5
+# entries are (rel_path, base_lower, path_lower, char_mask) -- the lowercased
+# forms and the presence mask are precomputed once per walk, so a keystroke's
+# fuzzy scan does no per-entry string work it can avoid (PERF.md PF-01).
+_TREE_CACHE: tuple[str, float, float, list[tuple[str, str, str, int]]] | None = None
+_TREE_FILTER_CACHE: tuple[str, str, list[tuple[str, str, str, int]]] | None = None
+_TREE_RESULT_CACHE: tuple[str, str, list[str]] | None = None  # (root, prefix, top-8)
+_PROJECT_ROOT_CACHE: tuple[str, str] | None = None  # (cwd, root)
+
+# Bitset of which characters an entry's path contains, for a cheap
+# necessary-condition rejection before the (Python-loop) fuzzy scorer. A
+# subsequence match implies every query char is present, so dropping entries
+# whose mask lacks a query char can never hide a real match.
+_MASK_CHARS = {c: i for i, c in enumerate("abcdefghijklmnopqrstuvwxyz0123456789")}
+
+
+def _char_mask(s: str) -> int:
+    mask = 0
+    for ch in s:
+        i = _MASK_CHARS.get(ch)
+        if i is None:
+            mask |= 1  # bit 0 doubles as "some other char"; always allowed
+        else:
+            mask |= 1 << (i + 1)
+    return mask
+
+
+def _query_mask(q: str) -> int:
+    """Bits a candidate must all have to be a possible fuzzy match."""
+    mask = 0
+    for ch in q:
+        i = _MASK_CHARS.get(ch)
+        mask |= 1 if i is None else 1 << (i + 1)
+    return mask
+
+
+def _bust_tree_cache() -> None:
+    """Drop the completion caches (called on each prompt entry so files created
+    mid-session show up, and available to any caller that knows the tree moved)."""
+    global _TREE_CACHE, _TREE_FILTER_CACHE, _TREE_RESULT_CACHE, _PROJECT_ROOT_CACHE
+    _TREE_CACHE = None
+    _TREE_FILTER_CACHE = None
+    _TREE_RESULT_CACHE = None
+    _PROJECT_ROOT_CACHE = None
+
+
+def _project_root() -> str:
+    """`_detect_project_root()` memoized per cwd. The cwd does not change
+    mid-REPL, so the underlying `git rev-parse` subprocess (~2 ms) must not run
+    per keystroke (PERF.md PF-01)."""
+    global _PROJECT_ROOT_CACHE
+    from ._risk import _detect_project_root
+
+    cwd = os.path.realpath(os.getcwd())
+    if _PROJECT_ROOT_CACHE is not None and _PROJECT_ROOT_CACHE[0] == cwd:
+        return _PROJECT_ROOT_CACHE[1]
+    root = os.path.realpath(_detect_project_root())
+    _PROJECT_ROOT_CACHE = (cwd, root)
+    return root
+
+
+def _cached_tree(root: str) -> list[tuple[str, str, str, int]]:
+    """`_walk_tree(root)` behind a short TTL + root-mtime guard so a keystroke
+    never pays the BFS scan (PERF.md PF-01), with the per-entry derived data
+    (lowercased base/path, char mask) computed once per walk."""
+    global _TREE_CACHE
+    now = time.monotonic()
+    try:
+        mtime = os.stat(root).st_mtime
+    except OSError:
+        mtime = 0.0
+    if _TREE_CACHE is not None:
+        c_root, c_mtime, deadline, entries = _TREE_CACHE
+        if c_root == root and c_mtime == mtime and now < deadline:
+            return entries
+    entries = []
+    for rel in _walk_tree(root):
+        path_l = rel.lower()
+        entries.append((rel, path_l.rstrip("/").rsplit("/", 1)[-1], path_l,
+                        _char_mask(path_l)))
+    _TREE_CACHE = (root, mtime, now + _TREE_CACHE_TTL, entries)
+    return entries
+
 
 def _walk_tree(root: str) -> list[str]:
     """List every visible file/dir under root (relative paths, dirs suffixed
@@ -262,24 +359,43 @@ def _match_file_paths(prefix: str) -> list[str]:
     back to listing just that one directory's immediate children, which
     stays cheap and reflects files created mid-session.
     """
-    from ._risk import _detect_project_root
+    global _TREE_FILTER_CACHE, _TREE_RESULT_CACHE
 
-    root = os.path.realpath(_detect_project_root())
+    root = _project_root()
     q = prefix.lower()
 
     if "/" not in prefix:
-        candidates = _walk_tree(root)
+        # Unchanged prefix (e.g. arrow-key dropdown navigation redraws with the
+        # same buffer) -> replay the cached top-8 instead of re-scoring.
+        if _TREE_RESULT_CACHE is not None and _TREE_RESULT_CACHE[0] == root \
+                and _TREE_RESULT_CACHE[1] == prefix:
+            return list(_TREE_RESULT_CACHE[2])
+        candidates = _cached_tree(root)
+        # Incremental filter: subsequence matching is monotone under prefix
+        # extension, so everything matching a longer prefix also matched the
+        # shorter one -- reuse the previous candidate set instead of rescanning.
+        prev = _TREE_FILTER_CACHE
+        if prev is not None and prev[0] == root and prefix != prev[1] \
+                and prefix.startswith(prev[1]):
+            candidates = prev[2]
+        qmask = _query_mask(q) if q else 0
         scored = []
-        for f in candidates:
-            base = f.rstrip("/").rsplit("/", 1)[-1].lower()
+        matched = []
+        for entry in candidates:
+            rel, base, path_l, mask = entry
+            if qmask & ~mask:
+                continue  # missing a query char -> cannot be a subsequence
             s = _fuzzy_score(q, base) if q else 0
             if q and s is None:
-                s = _fuzzy_score(q, f.lower())
+                s = _fuzzy_score(q, path_l)
             if s is None:
                 continue
-            scored.append((s, f))
-        scored.sort(key=lambda t: -t[0])
-        return [f for _, f in scored[:8]]
+            matched.append(entry)
+            scored.append((s, rel))
+        _TREE_FILTER_CACHE = (root, prefix, matched)
+        result = [rel for _, rel in heapq.nlargest(8, scored, key=lambda t: t[0])]
+        _TREE_RESULT_CACHE = (root, prefix, result)
+        return result
 
     parent_part, _ = os.path.split(prefix)
     directory = os.path.realpath(os.path.join(root, parent_part))
@@ -395,6 +511,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
     idled — nx/_autowake.py). Whatever the user had typed is stashed in
     _state._WAKE_PREFILL so the REPL can restore it after the wake turn."""
     history = history or []
+    _bust_tree_cache()  # fresh tree each prompt: mid-session files appear now
     fd = sys.stdin.fileno()
 
     buf = initial.split("\n") if initial else [""]
@@ -432,8 +549,46 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 visual.append((bi, len(line), ""))
         return visual
 
+    def compute_matches() -> None:
+        """Resolve the dropdown candidates for the current buffer/cursor.
+
+        Called once per key event, after the buffer mutation and before
+        `render()`. This is the ONLY place the completion path touches the
+        filesystem (PERF.md PF-01 / invariant I-1: `render()` itself must be
+        I/O-free and do no work proportional to repo size)."""
+        nonlocal current_matches, current_kind, current_at_start, sel_idx, win_top
+        matches = []
+        kind = None
+        at_start = None
+        if len(buf) == 1 and buf[0].startswith("/") and " " not in buf[0]:
+            matches = _match_slash_commands(buf[0])[:6]
+            kind = "slash"
+        elif len(buf) == 1 and buf[0].startswith("/") and buf[0].count(" ") == 1 \
+                and buf[0].split(" ", 1)[0] in SLASH_ARG_OPTIONS:
+            cmd, rest = buf[0].split(" ", 1)
+            matches = _match_slash_args(cmd, rest)[:6]
+            kind = "arg"
+        elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
+            _cmd, src_name, rest = buf[0].split(" ", 2)
+            matches = _match_source_model(src_name, rest)
+            kind = "arg2"
+        else:
+            at_tok = _at_token_at_cursor(buf[row], col)
+            if at_tok is not None:
+                at_start, at_prefix = at_tok
+                matches = [(p, "") for p in _match_file_paths(at_prefix)]
+                kind = "file"
+        if matches != current_matches:
+            sel_idx = 0
+            win_top = 0
+        elif sel_idx >= len(matches):
+            sel_idx = max(0, len(matches) - 1)
+        current_matches = matches
+        current_kind = kind
+        current_at_start = at_start
+
     def render() -> None:
-        nonlocal rendered_lines, cursor_line, current_matches, current_kind, current_at_start, sel_idx, win_top
+        nonlocal rendered_lines, cursor_line, sel_idx, win_top
         width = shutil.get_terminal_size((80, 24)).columns
         box_w = max(20, width - 2)
         inner_w = max(1, box_w - 2)
@@ -471,35 +626,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             f"{DIM}╰─ {stats}{' ' * bot_fill}╯{RESET}",
         ]
 
-        matches = []
-        kind = None
-        at_start = None
-        if len(buf) == 1 and buf[0].startswith("/") and " " not in buf[0]:
-            matches = _match_slash_commands(buf[0])[:6]
-            kind = "slash"
-        elif len(buf) == 1 and buf[0].startswith("/") and buf[0].count(" ") == 1 \
-                and buf[0].split(" ", 1)[0] in SLASH_ARG_OPTIONS:
-            cmd, rest = buf[0].split(" ", 1)
-            matches = _match_slash_args(cmd, rest)[:6]
-            kind = "arg"
-        elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
-            _cmd, src_name, rest = buf[0].split(" ", 2)
-            matches = _match_source_model(src_name, rest)
-            kind = "arg2"
-        else:
-            at_tok = _at_token_at_cursor(buf[row], col)
-            if at_tok is not None:
-                at_start, at_prefix = at_tok
-                matches = [(p, "") for p in _match_file_paths(at_prefix)]
-                kind = "file"
-        if matches != current_matches:
-            sel_idx = 0
-            win_top = 0
-        elif sel_idx >= len(matches):
-            sel_idx = max(0, len(matches) - 1)
-        current_matches = matches
-        current_kind = kind
-        current_at_start = at_start
+        matches = current_matches
+        kind = current_kind
         # Scroll window: rows beyond _DROPDOWN_MAX_ROWS stay reachable via
         # ↑/↓ (and PageUp/PageDown) instead of being silently cut off.
         win_top, more_above, more_below = _dropdown_window(
@@ -682,6 +810,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         sys.stdout.write("\x1b[?25h\x1b[?2004h\n")
         sys.stdout.flush()
         try:
+            compute_matches()
             render()
             while True:
                 # Wake-aware wait: with a sentinel set, poll stdin readiness
@@ -709,6 +838,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                         line = buf[row]
                         buf[row], col = _accept_file_completion(
                             line, col, current_at_start or 0, chosen)
+                        compute_matches()
                         render()
                         continue
                     if current_kind == "slash" and current_matches and len(buf) == 1 \
@@ -720,6 +850,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                         if new_line != buf[row]:
                             buf[row] = new_line
                             col = len(buf[row])
+                            compute_matches()
                             render()
                             continue
                         if cmd == "/source":
@@ -728,6 +859,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                             # to the model dropdown instead.
                             buf[row] = new_line + " "
                             col = len(buf[row])
+                            compute_matches()
                             render()
                             continue
                     if current_kind == "arg2" and current_matches:
@@ -740,6 +872,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                             if new_line != buf[row]:
                                 buf[row] = new_line
                                 col = len(buf[row])
+                                compute_matches()
                                 render()
                                 continue
                     finish()
@@ -777,6 +910,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                         col = len(buf[row])
                 elif c >= " ":
                     insert_text(c)
+                compute_matches()
                 render()
         finally:
             sys.stdout.write("\x1b[?25h\x1b[?2004l")

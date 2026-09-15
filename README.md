@@ -447,7 +447,11 @@ In the REPL input box:
 - **Tab** accepts the highlighted completion.
 - Typing **`@`** starts a fuzzy file-path suggestion dropdown (Tab to accept);
   the `@path` mention is expanded into file contents when the message is
-  submitted. An **`@image`** mention attaches the picture itself so the model
+  submitted. The dropdown resolves its candidates before each redraw — the
+  project tree is walked once per prompt (cached, re-checked on a short TTL)
+  and each longer prefix filters the previous candidate set, so typing stays
+  sub-millisecond even in a repo with tens of thousands of files. An
+  **`@image`** mention attaches the picture itself so the model
   sees it on that turn (`NX_VISION=1` + native tool calls; with vision off the
   message carries a note naming the gate instead). Attaching via mention skips
   the `read_image` tool round-trip entirely and works on any backend that

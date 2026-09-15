@@ -66,11 +66,16 @@ def _fmt_think_duration(elapsed: float) -> str:
 # gets hidden the same way native tool_calls already are.
 _TEXT_TOOL_TAG_OPENERS = ("<tool_call>", "[nx_tool_call]")
 
+# Longest opener; a tag can only START within len(opener)-1 bytes before the
+# previous chunk boundary, so the per-chunk scan resumes that far back and the
+# whole-answer scan stays O(chunk) instead of O(buffer) (PERF.md PF-02).
+_MAX_OPENER_LEN = max(len(o) for o in _TEXT_TOOL_TAG_OPENERS)
 
-def _first_tool_tag_index(text: str) -> int | None:
+
+def _first_tool_tag_index(text: str, start: int = 0) -> int | None:
     idx = None
     for opener in _TEXT_TOOL_TAG_OPENERS:
-        i = text.find(opener)
+        i = text.find(opener, start)
         if i != -1 and (idx is None or i < idx):
             idx = i
     return idx
@@ -133,6 +138,7 @@ class StreamParser:
         self.tool_status_active = False
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
+        self._tag_scan_from = 0  # watermark for the tool-tag scan (PF-02)
         self.had_tool_call = False  # a native tool_calls delta already arrived this turn
         self._live_committed = False  # say_live already frozen once; never reopen it
         self.think_start: float | None = None
@@ -358,7 +364,13 @@ class StreamParser:
             self.streamed_chars += len(chunk)
             if not self.in_text_tool_tag:
                 full = self._content_str
-                tag_idx = _first_tool_tag_index(full)
+                tag_idx = _first_tool_tag_index(full, self._tag_scan_from)
+                if tag_idx is None:
+                    # Resume the next scan only as far back as a split opener
+                    # could extend: an opener starts <= _MAX_OPENER_LEN-1 bytes
+                    # before this boundary. Keeps the scan O(chunk).
+                    self._tag_scan_from = max(
+                        0, len(full) - (_MAX_OPENER_LEN - 1))
                 if tag_idx is None:
                     if not self.quiet and self.say_live is None:
                         self.say_live = Live(console=self._say_console,
