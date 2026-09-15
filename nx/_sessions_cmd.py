@@ -228,9 +228,11 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     not a mid-save sweep); (3) enforce the NX_IMAGES_QUOTA_MB cap. Prints
     one line per action. Returns True if it handled the invocation (caller
     exits)."""
-    if not args or args[0] not in ("--prune", "prune"):
+    # `nx sessions --prune` (verb-first) or a bare `nx --prune`/`prune`.
+    if args[:2] not in (["--prune"], ["prune"], ["sessions", "--prune"],
+                        ["sessions", "prune"]):
         return False
-    if args[0] == "prune" and args != ["prune"]:
+    if args[:2] == ["sessions", "prune"] and len(args) > 2:
         # `nx sessions prune` with a stray query is a typo — say so instead
         # of silently pruning against the wrong expectation.
         print(f"{C.WARNING}  usage: nx sessions --prune  (no other arguments){RESET}")

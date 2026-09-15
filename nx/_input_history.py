@@ -43,10 +43,16 @@ INPUT_HISTORY_ENTRY_CHARS = 8000
 
 
 def _history_path() -> str:
-    """Where the recall file lives: NX_INPUT_HISTORY_FILE, else
-    SESSION_HOME/input_history.json. Reads st.SESSION_HOME (not a plain
-    module global) so a /reload in tests that reassigns it from a fresh
-    NX_HOME is honored — same as _sessions_fs._sessions_dir()."""
+    """Where the recall file lives: NX_INPUT_HISTORY_FILE, then NX_HOME,
+    else SESSION_HOME/input_history.json. NX_HOME is read from the live
+    environment (not just the st.SESSION_HOME mirror) so a test module that
+    sets NX_HOME at import time — before its module-scope m.main() calls —
+    writes into its tempdir rather than the user's real recall file."""
+    direct = os.environ.get("NX_HOME")
+    if direct:
+        return os.environ.get(
+            "NX_INPUT_HISTORY_FILE",
+            os.path.join(os.path.expanduser(direct), "input_history.json"))
     return os.environ.get(
         "NX_INPUT_HISTORY_FILE",
         os.path.join(st.SESSION_HOME, "input_history.json"),

@@ -218,6 +218,20 @@ def _restore(fspath):
             else:
                 _d[_k] = _tmpl
 
+    # Re-derive the SESSION_HOME mirror from the just-applied env intents.
+    # The module-state rewind above restores nx.SESSION_HOME / st.SESSION_HOME
+    # to the baseline snapshot (real ~/.nx, since the baseline import has no
+    # NX_HOME). A test module that sets NX_HOME at import gets that env value
+    # re-applied, but without this the mirror still points at the real ~/.nx —
+    # so REPL-driving tests appended "hello"/"world" to the user's real
+    # input_history.json (and _write_session could too), trimming real history
+    # to the ring-buffer cap every run.
+    if "nx" in sys.modules:
+        _nx = sys.modules["nx"]
+        _home = os.path.expanduser(os.environ.get("NX_HOME", "~/.nx"))
+        _nx.SESSION_HOME = _home
+        sys.modules["nx._state"].SESSION_HOME = _home
+
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_setup(item):

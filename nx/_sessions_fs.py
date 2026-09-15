@@ -47,11 +47,18 @@ SESSION_LIST_MAX_LIMIT = 100
 
 
 def _sessions_dir() -> str:
-    """Where session files live. Honors NX_SESSIONS_DIR, then NX_HOME/sessions."""
-    return os.path.expanduser(
-        os.environ.get("NX_SESSIONS_DIR",
-                       os.path.join(st.SESSION_HOME, "sessions"))
-    )
+    """Where session files live. Honors NX_SESSIONS_DIR, then NX_HOME/sessions
+    (read live from the environment, before the st.SESSION_HOME mirror, so a
+    test module that sets NX_HOME at import time — before its module-scope
+    m.main() calls — never touches the user's real store), then
+    SESSION_HOME/sessions."""
+    direct = os.environ.get("NX_SESSIONS_DIR")
+    if direct:
+        return os.path.expanduser(direct)
+    home = os.environ.get("NX_HOME")
+    if home:
+        return os.path.join(os.path.expanduser(home), "sessions")
+    return os.path.join(st.SESSION_HOME, "sessions")
 
 
 def _memories_dir() -> str:

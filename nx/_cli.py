@@ -261,13 +261,16 @@ def main() -> None:
         pass
     if _m._run_one_shot():
         return
+    # `nx sessions --prune` — reconcile the store by hand, then exit. Before
+    # the listing verb: _cli_sessions treats "--prune" as a search query and
+    # would otherwise swallow the flag (it printed "no sessions matching
+    # '--prune'" instead of ever pruning).
+    if _cli_prune_sessions(sys.argv[1:]):
+        return
     # `nx sessions [query]` — discover + exit, no REPL. Checked first so
     # it short-circuits before the banner / network source resolution that the
     # interactive loop depends on.
     if _cli_sessions(sys.argv[1:]):
-        return
-    # `nx sessions --prune` — reconcile the store by hand, then exit.
-    if _cli_prune_sessions(sys.argv[1:]):
         return
     # `nx --tokens` / `--bench` — print the prompt-token floor and exit.
     if _cli_tokens(sys.argv[1:]):
