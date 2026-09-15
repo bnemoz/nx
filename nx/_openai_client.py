@@ -210,6 +210,7 @@ def probe_scope(stale: Callable[[], bool]):
         _PROBE_MODE.stale = None
 
 
+_MISSING = object()  # PF-22: sentinel for _Obj's attribute-wrapper cache
 _DONE = object()   # _ChatStream._line(): the terminal [DONE] frame was seen
 
 
@@ -220,17 +221,26 @@ class _Obj:
     returns the same raw dict (a harmless superset of "unknown" fields —
     every caller only ever does `.get(key)` on it, never iterates expecting
     exclusivity)."""
-    __slots__ = ("_raw",)
+    __slots__ = ("_raw", "_cache")
 
     def __init__(self, raw: Any):
         object.__setattr__(self, "_raw", raw if isinstance(raw, dict) else {})
+        object.__setattr__(self, "_cache", {})
 
     def __getattr__(self, name: str) -> Any:
+        # PF-22: memoize the child wrapper. Callers read the same path several
+        # times per token (`chunk.choices[0].delta`), and re-wrapping the dict
+        # (plus every dict in a list) on each read was ~5-8 allocations/token.
+        cache = self._cache
+        v = cache.get(name, _MISSING)
+        if v is not _MISSING:
+            return v
         v = self._raw.get(name)
         if isinstance(v, dict):
-            return _Obj(v)
-        if isinstance(v, list):
-            return [_Obj(x) if isinstance(x, dict) else x for x in v]
+            v = _Obj(v)
+        elif isinstance(v, list):
+            v = [_Obj(x) if isinstance(x, dict) else x for x in v]
+        cache[name] = v
         return v
 
     def __repr__(self) -> str:

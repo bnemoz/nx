@@ -44,6 +44,12 @@ _TPS_TRUST_WINDOW = 0.5
 # decode rate, still marked `~`. Above it, real multi-read pacing — kept.
 _TPS_MIN_SPAN = 0.02
 
+# PF-04: minimum Live re-render interval. 50 ms for the first ~2 KB of an
+# answer, then scaled with its length — no human reads faster than ~20 Hz and a
+# 20 KB answer does not need 20 fps of full Markdown re-parses.
+_SAY_MIN_INTERVAL = 0.05
+_SAY_THROTTLE_SCALE_BYTES = 2048
+
 
 def _fmt_think_duration(elapsed: float) -> str:
     """ms below 1s, seconds below 1min, else 'Xmin Ys'."""
@@ -117,7 +123,13 @@ class StreamParser:
         # only as the staged [Runtime note].
         self.quiet = quiet
         self.content: list[str] = []
-        self._content_str = ""
+        # PF-03/PF-04: content is kept as a list of raw chunks plus an
+        # incrementally-stripped mirror (`_clean`). No whole-buffer string is
+        # copied or re-joined per chunk; `_content_str`/`_clean_str` below are
+        # derived read-only properties, not accumulators.
+        self._clean: list[str] = []
+        self._content_len = 0
+        self._clean_len = 0
         self.tcs: dict[int, dict[str, Any]] = {}
         self.mode: str | None = None  # None | "think" | "say"
         self.say_live: Live | None = None
@@ -138,11 +150,26 @@ class StreamParser:
         self.tool_status_active = False
         self.last_tool_status = 0.0
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
-        self._tag_scan_from = 0  # watermark for the tool-tag scan (PF-02)
+        self._tag_carry = ""        # raw tail carried across chunks for the tag scan (PF-02/03)
+        self._tag_carry_start = 0   # absolute offset of _tag_carry in raw content
         self.had_tool_call = False  # a native tool_calls delta already arrived this turn
         self._live_committed = False  # say_live already frozen once; never reopen it
         self.think_start: float | None = None
         self.last_say_render = 0.0
+        self._last_render_len = -1  # clean length at the last Live render (PF-04)
+
+    # --- derived content views (PF-03/04) ----------------------------------
+    @property
+    def _content_str(self) -> str:
+        """The raw accumulated content, joined on demand. Kept as a property
+        (not an accumulator) so no whole-buffer copy happens per chunk; only
+        tests and the rare tag-prefix path read it."""
+        return "".join(self.content)
+
+    @property
+    def _clean_str(self) -> str:
+        """The ANSI-stripped accumulated content — what every render reads."""
+        return "".join(self._clean)
 
     # --- tool-call status line (throttled) ---------------------------------
     def show_tool_status(self, force: bool = False) -> None:
@@ -162,7 +189,11 @@ class StreamParser:
         live panel. Must be used instead of a bare `say_live.stop()` whenever
         content may have arrived since the last throttled render."""
         if self.say_live is not None:
-            self.say_live.update(Markdown(strip_ansi_for_display(self._content_str)))
+            # PF-04: Live(transient=False) already froze the last frame; only
+            # re-parse the whole answer if content arrived since that render.
+            if self._clean_len != self._last_render_len:
+                self.say_live.update(Markdown(self._clean_str))
+                self._last_render_len = self._clean_len
             self.say_live.stop()
             self.say_live = None
 
@@ -360,28 +391,42 @@ class StreamParser:
             self.repeat_chunk_run = 0
         if chunk:
             self.content.append(chunk)
-            self._content_str += chunk
+            self._content_len += len(chunk)
             self.streamed_chars += len(chunk)
+            # PF-04: strip ANSI once per chunk, not once per rendered frame —
+            # the clean mirror is what every render reads.
+            clean = strip_ansi_for_display(chunk)
+            if clean:
+                self._clean.append(clean)
+                self._clean_len += len(clean)
             if not self.in_text_tool_tag:
-                full = self._content_str
-                tag_idx = _first_tool_tag_index(full, self._tag_scan_from)
-                if tag_idx is None:
-                    # Resume the next scan only as far back as a split opener
-                    # could extend: an opener starts <= _MAX_OPENER_LEN-1 bytes
-                    # before this boundary. Keeps the scan O(chunk).
-                    self._tag_scan_from = max(
-                        0, len(full) - (_MAX_OPENER_LEN - 1))
-                if tag_idx is None:
+                # PF-02/03: scan only the carried tail plus this chunk — an
+                # opener starts <= _MAX_OPENER_LEN-1 bytes before the previous
+                # boundary, so the whole-answer scan stays O(chunk) and the raw
+                # buffer is never re-joined per chunk.
+                window = self._tag_carry + chunk
+                rel = _first_tool_tag_index(window)
+                if rel is None:
+                    carry_n = _MAX_OPENER_LEN - 1
+                    self._tag_carry = window[-carry_n:]
+                    self._tag_carry_start = self._content_len - len(self._tag_carry)
                     if not self.quiet and self.say_live is None:
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
                     now = time.time()
+                    # PF-04: raise the throttle with size — 50 ms for the first
+                    # ~2 KB, then scaled, so a long answer is not re-parsed at 20 fps.
+                    interval = max(
+                        _SAY_MIN_INTERVAL,
+                        _SAY_MIN_INTERVAL * self._clean_len / _SAY_THROTTLE_SCALE_BYTES)
                     if not self.quiet and self.say_live is not None \
-                            and now - self.last_say_render >= 0.05:
-                        self.say_live.update(Markdown(strip_ansi_for_display(full)))
+                            and now - self.last_say_render >= interval:
+                        self.say_live.update(Markdown(self._clean_str))
                         self.last_say_render = now
+                        self._last_render_len = self._clean_len
                 else:
+                    tag_idx = self._tag_carry_start + rel
                     # Tag opened mid-stream: commit whatever prose came
                     # before it, close the live panel, and fall through to
                     # the throttled tool-status line below — same treatment
@@ -398,13 +443,13 @@ class StreamParser:
                     # whatever was last rendered, so without re-rendering to
                     # the (tag-free) prefix right before stopping, that stray
                     # partial-opener frame would be the one left on screen.
-                    prefix = full[:tag_idx]
+                    prefix = strip_ansi_for_display("".join(self.content)[:tag_idx])
                     if not self.quiet and self.say_live is None and prefix.strip():
                         self.say_live = Live(console=self._say_console,
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
                     if self.say_live is not None:
-                        self.say_live.update(Markdown(strip_ansi_for_display(prefix)))
+                        self.say_live.update(Markdown(prefix))
                         self.say_live.stop()
                         self.say_live = None
                     self._live_committed = True

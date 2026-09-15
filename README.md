@@ -468,6 +468,18 @@ session-description generation (`NX_SESSION_DESC_REFRESH`), and the settle after
 a short `run_bash` all moved off the REPL thread / off fixed sleeps, so no turn
 pays a blocking side-effect after its answer renders.
 
+**Streaming render cost (0.57.0).** A long answer used to get more expensive per
+token the longer it grew: the accumulated text was re-copied on every delta, and
+the whole answer was ANSI-stripped and re-parsed as Markdown on every rendered
+frame. Now the parser keeps the answer as a list of chunks with an
+incrementally-stripped mirror (no whole-buffer copy or re-join per chunk), strips
+ANSI once per chunk instead of once per frame, scales the render interval with
+answer size past the first ~2 KB, and skips the final re-parse when the last
+frame already covers every byte received. A 4000-token answer renders in roughly
+a quarter of the previous CPU, and a 36x longer answer no longer costs ~600x the
+rendered bytes. The SSE reader also stops re-wrapping every JSON object per
+attribute read.
+
 ## Approval modes
 
 Every write/edit/bash call is risk-classified (`low`/`medium`/`high`) by a

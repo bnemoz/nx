@@ -153,6 +153,18 @@ render path was already the larger cost.
 materialize with `"".join(...)` only where the full string is actually needed
 (the throttled render and the final commit). Removes the duplicate accumulator.
 
+**Shipped in 0.57.0.** The `+=` accumulator is gone: content lives as the chunk
+list only, and `_content_str` / `_clean_str` are read-only **properties** that
+join on demand (the raw one is now read only by the rare tag-prefix path and by
+tests). The tool-tag scan no longer joins the buffer either — it carries a
+bounded raw tail (`_tag_carry`, at most `_MAX_OPENER_LEN - 1` bytes) across chunks
+instead of a byte-offset watermark into a string that no longer exists, with
+`_tag_carry_start` recovering the absolute offset when an opener is found (so
+PF-02's O(chunk) guarantee is preserved and the split-opener case still works).
+Tests: `tests/test_perf_render_path.py` pins the property form and the per-frame
+rendered-byte ratio; `tests/test_stream_tag_scan_watermark.py` is unchanged and
+still passes.
+
 ---
 
 **PF-04 · MED · `_stream_parse.py:368-371` (+ `:159`) — re-rendering the whole
@@ -182,6 +194,23 @@ buffer per frame.
 4. Consider plain append-only writes for answers with no markdown structure
    (no `#`, `` ` ``, `-`, `|`, `*` in the tail) and reserve `Live`+`Markdown`
    for when formatting actually matters.
+
+**Shipped in 0.57.0** — items 1–3, not 4. `strip_ansi_for_display` now runs
+**once per chunk** into an incremental `_clean` mirror (with `_clean_len`
+mirroring `_content_len`), and every render — throttled frame and tag-prefix
+commit alike — reads that mirror instead of re-stripping the buffer. The
+throttle is size-scaled: `max(_SAY_MIN_INTERVAL, _SAY_MIN_INTERVAL *
+_clean_len / 2048)` (50 ms floor for the first ~2 KB, then linearly). A clean
+length is recorded at each render (`_last_render_len`) and `stop_say_live`
+re-parses only when it moved, so the stopped-frame duplicate parse is gone.
+Measured against an emulation of the pre-fix path (every chunk rendered plus the
+final duplicate parse): a 17.5 KB answer re-parsed 340 KB → 74 KB (**4.6× less
+CPU**); a 288 KB answer 85 MB → 1.2 MB (**71×**). Item 4 (plain append-only for
+markdown-free tails) stays deliberately unshipped: it changes what the user sees
+mid-stream, so it needs its own decision, not a perf slot. Tests:
+`tests/test_perf_render_path.py` (`test_markdown_render_bytes_are_sublinear`,
+`test_final_parse_skipped_when_nothing_arrived`,
+`test_throttle_scales_with_answer_size`).
 
 ---
 
@@ -387,6 +416,20 @@ re-wraps dicts/lists per attribute read (~5-8 allocations per token). Fix:
 `iter_raw()` + split on `b"\n\n"` + `json.loads(bytes)`, and read
 `obj["choices"][0]["delta"]` straight off the dict. Small, safe, per-token.
 
+**Shipped in 0.57.0, partially.** The `_Obj` wrapper now memoizes its child
+wrappers in a per-instance cache (`_MISSING` sentinel; `__slots__` gained
+`_cache`), so the repeated `chunk.choices[0].delta` reads in
+`StreamParser.process` re-wrap each dict/list once per chunk instead of 5–8
+allocations per token. The `iter_raw()` half was **deliberately not taken**:
+`_ChatStream.__iter__`'s byte-level split exists to fix 0.56.1's framing bug
+(`iter_lines()`'s `str.splitlines()` breaks SSE frames on raw U+0085/U+2028/
+U+2029 bytes inside tool args), and `iter_raw()` would hand back the same bytes
+while dropping the per-frame `dropped_lines` accounting that bug's regression
+test relies on. What `iter_raw()` would have bought — the `buf += raw` re-copy —
+is bounded by the pending-frame size (the next unterminated `data:` line), not
+the answer size, and it is on the SSE read thread, not the render path. Recorded
+here so the next audit does not re-open it as an obvious win.
+
 **PF-23 · LOW · `_turn.py:1411` `sum(len(str(m.get("content") or "")) for m in
 messages)`** scans the whole prompt to compute a fallback estimate even when the
 server reported `usage`. Fix: skip when usage is present.
@@ -533,7 +576,7 @@ behavior changes, so minors, with patches for anything that only adds a test.
 | --- | --- | --- |
 | **0.55.0** — *stop the keystroke hitch* | **PF-01** (tree cache + move I/O out of `render()` + memoize project root), **PF-02** (scan watermark) — **shipped** | T-1, T-3, T-4 green (`tests/test_stream_tag_scan_watermark.py`, `tests/test_chatbox_completion_cache.py`). `@`-completion < 1 ms/keystroke on a 20k-file repo; long-answer stream CPU < 50 ms |
 | **0.56.0** — *per-turn tax* | **PF-06** (interrupt handshake), **PF-07** (async metrics push), **PF-08** (bash sleeps — settle sleep only), **PF-09** (background title gen) — **shipped** | T-8/T-13 covered by `tests/test_perf_interrupt_disarm.py` + `tests/test_perf_turn_tax.py`. Disarm→prompt < 50 ms (measured ~1 ms); `flush()` never POSTs inline; `_finish_bg_job` ~5 ms not 200 ms; desc refresh non-blocking. The `_poll_pid` reaper-event rewrite stays open (needs a new mechanism). |
-| **0.57.0** — *render path* | **PF-03** (join instead of `+=`), **PF-04** (incremental clean-string accumulation, size-scaled throttle, no double final parse), **PF-22** (`iter_raw` + dict access) | T-2, T-5 green. `StreamParser` linear; no `_content_str` |
+| **0.57.0** — *render path* | **PF-03** (join instead of `+=`), **PF-04** (incremental clean-string accumulation, size-scaled throttle, no double final parse), **PF-22** (dict access; `iter_raw` half declined — see PF-22) — **shipped** | T-2/T-5 covered by `tests/test_perf_render_path.py`. `StreamParser` linear; `_content_str`/`_clean_str` are properties, not accumulators; rendered bytes 4.6×/71× lower on 17.5 KB/288 KB answers |
 | **0.58.0** — *prefix-cache integrity* | **PF-12** (memory note to the tail), **PF-13** (strip image payloads after consumption), **PF-14** (spill at append time), **PF-15** (single pinned prefix block) | T-6, T-7 green. `cached:` stays non-zero across a recovery storm and across resume; per-turn payload bytes do not grow with attached images |
 | **0.59.0** — *one cached capability manifest* | **PF-10** (stable cache-routing identity), **PF-11** (pin accepted request shape), **PF-21** (memoize `resolve_model`). Pairs with ROADMAP P3-10 | T-11 green (request count pinned). Zero redundant `/v1/models` per turn |
 | **0.60.0** — *bounds and durability* | **PF-16** (bounded caches, agent-record eviction), **PF-17** (sub-agent semaphore), **PF-18** (cache validity anchors), **PF-05** (undo persistence amortized), **PF-19** (diff hunk cap) | T-10, T-12 green. Flat RSS over a 200-turn synthetic session |
