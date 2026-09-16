@@ -254,7 +254,7 @@ def _cli_prune_sessions(args: list[str]) -> bool:
 def _cli_tokens(args: list[str]) -> bool:
     """`nx --tokens` / `nx --bench` — print the exact prompt-token
     floor (SYSTEM + the active TOOLS schema + a 1-token "hey") for the active
-    backend/model, then exit. Turns the README's "~625 tokens on a bare hey"
+    backend/model, then exit. Turns the README's "under ~4K tokens on a bare hey"
     claim into something mechanically checked per-backend/per-edit, instead
     of an eyeballed footer. Returns True if it handled the flag (caller
     should then exit); False otherwise.

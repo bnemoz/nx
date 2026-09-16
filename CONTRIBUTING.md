@@ -72,13 +72,14 @@ CLAUDE.md. Beyond the schema itself:
   `__init__.py` — the same "prefer a new `nx/_feature.py` over growing
   `__init__.py`" rule from AGENTS.md.
 - Dispatch: wire it into `run_tool()`.
-- Tiering (0.62.0, the feature-cost rule): a new always-on tool costs ~150
-  tokens on EVERY turn forever. Either name the existing always-on tool it
-  displaces into tier 2 (withheld by a `_TOOL_GATES` entry in
-  `nx/_dispatch.py`, surfaced on demand by `search_tools`), or raise
-  `BUDGET_TOKENS` in `tests/test_initial_context.py` with a ledger entry
-  justifying the cost. `tests/perf/baselines.json`'s `active_tools_floor`
-  pins the always-on count.
+- Tiering (0.62.0, the feature-cost rule): a new always-on tool adds to the
+  per-turn floor that every session pays. Prefer making it tier-2 first: add a
+  `_TOOL_GATES` entry in `nx/_dispatch.py` so it is withheld until relevant
+  and surfaced on demand by `search_tools` (0 tokens until used). An always-on
+  tool may instead raise `BUDGET_TOKENS` in `tests/test_initial_context.py`
+  with a ledger entry justifying the cost — the ceiling is ~4K tokens, and the
+  point is to stay under it, not to compress every schema to the minimum.
+  `tests/perf/baselines.json`'s `active_tools_floor` pins the always-on count.
 - Risk classification: if the tool can write or execute, confirm
   `_assess_risk()` (`nx/_risk.py`) handles it sensibly — don't assume a new
   tool defaults to a safe risk tier.
@@ -204,7 +205,10 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
 - [ ] Does an inline "unknown arg" / usage-error message (if any) match the
       documented syntax?
 - [ ] If it touches `TOOLS`/`FINAL_ANSWER_TOOL`/`SYSTEM`, is the added text as
-      terse as possible — it's sent every turn?
+      *clear and complete* as the model benefits from — every argument
+      documented, overlapping tools named — rather than squeezed to the fewest
+      possible characters? The floor is budgeted (~4K), so favor description
+      over terseness.
 
 ## Adding a tool: self-healing checklist
 

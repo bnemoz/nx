@@ -1,23 +1,30 @@
 # nx (pronounced "annex")
 
-A coding agent that doesn't spend 50K tokens of context before you've said
-anything. Point it at any OpenAI-compatible endpoint — a local llama.cpp /
-vLLM / SGLang server, or a remote API like OpenRouter, Together, or Z.ai —
-and get an agent that reads, writes, edits, and runs shell commands in your
-project.
+A coding agent that keeps its per-turn floor under ~4K tokens, so a
+128K-1M-token context window stays mostly yours. Point it at any
+OpenAI-compatible endpoint — a local llama.cpp / vLLM / SGLang server, or a
+remote API like OpenRouter, Together, or Z.ai — and get an agent that reads,
+writes, edits, and runs shell commands in your project.
 
-## Why context-frugal
+## Why a bounded floor
 
 Most agent harnesses burn 20K-50K+ tokens of system prompt and tool schemas
-before your first message even lands. That's context you can't use for your
-own code, and it's paid on *every single turn* — worse on local models, where
-you're already tight on context and speed.
+before your first message even lands — a large slice of a modern context
+window spent before you've typed anything, and paid on *every turn*.
 
-nx keeps the per-turn floor small: a terse `SYSTEM` prompt plus a handful of
-tool schemas, nothing else. Run `nx --tokens` to print the exact,
-mechanically-counted floor for your active backend/model — system prompt +
-active tool schemas + a one-token "hey" — instead of an eyeballed number
-that drifts as tools are added or removed.
+nx holds the floor under a **hard, recorded budget of ~4K tokens**: a
+`SYSTEM` prompt plus the always-on tool schemas, and nothing else. That is
+roomy enough for genuinely descriptive schemas — every argument the model can
+pass is documented, tools name each other, and self-healing behavior is
+spelled out — while staying trivial against the 128K-1M windows today's
+models ship with. The budget is not a vague aspiration: it is an enforced
+number, and the machinery that keeps it honest is what lets nx stay bounded
+*without* forcing every schema down to a cryptic minimum.
+
+Run `nx --tokens` to print the exact, mechanically-counted floor for your
+active backend/model — system prompt + active tool schemas + a one-token
+"hey" — instead of an eyeballed number that drifts as tools are added or
+removed.
 
 It's also built to survive the rough edges of self-hosted models: accepts
 native `tool_calls` by default (`tool_choice="auto"`) and falls back to

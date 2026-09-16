@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Guard the README's "~625 tokens on a bare hey" claim.
+"""Guard the README's "under ~4K tokens on a bare hey" claim.
 
-The README advertises that a bare `hey` costs about 625 tokens of initial
-context. That floor is the whole reason nx exists — it's two orders of
-magnitude under the harnesses that spend 20K-50K before you've typed
-anything — so this test watches it. If a new tool or a fatter SYSTEM bloats
-the payload, we want to know before the README quietly becomes a lie.
+The README advertises that a bare `hey` costs under ~4K tokens of initial
+context. That bounded floor is the whole reason nx exists — it stays trivial
+against the 128K-1M-token windows today's models ship with, unlike the
+harnesses that spend 20K-50K before you've typed anything — so this test
+watches it. If a new tool or a fatter SYSTEM bloats the payload, we want to
+know before the README quietly becomes a lie.
 
 WHAT WE MEASURE (the part we control and send to the API):
   - SYSTEM          the system prompt
@@ -22,7 +23,7 @@ NX_SUBAGENTS on the set gains spawn_agent (330 tok after the 0.41 trim,
 was 396) → 3210. The old soft warn at 2500 predates the schema rewrite and
 fired on every run, which is the same as having no line at all.
 
-BUDGET covers the 17-tool default set because that is what a fresh session
+BUDGET covers the 20-tool default set because that is what a fresh session
 pays; enabling sub-agents is a deliberate, user-visible choice. A PR that
 moves the floor past BUDGET_TOKENS must either trim elsewhere or raise the
 number here — with the justification in the ledger below.
@@ -88,7 +89,15 @@ import nx as m  # noqa: E402
 # displaces all FUTURE always-on rent (a later tool can ship tier-2 at 0 tok
 # and be surfaced by search_tools on demand instead of riding every request).
 # BUDGET_TOKENS rises 3180→3320 by that deliberate, verifiable cost.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 3320)  # hard: recorded, justified
+# 0.63: policy change, not a feature cost. nx targets models with 128K-1M-token
+# windows, so the floor no longer needs to be squeezed toward the minimum — a
+# schema should be as descriptive as the model benefits from, not as terse as
+# possible. BUDGET_TOKENS rises 3320→4096 to make that headroom explicit:
+# "under ~4K" is the published contract, and the ceiling is where descriptive
+# (not cryptic) schemas become affordable. The measured floor (~3.3K) is
+# unchanged; this is deliberate slack so the next few schemas land descriptive
+# instead of compressed. Growth past 4096 still needs a ledger entry.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 4096)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 
@@ -115,7 +124,7 @@ def test_initial_context_floor():
     # run_bash call has actually backgrounded this session, see
     # _SESSION_HAS_BACKGROUNDED) + a one-token user message. FINAL_ANSWER_TOOL
     # is intentionally excluded — it's only injected on a forced-final retry
-    # (nx.py:1847), not on turn 1, so it's not part of the README's ~625.
+    # (nx.py:1847), not on turn 1, so it's not part of the README's ~4K floor.
     # Opt-in tools are forced OFF for the measurement: a developer shell with
     # NX_SUBAGENTS=1/NX_VISION=1 must not change the guarded baseline (nx
     # resolves those at import, possibly in another test module, so set the
