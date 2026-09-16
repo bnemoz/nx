@@ -888,20 +888,31 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
             st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level
         else:
             st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
+    # A foreground agent is the longest-running tool call there is (its own
+    # model loop, minutes), and until 0.35.0 the parent showed only
+    # `running spawn_agent` for all of it. Each step of its loop posts a turn
+    # count to the parent's activity line through note_progress.
+    #
+    # But the parent's spinner thread must NOT keep redrawing while the
+    # sub-loop owns the terminal: this body runs on the parent thread, so the
+    # spinner's 4 fps CLEAR_LINE rewrites interleave with the sub-loop's own
+    # spinner, reasoning Live panel and tool-box prints on the same cursor
+    # line — the parent line flickers over the agent's output (and vice versa).
+    # Same handshake _confirm() uses: stop the spinner around the sub-loop's
+    # terminal I/O, restart it after (t0 is stamped once, so the elapsed clock
+    # keeps reading as time-in-flight for the whole spawn_agent call). The
+    # turn note still lands on spinner.note while stopped and shows the
+    # moment the line comes back.
+    parent_spinner = st._ACTIVE_SPINNER
+    if not quiet and parent_spinner is not None:
+        parent_spinner.stop()
+    _steps = [0]
+
+    def _progress_step() -> None:
+        _steps[0] += 1
+        note_progress(f"agent turn {_steps[0]}/{max_turns}")
+
     try:
-        # A foreground agent is the longest-running tool call there is (its own
-        # model loop, minutes), and until 0.35.0 the parent showed only
-        # `running spawn_agent` for all of it. Each step of its loop now posts a
-        # turn count to the parent's activity line through note_progress, which
-        # lands on st._ACTIVE_SPINNER — set by run_tool() for this very call.
-        # A quiet (background) agent has no parent spinner, so it keeps
-        # on_step=None rather than paying for a callback that goes nowhere.
-        _steps = [0]
-
-        def _progress_step() -> None:
-            _steps[0] += 1
-            note_progress(f"agent turn {_steps[0]}/{max_turns}")
-
         summary = _m._run_model_turn_loop(
             messages,
             max_turns_override=max_turns,
@@ -910,6 +921,8 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     except Exception as e:  # noqa: BLE001 — a failed subagent is a tool error, not a crash
         return f"ERROR: sub-agent failed: {type(e).__name__}: {e}"
     finally:
+        if not quiet and parent_spinner is not None:
+            parent_spinner.start()
         _SUBAGENT_TLS.ctx = prev_ctx
         with _SPAWN_LOCK:
             st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level

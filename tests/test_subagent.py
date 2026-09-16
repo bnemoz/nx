@@ -419,3 +419,63 @@ def test_one_shot_result_single_tool_still_pairs(nx_fresh):
     out = _one_shot_result(messages, 0, {"status": "done", "turns": 1}, 1.0)
     assert out["tool_calls"][0]["result"] == "file body"
     assert out["final_answer"] is None
+
+
+def test_foreground_spawn_pauses_parent_spinner(nx_fresh, monkeypatch):
+    """0.62.1: a foreground spawn_agent ran on the parent thread while the
+    parent's run_tool LifeSpinner thread kept redrawing at 4 fps — its
+    CLEAR_LINE rewrites interleaved with the sub-loop's own spinner / Live
+    panel on the same cursor line, so both flickered. The sub-loop must stop
+    the parent spinner for its duration and restart it after (same handshake
+    _confirm() uses)."""
+    from nx._ansi import LifeSpinner
+    from nx._subagent import spawn_agent
+    sp = LifeSpinner(label="running spawn_agent")
+    events = []
+
+    class TrackedSpinner(LifeSpinner):
+        def start(self):
+            events.append("start")
+            if events.count("start") == 1:
+                super().start()  # only the original start may actually thread
+
+        def stop(self):
+            events.append("stop")
+            if events.count("stop") == 1:
+                super().stop()
+
+    tracked = TrackedSpinner(label="running spawn_agent")
+    nx_fresh._state._ACTIVE_SPINNER = tracked
+
+    def fake_loop(messages, *a, **kw):
+        # mid-sub-loop: the parent spinner must be stopped NOW
+        assert events and events[-1] == "stop"
+        assert nx_fresh._state._ACTIVE_SPINNER is tracked  # note_progress still lands
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("q")
+    assert out == "done"
+    # spinner was paused for the loop and resumed after it
+    assert events == ["stop", "start"]
+    assert nx_fresh._state._ACTIVE_SPINNER is tracked  # run_tool still owns it
+
+    # quiet (background worker) path: no parent spinner ownership, no pause
+    from nx._subagent import _ASYNC_QUIET_SLOTS
+    events.clear()
+    _ASYNC_QUIET_SLOTS.quiet = True
+
+    def quiet_loop(messages, *a, **kw):
+        assert not events  # a quiet agent owns no spinner and pauses nothing
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", quiet_loop)
+    try:
+        out = spawn_agent("q")
+        assert out == "done"
+        assert events == []  # never touched a spinner it doesn't own
+    finally:
+        _ASYNC_QUIET_SLOTS.quiet = False
+        nx_fresh._state._ACTIVE_SPINNER = None
