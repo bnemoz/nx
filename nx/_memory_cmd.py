@@ -44,6 +44,7 @@ transcript-flattening helper shared with `_sessions_cmd.py`, and `_confirm()`
 through nx/_private.py (0600/0700, umask-proof)."""
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import time
@@ -53,7 +54,7 @@ from ._ansi import DIM, RESET, C
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
-from ._private import (atomic_write_private, atomic_write_private_noreplace,
+from ._private import (atomic_write_private_noreplace,
                        private_dir)
 from ._sessions_io import _flatten_message_text
 from . import _state as st
@@ -106,6 +107,8 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     /memory remember <query>     — keyword search through saved memories
     /memory delete <target>      — remove one memory (title/file/prefix)
     /memory list                 — list all saved memories
+    /memory archived [target]    — list notes /memory optimize archived, or
+                                   restore one by title/file/prefix
     /memory optimize [dry] [focus]  — librarian pass over the store: fold
         duplicates together and archive notes a matured project outgrew
     """
@@ -131,6 +134,11 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
         _cmd_memory_save(messages, notes)
         return
 
+    if sub == "archived":
+        target = parts[2] if len(parts) >= 3 else ""
+        _cmd_memory_archived(target)
+        return
+
     if sub == "optimize":
         # Imported lazily: _memory_optimize imports this module at module level.
         from ._memory_optimize import _cmd_memory_optimize
@@ -143,6 +151,7 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     print(f"{DIM}    /memory remember <query>    search memories{RESET}")
     print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
     print(f"{DIM}    /memory list                list all memories{RESET}")
+    print(f"{DIM}    /memory archived [target]   list archived notes, or restore one{RESET}")
     print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
           f"(dry prints the plan only){RESET}")
 
@@ -275,7 +284,7 @@ def _cmd_memory_list() -> None:
     project-only repo used to report "no memories saved yet" here."""
     files = []
     for d, label in _iter_memory_dirs("project"):
-        for name, _path, mtime, title, _content in _iter_notes(d):
+        for name, _path, mtime, title, _content in _iter_notes(d, titles_only=True):
             files.append((mtime, name, title, label))
 
     if not files:
@@ -287,6 +296,103 @@ def _cmd_memory_list() -> None:
     for i, (mtime, name, title, label) in enumerate(files, 1):
         date = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"  {C.SUCCESS}{i:>2}.{RESET} [{label}] {title}  {DIM}({date}){RESET}")
+
+
+def _iter_archive_notes(d: str) -> list[tuple[str, str, float, str, str]]:
+    """Every archived note under `<d>/archive/<run>/` as the same shape the live
+    scanner yields, (run, name, mtime, title, path). Archived notes are exactly
+    what `/memory optimize` moved there, so this is the read side of the
+    reversible-by-`mv` promise the archive makes. Newest run first."""
+    out: list[tuple[str, str, float, str, str]] = []
+    archive = os.path.join(d, "archive")
+    try:
+        runs = sorted(os.listdir(archive), reverse=True)
+    except OSError:
+        return out
+    for run in runs:
+        run_dir = os.path.join(archive, run)
+        if not os.path.isdir(run_dir):
+            continue
+        try:
+            names = sorted(os.listdir(run_dir), reverse=True)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(run_dir, name)
+            head = _read_memory_title(path, name)
+            if head is None:
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            out.append((run, name, mtime, head[0], path))
+    return out
+
+
+def _cmd_memory_archived(target: str) -> None:
+    """`/memory archived [target]` — list archived (retired) notes, or restore
+    one by title / filename / unique prefix. Restoring moves the file back into
+    its scope dir with a fresh name, so it re-enters the store (and the next
+    search re-indexes it)."""
+    entries = []
+    for d, label in _iter_memory_dirs("project"):
+        for run, name, mtime, title, path in _iter_archive_notes(d):
+            entries.append((run, name, mtime, title, path, label, d))
+
+    if not target:
+        if not entries:
+            print(f"{DIM}  no archived memories{RESET}")
+            return
+        print(f"{DIM}  archived memories ({len(entries)}):{RESET}")
+        for run, name, _mtime, title, _path, label, _d in sorted(
+                entries, key=lambda x: x[2], reverse=True):
+            print(f"  {C.SUCCESS}·{RESET} [{label}] {title}  "
+                  f"{DIM}({run} · {name}){RESET}")
+        print(f"{DIM}  restore one with: /memory archived <title|filename|prefix>{RESET}")
+        return
+
+    low = target.lower()
+    exact = [e for e in entries
+             if e[1].lower() == low or e[1][:-3].lower() == low or e[3].lower() == low]
+    if len(exact) == 1:
+        chosen = exact[0]
+    else:
+        cands = exact if exact else [e for e in entries if e[3].lower().startswith(low)]
+        if len(cands) > 1:
+            listing = "\n".join(f"  - {e[3]} ({e[1]})" for e in cands[:10])
+            print(f"{C.WARNING}  {target!r} matches {len(cands)} archived notes — "
+                  f"use an exact title or filename:{RESET}\n{listing}")
+            return
+        if not cands:
+            print(f"{DIM}  no archived memory matching {target!r}{RESET}")
+            return
+        chosen = cands[0]
+
+    _run, name, _mtime, title, path, label, scope_dir = chosen
+    if not _confirm_memory(f"restore memory {path} → {scope_dir}"):
+        return
+    # Publish with a fresh timestamped name via the one writer, then drop the
+    # archived original — the restore goes through the same 0600/no-clobber path
+    # as any other write, so a restored note is byte-conventional.
+    try:
+        with open(path, "rb") as f:
+            content = f.read().decode("utf-8", "replace")
+    except OSError as e:
+        print(f"{C.ERROR}  ✗ couldn't read {path}: {e}{RESET}")
+        return
+    # Strip the archived note's own footer — the writer appends a fresh one.
+    body = _MEMORY_FOOTER_RE.sub("", content).rstrip()
+    written = _write_memory_file(title, body, label, gate=False)
+    if written is None:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass  # the restored copy exists; a stale archive file is harmless
+    print(f"  {C.SUCCESS}restored{RESET} {title}  {DIM}→ {written[0]}{RESET}")
 
 
 _MEMORY_TRANSCRIPT_CHARS = 48000  # hard cap on the /memory save distillation input
@@ -382,6 +488,85 @@ def _read_memory_file(path: str, name: str) -> tuple[str, str] | None:
     return _first_title(content, name), content
 
 
+# The H1 of a memory note lives in its first line, so a title-only caller needs
+# a bounded head read, not the whole body: _load_memory_note reads every note in
+# both scopes at session start just for titles (a 56-note store is ~180 KB).
+_TITLE_HEAD_BYTES = 256
+
+
+def _read_memory_title(path: str, name: str) -> tuple[str, str] | None:
+    """(title, head_text) for one note from a bounded head read, or None when
+    the head is unreadable or not valid UTF-8 — the same skip a full read makes,
+    so the scanner tolerates a broken note identically on both paths. The title
+    falls back to the filename stem when no H1 appears in the head.
+
+    A note whose first bytes are valid but whose *body* later is not would pass
+    here and be skipped by a full read; that is the one (rare) divergence, and
+    it only widens which titles a title-only caller lists.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_TITLE_HEAD_BYTES)
+    except OSError:
+        return None
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        # final=False: a 256-byte cut may land mid-character; only genuinely
+        # invalid bytes raise, matching the full read's UnicodeDecodeError skip.
+        text = decoder.decode(head, final=False)
+    except UnicodeDecodeError:
+        return None
+    for ln in text.splitlines():
+        if ln.startswith("# "):
+            t = ln[2:].strip()
+            if t:
+                return t, text
+            break
+    stem = name[:-3] if name.endswith(".md") else name
+    return (stem or name), text
+
+
+_MEMORY_PREVIEW_ELISION = "\n... (truncated)"
+
+
+def _memory_confirm_preview(title, content, max_lines=12, max_chars=700):
+    """Terminal-UX preview for a memory approval prompt: the title plus a
+    bounded head of the body, so the user sees what is being written. Never
+    sent to the model (does not touch the token floor). A body is unbounded, so
+    the head is line- and char-capped with an elision marker."""
+    raw = content or ""
+    if not raw.strip():
+        doc = "# " + title
+    elif raw.lstrip().startswith("# "):
+        doc = raw
+    else:
+        doc = "# " + title + "\n\n" + raw
+    rows = doc.strip().splitlines()
+    clipped = len(rows) > max_lines
+    text = "\n".join(rows[:max_lines])
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+        clipped = True
+    if clipped:
+        text = text + _MEMORY_PREVIEW_ELISION
+    return text
+
+
+def _read_note_preview(path: str, max_chars: int = 700) -> str:
+    """A bounded head of a note's text for a delete-approval preview. The file
+    was already resolved by the caller; an unreadable note yields '' so the
+    prompt still shows the title alone."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(max_chars * 4)
+    except OSError:
+        return ""
+    return raw.decode("utf-8", "replace")[:max_chars]
+
+
+_MEMORY_FOOTER_RE = re.compile(r"\n---\n_scope:.*$", re.DOTALL)
+
+
 def _rank_hit(content: str, query: str) -> float:
     """Score one memory against a multi-term query (the caller has already
     verified every term appears somewhere): a term in the `# Title` outweighs
@@ -402,13 +587,6 @@ def _rank_hit(content: str, query: str) -> float:
     return score
 
 
-def _atomic_write_private(path: str, content: str) -> None:
-    """Write `content` to `path` 0600 (regardless of umask, via
-    _private.atomic_write_private) and atomically — tmp file + os.replace, so
-    a crash mid-write can't leave a truncated memory behind."""
-    atomic_write_private(path, content)
-
-
 def _publish_memory(path: str, content: str) -> bool:
     """Publish one memory note 0600 and atomically, WITHOUT clobbering: the
     final step is a claim (os.link fails with FileExistsError when another
@@ -422,14 +600,22 @@ def _publish_memory(path: str, content: str) -> bool:
         return False
 
 
-def _iter_notes(d: str) -> list[tuple[str, str, float, str, str]]:
+def _iter_notes(d: str, *, titles_only: bool = False
+                ) -> list[tuple[str, str, float, str, str]]:
     """The one scanner over a memories dir: every readable note as
     (name, path, mtime, title, content), sorted newest-name first (the
     `<timestamp>_` prefix makes name order the creation order). Unreadable
     files (missing, permissions, non-UTF-8) are skipped — every other
     scanner builds on this, so they all tolerate a broken note identically.
     The `archive/` subdir is invisible by construction (a directory never
-    ends in `.md`)."""
+    ends in `.md`).
+
+    `titles_only=True` keeps the exact same list shape but fills `content` with
+    just the head it read for the title — for callers that use only (name,
+    mtime, title) (memory_delete's resolver, `/memory list`, the session-start
+    note) this avoids reading every body in the store. Any caller that uses the
+    body must take the default.
+    """
     out: list[tuple[str, str, float, str, str]] = []
     try:
         names = sorted(os.listdir(d), reverse=True)
@@ -439,14 +625,21 @@ def _iter_notes(d: str) -> list[tuple[str, str, float, str, str]]:
         if not name.endswith(".md"):
             continue
         path = os.path.join(d, name)
-        read = _read_memory_file(path, name)
-        if read is None:
-            continue
+        if titles_only:
+            head = _read_memory_title(path, name)
+            if head is None:
+                continue
+            title, content = head[0], head[1]
+        else:
+            read = _read_memory_file(path, name)
+            if read is None:
+                continue
+            title, content = read
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0.0
-        out.append((name, path, mtime, read[0], read[1]))
+        out.append((name, path, mtime, title, content))
     return out
 
 
@@ -502,7 +695,8 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
     path, n = base, 1
     while True:
         if gate and not _confirm_memory(
-                f"write memory {path} ({len(content)} bytes)", preview=None):
+                f"write memory {path} ({len(content)} bytes)",
+                preview=_memory_confirm_preview(title, body)):
             return None
         if _publish_memory(path, content):
             return path, scope
@@ -594,17 +788,17 @@ def _memory_scan(
             except Exception:
                 fts_rows = None
         if fts_rows is not None:
-            for name, mtime, title, body, snip in sorted(
+            for name, mtime, title, body in sorted(
                     fts_rows, key=lambda r: r[0], reverse=True):
                 low = body.lower()
                 if not all(t in low for t in terms):
                     continue
-                snippet = " / ".join(
-                    p.strip() for p in snip.split("\n") if p.strip())
-                if not snippet:
-                    snippet = _memory_snippet(body, query)
+                # Same preview builder as the plain scan (see _memindex: the
+                # old FTS `snippet()` was token-bounded and truncated to ~12
+                # chars, so the accelerator used to degrade every hit).
                 hits.append(_MemoryHit(
-                    mtime, name, title, snippet, label, _rank_hit(body, query)))
+                    mtime, name, title, _memory_snippet(body, query), label,
+                    _rank_hit(body, query)))
             continue
         for name, _path, mtime, title, content in _iter_notes(d):
             if terms:
@@ -628,7 +822,7 @@ def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
     resolver behind memory_delete and `/memory delete`."""
     hits: list[_MemoryHit] = []
     for d, label in _iter_memory_dirs(scope):
-        for name, _path, mtime, title, _content in _iter_notes(d):
+        for name, _path, mtime, title, _content in _iter_notes(d, titles_only=True):
             hits.append(_MemoryHit(mtime, name, title, "", label, 0.0))
     hits.sort(key=lambda h: -h.mtime)  # newest first, same order memory_search uses
     return hits
@@ -719,7 +913,9 @@ def memory_delete(target: str, scope: str = "project", **_: Any) -> str:
         size = os.path.getsize(path)
     except OSError:
         size = 0
-    if not _confirm_memory(f"delete memory {path} ({size} bytes)", preview=None):
+    if not _confirm_memory(
+            f"delete memory {path} ({size} bytes)",
+            preview=_memory_confirm_preview(chosen.title, _read_note_preview(path))):
         return "DENIED by user"
     try:
         os.unlink(path)
@@ -812,7 +1008,7 @@ def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, 
     overflow = False
     for d in roots:
         label = "project" if d == _project_memories_dir(project_root) else "global"
-        notes = _iter_notes(d)
+        notes = _iter_notes(d, titles_only=True)   # titles only — no body reads
         overflow = overflow or len(notes) > 5
         for _name, _path, _mtime, title, _content in notes[:5]:
             titles.append(f"[{label}] {title}")

@@ -88,9 +88,8 @@ def test_search_dir_finds_by_body_and_title_terms():
         assert rows is None
         return
     assert rows is not None and [r[0] for r in rows] == ["20260101-000001_alpha.md"], rows
-    name, mtime, title, body, snip = rows[0]
+    name, mtime, title, body = rows[0]   # (name, mtime, title, body) — no snippet column
     assert title == "Alpha Note" and "X-Header" in body
-    assert snip  # FTS snippet around the hit
     rows2 = _memindex.search_dir(d, "renderer internals")
     assert rows2 is not None and [r[0] for r in rows2] == ["20260101-000002_beta.md"]
     # no hits: the caller falls back (empty list, not None, means "index worked")
@@ -151,7 +150,7 @@ def test_fts_off_results_match_fts_on_results():
           "# Unrelated note\n\nsomething about renderer internals\n")
     def _results():
         hits, _of, tot = _memory_cmd._memory_scan("renderer", "project", 0)
-        return [(h.name, h.title, round(h.score, 3)) for h in hits], tot
+        return [(h.name, h.title, h.snippet, round(h.score, 3)) for h in hits], tot
     with_fts = _results()
     assert len(with_fts[0]) == 2
     os.environ["NX_MEMORY_FTS"] = "0"
@@ -160,6 +159,10 @@ def test_fts_off_results_match_fts_on_results():
     finally:
         os.environ.pop("NX_MEMORY_FTS", None)
     assert with_fts == without, (with_fts, without)
+    # The FTS path used to answer with a token-bounded ~12-char snippet() and
+    # the plain scan with _memory_snippet's four body lines; parity above now
+    # includes the snippet, and a real preview must survive the accelerator.
+    assert "renderer" in with_fts[0][1][2].lower(), with_fts[0][1][2]
     # title hit ranks above body hit on both paths
     assert with_fts[0][0][0].endswith("quirk.md")
 
@@ -325,6 +328,87 @@ def _opt_client_text(text):
         chat = _Chat()
         base_url = "http://localhost:9/v1"
     return _Client()
+
+
+def test_compact_reclaims_index_and_preserves_results():
+    """Reconcile deletes rows when notes are archived but never shrinks the
+    file; compact() reclaims the dead pages without changing results."""
+    d = _proj_dir()
+    for i in range(20):
+        _note(d, "20260101-%06d_%02d.md" % (i, i),
+              "# Note %d\n\n" % i + "filler line body words here\n" * 40)
+    if not HAVE_FTS:
+        assert _memindex.compact(d, force=True) is False  # disabled build: no-op
+        return
+    before = _memindex.search_dir(d, "filler")
+    assert before is not None and len(before) == 20
+    # force=True so the test doesn't depend on the free-page threshold
+    assert _memindex.compact(d, force=True) is True
+    after = _memindex.search_dir(d, "filler")
+    assert [r[0] for r in after] == [r[0] for r in before]
+    # the threshold path is a no-op on a freshly compacted index
+    assert _memindex.compact(d) is False
+
+
+def test_prune_archive_keeps_newest_and_never_touches_this_run(tmp_path):
+    """Retention keeps the newest N run dirs, and a run dir touched this run
+    (mtime >= region_start) is never deleted — a prune can't eat the run it is
+    part of."""
+    import time as _t
+    from nx import _memory_optimize as opt
+    d = str(tmp_path)
+    arc = os.path.join(d, "archive")
+    old_runs = ["20260101-000000", "20260102-000000", "20260103-000000"]
+    for r in old_runs:
+        os.makedirs(os.path.join(arc, r))
+        os.utime(os.path.join(arc, r), (1_100_000_000, 1_100_000_000))
+    fresh = "20260104-000000"
+    os.makedirs(os.path.join(arc, fresh))
+    region_start = _t.time() - 1  # the fresh run happened "this run"
+    # runs sorted newest-name-first = [fresh, r2, r1, r0]; keep=2 drops r1, r0
+    assert opt.prune_archive(d, 2, region_start) == 2
+    assert not os.path.isdir(os.path.join(arc, old_runs[0]))
+    assert not os.path.isdir(os.path.join(arc, old_runs[1]))
+    assert os.path.isdir(os.path.join(arc, old_runs[2]))
+    assert os.path.isdir(os.path.join(arc, fresh))
+    # keep<=0 (the default) prunes nothing
+    assert opt.prune_archive(d, 0, 0.0) == 0
+
+
+def test_memory_archived_lists_and_restores(capsys):
+    root = tempfile.mkdtemp(prefix="nx-arch-")
+    m.st.PROJECT_ROOT = root
+    d = os.path.join(root, ".nx", "memories")
+    run = os.path.join(d, "archive", "20260101-000000")
+    _note(run, "20251231-000000_retired.md", "# Retired Topic\n\nold body\n")
+    m._confirm = lambda action, preview=None: True
+
+    _memory_cmd._cmd_memory_archived("")
+    out = capsys.readouterr().out
+    assert "Retired Topic" in out and "archived memories" in out
+    assert not os.path.exists(os.path.join(d, "20251231-000000_retired.md"))
+
+    _memory_cmd._cmd_memory_archived("Retired Topic")
+    out = capsys.readouterr().out
+    assert "restored" in out
+    # landed back in the live store with a fresh name and is gone from archive
+    live = [x for x in _memory_cmd._iter_notes(d) if x[3] == "Retired Topic"]
+    assert len(live) == 1
+    assert live[0][4].count("_scope:") == 1      # fresh footer, not doubled
+    assert not os.path.exists(os.path.join(run, "20251231-000000_retired.md"))
+
+
+def test_iter_notes_titles_only_skips_body_reads():
+    """titles_only keeps the same (name, mtime, title) view without reading
+    every body — the session-start note and delete resolver use it."""
+    d = _proj_dir()
+    _note(d, "20260101-000001_a.md", "# Alpha\n" + "body line\n" * 500)
+    _note(d, "20260101-000002_b.md", "# Beta\n" + "body line\n" * 500)
+    full = _memory_cmd._iter_notes(d)
+    head = _memory_cmd._iter_notes(d, titles_only=True)
+    assert [x[:4] for x in full] == [x[:4] for x in head]
+    # the body read was skipped: titles_only content is only the bounded head
+    assert all(len(h[4]) < len(f[4]) for h, f in zip(head, full))
 
 
 def test_optimize_max_notes_reviews_oldest_tail():

@@ -255,6 +255,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer; an answer that *was* cut off (`finish_reason=length`) is retried once at 3× this budget |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
+| `NX_MEMORY_ARCHIVE_KEEP_RUNS` | archived run dirs kept per memories dir by `/memory optimize` (default `0` = keep every run). The archive is the safety net that makes a bad librarian plan reversible (`/memory archived` restores one), so the default never prunes it; set a number on a long-lived store to bound the disk retired notes occupy. The prune is region-bounded — it can never delete the run it is part of — and reclaims the FTS index's dead pages at the same time |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
@@ -431,7 +432,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |
 | `/delete [target]` | delete a saved session |
-| `/memory save\|remember\|delete\|list` | manage persistent memory |
+| `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
 | `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
@@ -562,6 +563,36 @@ to the model.
 - **Diffs fed back to the model are capped** at `NX_DIFF_HUNK_MAX_CHARS`
   (8192) with an elision notice, so a one-line change in a repetitive 30k-line
   file no longer ships a 520 KB hunk into context by relying on a later filter.
+
+**Memory audit follow-ups (0.64.0).** Five defects surfaced by reading the
+memory subsystem end to end:
+- **FTS snippets were degrading recall.** `_memindex.search_dir` selected FTS5's
+  `snippet(..., 16)` — token-bounded, so a hit's preview was a roughly 12-char
+  fragment where the plain scan returned four body lines. Since the snippet is
+  the only body content the model sees, the accelerator was strictly worse than
+  the scan it accelerates. The column is gone; the FTS path now builds its
+  preview with the same `_memory_snippet` the scan uses, so the two paths agree
+  exactly (asserted in the suite).
+- **Nothing reclaimed the index or the archive.** Reconcile deleted archived
+  notes' rows but SQLite never shrinks the file (a 300 KB store left a 1.4 MB
+  index, 76/335 pages free), and `memories/archive/` grew forever.
+  `_memindex.compact()` VACUUMs the index opportunistically after an optimize
+  run (free pages above 25% of the file), and `NX_MEMORY_ARCHIVE_KEEP_RUNS`
+  bounds the archived runs — region-bounded, so a prune can never delete the run
+  it is part of (default `0` = keep all).
+- **The session-start note read every body.** The title-only scanner path reads
+  only each note's head for the title, so the session-start index and
+  `memory_delete`'s resolver no longer read the whole store (roughly half the
+  cost at 56 notes).
+- **`memory_write` approved blind, and its allow rule was dead.** The approval
+  prompt now shows a bounded head of the note; and the allowlist tool mapping no
+  longer classifies a memory write/delete as a file write (both start with
+  `write `/`delete `), so `A` and `/approval allow memory_write` finally work —
+  widened to the whole memory-write family, since a byte-count-shaped pattern
+  would match exactly one call.
+- **`/memory archived [target]`** lists and restores retired notes (the read
+  side of the archive's reversible-by-`mv` promise), and a dead
+  `_atomic_write_private` wrapper was removed.
 
 ## Approval modes
 
@@ -907,11 +938,16 @@ and never clobber — a same-second same-title collision gets a `-2`, `-3`…
 suffix instead of overwriting, and the collision check is part of the atomic
 publication itself, so concurrent writers (memory-merge workers) can't erase
 each other's note. `memory_write` and `memory_delete` go through
-the approval gate like `write_file`/`delete_file`; `memory_search` is
+the approval gate like `write_file`/`delete_file` — the prompt shows a bounded
+head of the note so you can see what you are approving, and pressing `A`
+blesses the whole `write memory *` / `delete memory *` shape (a byte-count- or
+path-shaped pattern would have matched exactly one call, so it was widened for
+these two tools); `memory_search` is
 read-only. The manual `/memory save|remember|delete|list` slash commands
 remain for distilling a whole session at once (project scope, same
-convention) and hand-managing notes, and `/memory optimize` cleans the store
-up once it has outgrown itself.
+convention) and hand-managing notes; `/memory archived [target]` lists the
+notes `/memory optimize` retired and restores one, and `/memory optimize`
+cleans the store up once it has outgrown itself.
 
 ### `/memory optimize`
 

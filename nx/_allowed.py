@@ -155,15 +155,24 @@ DEFAULT_SCOPE = "project"
 
 def _allowlist_tool(action: str) -> str:
     """The tool name a saved rule must match for `action`. nx's action strings
-    all carry the tool's own prefix, so this inverts that mapping."""
+    all carry the tool's own prefix, so this inverts that mapping.
+
+    The memory arms MUST come before the file arms: `write memory <path> (N
+    bytes)` and `delete memory <path> (N bytes)` both start with `write `/`delete
+    `, so the old ordering classified them as write_file/delete_file — no saved
+    rule for memory_write could ever match, and a `/approval allow memory_write`
+    rule was silently inert.
+    """
     if action.startswith("run: "):
         return "run_bash"
+    if action.startswith("write memory"):
+        return "memory_write"
+    if action.startswith("delete memory"):
+        return "memory_delete"
     if action.startswith(("edit ", "write ", "delete ")):
         return ("edit_file" if action.startswith("edit ")
                 else "delete_file" if action.startswith("delete ")
                 else "write_file")
-    if action.startswith("write memory"):
-        return "memory_write"
     if action.startswith("git commit: "):
         return "git_commit"
     return "*"
@@ -176,6 +185,18 @@ def _rule_from_action(action: str) -> tuple[str, str, str]:
     action, not this exact byte-string — e.g. `run: pytest tests/ -q` blesses
     future `pytest` invocations too. Exact-byte blessings would be near-useless
     since tool args almost never repeat verbatim.
+
+    memory_write/memory_delete are the exception: their action carries a
+    *byte count* (`write memory <path> (N bytes)`) or a *path* (`delete memory
+    <path> (N bytes)`), so a prefix blessing would be a blessing for that exact
+    write — every future note re-prompts. The pattern is widened to the tool's
+    whole action family (`write memory *` / `delete memory *`) so `A` means
+    "stop asking about memory writes/deletes", which is what a user pressing it
+    is asking for (a memory write is a private note, not a repo edit).
     """
     tool = _allowlist_tool(action)
+    if tool == "memory_write":
+        return (tool, "write memory *", DEFAULT_SCOPE)
+    if tool == "memory_delete":
+        return (tool, "delete memory *", DEFAULT_SCOPE)
     return (tool, action + "*", DEFAULT_SCOPE)

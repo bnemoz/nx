@@ -20,6 +20,15 @@ appear — the same shape the substring scan checks, modulo whitespace folding
 between the characters. `search_dir` therefore also re-checks the lowercase
 terms against the body before returning, so both paths answer from the same
 predicate.
+
+No `snippet()` column is selected (see `search_dir`): FTS5's snippet() is
+token-bounded and returned a ~12-char fragment, so previews come from the body
+the caller already has.
+
+`compact()` is the one GC seam: the index is a pure cache, so when the store
+shrinks (an optimize run archived notes) the orphaned pages are reclaimed
+instead of bloating the file forever. It runs opportunistically rather than on
+every reconcile, because a VACUUM rewrites the whole file.
 """
 from __future__ import annotations
 
@@ -204,11 +213,18 @@ def reconcile(conn: sqlite3.Connection, d: str) -> None:
 
 # --- query -----------------------------------------------------------------------
 
-def search_dir(d: str, query: str) -> Optional[list[tuple[str, float, str, str, str]]]:
-    """Answer `query` from this dir's index: a list of
-    (name, mtime, title, body, snippet) tuples — body included so the caller
-    can apply the exact substring predicate and `_rank_hit` scoring without
-    touching the filesystem.
+def search_dir(d: str, query: str) -> Optional[list[tuple[str, float, str, str]]]:
+    """Answer `query` from this dir's index: a list of (name, mtime, title,
+    body) tuples. The body is included so the caller can apply the exact
+    substring predicate, `_rank_hit` scoring AND `_memory_snippet` previewing
+    without touching the filesystem.
+
+    Deliberately no `snippet()` column: FTS5's snippet() is token-, not
+    context-, bounded, so at any cheap context size it returned a ~12-char
+    fragment where the plain scan's `_memory_snippet` returned four body lines.
+    The snippet is the only body content the model gets, so the accelerator was
+    silently degrading recall; the caller now builds the preview from the body
+    it already has.
 
     Returns None when the caller must fall back to the plain scan (FTS
     disabled/unsupported, index unusable, no query terms, or the FTS query
@@ -226,8 +242,7 @@ def search_dir(d: str, query: str) -> Optional[list[tuple[str, float, str, str, 
         match = " ".join(_fts_phrase(t) for t in terms)
         try:
             rows = conn.execute(
-                "SELECT name, mtime, title, body, "
-                "snippet(memories_fts, 2, '', '', ' … ', 16) "
+                "SELECT name, mtime, title, body "
                 "FROM memories_fts WHERE memories_fts MATCH ?",
                 (match,)).fetchall()
         except sqlite3.OperationalError as e:
@@ -236,14 +251,76 @@ def search_dir(d: str, query: str) -> Optional[list[tuple[str, float, str, str, 
             _log_event("error", {"where": "memindex", "error": str(e)})
             return None
         out = []
-        for name, mtime, title, body, snip in rows:
+        for name, mtime, title, body in rows:
             try:
                 mtime_f = float(mtime)
             except (TypeError, ValueError):
                 mtime_f = 0.0
-            out.append((str(name), mtime_f, title or "", body or "", snip or ""))
+            out.append((str(name), mtime_f, title or "", body or ""))
         return out
     except sqlite3.Error:
         return None
+    finally:
+        conn.close()
+
+
+# --- gc ------------------------------------------------------------------------
+
+# Reclaim the index once dead pages outweigh this share of the file. Measured
+# rationale: a 300 KB store produced a 1.4 MB index (76/335 pages free) after
+# an optimize run archived notes, because reconcile deletes rows but SQLite
+# never shrinks the file on its own.
+_COMPACT_FREE_RATIO = 0.25
+
+
+def _freq_fold(conn: sqlite3.Connection) -> None:
+    """Merge FTS5's pending b-tree leaves into the segment index (the
+    `merge=4` maintenance op), so the freed pages VACUUM reclaims are the
+    whole table's, not just freshly-deleted rows'. Best effort."""
+    try:
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
+    except sqlite3.Error:
+        return
+    if sqlite3.sqlite_version_info >= (3, 42, 0):
+        try:  # fold the segment index's frequencies into their leaves
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts, rank) VALUES('merge', 4)")
+        except sqlite3.Error:
+            pass
+
+
+def compact(d: str, *, force: bool = False) -> bool:
+    """Reclaim this dir's index after the store shrank. Returns True when a
+    VACUUM ran. `force=True` (opt-in `nx memories --compact`) skips the
+    threshold check; the default only fires when free pages exceed
+    _COMPACT_FREE_RATIO of the file, so an ordinary reconcile never pays for
+    a full rewrite. Uses a DELETE journal for the duration (VACUUM cannot run
+    inside a WAL transaction; the journal mode reverts to WAL after)."""
+    if not _fts_supported() or not enabled():
+        return False
+    # Never CREATE an index just to compact it: a dir that has no index has no
+    # dead pages, and _open/_connect would mkdir + create an empty .sqlite.
+    if not os.path.exists(_db_path(d)):
+        return False
+    conn = _open(d)
+    if conn is None:
+        return False
+    try:
+        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0] or 0)
+        free = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+        if not force:
+            if page_count <= 0 or free < 1 or free < _COMPACT_FREE_RATIO * page_count:
+                return False
+        _freq_fold(conn)
+        conn.commit()
+        conn.execute("PRAGMA journal_mode=DELETE")
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.execute("PRAGMA journal_mode=WAL")
+        return True
+    except sqlite3.Error as e:
+        _log_event("error", {"where": "memindex", "error": f"compact: {e}"})
+        return False
     finally:
         conn.close()

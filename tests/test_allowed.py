@@ -140,6 +140,27 @@ def test_confirm_a_key_saves_prefix_rule(nx_fresh, monkeypatch, capsys):
     assert nx_fresh._confirm("run: pytest tests/test_other.py -x") is True
 
 
+def test_memory_actions_classify_as_memory_tools_not_file_tools(nx_fresh):
+    """`write memory <path> (N bytes)` starts with `write `, so the generic file
+    arm used to win and memory_write rules could never match. The memory arms
+    must be checked first, and their saved pattern must cover the whole family
+    (a byte-count/path-shaped pattern would match only that one call)."""
+    from nx import _allowed
+    assert _allowed._allowlist_tool("write memory /x/.nx/memories/a.md (12 bytes)") == "memory_write"
+    assert _allowed._allowlist_tool("delete memory /x/a.md (9 bytes)") == "memory_delete"
+    # file tools unchanged
+    assert _allowed._allowlist_tool("write /repo/f.py (10 bytes)") == "write_file"
+    assert _allowed._allowlist_tool("delete /repo/f.py (10 bytes)") == "delete_file"
+    # the A-key pattern blesses the whole memory-write family
+    assert _allowed._rule_from_action("write memory /p/a.md (120 bytes)") == \
+        ("memory_write", "write memory *", "project")
+    assert _allowed._rule_from_action("delete memory /p/a.md (90 bytes)") == \
+        ("memory_delete", "delete memory *", "project")
+    # and a saved rule actually allows a LATER, differently-sized memory write
+    _allowed.add_rule(*_allowed._rule_from_action("write memory /p/a.md (120 bytes)"))
+    assert _allowed.check_allow("memory_write", "write memory /p/b.md (44 bytes)") is not None
+
+
 def test_n_key_denies_and_saves_nothing(nx_fresh, monkeypatch, tmp_path):
     monkeypatch.setattr(nx_fresh, "_local_risk_hint", lambda action: ("medium", "test action"))
     monkeypatch.setattr(nx_fresh, "_ask_approval", lambda prompt, allow_hint=None: "n")

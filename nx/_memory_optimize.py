@@ -37,6 +37,10 @@ Flow, bounded at every step:
    `<memories_dir>/archive/<run-stamp>/` inside their own scope dir. A bad
    librarian answer is therefore reversible by `mv`, and the scanner can't
    see the archive (it lists `.md` *files*, and `archive` has no suffix).
+   Retention is opt-in (`NX_MEMORY_ARCHIVE_KEEP_RUNS`, default 0 = keep every
+   run) and region-bounded, so a prune can never delete the run it is part of —
+   and the FTS index's dead pages are reclaimed at the same time
+   (`_memindex.compact`).
 5. The live transcript's memory note is refreshed by APPENDING a fresh note at
    the tail, never rewriting one in place, so the prompt-prefix cache survives
    (`_refresh_memory_note`, PERF.md PF-12).
@@ -75,6 +79,12 @@ OPTIMIZE_DEFAULT_BATCH = 0
 # Hard ceiling on how many notes one run reviews (newest first; the rest are
 # reported as unexamined rather than silently skipped). 0 = no ceiling.
 OPTIMIZE_DEFAULT_MAX_NOTES = 120
+
+# Archived run dirs kept per memories dir by `/memory optimize` (0 = keep all).
+# The archive exists so a bad librarian plan is reversible with `mv`, so the
+# default never prunes it; a store on a long-lived repo sets this to bound the
+# retired notes' disk (see _archive_keep_runs / prune_archive).
+OPTIMIZE_DEFAULT_KEEP_RUNS = 0
 
 # Per-note digest size in the index (the librarian judges on titles + gist;
 # it sees full bodies only for the groups it is asked to merge).
@@ -152,6 +162,16 @@ def _merge_workers(count: int) -> int:
     if workers == 0:
         return max(1, min(count, _MERGE_WORKERS_CAP))
     return max(1, min(workers, max(1, count)))
+
+
+def _archive_keep_runs() -> int:
+    """Archived run dirs kept per memories dir (NX_MEMORY_ARCHIVE_KEEP_RUNS;
+    0 = keep every run, the default — nothing is pruned unless asked). The
+    archive is a safety net (a bad librarian plan is reversible by `mv`), so
+    the default is unbounded; a long-lived store sets this to bound the disk
+    the retired notes occupy."""
+    return _opt_env_int("NX_MEMORY_ARCHIVE_KEEP_RUNS",
+                        OPTIMIZE_DEFAULT_KEEP_RUNS)
 
 
 class _OptNote(NamedTuple):
@@ -565,6 +585,45 @@ def _archive(note: _OptNote, stamp: str) -> str | None:
         return None
 
 
+def prune_archive(memories_dir: str, keep: int, region_start: float) -> int:
+    """Retention for `<memories_dir>/archive/`: keep the newest `keep` run
+    dirs, delete older ones. Returns how many run dirs were removed. `keep <= 0`
+    keeps everything (the archive is never pruned implicitly).
+
+    The prune is REGION-BOUNDED, not count-only: any run dir whose mtime is at
+    or after `region_start` (this run's start) is skipped, so a prune can never
+    delete the run it is part of — nor a concurrent run's freshly written
+    archive, which touched its dir after that run's own start.
+    """
+    if keep <= 0:
+        return 0
+    archive = os.path.join(memories_dir, "archive")
+    try:
+        runs = sorted(
+            (n for n in os.listdir(archive)
+             if os.path.isdir(os.path.join(archive, n))), reverse=True)
+    except OSError:
+        return 0
+    pruned = 0
+    for name in runs[keep:]:
+        path = os.path.join(archive, name)
+        try:
+            if os.path.getmtime(path) >= region_start:
+                continue  # this run (or a concurrent one) — never touched
+            _rmtree_private(path)
+            pruned += 1
+        except OSError:
+            continue
+    return pruned
+
+
+def _rmtree_private(path: str) -> None:
+    """Remove an archived run dir with the same 0700 posture its files were
+    written with (shutil.rmtree honors whatever permissions are there)."""
+    import shutil
+    shutil.rmtree(path)
+
+
 def _group_scope(group: list[_OptNote]) -> str:
     """Where a merged note belongs: the scope holding most of its sources,
     project winning ties (with no project root `_write_memory_file` already
@@ -586,9 +645,17 @@ def _confirm_optimize(action: str) -> bool:
 
 def _drop_memory_caches() -> None:
     """A rewritten store invalidates any cached memory_search index (the same
-    drop run_tool() does after memory_write/memory_delete)."""
+    drop run_tool() does after memory_write/memory_delete) and reclaims the
+    FTS index's dead pages (documents were archived without their rows shrinking
+    the file — see _memindex.compact)."""
     for k in [k for k in st._TOOL_RESULT_CACHE if k and k[0] == "memory_search"]:
         del st._TOOL_RESULT_CACHE[k]
+    try:
+        from ._memindex import compact
+        for d, _label in _iter_memory_dirs("project"):
+            compact(d)
+    except Exception:
+        pass  # a cache GC must never fail the run
 
 
 def _print_plan(plan: _Plan, known: dict[str, _OptNote]) -> None:
@@ -698,6 +765,20 @@ def _apply_plan(plan: _Plan, known: dict[str, _OptNote],
     return merged, archived, archive_dir
 
 
+def prune_archives(region_start: float) -> int:
+    """Apply NX_MEMORY_ARCHIVE_KEEP_RUNS across every memories dir. A no-op
+    (returns 0) at the default of 0. `region_start` is the run's start time, so
+    the prune can never touch an archive dir this run (or a concurrent run)
+    just wrote."""
+    keep = _archive_keep_runs()
+    if keep <= 0:
+        return 0
+    pruned = 0
+    for d, _label in _iter_memory_dirs("project"):
+        pruned += prune_archive(d, keep, region_start)
+    return pruned
+
+
 # --- command -----------------------------------------------------------------
 
 def _parse_opts(arg: str) -> tuple[bool, str]:
@@ -739,6 +820,7 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     for the librarian (\"focus on the build system notes\").
     """
     dry, focus = _parse_opts(arg)
+    region_start = time.time()
     notes = _collect_notes("project")
     total_before = len(notes)
     if total_before < 2:
@@ -814,9 +896,13 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
         return
 
     merged, archived, archive_dir = _apply_plan(plan, known, messages)
+    pruned = prune_archives(region_start)
     after = len(_collect_notes("project"))
     print(f"{DIM}  ✓ {before} → {after} memories "
           f"({merged} merged note{'s' if merged != 1 else ''}, {archived} archived){RESET}")
+    if pruned:
+        print(f"{DIM}    {pruned} older archive run{'s' if pruned != 1 else ''} pruned "
+              f"(NX_MEMORY_ARCHIVE_KEEP_RUNS={_archive_keep_runs()}){RESET}")
     if archive_dir:
         print(f"{DIM}    originals kept in {archive_dir}{RESET}")
     if merged or archived:
