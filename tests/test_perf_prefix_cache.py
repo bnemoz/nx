@@ -155,6 +155,88 @@ def test_memory_note_is_never_written_at_index_one(tmp_path, monkeypatch):
     assert "[Saved memories" in msgs[-1]["content"]
 
 
+
+# --- F-1: a fold never swallows the prefix block -----------------------------
+class _Msg:
+    content = "digest text"
+
+
+class _Choice:
+    message = _Msg()
+
+
+class _Resp:
+    choices = [_Choice()]
+    usage = None
+
+
+def _stub_summarizer(monkeypatch):
+    """compress() hits the network; replace the chat call so the fold runs."""
+    calls = []
+    def fake_create(**kwargs):
+        calls.append(kwargs)
+        return _Resp()
+    monkeypatch.setattr(st.client.chat.completions, "create", fake_create)
+    return calls
+
+
+def test_compress_preserves_the_prefix_block(tmp_path, monkeypatch):
+    """F-1 regression: compress() used to compute body = messages[1:], so the
+    foldable head swallowed the pinned prefix notes and the rebuild dropped
+    them — busting the prefix cache AND silently erasing the project rules,
+    cwd, and memory index from context. The block must survive verbatim."""
+    from nx import _compress
+    import copy
+    root = tmp_path / "proj"
+    root.mkdir()
+    monkeypatch.setattr(st, "PROJECT_ROOT", str(root))
+    monkeypatch.setattr(st, "SESSION_HOME", str(tmp_path))
+    monkeypatch.setattr(nx, "NX_SUBAGENTS", 1)
+    _write_memory("Seed", "b", scope="project", project_root=str(root))
+    _stub_summarizer(monkeypatch)
+
+    msgs = nx._initial_messages()
+    head_len = _prefix._head_len(msgs)
+    assert head_len > 1, "test needs a multi-message pinned head"
+    for i in range(10):
+        msgs.append({"role": "user", "content": f"q{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    head_before = copy.deepcopy(msgs[:head_len])
+
+    result = _compress.compress(msgs, keep=4)
+    assert result is not None
+    # the block survives, in place, byte-identical
+    assert msgs[:head_len] == head_before, "fold mutated or dropped the prefix block"
+    assert _prefix.check_prefix(msgs, warn=False) is True, "head moved across the fold"
+    # rebuild is well-formed: system + block + summary + tail
+    assert _compress._is_summary_msg(msgs[head_len])
+
+
+def test_compress_pins_the_block_even_when_unpinned(monkeypatch):
+    """A transcript assembled without pin_prefix (e.g. an old session) still
+    keeps its leading prefix notes across a fold — is_prefix_note is the
+    authority, not the pin."""
+    from nx import _compress
+    _stub_summarizer(monkeypatch)
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "[Project instructions from AGENTS.md:]\nrule"},
+        {"role": "user", "content": "[Orientation note:]\nWorking directory: /tmp"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "q3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "q4"},
+        {"role": "assistant", "content": "a4"},
+    ]
+    result = _compress.compress(msgs, keep=2)
+    assert result is not None
+    assert _prefix.is_prefix_note(msgs[1]) and _prefix.is_prefix_note(msgs[2])
+    assert "rule" in msgs[1]["content"]
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

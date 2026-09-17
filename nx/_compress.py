@@ -738,8 +738,18 @@ def compress(
     # An explicit keep= with auto=True means "the conservative fold, but with
     # THIS keep" — the overflow tiers rely on it (0.41); auto's raise-to-1/3
     # would otherwise defeat a halved keep on a second refusal.
+    from ._prefix import is_prefix_note
     sys_msg = messages[0] if messages and messages[0].get("role") == "system" else None
+    # The prefix block (AGENTS.md / memory / orientation / delegation notes) is
+    # PERMANENT (PERF.md I-3/I-4, PF-15): it defines the pinned bytes every
+    # later request must still open with, and it carries the project rules,
+    # cwd, and memory index the model needs after the fold. It is carved out
+    # before the foldable region and re-inserted unchanged in the rebuild
+    # below — a fold must never swallow it (F-1 in PROMPT_CACHE_AUDIT.md).
+    prefix_block = []
     body = messages[1:] if sys_msg else messages
+    while body and is_prefix_note(body[0]):
+        prefix_block.append(body.pop(0))
     # 2.4b: a compress() summary turn at the top of the body is prior art, not
     # material — it is reused verbatim below and the fresh digest is APPENDED
     # to it (bytes only ever grow, the same append-only discipline as the 1.1
@@ -961,7 +971,8 @@ def compress(
     else:
         header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
         new_mid = [{"role": "user", "content": f"{header}\n\n{summary}", "_digest": True}]
-    messages[:] = ([sys_msg] if sys_msg else []) + new_mid + tail
+    messages[:] = (([sys_msg] if sys_msg else []) + prefix_block
+                   + new_mid + tail)
     return len(tail), summarized_n, len(summary)
 
 
