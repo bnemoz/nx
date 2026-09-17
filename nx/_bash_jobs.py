@@ -27,6 +27,7 @@ from . import _state as st
 from ._env import _env_float, _env_int
 from ._interrupt import _USER_INTERRUPTED, _watch_for_interrupts
 from ._logging import _log_event
+from ._ripgrep import prefer_ripgrep
 from ._private import open_private, private_dir, touch_private
 
 
@@ -568,6 +569,12 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     trap = _heredoc_quote_trap(command)
     if trap:
         return trap
+    # Harness-side upgrade (0.64.2): the model sometimes writes a grep-family
+    # command inside run_bash even when ripgrep is installed. nx knows whether
+    # rg is on PATH, so rewrite before approval, timeout inference, or the
+    # secret scan see it — the user approves (and the log records) what will
+    # actually run.
+    command = prefer_ripgrep(command)
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
     if secret is not None:
         from ._subagent import _subagent_quiet
