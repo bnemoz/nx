@@ -37,6 +37,17 @@ def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:
         return 0, False
 
 
+# Window ceiling. A model that keeps paging a huge file with ever-larger
+# limits (or offset++ scans) is the single fastest way to fill a context
+# window; the ceiling makes that strategy impossible rather than merely
+# discouraged. Set NX_READ_FILE_MAX_LINES=0 to disable.
+READ_FILE_MAX_LINES_DEFAULT = 2000
+
+
+def _read_file_max_lines() -> int:
+    return _env_int("NX_READ_FILE_MAX_LINES", READ_FILE_MAX_LINES_DEFAULT)
+
+
 def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, **_: Any) -> str:
     """Read a file as numbered lines (1-based, `cat -n` style: right-aligned
     line number, a tab, then the line). Large files return only a window — pass
@@ -65,6 +76,25 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
         limit = int(limit)
     except (TypeError, ValueError):
         limit = 400
+    # Window ceiling: clamp oversized limits instead of honoring them. The
+    # header tells the model exactly how to proceed (target a line via
+    # search_files) rather than letting it brute-force with bigger windows.
+    max_lines = _read_file_max_lines()
+    if max_lines > 0 and limit > max_lines:
+        return (f"[read_file: limit {limit} exceeds the {max_lines}-line window "
+                f"ceiling (NX_READ_FILE_MAX_LINES). Do NOT page through a file "
+                f"this way -- each window is context you pay for. Find the "
+                f"section you need with search_files(pattern, path=\"{path}\", "
+                f"context=N) and read_file(path, offset=<hit line>) just that "
+                f"part, or raise NX_READ_FILE_MAX_LINES if you truly need the "
+                f"whole file.]")
+    if path.lower().endswith(".pdf"):
+        # A PDF read through read_file used to fall into the UTF-8 error path,
+        # which models read as "try harder" — a 50K-page text binary read
+        # through 500 pages of `head` is how a context window dies. Route to
+        # the markdown extractor (page-capped, never raises) instead.
+        from ._pdf import extract_pdf
+        return extract_pdf(path)
     out: list[str] = []
     skipped = 0
     try:
@@ -111,6 +141,14 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
         tip = (" Looking for one function/section rather than the whole "
                "file? STOP paging -- call search_files(pattern, context=N) "
                "instead, it finds it in one shot.")
+    else:
+        # Escalating steer: a mid-file window usually means the model is
+        # walking the file with incrementing offsets, which is how a big file
+        # eats a context window. Name the alternative and the exact next move.
+        tip = (f" Paging mid-file. If you are walking toward a target, STOP -- "
+               f"one search_files(pattern, path=\"{path}\") call lands on the "
+               f"right offset; then read_file(path, offset=<hit line>, limit=N) "
+               f"just that section.")
     return (f"[{path}: lines {start + 1}-{end} of {total}{plus}; "
             f"call read_file with offset/limit to page.{tip}]\n" + body)
 

@@ -187,6 +187,49 @@ def test_strip_only_when_whole_block_numbered():
     assert m._strip_line_numbers("foo\nbar") == "foo\nbar"
 
 
+def test_limit_above_ceiling_refused_with_steering():
+    # A huge limit is refused, not honored: paging a 50K-line file with big
+    # windows is how a context window dies. The refusal names the env knob
+    # and points at search_files instead of just erroring.
+    path = _write("huge.txt", "".join(f"l{i}\n" for i in range(1, 30001)))
+    out = m.read_file(path, limit=10000)
+    assert out.startswith("[read_file: limit 10000 exceeds the 2000-line window")
+    assert "NX_READ_FILE_MAX_LINES" in out and "search_files" in out
+    old = os.environ.get("NX_READ_FILE_MAX_LINES")
+    os.environ["NX_READ_FILE_MAX_LINES"] = "0"
+    try:
+        out = m.read_file(path, limit=10000)
+    finally:
+        if old is None:
+            os.environ.pop("NX_READ_FILE_MAX_LINES", None)
+        else:
+            os.environ["NX_READ_FILE_MAX_LINES"] = old
+    assert out.startswith(f"[{path}: lines 1-10000 of 30000;")
+
+
+def test_default_window_under_ceiling_unaffected():
+    path = _write("norm.txt", "".join(f"l{i}\n" for i in range(1, 2501)))
+    out = m.read_file(path, limit=400)
+    assert out.startswith(f"[{path}: lines 1-400 of 2500;")
+
+
+def test_midfile_window_carries_search_steering():
+    # A mid-file window is the offset-walk smell; the header must steer to
+    # search_files rather than just inviting the next page.
+    path = _write("walk.txt", "".join(f"l{i}\n" for i in range(1, 1001)))
+    out = m.read_file(path, offset=500, limit=5)
+    assert "search_files" in out.split("\n", 1)[0]
+
+
+def test_pdf_path_routes_to_extractor(monkeypatch):
+    # A PDF read through read_file must not hit the UTF-8 error path (models
+    # retry that forever); it routes to the markdown extractor, which without
+    # pymupdf4llm installed returns the one-line install note — never an error.
+    path = _write("doc.pdf", b"%PDF-1.4 fake binary not utf8 \xff\xfe".decode("latin-1"))
+    out = m.read_file(path)
+    assert "ERROR" not in out or "could not open PDF" in out or "pymupdf4llm" in out
+
+
 if __name__ == "__main__":
     import pytest
 
