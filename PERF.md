@@ -401,7 +401,8 @@ never change once sent.
 
 **Shipped in 0.58.0.** `_sanitize_tool_result` (`_text_fallback.py:404`) now
 spills on the way *in*: a result larger than `NX_TOOL_RESULT_SPILL_MIN_CHARS`
-(default 4000 — the smallest retroactive threshold, `OVERFLOW_EVICT_MIN_CHARS`)
+(default 102400 as of 0.66.4, held equal to the cap so any read within the
+cap passes whole — originally 4000, which stubbed even a ~25KB whole-file read)
 is written to the overflow store and replaced with the same bounded head/tail +
 path stub the arrival-time cap already produced, before it ever enters history.
 Because `_spill_tool_results` skips anything carrying `"saved to:"`, the

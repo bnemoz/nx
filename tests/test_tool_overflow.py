@@ -163,6 +163,33 @@ def test_append_floor_disabled_restores_cap_only(monkeypatch):
     assert "saved to:" not in out and out == _body(n=40)
 
 
+def test_25kb_whole_file_read_passes_unstubbed(tmp_path, monkeypatch):
+    """0.66.3: a ~25KB markdown read (the 25K-line window ceiling) must arrive
+    whole — no stub, no spill — with the raised defaults. Regression for a
+    ~25KB grant doc that spilled at the old 4000-char append floor and forced
+    the model into pointer-chasing re-reads."""
+    monkeypatch.setattr(tf, "TOOL_RESULT_CHARS", tf.TOOL_RESULT_CHARS)
+    monkeypatch.setattr(tf, "APPEND_SPILL_MIN_CHARS", tf.APPEND_SPILL_MIN_CHARS)
+    monkeypatch.setattr(tf, "TOOL_RESULT_SPILL", tf.TOOL_RESULT_SPILL)
+    body = "".join(f"Sentence {i} of a long grant aims document.\n"
+                   for i in range(580))  # ~25KB prose: under floor, no dup runs
+    out = m._sanitize_tool_result(body)
+    assert "saved to:" not in out and out == body
+
+
+def test_under_100kb_read_passes_unstubbed(monkeypatch):
+    """0.66.4: the cap and append floor are held equal (102400), so a ~90KB
+    result — e.g. a big multi-file read — still arrives whole; only results
+    strictly over the cap are stubbed."""
+    monkeypatch.setattr(tf, "TOOL_RESULT_CHARS", tf.TOOL_RESULT_CHARS)
+    monkeypatch.setattr(tf, "APPEND_SPILL_MIN_CHARS", tf.APPEND_SPILL_MIN_CHARS)
+    monkeypatch.setattr(tf, "TOOL_RESULT_SPILL", tf.TOOL_RESULT_SPILL)
+    body = "".join(f"Sentence {i} of a very long output block.\n"
+                   for i in range(2200))  # ~95KB prose
+    out = m._sanitize_tool_result(body)
+    assert "saved to:" not in out and out == body
+
+
 def test_overflow_echo_bounded_by_char_budget(monkeypatch):
     huge = "\n".join("z" * 500 for _ in range(20))
     head, tail, _ = ov._echo_lines(huge)

@@ -6,7 +6,7 @@ without a second tool call. This is the scoped, structured sibling of
 NX_VERIFY_CMD (which stays the hands-off post-edit loop): here the MODEL
 chooses when to run tests and with what target, the command shape is fixed
 per ecosystem (no free-text shell), and the result is folded to the failure
-so a fat suite doesn't eat the 20K tool-result budget.
+so a fat suite doesn't eat the tool-result budget.
 
 Approval/approval-wording contract: the action string handed to _confirm() is
 "run tests: <argv>" — nx/_risk.py's local fast path scores exactly that shape

@@ -66,7 +66,7 @@ TOOL_RESULT_PROTOCOL_NOTE = (
 )
 
 
-TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
+TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 102400)
 
 # Oversized results are additionally spilled to disk (see _overflow.py): the
 # model gets head + tail + the path of the full text instead of a blind cut.
@@ -74,16 +74,17 @@ TOOL_RESULT_CHARS = _env_int("NX_TOOL_RESULT_CHARS", 20000)
 TOOL_RESULT_SPILL = _env_int("NX_TOOL_RESULT_SPILL", 1)
 
 # PF-14: the floor at which a tool result is spilled to disk the moment it is
-# produced, BEFORE it is ever sent to the model. This is the smallest of the
-# retroactive evictors' thresholds (OVERFLOW_EVICT_MIN_CHARS 4000,
-# COMPRESS_SPILL_MIN_CHARS 8000), so any result those paths would have spilled
+# produced, BEFORE it is ever sent to the model. Held equal to the hard cap
+# above so any whole-file read within the cap passes whole with no spill at
+# all (0.66.2's 4000 default stubbed even a ~25KB markdown read_file). It is
+# no longer tied to the evictors' thresholds
 # for a context overrun already carries its on-disk stub by the time it enters
 # history. That matters for the prompt cache: a retroactive spill rewrites a
 # mid-transcript message's bytes, invalidating the server prefix cache for the
 # whole remaining prompt on exactly the turns it is largest. 0 restores the
 # old arrival-time cap only (>TOOL_RESULT_CHARS), leaving the evictors as the
 # sole (rewriting) spiller.
-APPEND_SPILL_MIN_CHARS = _env_int("NX_TOOL_RESULT_SPILL_MIN_CHARS", 4000)
+APPEND_SPILL_MIN_CHARS = _env_int("NX_TOOL_RESULT_SPILL_MIN_CHARS", 102400)
 
 # First-line secrets hygiene (0.40, roadmap 1.6): mask known token SHAPES in
 # tool results before the result is shown, persisted (sessions, spills,
