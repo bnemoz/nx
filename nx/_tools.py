@@ -42,7 +42,7 @@ def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:
 # limits (or offset++ scans) is the single fastest way to fill a context
 # window; the ceiling makes that strategy impossible rather than merely
 # discouraged. Set NX_READ_FILE_MAX_LINES=0 to disable.
-READ_FILE_MAX_LINES_DEFAULT = 10000
+READ_FILE_MAX_LINES_DEFAULT = 25000
 
 
 def _read_file_max_lines() -> int:
