@@ -3,7 +3,8 @@ so `@path/to/file` in a message reaches the model as read_file-style numbered
 context without a separate tool round-trip. An image mention (@shot.png) goes
 further: when NX_VISION is on, the image itself is attached as content parts
 (see _images.read_image), so the model SEES the picture on the turn that asks
-about it. Pure function, no globals/state.
+about it. A `.pdf` mention is extracted to markdown text (see _pdf.extract_pdf;
+optional pymupdf4llm dependency). Pure function, no globals/state.
 """
 from __future__ import annotations
 
@@ -122,6 +123,10 @@ def expand_at_mentions(text: str, cwd: str | None = None) -> str | list[dict]:
                 image_parts.extend(out)
             else:
                 blocks.append(f"\n\n--- @{token} ---\n{out}")
+            continue
+        if os.path.splitext(resolved)[1].lower() == ".pdf":
+            from ._pdf import extract_pdf
+            blocks.append(extract_pdf(resolved, token))
             continue
         ext = os.path.splitext(resolved)[1].lower()
         try:
