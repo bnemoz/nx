@@ -21,7 +21,9 @@ from __future__ import annotations
 import heapq
 import os
 import shutil
+import signal
 import sys
+import threading
 import time
 import unicodedata
 from typing import Callable, cast
@@ -659,10 +661,40 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             if i != redraw_rows - 1:
                 out += "\n"
         out += "\r" + move_up((redraw_rows - 1) - (cur_vrow + 1)) + move_right(cur_vcol + 1)
-        sys.stdout.write(out)
+        # Emit the whole frame in ONE write with SIGINT masked. The repaint
+        # only lands correctly if the cursor is where `cursor_line` says; a
+        # SIGINT delivered between the write and the bookkeeping update (or
+        # inside the previous paint) desyncs the two, and every later render
+        # then paints N rows too low -- stacking orphaned frames in scrollback
+        # (one per repeated ^C). Blocking SIGINT here keeps cursor position
+        # and bookkeeping atomic; pending ^C still fires right after the
+        # unmask, where the key loop's KeyboardInterrupt handling resyncs.
+        mask = {signal.SIGINT}
+        if hasattr(signal, "pthread_sigmask") and threading.current_thread() \
+                is threading.main_thread():
+            signal.pthread_sigmask(signal.SIG_BLOCK, mask)
+        try:
+            sys.stdout.write(out)
+            sys.stdout.flush()
+            rendered_lines = len(lines)
+            cursor_line = cur_vrow + 1
+        finally:
+            if hasattr(signal, "pthread_sigmask") and threading.current_thread() \
+                    is threading.main_thread():
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, mask)
+
+    def resync_cursor() -> None:
+        """Re-anchor the repaint origin after an interrupt. A SIGINT that
+        lands mid-render (or mid-stream output) leaves the terminal cursor at
+        an arbitrary row while `rendered_lines`/`cursor_line` still hold stale
+        offsets, so the next paint draws N rows too low and pushes the old
+        frame into scrollback. Resetting the bookkeeping to 'nothing rendered,
+        cursor at column 0 of a fresh line' makes the next render a plain
+        first-frame paint from wherever the cursor physically is."""
+        sys.stdout.write("\n")
         sys.stdout.flush()
-        rendered_lines = len(lines)
-        cursor_line = cur_vrow + 1
+        rendered_lines = 0
+        cursor_line = 0
 
     def finish() -> None:
         sys.stdout.write("\r" + move_down((rendered_lines - 1) - cursor_line) + "\n")
@@ -829,7 +861,19 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                         continue
                 c = _raw_read_key(fd)
                 if c == "\x1b":
-                    esc = handle_escape(_raw_read_available(fd))
+                    # Escape sequences can arrive byte-split: anything after
+                    # the CSI/SS3 prefix is drained from a short poll window,
+                    # and under load (SIGINT storm, busy tool turn) the tail
+                    # bytes simply are not there yet. Hold the prefix and
+                    # prepend it to the next read instead of letting the tail
+                    # be typed into the buffer as literal text ("o;" residue).
+                    tail = _raw_read_available(fd)
+                    if not tail:
+                        tail = _raw_read_available(fd, timeout=0.05)
+                    if not tail:
+                        # A bare Esc with nothing following: treat as Esc key.
+                        continue
+                    esc = handle_escape(tail)
                     if esc is not None:
                         finish()
                         return esc
@@ -921,6 +965,17 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     insert_text(c)
                 compute_matches()
                 render()
+        except (EOFError, KeyboardInterrupt):
+            # ^C inside the editor (either \x03 or a real SIGINT racing the
+            # key loop) must tear the frame down and re-anchor the cursor
+            # before propagating; the finally below only restores mode flags,
+            # it does not reset the render bookkeeping.
+            try:
+                resync_cursor()
+            except Exception:
+                rendered_lines = 0
+                cursor_line = 0
+            raise
         finally:
             sys.stdout.write("\x1b[?25h\x1b[?2004l")
             sys.stdout.flush()
