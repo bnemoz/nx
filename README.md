@@ -203,7 +203,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_OVERFLOW_ECHO_CHARS` | max chars of head/tail content echoed back alongside the spill path (default 2000; `0` = path note only) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
 | `NX_READ_FILE_LINES` | default `read_file` window size in lines (default 400; `limit<=0` reads to end) |
-| `NX_READ_FILE_MAX_LINES` | ceiling on the `read_file` window in lines (default 2000; `0` disables). A larger `limit` is refused with steering toward `search_files`, so a model cannot fill its context by paging a huge file with ever-bigger windows. `.pdf` paths bypass paging entirely and route to the markdown extractor (`NX_PDF_MAX_PAGES`) |
+| `NX_READ_FILE_MAX_LINES` | ceiling on the `read_file` window in lines (default 10000; `0` disables). A larger `limit` is refused with steering toward `search_files`, so a model cannot fill its context by paging a huge file with ever-bigger windows. `.pdf` paths bypass paging entirely and route to the markdown extractor (`NX_PDF_MAX_PAGES`) |
 | `NX_MENTION_INLINE_LIMIT` | max size in bytes for a file `@mention` to inline whole (default 4096). Bigger files get a stub naming the size and pointing at `read_file`/`search_files`. CSV/TSV/`.tab` over 1 KB always take the preview path instead: header + first 10 data rows + row count, since the columns are nearly all a data-file mention is about |
 | `NX_MENTION_CSV_SCAN_BYTES` | max CSV/TSV preview size for the row-count scan (default 1048576 = 1 MB); bigger files skip the full read and report `N+` rows instead of an exact count |
 | `NX_PDF_MAX_PAGES` | pages a `@doc.pdf` mention extracts to markdown (default 50; `0` = no cap). A longer PDF is extracted up to the cap and the block header names the range carried (`PDF, 300 pages — carried the first 50`), so the truncation is visible and a bigger pull is one env var away. Extraction needs the optional `pymupdf4llm` dependency (`pip install pymupdf4llm`); without it the mention carries a one-line note naming the install instead of erroring |
@@ -807,7 +807,7 @@ go through the approval gate above.
 
 | tool | args | notes |
 | --- | --- | --- |
-| `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory; limit capped by `NX_READ_FILE_MAX_LINES` (default 2000); `.pdf` paths extract to markdown instead of erroring |
+| `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory; limit capped by `NX_READ_FILE_MAX_LINES` (default 10000); `.pdf` paths extract to markdown instead of erroring |
 | `write_file` | `path`, `content` | overwrites; requires confirmation; atomic (temp+rename), preserves the file's permission bits and writes through symlinks to the real file |
 | `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly; `new` passes the garble guard (see `NX_GARBLE_GUARD`) |
 | `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation; atomic — a garbled or unmatched edit rolls back the whole batch; each `new` passes the garble guard |

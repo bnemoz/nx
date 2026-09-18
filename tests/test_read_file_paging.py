@@ -192,8 +192,8 @@ def test_limit_above_ceiling_refused_with_steering():
     # windows is how a context window dies. The refusal names the env knob
     # and points at search_files instead of just erroring.
     path = _write("huge.txt", "".join(f"l{i}\n" for i in range(1, 30001)))
-    out = m.read_file(path, limit=10000)
-    assert out.startswith("[read_file: limit 10000 exceeds the 2000-line window")
+    out = m.read_file(path, limit=20000)
+    assert out.startswith("[read_file: limit 20000 exceeds the 10000-line window")
     assert "NX_READ_FILE_MAX_LINES" in out and "search_files" in out
     old = os.environ.get("NX_READ_FILE_MAX_LINES")
     os.environ["NX_READ_FILE_MAX_LINES"] = "0"

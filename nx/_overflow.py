@@ -21,6 +21,13 @@ OVERFLOW_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
 # Cap on how much of the full text we put back in the message: keep it far below
 # TOOL_RESULT_CHARS (the message budget) so the path note itself always fits.
 MAX_SPILL_ECHO = _env_int("NX_OVERFLOW_ECHO_CHARS", 2000)
+
+# Marker prefixed to read_file results that came from an overflow spill
+# file. _sanitize_tool_result uses it to serve the read verbatim (hard cap
+# only) instead of re-spilling the read — a stub of a stub points at a fresh
+# file and the model chases pointers forever.
+OVERFLOW_READ_MARKER = "[overflow spill read: served verbatim]"
+
 _MAX_SPILL_ECHO_LINES = 5
 
 
@@ -55,6 +62,19 @@ def _purge_old_overflow(max_age_days: int = OVERFLOW_TTL_DAYS) -> None:
                 continue
     except OSError:
         pass
+
+
+def is_overflow_path(path: str) -> bool:
+    """True if `path` is inside the overflow spill dir (absolute or not, with
+    or without the .txt suffix — read_file callers pass whatever the stub
+    note showed them)."""
+    if not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    return os.path.dirname(real) == os.path.realpath(overflow_dir())
 
 
 def spill_to_disk(full: str) -> Optional[str]:
@@ -133,6 +153,23 @@ def _echo_lines(full: str) -> tuple:
     head = _fmt(head_lines, len("\n".join(tail_lines)) + 1 if tail_lines else 0)
     tail = _fmt(tail_lines, len(head) + 1)
     return head, tail, max(len(lines) - len(head_lines) - len(tail_lines), 0)
+
+
+def cap_overflow_read(text: str) -> str:
+    """Bound a verbatim spill-file read without re-spilling it: hard head/tail
+    cap (no pointer — the file IS the pointer), then strip the marker so the
+    model never sees the plumbing."""
+    from ._text_fallback import TOOL_RESULT_CHARS  # local: avoids import cycle
+    budget = TOOL_RESULT_CHARS
+    if budget > 0 and len(text) > budget:
+        head = budget * 2 // 3
+        tail = budget - head
+        elided = len(text) - head - tail
+        text = (text[:head]
+                + f"\n... [{elided} chars elided to bound context; "
+                + "re-run with offset/limit if you need the rest]\n"
+                + text[-tail:])
+    return text.replace(OVERFLOW_READ_MARKER, "")
 
 
 def build_overflow_result(full: str, path: str) -> str:

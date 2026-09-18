@@ -74,6 +74,7 @@ try:
         paths: tuple = ()             # every backing path (absolute), PF-18
         mtimes: tuple = ()            # their mtimes at store time
         tree_stamp: str | None = None  # set only for search_files entries
+        hits: int = 0                  # times this entry served a cache hit
 except ImportError:  # pragma: no cover
     _CacheEntry = None  # ty: ignore[invalid-assignment]  # py3.6- fallback
 
@@ -285,6 +286,15 @@ def cache_touch(cache: dict, key: Any) -> None:
     the key: dicts preserve insertion order, which makes the front of the
     iteration order the oldest entry — exactly what bound_cache evicts."""
     if key in cache:
+        e = cache[key]
+        # Count the hit before re-inserting (0.66.1): a rapid repeat of the
+        # same call is how a stuck model burns context — each hit re-bills the
+        # full cached result as a fresh tool message. _dispatch turns the
+        # second hit into a one-line stub pointing at the first result.
+        try:
+            cache[key] = e._replace(hits=e.hits + 1)
+        except Exception:
+            pass
         try:
             cache.move_to_end(key)
         except AttributeError:

@@ -6,7 +6,13 @@ import re
 from typing import Any, List, Tuple
 
 from ._env import _env_int
-from ._overflow import build_overflow_result, spill_to_disk
+from ._overflow import (
+    OVERFLOW_READ_MARKER as _OVERFLOW_READ_MARKER,
+    build_overflow_result,
+    cap_overflow_read as _cap_overflow_read,
+    is_overflow_path as _is_overflow_path,
+    spill_to_disk,
+)
 
 TOOL_OPEN_TAG = re.compile(r"<tool_call\s*>\s*", re.DOTALL)
 NX_OPEN_TAG = re.compile(r"\[nx_tool_call\]\s*", re.DOTALL)
@@ -428,7 +434,16 @@ def _sanitize_tool_result(text: Any) -> Any:
     text = _redact_tool_secrets(text)
     text = _escape_tool_protocol_delimiters(text)
     if len(text) <= 1000:
-        return text
+        return text.replace(_OVERFLOW_READ_MARKER, "")
+    # Never re-spill a read of an overflow spill file: the spill stub invites
+    # the model to read_file that path, so spilling the read would chase
+    # pointers forever (each stub points at a fresh file, and an offset/limit
+    # read of the middle gets spilled instead of served — observed as a ~100K
+    # token burn across dozens of spill-file reads). Serve it verbatim; the
+    # only bound is the hard cap (no pointer), since a full spill-file read is
+    # at most one previous TOOL_RESULT_CHARS anyway.
+    if text.lstrip().startswith(_OVERFLOW_READ_MARKER):
+        return _cap_overflow_read(text)
     lines = text.split("\n")
     out_lines = []
     i, n = 0, len(lines)

@@ -749,8 +749,31 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         cached = st._TOOL_RESULT_CACHE.get(cache_key)
         if cached is not None and cache_valid(cached):
             # LRU: a hit refreshes recency, so eviction drops genuinely cold
-            # entries rather than whatever was read first (PF-16).
+            # entries rather than whatever was read first (PF-16). cache_touch
+            # also counts the hit; see the stub branch below.
             cache_touch(st._TOOL_RESULT_CACHE, cache_key)
+            # Repeat-call guard (0.66.1): the SECOND hit on the same key
+            # returns a stub instead of the full result again. A model stuck
+            # in a re-read loop re-bills the full cached result as a fresh
+            # tool message on every turn — observed burning ~100K tokens
+            # re-reading one file ~40 times. The first result is already in
+            # history, so the stub only needs to point back at it. Cached
+            # errors / tiny results pass through untouched.
+            if (cached.hits >= 2 and isinstance(cached.result, str)
+                    and len(cached.result) > 500):
+                from ._subagent import _subagent_ctx as _cache_ctx
+                _rec = current_recorder() if _cache_ctx() is None else None
+                if _rec is not None:
+                    _h, _, _d = tool_display(name, args)
+                    _rec.blocks.append(ToolBlock(name=name, header=_h, detail=_d,
+                                                 cached=True))
+                return (
+                    "[repeat of an identical call you already made: the full "
+                    "result is earlier in this conversation — re-read it "
+                    "there instead of re-calling this tool. If you need "
+                    "different content, change the arguments (offset/limit/"
+                    "pattern) or move on.]"
+                )
             # A cache hit is still a read that happened: fire the post-hook
             # (with "cached": true) so an audit trail sees every read, not
             # just the miss that populated the entry. Pre-hook already ran

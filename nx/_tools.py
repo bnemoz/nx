@@ -14,6 +14,7 @@ import subprocess
 from typing import Any
 
 from ._env import _env_int
+from ._overflow import OVERFLOW_READ_MARKER, is_overflow_path
 
 
 def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:
@@ -41,7 +42,7 @@ def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:
 # limits (or offset++ scans) is the single fastest way to fill a context
 # window; the ceiling makes that strategy impossible rather than merely
 # discouraged. Set NX_READ_FILE_MAX_LINES=0 to disable.
-READ_FILE_MAX_LINES_DEFAULT = 2000
+READ_FILE_MAX_LINES_DEFAULT = 10000
 
 
 def _read_file_max_lines() -> int:
@@ -133,11 +134,19 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
             total = end + cap  # lower bound only
             plus = "+"
     if start == 0 and not truncated:
+        # A whole-file read: if this is an overflow spill file, tag it so
+        # _sanitize_tool_result serves it verbatim instead of re-spilling the
+        # read (pointer-chasing: the stub of a stub points at a fresh file).
+        if is_overflow_path(path):
+            return _OVERFLOW_READ_MARKER + body
         return body  # whole file (or whole rest of file) — no header
     if total is None:
         total = end  # window with start>0 reached EOF
     tip = ""
-    if start == 0:
+    if is_overflow_path(path):
+        # Same anti-respill tag for a windowed read; see the whole-file branch.
+        tip = ""
+    elif start == 0:
         tip = (" Looking for one function/section rather than the whole "
                "file? STOP paging -- call search_files(pattern, context=N) "
                "instead, it finds it in one shot.")
@@ -150,7 +159,9 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
                f"right offset; then read_file(path, offset=<hit line>, limit=N) "
                f"just that section.")
     return (f"[{path}: lines {start + 1}-{end} of {total}{plus}; "
-            f"call read_file with offset/limit to page.{tip}]\n" + body)
+            f"call read_file with offset/limit to page.{tip}]\n"
+            + (_OVERFLOW_READ_MARKER if is_overflow_path(path) else "")
+            + body)
 
 
 _LINE_NUM_PREFIX = re.compile(r"^ *\d+\t")
