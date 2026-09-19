@@ -629,6 +629,33 @@ def test_refresh_memory_note_at_resume_updates_stale_titles():
         m.st.PROJECT_ROOT = old
 
 
+def test_iter_memory_dirs_skips_project_dir_that_is_the_global_dir():
+    """A bare-cwd project root equal to NX_HOME makes <root>/.nx/memories the
+    global dir itself; it must not be scanned twice (every global note used to
+    appear as both [global] and [project] in /memory list and search)."""
+    root = tempfile.mkdtemp(prefix="nx-proj-home-")
+    _write_memory("Dup probe", "dircollision body", scope="global", project_root=None)
+    old = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        # Collision: global = SESSION_HOME/memories must equal <root>/.nx/memories.
+        old_home = m.st.SESSION_HOME
+        m.st.SESSION_HOME = os.path.join(root, ".nx")
+        try:
+            pairs = _memory_cmd._iter_memory_dirs("project")
+            assert [label for _d, label in pairs] == ["global"], pairs
+            assert [d for d, _label in pairs] == [_memory_cmd._memories_dir()]
+        finally:
+            m.st.SESSION_HOME = old_home
+        # A genuinely distinct project dir is still returned.
+        real_root = tempfile.mkdtemp(prefix="nx-proj-real-")
+        m.st.PROJECT_ROOT = real_root
+        pairs = _memory_cmd._iter_memory_dirs("project")
+        assert [label for _d, label in pairs] == ["global", "project"], pairs
+    finally:
+        m.st.PROJECT_ROOT = old
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))

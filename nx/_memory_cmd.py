@@ -465,7 +465,12 @@ def _iter_memory_dirs(scope: str = "project") -> list[tuple[str, str]]:
     pairs = [(_memories_dir(), "global")]
     p = _project_memories_dir(getattr(st, "PROJECT_ROOT", None))
     if p:
-        pairs.append((p, "project"))
+        # A project root of the home dir (bare-cwd fallback in
+        # _detect_project_root) makes <root>/.nx/memories the global dir
+        # itself; scanning it twice would list every global note as both
+        # [global] and [project].
+        if os.path.realpath(p) != os.path.realpath(_memories_dir()):
+            pairs.append((p, "project"))
     return pairs
 
 
