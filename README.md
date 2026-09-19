@@ -274,6 +274,9 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
 | `NX_MEMORY_ARCHIVE_KEEP_RUNS` | archived run dirs kept per memories dir by `/memory optimize` (default `0` = keep every run). The archive is the safety net that makes a bad librarian plan reversible (`/memory archived` restores one), so the default never prunes it; set a number on a long-lived store to bound the disk retired notes occupy. The prune is region-bounded — it can never delete the run it is part of — and reclaims the FTS index's dead pages at the same time |
+| `NX_MEMORY_REFLECT_MAX_NOTES` | most notes one `/memory reflect` pass indexes (newest first; default 120; `0` = all) |
+| `NX_MEMORY_REFLECT_WORKERS` | write round-trips `/memory reflect` runs at once (default 2, capped at 8) |
+| `NX_MEMORY_REFLECT_TIMEOUT` | per-call timeout in seconds for `/memory reflect` model calls (default 600) |
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
@@ -452,6 +455,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
 | `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
+| `/memory reflect [focus]` | cross-project connection pass: reviews the whole store (both scopes) and writes at most 3 global notes — recurring preferences promoted out of project scopes, cross-project patterns the user may not have connected; proposals about broken notes print as advice only. One approval for the run |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
 | `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -974,6 +978,18 @@ convention) and hand-managing notes; `/memory archived [target]` lists the
 notes `/memory optimize` retired and restores one, and `/memory optimize`
 cleans the store up once it has outgrown itself.
 
+### Note kinds (0.68.0)
+
+`memory_write` accepts an optional `kind`: `preference` (a durable style or
+tooling choice), `fact`, `gotcha`, or `episodic` (a one-off project event).
+The kind is stored in the note's footer (`_kind:`); an unrecognized or absent
+kind stores kind-free and behaves exactly as before. Preference-kind notes get
+special treatment at session start: the injected saved-memories note lists
+them under "User preferences (always apply)" — newest first, up to 4 —
+regardless of how many newer untagged notes exist, so your durable
+preferences reach the model every session even in a busy store. Ordinary
+titles ride the plain newest-first list as before.
+
 ### `/memory optimize`
 
 A store that only grows turns into noise: after a hundred notes some pair
@@ -1032,6 +1048,32 @@ of the store matches the store — including in a session that started before
 the cleanup. Session resume (`--resume` and `/resume`) runs the same
 rebuild, so a transcript written before an optimize run in another session
 no longer carries its retired titles either.
+
+### `/memory reflect`
+
+Where optimize is a janitor, `/memory reflect [focus]` is the mirror: it reads
+the whole store from outside (both scopes, capped at
+`NX_MEMORY_REFLECT_MAX_NOTES`, default 120) and asks the model one question a
+janitor never would — what do these notes know collectively that no single
+note says? Its outputs, in a line protocol like optimize's:
+
+- `WRITE scope kind` — at most 3 per run. A preference that keeps
+  re-appearing inside project scopes becomes one global `preference` note;
+  a pattern shared across projects becomes one cross-project insight note.
+  Each write gets its own round-trip over the NOTE'd source notes and goes
+  through the shared writer (0600, `_kind:` footer), gated by one approval
+  for the whole run. Nothing is archived — reflect only ever adds.
+- `PROPOSE ...` — contradictions, stale beliefs, or a preference buried in an
+  episodic note are printed as advice and never executed (fixing other
+  notes' composition is optimize's territory).
+
+An empty store, or one with no cross-cutting signal, writes nothing and says
+so. Tunables: `NX_MEMORY_REFLECT_MAX_NOTES` (default 120, `0` = all),
+`NX_MEMORY_REFLECT_WORKERS` (default 2, capped at 8), and
+`NX_MEMORY_REFLECT_TIMEOUT` (default 600s — a reasoning model can think for
+minutes). Like optimize, reflect is a slash command and not a tool: zero
+schema tokens, and the user decides when a reflective pass is worth a
+round-trip.
 
 ## Metrics
 

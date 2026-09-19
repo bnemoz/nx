@@ -1,12 +1,12 @@
 {
   "_comment": "Recorded perf baselines (PERF §5). Each entry: the pinned number, the release that measured it, and what regression looks like. Ratio tests multiply by --perf-tolerance (default 1.25).",
   "conftest_snapshot": {
-    "baseline_modules": 57,
-    "baseline_entries": 2736,
-    "budget_modules": 80,
-    "budget_entries": 3500,
-    "measured_in": "0.62.0",
-    "note": "T-9: conftest._BASELINE_MODS snapshot size. Growth past the budget means the per-test _restore() cost is drifting up (measured 0.43 ms/test at 57 modules) — trim module state or split a module before adding more."
+    "baseline_modules": 63,
+    "baseline_entries": 3023,
+    "budget_modules": 86,
+    "budget_entries": 3800,
+    "measured_in": "0.68.0",
+    "note": "T-9: conftest._BASELINE_MODS snapshot size. Growth past the budget means the per-test _restore() cost is drifting up — trim module state or split a module before adding more. Re-measured at 0.68.0 (memory reflect module + kind tracking pushed baseline_modules 57 -> 63; entries re-measured alongside)."
   },
   "active_tools_floor": {
     "always_on_count": 20,

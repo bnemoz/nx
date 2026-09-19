@@ -47,9 +47,10 @@ from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
     _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
     _render_transcript_for_memory, memory_write, memory_search, memory_delete,
-    _load_memory_note, _write_memory_file,
+    _load_memory_note, _write_memory_file, _note_kind, MEMORY_KINDS,
 )
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
+from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for tests)
 from ._repl_settings_cmds import (
     _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,

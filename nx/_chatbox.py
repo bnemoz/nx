@@ -90,7 +90,7 @@ SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
     "/verify": ["off", "run"],
     "/ctx": ["pin", "unpin", "clear"],
     "/plan": ["done", "off", "discard"],
-    "/memory": ["save", "remember", "delete", "list", "archived", "optimize"],
+    "/memory": ["save", "remember", "delete", "list", "archived", "optimize", "reflect"],
     "/export": ["md"],
     "/source": lambda: list(st.SOURCE_ORDER),
 }

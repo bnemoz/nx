@@ -145,6 +145,12 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
         _cmd_memory_optimize(messages, parts[2] if len(parts) >= 3 else "")
         return
 
+    if sub == "reflect":
+        # Imported lazily: _memory_reflect imports this module at module level.
+        from ._memory_reflect import _cmd_memory_reflect
+        _cmd_memory_reflect(parts[2] if len(parts) >= 3 else "")
+        return
+
     # Bare /memory — show usage
     print(f"{DIM}  usage:{RESET}")
     print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
@@ -154,6 +160,8 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     print(f"{DIM}    /memory archived [target]   list archived notes, or restore one{RESET}")
     print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
           f"(dry prints the plan only){RESET}")
+    print(f"{DIM}    /memory reflect [focus]     cross-project pass: promote recurring "
+          f"preferences, surface shared patterns{RESET}")
 
 
 def _cmd_memory_handler(user: str, state: Any) -> None:
@@ -566,6 +574,20 @@ def _read_note_preview(path: str, max_chars: int = 700) -> str:
 
 _MEMORY_FOOTER_RE = re.compile(r"\n---\n_scope:.*$", re.DOTALL)
 
+# Note kinds (0.68.0): a lightweight tag in the footer so retrieval and
+# session-start injection can treat classes of knowledge differently (a
+# preference is always relevant; an episodic project fact is not). Freeform
+# notes stay first-class: an unrecognised or absent kind is stored as-is and
+# behaves exactly like today. The recognized set is deliberately small.
+MEMORY_KINDS = ("preference", "fact", "gotcha", "episodic")
+
+
+def _note_kind(content: str) -> str:
+    """The `_kind:` value of a note's footer, or '' when untagged.
+    Tolerates footers written before kinds existed and hand-edited notes."""
+    m = re.search(r"(?:^|\s)_kind:\s*(\S+)", content)
+    return m.group(1) if m else ""
+
 
 def _rank_hit(content: str, query: str) -> float:
     """Score one memory against a multi-term query (the caller has already
@@ -643,10 +665,14 @@ def _iter_notes(d: str, *, titles_only: bool = False
     return out
 
 
-def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) -> tuple[str, str] | None:
+def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
+                       kind: str = "") -> tuple[str, str] | None:
     """The single memory writer: shared by the memory_write tool and
     `/memory save` so both produce identical files. Returns (path, scope), or
     None when gate=True and the user denied the confirmation.
+
+    kind: optional note kind tag (see MEMORY_KINDS) stored in the footer as
+    `_kind:`; an empty string keeps the footer kind-free (old format).
 
     Resolves project→global fallback (no project root), avoids a doubled H1
     when the body already starts with its own title, makedirs 0700, and never
@@ -686,7 +712,10 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     slug = _slugify(title)
     base = os.path.join(memories_dir, f"{time.strftime('%Y%m%d-%H%M%S')}_{slug}.md")
-    content = f"# {title}\n\n{body}\n\n---\n_scope: {scope}  _saved: {stamp}\n"
+    footer = f"_scope: {scope}  _saved: {stamp}"
+    if kind:
+        footer += f"  _kind: {kind}"
+    content = f"# {title}\n\n{body}\n\n---\n{footer}\n"
 
     # Claim a name. The loop is only the suffix walk; publication itself is
     # atomic and refuses to clobber (see _publish_memory), so a concurrent
@@ -705,7 +734,7 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False) ->
 
 
 def memory_write(
-    title: str, body: str, scope: str = "project", **_: Any
+    title: str, body: str, scope: str = "project", kind: str = "", **_: Any
 ) -> str:
     """Persist a memory note the model can recall in future sessions.
 
@@ -714,6 +743,10 @@ def memory_write(
     ~/.nx/memories/ (cross-project). The note is a markdown file named
     <timestamp>_<slug>.md starting with a `# Title` line — written 0600 via
     tmp+rename, and never clobbering an existing note.
+
+    kind: optional tag — "preference" (user's durable style/tooling choice),
+    "fact", "gotcha", or "episodic" (one-off project event). Untagged is fine;
+    the tag only helps ranking and injection treat the note appropriately.
 
     Search first: prefer updating/superseding an existing note (memory_delete
     the stale one) over accumulating near-duplicates.
@@ -728,14 +761,16 @@ def memory_write(
         return "ERROR: memory_write requires a non-empty `body`"
     if scope not in ("project", "global"):
         scope = "project"
+    if kind and kind not in MEMORY_KINDS:
+        kind = ""  # unrecognized tag: store kind-free rather than refuse
 
     try:
-        written = _write_memory_file(title, body, scope, gate=True)
+        written = _write_memory_file(title, body, scope, gate=True, kind=kind)
     except OSError as e:
         return f"ERROR: {type(e).__name__}: {e}"
     if written is None:
         return "DENIED by user"
-    path, scope = written
+    path, scope = written  # kind lives in the file footer, not the return
     rel = path
     try:
         rel = os.path.relpath(path)
@@ -1004,17 +1039,38 @@ def _load_memory_note(project_root: str | os.PathLike[str] | None) -> dict[str, 
     roots = _memory_dirs_for(project_root)
     if not roots:
         return None
+    # 0.68.0: preference-kind notes are injected EVERY session regardless of
+    # recency (they are the user's durable style/tooling choices) and get a
+    # deeper cap than ordinary titles; untagged/fact/episodic titles ride the
+    # plain newest-first list. Preferences in either scope count.
     titles: list[str] = []
+    prefs: list[tuple[float, str]] = []
     overflow = False
+    plain_cap = 5
+    pref_cap = 4
     for d in roots:
         label = "project" if d == _project_memories_dir(project_root) else "global"
         notes = _iter_notes(d, titles_only=True)   # titles only — no body reads
-        overflow = overflow or len(notes) > 5
-        for _name, _path, _mtime, title, _content in notes[:5]:
+        overflow = overflow or len(notes) > plain_cap
+        for _name, _path, _mtime, title, head in notes:
+            if _note_kind(head) == "preference":
+                prefs.append((_mtime, f"[{label}] {title}"))
+        for _name, _path, _mtime, title, _content in notes[:plain_cap]:
             titles.append(f"[{label}] {title}")
-    if not titles:
+    prefs.sort(key=lambda p: -p[0])  # newest preference first
+    shown_prefs = [text for _mtime, text in prefs[:pref_cap]]
+    if len(prefs) > pref_cap:
+        overflow = True
+    if not titles and not shown_prefs:
         return None
-    lines = list(titles)
+    lines = []
+    if shown_prefs:
+        lines.append("User preferences (always apply):")
+        lines.extend(shown_prefs)
+    if titles:
+        if shown_prefs:
+            lines.append("")
+        lines.extend(titles)
     if overflow:
         lines.append("… more saved — memory_search with an empty query lists the rest")
     body = "\n".join(lines)
