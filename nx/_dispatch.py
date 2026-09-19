@@ -1040,7 +1040,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # index/snippets — regardless of the scope the write/delete targeted.
         for k in [k for k in st._TOOL_RESULT_CACHE if k[0] == "memory_search"]:
             del st._TOOL_RESULT_CACHE[k]
-    if name == "run_bash" and result.startswith("[background]") and not st._SESSION_HAS_BACKGROUNDED:
+    # A fused then_run command can also background (it outlives NX_FUSION_POLL_SECONDS
+    # inside run_fused's own poll window). Those calls arrive here as edit tools, not
+    # run_bash, so key on the marker text rather than the tool name — otherwise the
+    # model is never told wait_background exists and the wake poller stays unarmed for
+    # work whose completion only a later turn can observe (0.68.2).
+    if ((result.startswith("[background]") if name == "run_bash"
+         else name in ("write_file", "edit_file", "multi_edit")
+         and "\n[background] PID" in result)
+            and not st._SESSION_HAS_BACKGROUNDED):
         st._SESSION_HAS_BACKGROUNDED = True
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE
         # This session now has background work whose completion only a LATER

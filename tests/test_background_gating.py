@@ -113,6 +113,22 @@ def test_run_tool_ignores_other_tools_even_if_result_looks_backgrounded(monkeypa
     assert m._SESSION_HAS_BACKGROUNDED is False
 
 
+def test_run_tool_flips_flag_on_a_fused_edit_that_backgrounded(monkeypatch):
+    # A then_run fused command that outlives the fusion poll window embeds the
+    # same [background] text in the edit tool's result — it must arm the wake
+    # poller and stage BACKGROUND_GUIDANCE like a plain run_bash background
+    # would, or the model is never told wait_background exists (0.68.2).
+    monkeypatch.setitem(
+        m.DISPATCH, "edit_file",
+        lambda **kw: "edited x.py\n\n[then_run:succeeded]\n"
+                     "[background] PID 789 | log: /tmp/z.log\nstill running",
+    )
+    assert m._SESSION_HAS_BACKGROUNDED is False
+    m.run_tool("edit_file", {"path": "x.py", "old": "a", "new": "b"})
+    assert m._SESSION_HAS_BACKGROUNDED is True
+    assert m._PENDING_BACKGROUND_NOTICE == m.BACKGROUND_GUIDANCE
+
+
 # ---------------------------------------------------------------------------
 # _flush_pending_background_notice()
 # ---------------------------------------------------------------------------
