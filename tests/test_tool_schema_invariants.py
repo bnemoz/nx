@@ -56,7 +56,13 @@ UNDOCUMENTED_OK = {
 
 # Tools whose argument names differ from the python body's parameter names on
 # purpose (`async` is a keyword, so the body takes it via **kwargs).
-ARG_NAME_EXCEPTIONS = {"spawn_agent": {"async"}}
+ARG_NAME_EXCEPTIONS = {
+    "spawn_agent": {"async"},
+    # then_run rides only the wrapped mutation bodies (nx/_fusion.py); the
+    # fused wrapper accepts **args and reads it, but the base bodies don't.
+    "write_file": {"then_run"}, "edit_file": {"then_run"},
+    "multi_edit": {"then_run"},
+}
 
 
 def _reads_as_prose(d):
@@ -79,7 +85,7 @@ def test_every_tool_appears_once():
     names = [_fn(t)["name"] for t in _all_tools()]
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     # test_background_gating pins the exact count when a tool is added/removed.
-    assert len(names) == 24
+    assert len(names) == 25
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -167,8 +173,11 @@ def test_schema_arguments_exist_on_the_body(tool):
     body = m.DISPATCH.get(name)
     if body is None:  # final_answer is terminal-dispatched, not in DISPATCH
         pytest.skip(f"{name} has no dispatch body")
+    # A wrapper can expose the wrapped body's real params explicitly
+    # (nx/_fusion.py's fused edit wrappers); those count as accepted.
+    accepted = set(getattr(body, "__wrapped_signature_params__", ()) or ())
     sig = inspect.signature(body)
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+    if not accepted and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
         accepted = {p.name for p in sig.parameters.values()
                     if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
         # **kwargs bodies still name their real args; only the exception set

@@ -1897,6 +1897,13 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         # no new data arrived.
         cur_tokens = st._LAST_PROMPT_TOKENS
         if cur_tokens > 0 and cur_tokens != prev_prompt_tokens:
+            # Online Context Compact (0.67.0): record the request BEFORE the
+            # threshold fold so boundary economics see this turn's size.
+            try:
+                from ._occompact import record_provider_request
+                record_provider_request(cur_tokens)
+            except Exception:  # noqa: BLE001
+                pass
             _m._maybe_autocompress(messages, cur_tokens)
         prev_prompt_tokens = cur_tokens
         if status == TURN_REDIRECT:

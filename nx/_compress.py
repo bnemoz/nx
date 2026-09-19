@@ -88,6 +88,12 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if subagent_note:
         messages.append({"role": "user", "content": subagent_note})
         st._PENDING_SUBAGENT_NOTICE = None
+    # Online Context Compact (0.67.0): the post-compaction continuation note
+    # (re-issue the plan) staged by _occompact.maybe_compact_after_boundary.
+    occ_note = getattr(st, "_PENDING_OCC_REMINDER", None)
+    if occ_note:
+        messages.append({"role": "user", "content": occ_note})
+        st._PENDING_OCC_REMINDER = None
     # The remaining staged notices all share one shape (a runtime-note string
     # on an st slot, consumed once), so they flush in a loop. The delegation
     # streak notice is staged by run_tool(); NX_VERIFY_CMD's outcome by

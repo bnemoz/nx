@@ -81,6 +81,14 @@ _STATE_NAMES = frozenset((
     "_INTERRUPT_THREAD", "_SESSION_HAS_BACKGROUNDED", "_PENDING_BACKGROUND_NOTICE",
     "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE", "_VERIFY_SEEN",
     "_PENDING_SUBAGENT_NOTICE",
+    # SoL-Pi ports (0.67.0)
+    "NX_FUSION", "NX_OBS", "NX_REDUCER", "NX_OCC",
+    "_OCC_PLAN", "_OCC_REQUEST_COUNT", "_OCC_LAST_CONTEXT_TOKENS",
+    "_OCC_POSITIVE_DELTA_TOTAL", "_OCC_POSITIVE_DELTA_COUNT",
+    "_OCC_COMPLETED_BOUNDARY_INTERVALS", "_OCC_LAST_BOUNDARY_REQUEST_COUNT",
+    "_OCC_NATIVE_COMPACTIONS", "_OCC_PENDING_BOUNDARY", "_OCC_COMPACTING",
+    "_OCC_CACHE_DEBT_TOKENS", "_OCC_REMAINING_BOUNDARIES",
+    "_PENDING_OCC_REMINDER",
     "_VERIFY_EDIT_LOG", "_VERIFY_INFLIGHT",
     "_CONSECUTIVE_EDITS", "_MULTI_EDIT_NUDGED",
     "_PLAN_ACTIVE", "_PLAN_GOAL", "_PLAN_SLUG", "_PLAN_STARTED",
@@ -386,6 +394,24 @@ TOOLS.append(IMAGE_VISION_TOOL)
 # is withheld until something backgrounds.
 TOOLS.append(PLAN_EDIT_TOOL)
 
+# --- SoL-Pi ports (0.67.0) ---------------------------------------------------
+# Action fusion: when NX_FUSION=1 the mutation tools gain an optional
+# `then_run` property (the follow-up validation command runs in the same
+# tool call). Appended at import so the default schema floor is unchanged.
+from ._fusion import THEN_RUN_PROP, FUSION_ENABLED
+
+if FUSION_ENABLED == 1:
+    for _t in TOOLS:
+        if _t["function"]["name"] in ("write_file", "edit_file", "multi_edit"):
+            _t["function"]["parameters"]["properties"]["then_run"] = dict(THEN_RUN_PROP)
+
+# Observation pack: obs_recall pages an archived large tool result back
+# verbatim (nx/_obs.py). Tier-2 gated on NX_OBS=1 so it costs 0 schema tokens
+# otherwise — a session that never packs never pays.
+from ._obs import OBS_RECALL_TOOL, OBS_ENABLED
+from ._reducer import REDUCER_ENABLED
+from ._occompact import OCC_ENABLED
+TOOLS.append(OBS_RECALL_TOOL)
 # Tiered tool registry + the search_tools meta-tool (0.62.0, PERF §6 items
 # 1-2). search_tools is read-only (no approval), always offered, and returns
 # the full schema of any tool the gate table withheld this turn — so the next
@@ -734,6 +760,24 @@ NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
 NX_VISION = _env_int("NX_VISION", 0)
+# --- SoL-Pi ports (0.67.0) ---------------------------------------------------
+# Action fusion (nx/_fusion.py): NX_FUSION=1 lets write_file/edit_file/
+# multi_edit carry `then_run` — a follow-up validation command run in the
+# same tool call after a successful edit.
+NX_FUSION = FUSION_ENABLED
+# Observation pack (nx/_obs.py): NX_OBS=1 replaces a large tool result with a
+# stable handle after its first NX_OBS_FULL_SENDS provider requests; the
+# obs_recall tool pages the archived original back verbatim.
+NX_OBS = OBS_ENABLED
+# Evidence-preserving reducer (nx/_reducer.py): NX_REDUCER=1 lets large
+# diagnostic outputs be replaced by a verified receipt (every quote checked
+# byte-for-byte against the on-disk archive; any miss fails open).
+NX_REDUCER = REDUCER_ENABLED
+# Online context compact (nx/_occompact.py): NX_OCC=1 makes completed plan
+# steps candidate points for a native fold, subject to economic and
+# window-pressure checks; the task continues after the fold with a plan
+# reminder note.
+NX_OCC = OCC_ENABLED
 # Slug length cap for /plan <goal> → .nx/<slug>.md (see _plan.py).
 NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)
 
@@ -747,6 +791,16 @@ from ._compress import (
     RECOVERY_DRY_SEQUENCE_BREAKERS, _recovery_sampling_opts, open_stream,
     compress, _maybe_autocompress, _compress_for_overrun,
     _default_tool_choice,
+)
+
+
+# --- SoL-Pi ports (0.67.0) ---------------------------------------------------
+from ._fusion import run_fused, with_fused_file_queue, fusion_enabled
+from ._obs import pack_result, obs_recall
+from ._reducer import reduce_tool_result
+from ._occompact import (
+    decide_compact, maybe_compact_after_boundary, record_boundary,
+    record_provider_request, occ_enabled,
 )
 
 

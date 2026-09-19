@@ -93,6 +93,34 @@ CLAUDE.md. Beyond the schema itself:
   enforces all three, including the `UNDOCUMENTED_OK` exemption list — add to
   it only when the property name really is the whole contract.
 
+## SoL-Pi mechanism ports (0.67.0)
+
+Four opt-in mechanisms ported from the SoL-Pi (pi harness) extension, each a
+focused module with an env gate (all default OFF; see README's env table):
+
+- **Action fusion** (`nx/_fusion.py`, `NX_FUSION=1`): the three edit tools
+  accept `then_run` and run the follow-up command in the same tool call. The
+  wrappers live in `nx/_edit_tools.py` (`_fused_body`), which also keeps
+  `DISPATCH[name] is nx.write_file` true for the schema-introspection and
+  sub-agent-write tests. Markers: `[then_run:succeeded|failed|skipped]`.
+- **Observation pack** (`nx/_obs.py`, `NX_OBS=1`): large tool results are
+  archived under `~/.nx/observations/` and replaced by an `obs_...` handle
+  after `NX_OBS_FULL_SENDS` provider requests; the tier-2-gated `obs_recall`
+  tool pages them back byte-exactly. Applied in `run_tool` after
+  `_sanitize_tool_result`, fail-open.
+- **Evidence-preserving reducer** (`nx/_reducer.py`, `NX_REDUCER=1`): large
+  diagnostic outputs can be replaced by a receipt whose every quote is
+  verified byte-for-byte against the archive; any miss fails open. Seam:
+  `run_tool` before history-append.
+- **Online context compact** (`nx/_occompact.py`, `NX_OCC=1`): completed
+  `todo_write` steps mark boundaries; a settle-time economics check may run
+  nx's native compress early, then stages the post-fold plan reminder via
+  `_PENDING_OCC_REMINDER` (flushed in `_flush_pending_background_notice`).
+
+Cross-mechanism contract: a tool result whose content contains the line
+`sol_pi_evidence_receipt_v1` is never observation-packed (the receipt IS the
+compact form).
+
 ## Adding a new env var
 
 Per CLAUDE.md: env vars, not config files. New tunables:

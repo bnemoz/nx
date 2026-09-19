@@ -39,6 +39,7 @@ from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._testrunner import run_tests
 from ._gitcommit import git_commit
+from ._obs import obs_recall
 from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
@@ -56,6 +57,11 @@ DISPATCH = {
 # defined with the tiered registry below; registered here so `nx`'s import-time
 # `from ._dispatch import (...)` (and any test table) sees one flat dispatch map.
 DISPATCH["search_tools"] = lambda pattern="": search_tools(pattern)
+
+# Observation pack recall tool (0.67.0): pages an archived large tool result
+# back verbatim. Schema appended to TOOLS in __init__.py; gated to appear
+# only when NX_OBS=1 (see _TOOL_GATES).
+DISPATCH["obs_recall"] = obs_recall
 
 # spawn_agent() runs its sub-loop with this table installed in st._SUBAGENT_DISPATCH
 # (plus a per-thread copy in _subagent._SUBAGENT_TLS — concurrent agents each need
@@ -155,6 +161,9 @@ _TOOL_GATES: dict[str, Any] = {
     "spawn_agent": _delegation_enabled,
     "read_image": lambda: bool(_m_safe().NX_VISION) and st._NATIVE_TOOL_CALLS_CONFIRMED,
     "plan_edit": plan_active,
+    # SoL-Pi ports (0.67.0): obs_recall only once a pack handle exists
+    # (packing never happened otherwise — nothing to recall).
+    "obs_recall": lambda: bool(_m_safe().NX_OBS),
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}
@@ -173,6 +182,7 @@ def _gate_vector() -> tuple:
         bool(_m.NX_SUBAGENTS),
         bool(_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED),
         bool(plan_active()),
+        bool(getattr(_m, "NX_OBS", 0)),
         tuple(sorted(broken)) if broken else (),
     )
 
@@ -192,7 +202,7 @@ def _active_tools() -> list[dict[str, Any]]:
     cached = _TOOL_LIST_CACHE.get(key)
     if cached is not None:
         return cached
-    broken = set(key[4])
+    broken = set(key[-1])
     tools = []
     for t in _m.TOOLS:
         name = t["function"]["name"]
@@ -638,6 +648,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             return _unknown_tool_error(name)
         if name == "plan_edit" and not plan_active():
             return _unknown_tool_error(name)
+        if name == "obs_recall" and not getattr(_m, "NX_OBS", 0):
+            return _unknown_tool_error(name)
     # Malformed-args circuit breaker: the tool was dropped for cause (this
     # endpoint keeps truncating its args), so refuse with the same wording the
     # retry nudge uses — "unknown tool" would read as the tool never existed
@@ -886,6 +898,29 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
                 pass  # verification is best-effort — never fail the edit
             if checked:
                 result = f"{result}\n{problem or os.path.basename(vp) + ' — py_compile OK'}"
+    # Evidence-Preserving Reducer (0.67.0, SoL-Pi port): large diagnostic
+    # outputs (build/test) can be replaced by a verified receipt — every
+    # quoted line checked byte-for-byte against the on-disk archive; any
+    # validation miss fails open with the original output. Applied only to
+    # the result string BEFORE sanitize, so quotes verify against the raw
+    # command output (the receipt itself is small and passes sanitize whole).
+    # See nx/_reducer.py.
+    if (isinstance(result, str) and not result.startswith(("ERROR", "DENIED"))
+            and name in ("run_bash", "write_file", "edit_file", "multi_edit")):
+        try:
+            from ._reducer import reduce_tool_result, reducer_enabled
+            if reducer_enabled():
+                _cmd = ""
+                if name == "run_bash":
+                    _cmd = str(args.get("command") or "")
+                else:
+                    _tr = args.get("then_run") or {}
+                    _cmd = str(_tr.get("command") or "")
+                _receipt = reduce_tool_result(name, _cmd, result)
+                if _receipt:
+                    result = _receipt
+        except Exception:  # noqa: BLE001 — fail open, always
+            pass
     # Dedup + cap the result BEFORE it enters the message history (the model and
     # the on-screen preview both get this sanitized form). Bounding repetitive
     # tool output is the cheapest defense against context-copying collapse.
@@ -900,6 +935,19 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         preview_lines = [_parts_preview(result)]
     else:
         result = _sanitize_tool_result(result)
+        # Observation Pack (0.67.0, SoL-Pi port): after its first
+        # NX_OBS_FULL_SENDS sends, a large tool result is replaced by a stable
+        # handle with exact paged recall (obs_recall). Applied at the
+        # history-append seam, after sanitize — the archived text is the
+        # sanitized form the model actually saw, so recall returns exactly
+        # what was once in context. Fail-open by construction. See _obs.py.
+        try:
+            from ._obs import pack_result, obs_enabled
+            if obs_enabled():
+                _ck = str(args.get("path") or args.get("command") or "")
+                result = pack_result(name, result, _ck)
+        except Exception:  # noqa: BLE001 — packing never breaks a result
+            pass
         # box the result; the preview is a further display-only trim of the (already
         # context-bounded) result
         preview_lines = result.splitlines()

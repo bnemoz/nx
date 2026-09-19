@@ -74,6 +74,14 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
             status = "pending"
         cleaned.append({"text": str(item.get("text", "")), "status": status})
     st._TODOS = cleaned
+    # Online Context Compact (0.67.0): a todo_write that newly completes >= 1
+    # item is a plan-step boundary — the OCC module decides at the next
+    # settled turn whether the economics justify a native fold.
+    try:
+        from ._occompact import inspect_todo_write
+        inspect_todo_write(cleaned)
+    except Exception:  # noqa: BLE001 — never break the todo tool
+        pass
     return render_todos(cleaned)
 
 

@@ -10,13 +10,15 @@ corruption quantized models produce, repaired when unambiguous, hard-errored
 when not (see that module's docstring).
 
 `_confirm` is monkeypatched by tests via `m._confirm = fake` (the top-level
-`nx` module attribute), so it's called through a lazy `import nx as _m;
+`nx` module attribute), so it's called through a lazy `import inspect
+import nx as _m;
 _m._confirm(...)` rather than bound directly at import time — see the note
 at the top of _repl.py for the same pattern.
 """
 from __future__ import annotations
 
 import glob
+import inspect
 import os
 import re
 import shutil
@@ -270,6 +272,39 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     return f"edited {path}\n{_diff_hunk(src, new_src)}{note}"
 
 
+
+
+# --- action fusion (0.67.0, SoL-Pi port) -------------------------------------
+# A call carrying `then_run` (NX_FUSION=1) runs its follow-up validation
+# command in the same tool call via nx/_fusion.run_fused. Declared here (not
+# in _dispatch) so DISPATCH[name] stays the same object the schema-introspection
+# tests and the sub-agent write tier see, and so the wrapper accepts `then_run`
+# as a real named parameter.
+def _fused_body(body):
+    real_params = {n for n in inspect.signature(body).parameters}
+    def _inner(*pos: Any, then_run: dict[str, Any] | None = None, **kw: Any):
+        # preserve the body's positional signature (edit_file(path, old, new))
+        path = pos[0] if pos else kw.pop("path", "")
+        rest = pos[1:]
+        if not then_run and not _fusion_enabled():
+            return body(path, *rest, **kw)
+        if not then_run:
+            return body(path, *rest, **kw)
+        params = list(inspect.signature(body).parameters)[1:]
+        call_kw = dict(zip(params, rest)) if rest else {}
+        call_kw.update(kw)
+        call_kw.pop("then_run", None)
+        args = {"path": path, "then_run": then_run, **call_kw}
+        return _fusion_run_fused(args, lambda: body(path, **call_kw))
+    # expose the body's real parameter names (and then_run) to introspection
+    _inner.__wrapped_signature_params__ = real_params | {"then_run"}
+    _inner.__name__ = getattr(body, "__name__", "fused")
+    _inner.__doc__ = getattr(body, "__doc__", None)
+    return _inner
+
+
+from ._fusion import run_fused as _fusion_run_fused, fusion_enabled as _fusion_enabled  # noqa: E402
+
 def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     """Apply multiple exact find-and-replace edits to one file atomically:
     either every edit lands or none do (a failed match rolls back the whole
@@ -520,3 +555,8 @@ def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
             pass
     _undo_push("apply_patch", befores)
     return f"applied patch ({backend}) to {len(files)} file(s): {', '.join(files)}"
+
+
+write_file = _fused_body(write_file)
+edit_file = _fused_body(edit_file)
+multi_edit = _fused_body(multi_edit)
