@@ -50,7 +50,7 @@ def test_default_withholds_the_gated_four():
     assert sorted(names) == sorted(
         n for n in all_names if n not in ("wait_background", "spawn_agent",
                                           "read_image", "plan_edit",
-                                          "obs_recall"))
+                                          "obs_recall", "web_fetch"))
 
 
 def test_memoized_on_the_gate_vector():

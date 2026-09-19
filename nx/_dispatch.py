@@ -40,6 +40,7 @@ from ._tools import read_file, list_dir, search_files, git_status, git_diff, git
 from ._testrunner import run_tests
 from ._gitcommit import git_commit
 from ._obs import obs_recall
+from ._webfetch import web_fetch
 from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
@@ -53,6 +54,7 @@ DISPATCH = {
     "memory_delete": memory_delete,
     "spawn_agent": spawn_agent, "read_image": read_image,
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
+    "web_fetch": web_fetch,
 }
 # defined with the tiered registry below; registered here so `nx`'s import-time
 # `from ._dispatch import (...)` (and any test table) sees one flat dispatch map.
@@ -164,6 +166,10 @@ _TOOL_GATES: dict[str, Any] = {
     # SoL-Pi ports (0.67.0): obs_recall only once a pack handle exists
     # (packing never happened otherwise — nothing to recall).
     "obs_recall": lambda: bool(_m_safe().NX_OBS),
+    # web_fetch (0.70.0): keyless DuckDuckGo-lite search + page fetch. Tier-2
+    # (0 schema tokens until a session needs the outside world) — surfaced by
+    # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).
+    "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}
@@ -183,6 +189,7 @@ def _gate_vector() -> tuple:
         bool(_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED),
         bool(plan_active()),
         bool(getattr(_m, "NX_OBS", 0)),
+        bool(getattr(_m, "NX_WEBFETCH", 0)),
         tuple(sorted(broken)) if broken else (),
     )
 
@@ -598,6 +605,13 @@ def _unknown_tool_error(name: str) -> str:
     if name == "plan_edit":
         return (f"ERROR: {name} is not available in this session (no plan is active). Start one "
                 "with /plan <goal>, or just proceed with the normal edit tools.")
+    if name == "obs_recall":
+        return (f"ERROR: {name} is not available in this session (NX_OBS is off — "
+                "nothing was packed, so there is nothing to recall).")
+    if name == "web_fetch":
+        return (f"ERROR: {name} is not available in this session (NX_WEBFETCH is off, "
+                "or the gate has not opened). Work from local files, or ask the user "
+                "to paste the relevant page/search results.")
     return (f"ERROR: {name} is not available in this session (withheld by the current session "
             "configuration). Use one of: " + ", ".join(sorted(known)))
 
@@ -649,6 +663,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         if name == "plan_edit" and not plan_active():
             return _unknown_tool_error(name)
         if name == "obs_recall" and not getattr(_m, "NX_OBS", 0):
+            return _unknown_tool_error(name)
+        if name == "web_fetch" and not getattr(_m, "NX_WEBFETCH", 0):
             return _unknown_tool_error(name)
     # Malformed-args circuit breaker: the tool was dropped for cause (this
     # endpoint keeps truncating its args), so refuse with the same wording the

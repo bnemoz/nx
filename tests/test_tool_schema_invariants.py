@@ -85,7 +85,7 @@ def test_every_tool_appears_once():
     names = [_fn(t)["name"] for t in _all_tools()]
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     # test_background_gating pins the exact count when a tool is added/removed.
-    assert len(names) == 25
+    assert len(names) == 26
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
