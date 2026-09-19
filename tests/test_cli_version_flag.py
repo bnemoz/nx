@@ -37,6 +37,34 @@ def test_main_prints_version_for_v(capsys, monkeypatch):
     assert out == f"nx {_cli._cli_version()}\n"
 
 
+# --- _help_colored: rustup-style flag coloring, TTY-gated ---------------------
+
+def test_help_colored_marks_flags_and_headers(monkeypatch):
+    import io
+    from nx import _cli
+    fake_tty = io.StringIO()
+    fake_tty.isatty = lambda: True
+    monkeypatch.setattr(sys, "stdout", fake_tty)
+    from nx._ansi import RESET
+    out = _cli._help_colored(_cli._HELP_TEXT)
+    # plain text input (no ANSI in the source string)
+    assert RESET not in _cli._HELP_TEXT
+    # flags and the "flags:" header are wrapped in color
+    assert "\x1b[38;2;" in out
+    # description text stays uncolored — the line's tail has no escape before it
+    line = next(l for l in out.splitlines() if "--yolo" in l)
+    assert line.endswith("start in never-prompt mode (auto-approve everything)")
+    # trailing description lines (no flag, not a usage line) stay entirely plain
+    assert "README.md for the full NX_* env var table." in out
+
+
+def test_help_colored_falls_back_without_tty(monkeypatch):
+    import io
+    from nx import _cli
+    monkeypatch.setattr(sys, "stdout", io.StringIO())  # isatty() -> False
+    assert _cli._help_colored(_cli._HELP_TEXT) == _cli._HELP_TEXT
+
+
 # --- import-time guard skips source setup for -v -----------------------------
 
 def test_import_time_guard_skips_switch_source_for_v(monkeypatch, tmp_path):

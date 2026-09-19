@@ -10,6 +10,7 @@ compression, the REPL loop itself) already has a stable home, so this is
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,42 @@ README.md for the full NX_* env var table.
 """
 
 
+_FLAG_TOKEN_RE = re.compile(r"--?[A-Za-z][\w-]*|<[^>]+>|\[[^\]]+\]|/|[A-Z]+(?=\s|$)")
+
+
+def _help_colored(text: str) -> str:
+    """Render the help text rustup/cargo style: flag tokens and section headers
+    in the accent color, descriptions in the default text color. Falls back to
+    plain text when stdout is not a TTY or NO_COLOR is set — help is written to
+    stdout, so no ANSI may leak into a pipe."""
+    import os
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    from ._ansi import C, RESET
+    accent = C.ACCENT
+    out = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        indent = line[:len(line) - len(stripped)]
+        # section headers: "flags:", "Batch mode — ...:", "Per-task exit codes: ..."
+        if stripped and not stripped.startswith("-") and stripped.endswith(":") \
+                and "  " not in stripped and len(stripped) < 70:
+            out.append(f"{indent}{accent}{stripped}{RESET}")
+            continue
+        # Only usage lines and flag lines get tokens colored; prose stays
+        # plain even when it mentions a flag ("`nx run --help` for details").
+        if not stripped.startswith(("-", "usage:", "nx ")):
+            out.append(line)
+            continue
+        # the description (everything from the 2+ space gap on) stays plain.
+        gap = re.search(r"\S\s{2,}\S", line)
+        head, tail = (line, "") if gap is None else \
+            (line[:gap.start() + 1], line[gap.start() + 1:])
+        head = _FLAG_TOKEN_RE.sub(lambda m: accent + m.group(0) + RESET, head)
+        out.append(head + tail)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
 def _cli_version() -> str:
     from importlib.metadata import version, PackageNotFoundError
     try:
@@ -74,7 +111,7 @@ def _cli_version() -> str:
 
 def _cli_help_or_version(argv: list[str]) -> bool:
     if "-h" in argv or "--help" in argv:
-        sys.stdout.write(_HELP_TEXT)
+        sys.stdout.write(_help_colored(_HELP_TEXT))
         return True
     if "--version" in argv or "-v" in argv:
         print(f"nx {_cli_version()}")
