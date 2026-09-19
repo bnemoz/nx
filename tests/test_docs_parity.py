@@ -114,11 +114,6 @@ def test_every_documented_env_var_is_actually_read():
     # role colors (NX_<ROLE>_COLOR) and per-source settings (NX_SOURCE_<NAME>_*).
     names = {n for n in names
              if not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
-    # Documented-but-not-yet-read placeholders: each needs the explanatory
-    # phrase in its README row (a real reader replaces the exemption when the
-    # feature lands — deleting the row or wiring the var both fail loudly).
-    PLACEHOLDERS = {"NX_SEARX_URL"}
-    names -= PLACEHOLDERS
     blob = ""
     for top in ("nx", "tests"):
         for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top)):

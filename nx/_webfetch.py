@@ -43,8 +43,14 @@ CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 7 * 24 * 3600)
 # that's the shared free resource).
 DDG_MIN_INTERVAL_SECS = _env_int("NX_WEBFETCH_SEARCH_INTERVAL", 3.0)
 
-UA = "nx-coding-agent/0.71 (+local CLI; respectful, cached, GET-only)"
+UA = "nx-coding-agent/0.72 (+local CLI; respectful, cached, GET-only)"
 SEARCH_URL = "https://html.duckduckgo.com/html/"
+# SearXNG (self-hosted metasearch) is the PREFERRED search backend (0.72.0):
+# set NX_SEARX_URL to the instance root (e.g. http://localhost:8080) and
+# searches go to {url}/search?q=...&format=json. No key; the instance's own
+# engines do the upstream querying, so nx adds exactly one request. DDG lite
+# stays as the fallback when NX_SEARX_URL is unset or unreachable.
+SEARX_URL = os.environ.get("NX_SEARX_URL", "").rstrip("/")
 TIMEOUT_SECS = 15
 MAX_SEARCH_RESULTS = 10
 
@@ -239,24 +245,61 @@ def _parse_results(body: str) -> list[dict[str, str]]:
     return out
 
 
+def _searx_search(query: str) -> str | None:
+    """SearXNG JSON-API search; None when unset/unreachable/broken (caller
+    falls back to DDG lite). One GET to the user's own instance — the DDG
+    throttle does not apply (it exists to spare a SHARED free endpoint)."""
+    if not SEARX_URL:
+        return None
+    qs = urllib.parse.urlencode({"q": query, "format": "json"})
+    try:
+        body = _http_get(f"{SEARX_URL}/search?{qs}")
+        data = json.loads(body)
+        results = data.get("results") or []
+    except Exception:
+        return None  # unreachable or bad JSON: fall through to DDG lite
+    out = []
+    for r in results[:MAX_SEARCH_RESULTS]:
+        url = str(r.get("url") or "")
+        if not url.startswith("http"):
+            continue
+        title = str(r.get("title") or "").strip()
+        content = str(r.get("content") or "").strip()
+        out.append(f"- {title} — {url}" + (f"\n  {content}" if content else ""))
+    if not out:
+        return "(SearXNG returned no results for this query.)"
+    return "\n".join(out)
+
+
 def _web_search(query: str) -> str:
-    # courtesy throttle: never hammer the free endpoint
-    now = time.monotonic()
-    wait = _LAST_SEARCH[0] + DDG_MIN_INTERVAL_SECS - now
-    if wait > 0:
-        time.sleep(wait)
-    _LAST_SEARCH[0] = time.monotonic()
+    # courtesy throttle for the shared free endpoint (DDG lite); the user's
+    # own SearXNG instance, when configured, is exempt.
+    if not SEARX_URL:
+        now = time.monotonic()
+        wait = _LAST_SEARCH[0] + DDG_MIN_INTERVAL_SECS - now
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_SEARCH[0] = time.monotonic()
 
     cache_key = "q:" + query.lower().strip()
     _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:
         return "[cached] " + hit
 
+    # SearXNG first (preferred); DDG lite is the fallback.
+    searx = _searx_search(query)
+    if searx is not None:
+        _cache_put(cache_key, searx)
+        _save_cache()
+        return searx
+
     qs = urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
     try:
         body = _http_get(f"{SEARCH_URL}?{qs}")
     except Exception as e:
-        return (f"ERROR: search failed ({type(e).__name__}); duckduckgo may be "
+        hint = (" (NX_SEARX_URL is set but unreachable — fell back to DuckDuckGo)"
+                if SEARX_URL else "")
+        return (f"ERROR: search failed ({type(e).__name__}){hint}; duckduckgo may be "
                 "rate-limiting — wait a few seconds and retry, or ask the user "
                 "for a URL to fetch directly.")
     results = _parse_results(body)
@@ -265,8 +308,8 @@ def _web_search(query: str) -> str:
             return ("Search blocked: DuckDuckGo is bot-challenging this IP right "
                     "now. Options: retry in a few minutes (a cached result may "
                     "exist), ask the user for a URL to `url`-fetch directly, or "
-                    "set up a SearXNG instance (the designated backup backend — "
-                    "see the README's NX_WEBFETCH entry).")
+                    "set NX_SEARX_URL to a SearXNG instance (the preferred search "
+                    "backend — see the README's NX_WEBFETCH entry).")
         return ("No results (the lite endpoint's HTML may have changed — check "
                 "the layout before assuming the query matched nothing).")
     lines = [
@@ -314,7 +357,7 @@ WEB_FETCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "Keyless web access, GET-only and rate-limited to stay polite to the free DuckDuckGo endpoints (results are cached globally for 7 days). Pass `query` for a web search returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
+        "description": "Keyless web access, GET-only and rate-limited to stay polite to free endpoints (results are cached globally for 7 days). Pass `query` for a web search (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo-lite) returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
         "parameters": {
             "type": "object",
             "properties": {

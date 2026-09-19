@@ -114,6 +114,78 @@ def test_search_throttle_enforces_interval():
     assert sleeps and 0 < sleeps[-1] <= w.DDG_MIN_INTERVAL_SECS
 
 
+def test_searx_preferred_when_configured():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:9"
+    try:
+        with unittest.mock.patch.object(w, "_http_get",
+                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'):
+            out = w.web_fetch(query="searx first")
+    finally:
+        w.SEARX_URL = saved
+    assert "https://s.example/" in out and "DuckDuckGo" not in out
+
+
+def test_searx_unreachable_falls_back_to_ddg():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:9"  # nothing listens there
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value=DDG_PAGE) as g:
+            out = w.web_fetch(query="fallback")
+    finally:
+        w.SEARX_URL = saved
+    # first GET hit searx (failed), second hit DDG
+    assert g.call_count == 2 and "Example A" in out
+
+
+def test_searx_throttle_exempt():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:9"
+    sleeps = []
+    real_sleep = w.time.sleep
+    w.time.sleep = lambda s: sleeps.append(s)
+    try:
+        def fake(url):
+            if "searx" not in url and "127.0.0.1:9" not in url:
+                return DDG_PAGE
+            raise OSError("down")
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake):
+            w.web_fetch(query="one")
+            w.web_fetch(query="two")
+    finally:
+        w.time.sleep = real_sleep
+        w.SEARX_URL = saved
+    assert not sleeps  # searx-configured searches are never held back
+
+
+def test_searx_bad_json_falls_back():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://searx.invalid"
+    try:
+        with unittest.mock.patch.object(w, "_http_get",
+                                        side_effect=['<html>not json</html>', DDG_PAGE]) as g:
+            out = w.web_fetch(query="badjson")
+    finally:
+        w.SEARX_URL = saved
+    assert g.call_count == 2 and "Example A" in out
+
+
+def test_searx_empty_results():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://searx.invalid"
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value='{"results": []}'):
+            out = w.web_fetch(query="nothing")
+    finally:
+        w.SEARX_URL = saved
+    assert "no results" in out
+
+
 def test_search_bot_challenge_is_actionable():
     _clean()
     challenge = "<html>Unfortunately, bots use DuckDuckGo too.</html>"
