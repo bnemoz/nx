@@ -57,7 +57,7 @@ def test_active_tools_excludes_wait_background_by_default():
                           "git_diff", "git_log", "sed_edit", "multi_edit",
                           "apply_patch", "todo_write", "memory_write",
                           "memory_search", "memory_delete", "run_tests",
-                          "git_commit", "search_tools"}
+                          "git_commit", "search_tools", "web_fetch"}
 
 
 def test_active_tools_includes_wait_background_once_flag_set():

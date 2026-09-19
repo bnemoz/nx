@@ -82,7 +82,7 @@ _STATE_NAMES = frozenset((
     "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE", "_VERIFY_SEEN",
     "_PENDING_SUBAGENT_NOTICE",
     # SoL-Pi ports (0.67.0)
-    "NX_FUSION", "NX_OBS", "NX_REDUCER", "NX_OCC", "NX_WEBFETCH",
+    "NX_FUSION", "NX_OBS", "NX_REDUCER", "NX_OCC",
     "_OCC_PLAN", "_OCC_REQUEST_COUNT", "_OCC_LAST_CONTEXT_TOKENS",
     "_OCC_POSITIVE_DELTA_TOTAL", "_OCC_POSITIVE_DELTA_COUNT",
     "_OCC_COMPLETED_BOUNDARY_INTERVALS", "_OCC_LAST_BOUNDARY_REQUEST_COUNT",
@@ -441,11 +441,10 @@ TOOLS.append(GIT_COMMIT_TOOL)
 
 # web_fetch (schema here, body in nx/_webfetch.py, 0.70.0): keyless web
 # access — DuckDuckGo *lite* HTML search (no API key) and a GET-only page
-# fetch stripped to readable text. Tier-2 gated on NX_WEBFETCH=1 so the
-# schema costs 0 tokens in sessions that never need the outside world; the
-# courtesy constraints (cache, min search interval, polite UA) live in the
-# module docstring.
-from ._webfetch import WEB_FETCH_TOOL
+# fetch stripped to readable text. Tier-2 gated on NX_WEBFETCH (default ON
+# since 0.71.0); the courtesy constraints (persistent 7-day cache, min search
+# interval, polite UA) live in the module docstring.
+from ._webfetch import WEB_FETCH_TOOL, WEBFETCH_ENABLED
 TOOLS.append(WEB_FETCH_TOOL)
 
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
@@ -789,12 +788,13 @@ NX_REDUCER = REDUCER_ENABLED
 NX_OCC = OCC_ENABLED
 # Slug length cap for /plan <goal> → .nx/<slug>.md (see _plan.py).
 NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)
-# web_fetch (nx/_webfetch.py, 0.70.0): NX_WEBFETCH=1 opts a session into the
-# tier-2 web tool (keyless DuckDuckGo-lite search + GET-only page fetch,
-# cached + rate-limited to stay polite to the free endpoints). Default 0: the
-# schema costs nothing until the gate opens, and fully offline hosts keep a
-# closed network door. NX_WEBFETCH_* tunables live in _webfetch.py.
-NX_WEBFETCH = _env_int("NX_WEBFETCH", 0)
+# web_fetch (nx/_webfetch.py, 0.70.0): NX_WEBFETCH=0 opts OUT of the tier-2
+# web tool (keyless DuckDuckGo-lite search + GET-only page fetch, cached
+# globally for 7 days under <SESSION_HOME>/web-cache/). Default 1 (0.71.0):
+# fully offline hosts set NX_WEBFETCH=0 to close the network door. The schema
+# itself is tier-2, so even an enabled session pays 0 tokens until the model
+# asks search_tools for it. NX_WEBFETCH_* tunables live in _webfetch.py.
+NX_WEBFETCH = WEBFETCH_ENABLED
 
 
 from ._compress import (

@@ -1,4 +1,5 @@
-"""web_fetch (0.70.0): keyless, free web access — no paid API.
+"""web_fetch (0.70.0; default-on + persistent cache in 0.71.0): keyless, free
+web access — no paid API.
 
 Two actions in one tier-2 tool:
 
@@ -12,16 +13,20 @@ Two actions in one tier-2 tool:
   (html.parser). Images/scripts/style are dropped, links keep their hrefs.
 
 Courtesy of a free resource is a design constraint, not a nice-to-have:
-every response is cached in-process for the session, a minimum interval is
-enforced between requests to duckduckgo.com, a small polite User-Agent is
-sent, and only ``GET`` requests are ever issued. Failures fail soft with a
-message the model can act on (retry later, narrower query, different URL) —
-never an exception into the turn loop.
+every response is cached globally for 7 days (persisted under
+``<SESSION_HOME>/web-cache/cache.jsonl``, so a fresh session hits the cache
+too), a minimum interval is enforced between requests to duckduckgo.com, a
+small polite User-Agent is sent, and only ``GET`` requests are ever issued.
+Failures fail soft with a message the model can act on (retry later, narrower
+query, different URL) — never an exception into the turn loop.
 """
 from __future__ import annotations
 
 import html as _html
+import json
+import os
 import re
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -32,20 +37,74 @@ from ._env import _env_int
 
 WEBFETCH_ENABLED = _env_int("NX_WEBFETCH", 1)
 FETCH_MAX_BYTES = _env_int("NX_WEBFETCH_MAX_BYTES", 20000)
-CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 600)
+CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 7 * 24 * 3600)
 # Courtesy floor between requests to duckduckgo.com (search OR the fetch of a
 # page hosted anywhere is NOT throttled — only the search endpoint is, since
 # that's the shared free resource).
 DDG_MIN_INTERVAL_SECS = _env_int("NX_WEBFETCH_SEARCH_INTERVAL", 3.0)
 
-UA = "nx-coding-agent/0.70 (+local CLI; respectful, cached, GET-only)"
+UA = "nx-coding-agent/0.71 (+local CLI; respectful, cached, GET-only)"
 SEARCH_URL = "https://html.duckduckgo.com/html/"
 TIMEOUT_SECS = 15
 MAX_SEARCH_RESULTS = 10
 
 # --- session state (module-level on purpose: conftest rewinds nx.* dicts) ---
-_CACHE: dict[str, tuple[float, str]] = {}
+_CACHE: dict[str, tuple[float, str]] = {}  # key -> (monotonic ts, text)
 _LAST_SEARCH: list[float] = [0.0]
+_CACHE_LOADED: list[bool] = [False]
+
+# Web-cache persistence (0.71.0): one JSON object per line
+# {"k", "t" (epoch secs), "v"} under <SESSION_HOME>/web-cache/cache.jsonl.
+# SESSION_HOME (NX_HOME) is set up by __init__.py after this module imports
+# and tests point NX_HOME at a tmpdir, so resolve it lazily.
+def _cache_dir() -> str:
+    from ._state import SESSION_HOME
+    return os.path.join(SESSION_HOME, "web-cache")
+
+
+def _ensure_cache() -> None:
+    """Best-effort load of the persistent cache on first use per process;
+    expired entries are dropped, corrupt lines skipped, missing dir a no-op."""
+    if _CACHE_LOADED[0]:
+        return
+    _CACHE_LOADED[0] = True
+    try:
+        path = os.path.join(_cache_dir(), "cache.jsonl")
+        if not os.path.exists(path):
+            return
+        now = time.time()
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    age = now - float(obj["t"])
+                    if 0 <= age < CACHE_TTL_SECS:
+                        _CACHE[obj["k"]] = (time.monotonic() - age, str(obj["v"]))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        pass
+
+
+def _save_cache() -> None:
+    """Best-effort atomic write of the whole cache (tmp+rename, 0600). A cache
+    write failure must never fail the tool call."""
+    try:
+        d = _cache_dir()
+        os.makedirs(d, exist_ok=True)
+        now = time.time()
+        lines = [json.dumps({"k": k, "t": now - (time.monotonic() - v[0]), "v": v[1]})
+                 for k, v in _CACHE.items()]
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, os.path.join(d, "cache.jsonl"))
+    except OSError:
+        pass
 
 
 # --- HTML -> text -----------------------------------------------------------
@@ -189,6 +248,7 @@ def _web_search(query: str) -> str:
     _LAST_SEARCH[0] = time.monotonic()
 
     cache_key = "q:" + query.lower().strip()
+    _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:
         return "[cached] " + hit
 
@@ -201,6 +261,12 @@ def _web_search(query: str) -> str:
                 "for a URL to fetch directly.")
     results = _parse_results(body)
     if not results:
+        if "bots use DuckDuckGo" in body:
+            return ("Search blocked: DuckDuckGo is bot-challenging this IP right "
+                    "now. Options: retry in a few minutes (a cached result may "
+                    "exist), ask the user for a URL to `url`-fetch directly, or "
+                    "set up a SearXNG instance (the designated backup backend — "
+                    "see the README's NX_WEBFETCH entry).")
         return ("No results (the lite endpoint's HTML may have changed — check "
                 "the layout before assuming the query matched nothing).")
     lines = [
@@ -209,6 +275,7 @@ def _web_search(query: str) -> str:
     ]
     text = "\n".join(lines)
     _cache_put(cache_key, text)
+    _save_cache()
     return text
 
 
@@ -218,6 +285,7 @@ def _web_fetch_url(url: str) -> str:
     if not url.startswith(("http://", "https://")):
         return "ERROR: url must start with http:// or https://"
     cache_key = "u:" + url
+    _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:
         return "[cached] " + hit
     try:
@@ -229,6 +297,7 @@ def _web_fetch_url(url: str) -> str:
     if len(text) > FETCH_MAX_BYTES:
         text = text[:FETCH_MAX_BYTES] + f"\n\n[truncated at {FETCH_MAX_BYTES} bytes; fetch a narrower URL for more]"
     _cache_put(cache_key, text)
+    _save_cache()
     return text
 
 
@@ -245,7 +314,7 @@ WEB_FETCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "Keyless web access, GET-only and rate-limited to stay polite to the free DuckDuckGo endpoints (results are cached per session). Pass `query` for a web search returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
+        "description": "Keyless web access, GET-only and rate-limited to stay polite to the free DuckDuckGo endpoints (results are cached globally for 7 days). Pass `query` for a web search returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
         "parameters": {
             "type": "object",
             "properties": {

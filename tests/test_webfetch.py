@@ -57,8 +57,17 @@ def test_schema_registered_and_gated():
     assert any(t["function"]["name"] == "web_fetch" for t in nx.TOOLS)
     import nx._dispatch as d
     assert "web_fetch" in d._TOOL_GATES
-    # env defaults to off -> gate closed (conftest scrubbed NX_*)
-    assert d._TOOL_GATES["web_fetch"]() is False
+    # on by default (0.71.0): the env default is 1, so the gate is OPEN with
+    # NX_* scrubbed (conftest); NX_WEBFETCH=0 closes it for offline hosts.
+    assert d._TOOL_GATES["web_fetch"]() is True
+    # NX_WEBFETCH is a module attr (proxied via _STATE_NAMES), not re-read
+    # from the env at gate time — set it the way tests set NX_SUBAGENTS.
+    saved = nx.NX_WEBFETCH
+    nx.NX_WEBFETCH = 0
+    try:
+        assert d._TOOL_GATES["web_fetch"]() is False
+    finally:
+        nx.NX_WEBFETCH = saved
 
 
 def test_exactly_one_of_query_url():
@@ -103,6 +112,14 @@ def test_search_throttle_enforces_interval():
         w.time.sleep = real_sleep
     # second search was held back to >= the courtesy floor
     assert sleeps and 0 < sleeps[-1] <= w.DDG_MIN_INTERVAL_SECS
+
+
+def test_search_bot_challenge_is_actionable():
+    _clean()
+    challenge = "<html>Unfortunately, bots use DuckDuckGo too.</html>"
+    with unittest.mock.patch.object(w, "_http_get", return_value=challenge):
+        out = w.web_fetch(query="blocked")
+    assert "blocked" in out and "SearXNG" in out
 
 
 def test_search_failure_fails_soft():
@@ -193,4 +210,81 @@ def test_fetch_against_local_server():
 def test_withheld_tool_refusal_names_the_gate():
     import nx._dispatch as d
     msg = d._unknown_tool_error("web_fetch")
-    assert "NX_WEBFETCH" in msg and "ask the user" in msg
+    # 0.71.0: on by default, so this refusal is only reachable with NX_WEBFETCH=0
+    os.environ["NX_WEBFETCH"] = "0"
+    try:
+        assert "NX_WEBFETCH" in msg
+    finally:
+        del os.environ["NX_WEBFETCH"]
+
+
+def test_cache_persists_across_sessions(tmp_path=None):
+    """0.71.0: the cache is global, persisted under <NX_HOME>/web-cache/ and
+    reloaded by a fresh process/module state; default TTL is 7 days."""
+    import shutil
+    home = tempfile.mkdtemp(prefix="nx-wf-home-")
+    old_home = os.environ.get("NX_HOME")
+    os.environ["NX_HOME"] = home
+    # conftest re-derives the SESSION_HOME mirror from NX_HOME before each
+    # test, but never mid-test - mirror our change by hand.
+    sys.modules["nx"].SESSION_HOME = home
+    sys.modules["nx._state"].SESSION_HOME = home
+    try:
+        _clean()
+        w._CACHE_LOADED[0] = False
+        with unittest.mock.patch.object(w, "_http_get", return_value=DDG_PAGE):
+            w.web_fetch(query="persist me")
+        cache_file = os.path.join(home, "web-cache", "cache.jsonl")
+        assert os.path.exists(cache_file) and os.path.getsize(cache_file) > 0
+        assert "Example A" in open(cache_file).read()
+        # simulate a NEW session: blank memory cache, reload from disk
+        _clean()
+        w._CACHE_LOADED[0] = False
+        with unittest.mock.patch.object(w, "_http_get",
+                                        side_effect=AssertionError("network hit")):
+            out = w.web_fetch(query="persist me")
+        assert "[cached]" in out and "Example A" in out
+        # expired entries are dropped on load
+        lines2 = open(cache_file).read().strip().split("\n")
+        import json as _json
+        obj = _json.loads(lines2[0])
+        obj["t"] -= w.CACHE_TTL_SECS + 10  # just past expiry
+        with open(cache_file, "w") as f:
+            f.write(_json.dumps(obj) + "\n")
+        _clean()
+        w._CACHE_LOADED[0] = False
+        with unittest.mock.patch.object(w, "_http_get", return_value=DDG_PAGE) as g:
+            w.web_fetch(query="persist me")
+        assert g.call_count == 1  # expired -> refetched
+        # corrupt lines are skipped, not fatal
+        with open(cache_file, "w") as f:
+            f.write("not json\n")
+            f.write(lines2[0] + "\n")
+        _clean()
+        w._CACHE_LOADED[0] = False
+        w._ensure_cache()
+        assert any("persist me" in k for k in w._CACHE)
+    finally:
+        if old_home is None:
+            os.environ.pop("NX_HOME", None)
+        else:
+            os.environ["NX_HOME"] = old_home
+        shutil.rmtree(home, ignore_errors=True)
+        _clean()
+        w._CACHE_LOADED[0] = False
+
+
+def test_cache_save_failure_never_fails_the_call():
+    _clean()
+    # break the atomic rename INSIDE _save_cache (the real call site swallows
+    # OSError, so a cache write failure must not fail the tool call)
+    real_replace = w.os.replace
+    def boom(src, dst):
+        raise OSError("disk gone")
+    w.os.replace = boom
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value=DDG_PAGE):
+            out = w.web_fetch(query="ok anyway")
+    finally:
+        w.os.replace = real_replace
+    assert "Example A" in out
