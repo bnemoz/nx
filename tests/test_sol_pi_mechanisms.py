@@ -23,12 +23,21 @@ from nx import _fusion, _obs, _reducer, _occompact  # noqa: E402
 
 # --- action fusion -----------------------------------------------------------
 
-def test_fusion_disabled_by_default():
-    assert _fusion.fusion_enabled() is False
-    # a then_run arg with fusion off runs the plain body
-    out = m.run_tool("write_file", {"path": os.path.join(_tmp, "a.txt"),
-                                    "content": "hi", "then_run": {"command": "echo x"}})
-    assert "[then_run" not in out
+def test_fusion_default_on_and_zero_flag_disables():
+    # 0.67.1: fusion is ON by default; NX_FUSION=0 restores the separate
+    # round-trip. Simulate the env-off path via the module flag.
+    saved = _fusion.FUSION_ENABLED
+    _fusion.FUSION_ENABLED = 0
+    try:
+        assert _fusion.fusion_enabled() is False
+        out = m.run_tool("write_file", {"path": os.path.join(_tmp, "a.txt"),
+                                        "content": "hi", "then_run": {"command": "echo x"}})
+        assert "[then_run" not in out
+    finally:
+        _fusion.FUSION_ENABLED = saved
+    # the import-time default reads NX_FUSION (default 1)
+    from nx._env import _env_int
+    assert _env_int("NX_FUSION", 1) == 1
 
 
 def test_fusion_success_marker(monkeypatch):

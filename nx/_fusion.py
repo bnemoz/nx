@@ -39,7 +39,11 @@ THEN_RUN_SUCCEEDED = "[then_run:succeeded]"
 THEN_RUN_FAILED = "[then_run:failed]"
 THEN_RUN_SKIPPED = "[then_run:skipped]"
 
-FUSION_ENABLED = _env_int("NX_FUSION", 0)
+# ON by default (0.67.1): fused edit+validate is the agent's most common
+# two-step cadence and the schema property itself is the only cost (~40
+# tokens per edit tool, inside the recorded 4K budget). NX_FUSION=0 restores
+# the old separate round-trip.
+FUSION_ENABLED = _env_int("NX_FUSION", 1)
 
 # Seconds nx waits for the fused command before backgrounding it. A fused
 # validation command is usually a test/build; the model asked to see its

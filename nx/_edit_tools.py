@@ -275,7 +275,7 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
 
 
 # --- action fusion (0.67.0, SoL-Pi port) -------------------------------------
-# A call carrying `then_run` (NX_FUSION=1) runs its follow-up validation
+# A call carrying `then_run` (NX_FUSION, default ON) runs its follow-up validation
 # command in the same tool call via nx/_fusion.run_fused. Declared here (not
 # in _dispatch) so DISPATCH[name] stays the same object the schema-introspection
 # tests and the sub-agent write tier see, and so the wrapper accepts `then_run`

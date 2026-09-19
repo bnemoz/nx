@@ -395,9 +395,9 @@ TOOLS.append(IMAGE_VISION_TOOL)
 TOOLS.append(PLAN_EDIT_TOOL)
 
 # --- SoL-Pi ports (0.67.0) ---------------------------------------------------
-# Action fusion: when NX_FUSION=1 the mutation tools gain an optional
+# Action fusion (0.67.1, default ON): the mutation tools gain an optional
 # `then_run` property (the follow-up validation command runs in the same
-# tool call). Appended at import so the default schema floor is unchanged.
+# tool call). NX_FUSION=0 restores the separate round-trip.
 from ._fusion import THEN_RUN_PROP, FUSION_ENABLED
 
 if FUSION_ENABLED == 1:
@@ -761,7 +761,7 @@ NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
 NX_VISION = _env_int("NX_VISION", 0)
 # --- SoL-Pi ports (0.67.0) ---------------------------------------------------
-# Action fusion (nx/_fusion.py): NX_FUSION=1 lets write_file/edit_file/
+# Action fusion (nx/_fusion.py): NX_FUSION lets write_file/edit_file/
 # multi_edit carry `then_run` — a follow-up validation command run in the
 # same tool call after a successful edit.
 NX_FUSION = FUSION_ENABLED

@@ -96,9 +96,10 @@ CLAUDE.md. Beyond the schema itself:
 ## SoL-Pi mechanism ports (0.67.0)
 
 Four opt-in mechanisms ported from the SoL-Pi (pi harness) extension, each a
-focused module with an env gate (all default OFF; see README's env table):
+focused module with an env gate (fusion default ON since 0.67.1; the other
+three default OFF; see README's env table):
 
-- **Action fusion** (`nx/_fusion.py`, `NX_FUSION=1`): the three edit tools
+- **Action fusion** (`nx/_fusion.py`, `NX_FUSION`, default ON since 0.67.1): the three edit tools
   accept `then_run` and run the follow-up command in the same tool call. The
   wrappers live in `nx/_edit_tools.py` (`_fused_body`), which also keeps
   `DISPATCH[name] is nx.write_file` true for the schema-introspection and

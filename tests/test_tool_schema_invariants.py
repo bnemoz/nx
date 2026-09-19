@@ -131,6 +131,20 @@ def test_property_shapes_are_the_flat_subset(tool):
             assert items["type"] == "object", f"{name}.{prop}: unexpected array item"
             assert items.get("required"), f"{name}.{prop}: item schema should require its keys"
             continue
+        if schema.get("type") == "object":
+            # the one documented object-of-scalars property (action fusion's
+            # then_run, nx/_fusion.py): same shape contract as the
+            # array-of-objects case -- flat scalar properties, required keys.
+            assert name in ("write_file", "edit_file", "multi_edit") and prop == "then_run", (
+                f"{name}.{prop}: unexpected object property")
+            inner = schema.get("properties") or {}
+            assert schema.get("required"), f"{name}.{prop}: object property should require its keys"
+            for ik, isch in inner.items():
+                assert set(isch) <= {"type", "enum", "description"}, (
+                    f"{name}.{prop}.{ik}: unexpected schema keys {set(isch)}")
+                assert isch.get("type") in ("string", "integer", "boolean") or "enum" in isch, (
+                    f"{name}.{prop}.{ik}: not a scalar")
+            continue
         assert set(schema) <= {"type", "enum", "description"}, \
             f"{name}.{prop}: unexpected schema keys {set(schema)}"
         assert schema.get("type") in ("string", "integer", "boolean") or "enum" in schema, \
