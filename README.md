@@ -169,6 +169,10 @@ disables the probe and the attach.
 | `-h` / `--help` | print flag usage and exit |
 | `--version` / `-v` | print the installed version and exit |
 
+Every subcommand (`run`, `sessions`, `config`, `eval`) accepts `-h/--help`
+and prints its own usage, flags, and exit codes: `nx run --help`,
+`nx sessions --help`, `nx config --help`, `nx eval --help`.
+
 `nx sessions [query]` is a shell subcommand (not a flag): it lists/filters saved
 sessions and exits without entering the REPL. `nx sessions --prune` reconciles
 the store by hand: drops index rows (and any pre-0.46 legacy index shards)

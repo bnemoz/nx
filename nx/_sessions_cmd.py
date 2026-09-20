@@ -172,6 +172,24 @@ def _session_next_hint(command: str, page: int, limit: int, query: str | None = 
     return f"{command}{quoted_query} --page {page + 1} --limit {limit}"
 
 
+_SESSIONS_USAGE = """\
+usage: nx sessions [query] [--page N] [--limit N]
+       nx sessions --prune
+
+List saved sessions and exit. With a query: substring-filters (case-
+insensitive) across title, description, preview and id.
+
+  --page N / -p N    1-based page number (default 1)
+  --limit N / -n N   rows per page (default 10)
+
+  nx sessions --prune  run the store's GC by hand and exit: drop rows whose
+                       session JSON vanished, collect unreferenced image
+                       payloads immediately, enforce the NX_IMAGES_QUOTA_MB
+                       cap. One line per action.
+
+Resume with: nx --resume <n|short-id|title>
+"""
+
 def _cli_sessions(args: list[str]) -> bool:
     """`nx sessions [query]` — list saved sessions and exit (no REPL).
 
@@ -192,6 +210,9 @@ def _cli_sessions(args: list[str]) -> bool:
         return False
     if args[0] not in ("sessions", "--sessions", "ls", "list"):
         return False
+    if any(a in ("-h", "--help") for a in args):
+        print(_SESSIONS_USAGE, end="")
+        return True
     query, page, limit, warnings = _session_list_page_options(args[1:])
     offset = (page - 1) * limit
     fetched = _list_sessions(limit=limit + 1, offset=offset, query=query)

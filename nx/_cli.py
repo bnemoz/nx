@@ -45,15 +45,33 @@ flags:
                                    exit 4 if the run errored (endpoint down,
                                    API rejected the request), else 0
 
-Batch mode — run every task in a JSONL file and emit JSONL results:
+subcommands (each has its own -h/--help):
 
-  nx run -f tasks.jsonl [--parallel N] [--continue-on-error]
+  nx run -f tasks.jsonl    batch mode: every JSONL line is one task, one JSON
+                           result line per task on stdout
+      flags: -f/--prompt-file, --parallel N, --continue-on-error,
+             --max-turns N, --timeout SEC, --yolo/--approval, --source
+      per-task exit: 0 done, 3 turn cap, 4 error
+      process exit: 0 all done, 3 any cap, 4 any error, 2 misuse
 
-Per-task exit codes: 0 done, 3 turn cap, 4 error. `nx run --help` for details.
+  nx sessions [query]      list/filter saved sessions and exit (--page N and
+                           --limit N to page); "nx sessions --prune" runs the
+                           store's GC by hand: reconcile vanished rows,
+                           collect unreferenced image payloads, enforce the
+                           NX_IMAGES_QUOTA_MB cap
 
-`nx eval run` replays the offline stub-server eval corpus through the same
-harness and scores each scenario (exit 0 when all pass); `nx eval list`
-shows the corpus.
+  nx config list|get|set|path|doctor
+                           view/check the env layer; never touches the
+                           network, so it works against a dead endpoint
+
+  nx eval list|run         offline eval corpus: replays recorded stub-server
+                           scenarios through the real batch harness and
+                           scores each (run flags: --source, --out,
+                           --filter ID, --parallel N, --json; exit 0 when
+                           all scenarios pass)
+
+headless one-shot exit codes (--prompt-file): 0 done, 4 run errored,
+2 misuse (unreadable/empty prompt file, no source), 130 interrupted.
 
   --tokens / --bench               print the exact prompt-token floor and exit
   -h, --help                      show this help and exit
@@ -109,7 +127,15 @@ def _cli_version() -> str:
         return "unknown"
 
 
+_VERBS = ("run", "config", "eval", "sessions", "ls", "list", "prune")
+
+
 def _cli_help_or_version(argv: list[str]) -> bool:
+    # Verb-first invocations fall through so each subcommand prints its own
+    # usage; the top-level flag list describes flags those verbs reject.
+    # main()'s verb dispatch handles them.
+    if argv and argv[0] in _VERBS:
+        return False
     if "-h" in argv or "--help" in argv:
         sys.stdout.write(_help_colored(_HELP_TEXT))
         return True
