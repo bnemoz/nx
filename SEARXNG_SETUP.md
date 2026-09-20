@@ -16,6 +16,16 @@ uv pip install --python .venv/bin/python -e .
 
 (`uv` is the only extra dependency; any Python 3.10+ venv works the same way.)
 
+If the editable install fails with `ModuleNotFoundError: msgspec` (or `yaml` /
+`typing_extensions`) from `searx/__init__.py`, upstream `setup.py` imports
+`searx` at build time without declaring those build deps. Workaround
+(verified 2026-09-20 on the second machine):
+
+```bash
+uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python --no-build-isolation -e .
+```
+
 ## 2. Settings
 
 Write `~/.local/share/searxng/settings.yml`:
