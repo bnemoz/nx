@@ -5,8 +5,10 @@ Covers the record policy (skip blanks/slash commands, consecutive-dedup),
 the ring-buffer cap, the NX_HISTORY_LINES=0 kill switch, corrupt-file
 fallback, per-entry truncation, file privacy, and locked concurrent appends.
 """
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,7 @@ for _var in list(os.environ):
 os.environ["NX_ENV_FILE"] = "/dev/null"
 
 _tmp = tempfile.mkdtemp(prefix="nx-input-history-")
+atexit.register(lambda: shutil.rmtree(_tmp, ignore_errors=True))
 os.environ["NX_HOME"] = _tmp
 os.environ["NX_SESSIONS_DIR"] = os.path.join(_tmp, "sessions")
 
@@ -33,7 +36,11 @@ def _reset_env(cap=None):
     """Point the recall file at a fresh temp path (and optionally cap lines),
     then reload just the path resolution — SESSION_HOME is read live from
     _state, so no module reload is needed."""
-    fd, path = tempfile.mkstemp(prefix="nx-hist-", suffix=".json")
+    # Temp files live in the module's own scratch dir, NOT /tmp: some tests
+    # leave the history file (and every written one leaves a .lock sidecar
+    # that _exclusive_file_lock intentionally never unlinks), so dropping
+    # them in /tmp would leak a pair per test, per run.
+    fd, path = tempfile.mkstemp(prefix="nx-hist-", suffix=".json", dir=_tmp)
     os.close(fd)
     os.unlink(path)  # want a missing file, not an empty one
     os.environ["NX_INPUT_HISTORY_FILE"] = path
