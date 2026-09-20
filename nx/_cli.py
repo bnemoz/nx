@@ -25,97 +25,102 @@ from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
 from ._images import _parts_preview
 
 _HELP_TEXT = """\
-usage: nx [flags]
-       nx run -f tasks.jsonl [flags]
-       nx sessions [query]
-       nx config list [filter] / get NAME / set NAME VALUE / path / doctor
-       nx eval list / run
+An interactive terminal coding agent.
 
-flags:
-  --yolo                          start in never-prompt mode (auto-approve everything)
-  --approval <all|low|medium|high|yolo>
-                                   start with a non-default approval mode
-  --source <name>                 start on a specific source
-  --resume [target]               resume a saved session; bare = most recent
-  --session <id>                  start a fresh run attached to a specific session id
-  --prompt-file <path> / -f <path>
-                                   headless one-shot mode; "-" reads stdin
-  --json                          (with --prompt-file) emit a JSON result summary
-                                   on stdout instead of streamed chat output;
-                                   exit 4 if the run errored (endpoint down,
-                                   API rejected the request), else 0
+Usage: nx [OPTIONS] [COMMAND]
 
-subcommands (each has its own -h/--help):
+Commands:
+  run <file>     Batch mode: every JSONL line is one task, one JSON result
+                 line per task on stdout. Flags: --parallel N, --max-turns N,
+                 --timeout SEC, --continue-on-error, plus the global ones below.
+  sessions       List/filter saved sessions and exit (--page N --limit N to
+                 page). "nx sessions --prune" runs the store's GC by hand:
+                 reconcile vanished rows, collect unreferenced image payloads,
+                 enforce NX_IMAGES_QUOTA_MB.
+  config         View/check the env layer: list [filter] / get NAME /
+                 set NAME VALUE / path / doctor. Never touches the network,
+                 so it works against a dead endpoint.
+  eval           Offline eval corpus: replays recorded stub-server scenarios
+                 through the real batch harness and scores each
+                 (list / run [--source, --out, --filter ID, --parallel N,
+                 --json]; exit 0 when all scenarios pass).
 
-  nx run -f tasks.jsonl    batch mode: every JSONL line is one task, one JSON
-                           result line per task on stdout
-      flags: -f/--prompt-file, --parallel N, --continue-on-error,
-             --max-turns N, --timeout SEC, --yolo/--approval, --source
-      per-task exit: 0 done, 3 turn cap, 4 error
-      process exit: 0 all done, 3 any cap, 4 any error, 2 misuse
+Options:
+  -f, --prompt-file <path>  Headless one-shot mode; "-" reads stdin. With
+                            --json, emits a JSON result summary on stdout
+                            instead of streamed chat output; exit 4 if the
+                            run errored (endpoint down, API rejected), else 0
+      --json                (with --prompt-file) see above
+      --approval <mode>     Start with a non-default approval mode
+                            [possible values: all, low, medium, high, yolo]
+  -y, --yolo                Start in never-prompt mode (auto-approve everything)
+      --source <name>       Start on a specific source
+      --resume [target]     Resume a saved session; bare = most recent
+      --session <id>        Start a fresh run attached to a specific session id
+      --tokens              Print the exact prompt-token floor and exit
+      --bench               Alias for --tokens
+  -h, --help                Display the concise help for this command
+  -V, --version             Display the nx version
 
-  nx sessions [query]      list/filter saved sessions and exit (--page N and
-                           --limit N to page); "nx sessions --prune" runs the
-                           store's GC by hand: reconcile vanished rows,
-                           collect unreferenced image payloads, enforce the
-                           NX_IMAGES_QUOTA_MB cap
+Exit codes:
+  0     Done
+  2     Misuse (unreadable/empty prompt file, no source, bad flags)
+  3     Turn cap reached (batch per-task / process summary)
+  4     Run errored (endpoint down, API rejected the request)
+  130   Interrupted
 
-  nx config list|get|set|path|doctor
-                           view/check the env layer; never touches the
-                           network, so it works against a dead endpoint
-
-  nx eval list|run         offline eval corpus: replays recorded stub-server
-                           scenarios through the real batch harness and
-                           scores each (run flags: --source, --out,
-                           --filter ID, --parallel N, --json; exit 0 when
-                           all scenarios pass)
-
-headless one-shot exit codes (--prompt-file): 0 done, 4 run errored,
-2 misuse (unreadable/empty prompt file, no source), 130 interrupted.
-
-  --tokens / --bench               print the exact prompt-token floor and exit
-  -h, --help                      show this help and exit
-  --version / -v                  show the version and exit
-
+Use `nx help <command>` or `nx <command> --help` for details on a command.
 Run `nx sessions` to list saved sessions, `nx config doctor` to check the env
 layer, or `/help` in the REPL for the full in-session command list. See
 README.md for the full NX_* env var table.
 """
 
 
-_FLAG_TOKEN_RE = re.compile(r"--?[A-Za-z][\w-]*|<[^>]+>|\[[^\]]+\]|/|[A-Z]+(?=\s|$)")
-
-
 def _help_colored(text: str) -> str:
-    """Render the help text rustup/cargo style: flag tokens and section headers
-    in the accent color, descriptions in the default text color. Falls back to
-    plain text when stdout is not a TTY or NO_COLOR is set — help is written to
-    stdout, so no ANSI may leak into a pipe."""
+    """Render the help text uv/rustup style: section headers (Usage:, Options:,
+    Commands:, Exit codes:) in BOLD, the token column of every entry line (the
+    `run <file>` part of a Commands row, the `-f, --prompt-file <path>` part of
+    an Options row) in the accent color, and descriptions in the default text
+    color — never dimmed: a dim tail on top of a dark theme is unreadable.
+
+    Only entry lines get the accent treatment: a line indented inside one of
+    the block sections whose first token sits before the 2+ space gap to its
+    description. Continuation lines (descriptions wrapping under the token
+    column) and trailing prose never start a colored run, even when they
+    mention flags ("--parallel N"). Falls back to plain text when stdout is
+    not a TTY or NO_COLOR is set — help is written to stdout, so no ANSI may
+    leak into a pipe."""
     import os
     if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
         return text
-    from ._ansi import C, RESET
-    accent = C.ACCENT
+    from ._ansi import BOLD, C, RESET
+    accent, bold = C.ACCENT, BOLD
     out = []
+    in_blocks = False   # inside the Commands:/Options:/Exit codes: body
     for line in text.splitlines():
         stripped = line.lstrip()
         indent = line[:len(line) - len(stripped)]
-        # section headers: "flags:", "Batch mode — ...:", "Per-task exit codes: ..."
-        if stripped and not stripped.startswith("-") and stripped.endswith(":") \
-                and "  " not in stripped and len(stripped) < 70:
-            out.append(f"{indent}{accent}{stripped}{RESET}")
+        # section headers
+        if stripped and stripped.endswith(":") and len(stripped) < 40 \
+                and not stripped.startswith("-"):
+            in_blocks = stripped in ("Commands:", "Options:", "Exit codes:")
+            out.append(f"{indent}{bold}{stripped}{RESET}")
             continue
-        # Only usage lines and flag lines get tokens colored; prose stays
-        # plain even when it mentions a flag ("`nx run --help` for details").
-        if not stripped.startswith(("-", "usage:", "nx ")):
+        if not in_blocks:
             out.append(line)
             continue
-        # the description (everything from the 2+ space gap on) stays plain.
+        # an entry line starts at the token column (indent 2, or 6 for an
+        # Options entry aligned under a short form); descriptions that wrap
+        # under the token column start at column 17/28 and stay plain
+        if len(indent) not in (2, 6) or not stripped:
+            out.append(line)
+            continue
         gap = re.search(r"\S\s{2,}\S", line)
-        head, tail = (line, "") if gap is None else \
-            (line[:gap.start() + 1], line[gap.start() + 1:])
-        head = _FLAG_TOKEN_RE.sub(lambda m: accent + m.group(0) + RESET, head)
-        out.append(head + tail)
+        if gap is None:
+            out.append(line)
+            continue
+        head, tail = line[:gap.start() + 1], line[gap.start() + 1:]
+        out.append(f"{indent}{accent}{head.strip()}{RESET}" + ("  " + tail if tail else ""))
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 

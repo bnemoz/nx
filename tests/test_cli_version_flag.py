@@ -37,9 +37,9 @@ def test_main_prints_version_for_v(capsys, monkeypatch):
     assert out == f"nx {_cli._cli_version()}\n"
 
 
-# --- _help_colored: rustup-style flag coloring, TTY-gated ---------------------
+# --- _help_colored: uv/rustup-style blocks, TTY-gated -------------------------
 
-def test_help_colored_marks_flags_and_headers(monkeypatch):
+def test_help_colored_marks_entries_and_headers(monkeypatch):
     import io
     from nx import _cli
     fake_tty = io.StringIO()
@@ -49,12 +49,19 @@ def test_help_colored_marks_flags_and_headers(monkeypatch):
     out = _cli._help_colored(_cli._HELP_TEXT)
     # plain text input (no ANSI in the source string)
     assert RESET not in _cli._HELP_TEXT
-    # flags and the "flags:" header are wrapped in color
+    # token column entries and section headers are wrapped in escapes
     assert "\x1b[38;2;" in out
-    # description text stays uncolored — the line's tail has no escape before it
+    assert "\x1b[1mOptions:\x1b[0m" in out
+    # entry tokens colored, descriptions stay plain after the gap
     line = next(l for l in out.splitlines() if "--yolo" in l)
-    assert line.endswith("start in never-prompt mode (auto-approve everything)")
-    # trailing description lines (no flag, not a usage line) stay entirely plain
+    assert line.endswith("Start in never-prompt mode (auto-approve everything)")
+    # long-only Options entries (indent 6) are entry lines too
+    assert "\x1b[0m  ".startswith("\x1b[0m")  # sanity: RESET imported/used
+    src_line = next(l for l in out.splitlines() if "--source <name>" in l)
+    assert src_line.startswith("      \x1b[38;2;") and src_line.rstrip().endswith(
+        "Start on a specific source")
+    # continuation and prose lines stay entirely plain
+    assert "line per task on stdout. Flags: --parallel N" in out
     assert "README.md for the full NX_* env var table." in out
 
 
@@ -62,6 +69,16 @@ def test_help_colored_falls_back_without_tty(monkeypatch):
     import io
     from nx import _cli
     monkeypatch.setattr(sys, "stdout", io.StringIO())  # isatty() -> False
+    assert _cli._help_colored(_cli._HELP_TEXT) == _cli._HELP_TEXT
+
+
+def test_help_colored_no_color_env(monkeypatch):
+    import io
+    from nx import _cli
+    fake_tty = io.StringIO()
+    fake_tty.isatty = lambda: True
+    monkeypatch.setattr(sys, "stdout", fake_tty)
+    monkeypatch.setenv("NO_COLOR", "1")
     assert _cli._help_colored(_cli._HELP_TEXT) == _cli._HELP_TEXT
 
 
