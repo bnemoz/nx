@@ -319,7 +319,14 @@ def main() -> None:
             # through to normal startup — the legacy `local` source still
             # registers, and one-shot mode surfaces its usual "no source
             # configured" exit.
-            run_onboarding()
+            if run_onboarding():
+                # On success, re-exec with a clean interpreter: `import nx`
+                # above already ran _discover_sources() against the EMPTY
+                # pre-onboarding env, and that snapshot isn't rebuilt, so
+                # continuing in-process would silently fall back to the
+                # default localhost:8080 endpoint instead of the URL the
+                # user just pasted. A fresh process sees the saved config.
+                os.execv(sys.argv[0], sys.argv)
     # `nx run ...` — headless batch mode: every line of a JSONL file is one
     # task, each runs the one-shot machinery on its own quiet thread and
     # emits one JSONL result line; the process exit code summarizes the run.

@@ -160,6 +160,35 @@ def test_wizard_refuses_non_tty(env_file, monkeypatch, capsys):
 
 # --- local SearXNG installer (yes-branch; _run mocked, no network) ----------
 
+def test_install_local_searx_rejects_non_linux(monkeypatch, capsys):
+    """macOS is posix but has no systemd — the installer must bail BEFORE
+    cloning anything (regression: os.name gate let Macs into a doomed install)."""
+    monkeypatch.setattr(_onboard.sys, "platform", "darwin")
+    monkeypatch.setattr(_onboard, "_run",
+                        lambda cmd: (_ for _ in ()).throw(
+                            AssertionError("must not run any command")))
+    assert _onboard.install_local_searx() is None
+    assert "macOS" in capsys.readouterr().out
+
+
+def test_install_local_searx_uses_uv_pip_for_uv_venvs(tmp_path, monkeypatch):
+    """uv-created venvs ship no pip, so installs must go through
+    `uv pip install --python <venv python>` (regression: `python -m pip`
+    failed with 'No module named pip' right after a successful `uv venv`)."""
+    src = tmp_path / ".local/share/searxng-src"
+    (src / "searx").mkdir(parents=True)  # post-clone tree; no venv yet
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(_onboard.sys, "platform", "linux")
+    monkeypatch.setattr(_onboard, "_probe_searx", lambda url: None)
+    calls = []
+    monkeypatch.setattr(_onboard, "_run", lambda cmd: calls.append(cmd) or True)
+    monkeypatch.setattr(_onboard, "_have", lambda c: c in ("uv", "git"))
+    assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
+    assert ["uv", "pip", "install", "--python",
+            str(src / ".venv/bin/python"), "-r",
+            str(src / "requirements.txt")] in calls
+    assert not any("-m" in c and "pip" in c for c in calls)
+
 def test_install_local_searx_happy_path(tmp_path, monkeypatch):
     src = tmp_path / "searxng-src"
     (src / "searx").mkdir(parents=True)

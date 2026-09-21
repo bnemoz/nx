@@ -65,7 +65,10 @@ def install_local_searx() -> str | None:
     success, or None when unsupported/unavailable/failed — the wizard then
     falls back to the paste-a-URL path so nothing is lost.
     """
-    if os.name != "posix":
+    # sys.platform, not os.name: macOS is also "posix" but has no systemd, so
+    # gating on os.name let Mac users walk into a doomed install (clone + venv
+    # + guaranteed-dead systemctl step).
+    if sys.platform != "linux":
         print("  ✗ automated install needs Linux + systemd; on macOS, install "
               "SearXNG manually (see SEARXNG_SETUP.md) and paste its URL.")
         return None
@@ -83,8 +86,10 @@ def install_local_searx() -> str | None:
                      "https://github.com/searxng/searxng.git", src]):
             return None
     py = os.path.join(src, ".venv", "bin", "python")
-    if not os.path.exists(py):
-        if _have("uv"):
+    venv_exists = os.path.exists(py)
+    if not venv_exists:
+        use_uv = _have("uv")
+        if use_uv:
             if not _run(["uv", "venv", os.path.join(src, ".venv"),
                          "--python", "3.12"]):
                 return None
@@ -94,12 +99,23 @@ def install_local_searx() -> str | None:
         else:
             print("  ✗ neither uv nor python3 found — cannot build a venv.")
             return None
-        if not _run([py, "-m", "pip", "install", "-r",
-                     os.path.join(src, "requirements.txt")]):
-            return None
-        if not _run([py, "-m", "pip", "install", "--no-build-isolation",
-                     "-e", src]):
-            return None
+        # venv-module venvs bundle pip; uv-created ones do NOT (uv never needs
+        # it), so `python -m pip` there fails with "No module named pip". Route
+        # installs through uv's own resolver against the venv instead.
+        if use_uv:
+            if not _run(["uv", "pip", "install", "--python", py, "-r",
+                         os.path.join(src, "requirements.txt")]):
+                return None
+            if not _run(["uv", "pip", "install", "--python", py,
+                         "--no-build-isolation", "-e", src]):
+                return None
+        else:
+            if not _run([py, "-m", "pip", "install", "-r",
+                         os.path.join(src, "requirements.txt")]):
+                return None
+            if not _run([py, "-m", "pip", "install", "--no-build-isolation",
+                         "-e", src]):
+                return None
 
     # 2. settings.yml — fresh secret per machine, loopback bind, json format
     import secrets
