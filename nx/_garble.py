@@ -115,6 +115,16 @@ _INSISTED_MAX = 256
 # can't spin.
 _MAX_REPAIR_PASSES = 6
 
+# A pipe-delimited markdown table row ("| a | b |" or "| a | b |"). Column
+# separators make short tokens alternate legitimately, which trips the
+# same-line gram/echo checks, and real tables can have an identical header
+# and data row — so table rows get a much wider false-positive margin
+# (0.76.0: two blocked edits on a pipe-delimited header example).
+_PIPE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+# Adjacent identical pipe rows needed for a dup-line signature inside a
+# table (two is an ordinary header+data row; three is still suspicious).
+_PIPE_DUP_LINES = 3
+
 
 def enabled() -> bool:
     """NX_GARBLE_GUARD is read per-call so the env var (or a /set write)
@@ -131,8 +141,10 @@ def garble_signature(new: str) -> list[str]:
         return sigs
     lines = new.split("\n")
 
-    # 1. near-adjacent duplicated lines
+    # 1. near-adjacent duplicated lines. Inside a pipe table, two identical
+    #    adjacent rows are ordinary (header + data row); require three.
     seen_at: dict[str, int] = {}
+    seen_at_first: dict[str, int] = {}
     for i, ln in enumerate(lines):
         key = ln.strip()
         if len(key) < _MIN_DUP_LINE:
@@ -140,7 +152,14 @@ def garble_signature(new: str) -> list[str]:
         j = seen_at.get(key)
         if j is not None and (i - j == 1
                               or (i - j == 2 and not lines[j + 1].strip())):
+            if _PIPE_ROW_RE.match(ln) and i - j == 1:
+                run = i - seen_at_first.get(key, j) + 1
+                if run < _PIPE_DUP_LINES:
+                    seen_at[key] = i
+                    continue
             sigs.append(f"duplicated line {j + 1}->{i + 1}: {key[:70]!r}")
+        if key not in seen_at_first:
+            seen_at_first[key] = i
         seen_at[key] = i
 
     # 2. repeated 5-word gram within a small window (mid-line restarts);
@@ -150,8 +169,12 @@ def garble_signature(new: str) -> list[str]:
     #    words apart across a line break is a loop/guard body repeating, not
     #    corruption (0.23.0: this false positive broke repeated `if not
     #    quiet:`-style blocks and forced models into contortions).
-    words = _WORD_RE.findall(new)
-    spans = _word_spans(new)
+    # Pipe-table rows are exempt from the same-line repetition checks (2 and
+    # 2b): alternating short tokens around "|" separators are the table's own
+    # shape, not a stream restart. Run the checks on the non-table lines only.
+    prose = "\n".join(ln for ln in lines if not _PIPE_ROW_RE.match(ln))
+    words = _WORD_RE.findall(prose)
+    spans = _word_spans(prose)
     if len(words) >= _GRAM_N:
         grams: dict[tuple, int] = {}
         for i in range(len(words) - _GRAM_N + 1):
@@ -159,7 +182,7 @@ def garble_signature(new: str) -> list[str]:
             j = grams.get(g)
             if j is not None and i - j <= _GRAM_N \
                     and _ECHO_JOIN_RE.fullmatch(
-                        new[spans[j + _GRAM_N - 1].end():spans[i].start()]):
+                        prose[spans[j + _GRAM_N - 1].end():spans[i].start()]):
                 sigs.append(f"repeated phrase: {' '.join(g)!r}")
             grams[g] = i
 
@@ -167,11 +190,11 @@ def garble_signature(new: str) -> list[str]:
     seen_bigram: set[str] = set()
     for i in range(len(words) - _STUTTER_ECHO_WORDS + 1):
         if words[i] == words[i + 2] and words[i + 1] == words[i + 3]:
-            gap = new[spans[i + 1].end():spans[i + 2].start()]
+            gap = prose[spans[i + 1].end():spans[i + 2].start()]
             if not _ECHO_JOIN_RE.fullmatch(gap):
                 continue  # copies not whitespace-joined on one line -> code
-            if ("\n" in new[spans[i].start():spans[i + 1].end()]
-                    or "\n" in new[spans[i + 2].start():spans[i + 3].end()]):
+            if ("\n" in prose[spans[i].start():spans[i + 1].end()]
+                    or "\n" in prose[spans[i + 2].start():spans[i + 3].end()]):
                 continue  # a copy straddles a line break -> code, not echo
             bg = f"{words[i]} {words[i + 1]}"
             if bg not in seen_bigram:

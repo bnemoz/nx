@@ -64,6 +64,35 @@ def test_short_repeated_lines_are_ignored():
     assert _garble.garble_signature("x = 1\n)\n)\nelse:\n    pass\n") == []
 
 
+# --- pipe-delimited markdown table rows (0.76.0 regression) -------------------
+# Alternating short tokens around "|" separators and an identical header+data
+# row are a table's own shape, not stream corruption.
+
+def test_pipe_table_rows_are_not_garble():
+    rows = "| Name | Type | Description | Name | Type | Description |"
+    assert _garble.garble_signature(rows) == []
+    assert _garble.garble_signature(
+        "| git commit | git commit | git commit | git commit |") == []
+    assert _garble.garble_signature("| alpha | alpha | alpha | alpha |") == []
+
+
+def test_pipe_table_header_plus_data_row_is_not_garble():
+    header = "| Argument | Required | Description |"
+    assert _garble.garble_signature(header + "\n" + header) == []
+
+
+def test_three_identical_pipe_rows_still_flagged():
+    row = "| one | two | three | four | five |"
+    sigs = _garble.garble_signature("\n".join([row] * 3))
+    assert any(s.startswith("duplicated line") for s in sigs), sigs
+
+
+def test_garble_outside_table_rows_still_detected():
+    sigs = _garble.garble_signature(
+        "| Name | Type |\nso tuple == hits the fast-path fast-path fast-path and")
+    assert "stuttered words: 'fast path'" in sigs, sigs
+
+
 def test_far_apart_repetition_is_not_garble():
     # same decorator 40 lines apart — legitimate, not a stutter
     filler = "\n".join(f"# line {i} padding to separate the two blocks" for i in range(30))
