@@ -194,6 +194,24 @@ def _http_get(url: str) -> str:
         return resp.read(FETCH_MAX_BYTES * 4).decode(charset, errors="replace")
 
 
+def _http_get_bytes(url: str) -> tuple[bytes, str]:
+    """GET with the body as raw bytes plus the declared content type. For PDF
+    routing: extracting a PDF as latin-1 text would yield garbage, so the
+    caller must know the content type before decoding."""
+    req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
+    with urllib.request.urlopen(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
+        ctype = (resp.headers.get_content_type() or "").lower()
+        return resp.read(FETCH_MAX_BYTES * 4), ctype
+
+
+def _pdf_sniff(body: bytes, ctype: str) -> bool:
+    """Content-type says PDF, or the magic bytes say it anyway (some servers
+    serve PDFs as application/octet-stream)."""
+    if "pdf" in ctype:
+        return True
+    return body[:5] == b"%PDF-"
+
+
 def _cache_get(key: str) -> str | None:
     hit = _CACHE.get(key)
     if hit and time.monotonic() - hit[0] < CACHE_TTL_SECS:
@@ -332,11 +350,27 @@ def _web_fetch_url(url: str) -> str:
     if (hit := _cache_get(cache_key)) is not None:
         return "[cached] " + hit
     try:
-        body = _http_get(url)
+        body, ctype = _http_get_bytes(url)
     except Exception as e:
         return (f"ERROR: fetch failed ({type(e).__name__}); the site may block "
                 "scripts or need a browser — try a different URL or ask the user.")
-    text = _html_to_text(body)
+    if _pdf_sniff(body, ctype):
+        # A PDF (arXiv/PMC download links, journal PDFs): decode-as-text would
+        # yield garbage. Same extractor read_file routes PDFs through —
+        # page-capped via NX_PDF_MAX_PAGES, never raises.
+        from ._pdf import extract_pdf
+        fd, path = tempfile.mkstemp(suffix=".pdf", prefix="nx-webfetch-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+            text = extract_pdf(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    else:
+        text = _html_to_text(body.decode("utf-8", errors="replace"))
     if len(text) > FETCH_MAX_BYTES:
         text = text[:FETCH_MAX_BYTES] + f"\n\n[truncated at {FETCH_MAX_BYTES} bytes; fetch a narrower URL for more]"
     _cache_put(cache_key, text)

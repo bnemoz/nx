@@ -53,8 +53,9 @@ def test_help_colored_marks_entries_and_headers(monkeypatch):
     assert "\x1b[38;2;" in out
     assert "\x1b[1mOptions:\x1b[0m" in out
     # entry tokens colored, descriptions stay plain after the gap
-    line = next(l for l in out.splitlines() if "--yolo" in l)
-    assert line.endswith("Start in never-prompt mode (auto-approve everything)")
+    line = next(l for l in out.splitlines() if l.rstrip().endswith(
+        "Start in never-prompt mode (auto-approve everything)"))
+    assert "--yolo" in line
     # long-only Options entries (indent 6) are entry lines too
     assert "\x1b[0m  ".startswith("\x1b[0m")  # sanity: RESET imported/used
     src_line = next(l for l in out.splitlines() if "--source <name>" in l)

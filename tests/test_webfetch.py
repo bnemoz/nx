@@ -223,7 +223,8 @@ def test_search_sends_get_with_polite_ua():
 
 def test_fetch_strips_html_keeps_links():
     _clean()
-    with unittest.mock.patch.object(w, "_http_get", return_value=PAGE):
+    with unittest.mock.patch.object(w, "_http_get_bytes",
+                                    return_value=(PAGE.encode(), "text/html")):
         out = w.web_fetch(url="https://example.org/page")
     assert "Heading" in out and "bold" in out
     assert "[link](https://x.example/1)" in out
@@ -233,9 +234,38 @@ def test_fetch_strips_html_keeps_links():
 def test_fetch_truncates():
     _clean()
     big = "<p>" + ("word " * 20000) + "</p>"
-    with unittest.mock.patch.object(w, "_http_get", return_value=big):
+    with unittest.mock.patch.object(w, "_http_get_bytes",
+                                    return_value=(big.encode(), "text/html")):
         out = w.web_fetch(url="https://example.org/big")
     assert "truncated" in out and len(out) < 30000
+
+
+def test_fetch_pdf_routed_to_extractor():
+    """0.79.0: a URL that serves a PDF (arXiv/PMC download links) routes
+    through extract_pdf instead of decode-as-html garbage."""
+    _clean()
+    pdf_bytes = b"%PDF-1.4 fake body"
+    with unittest.mock.patch.object(w, "_http_get_bytes",
+                                    return_value=(pdf_bytes, "application/pdf")), \
+         unittest.mock.patch("nx._pdf.extract_pdf",
+                             return_value="--- @pdf ---\nExtracted paper text") as ex:
+        out = w.web_fetch(url="https://arxiv.org/pdf/2401.00001")
+    assert ex.called
+    assert "Extracted paper text" in out
+    # magic-byte sniff when the server mislabels the content type
+    _clean()
+    with unittest.mock.patch.object(w, "_http_get_bytes",
+                                    return_value=(pdf_bytes, "application/octet-stream")), \
+         unittest.mock.patch("nx._pdf.extract_pdf",
+                             return_value="--- @pdf ---\nExtracted paper text"):
+        out = w.web_fetch(url="https://example.org/paper.pdf")
+    assert "Extracted paper text" in out
+    # HTML still goes through the normal text extractor
+    _clean()
+    with unittest.mock.patch.object(w, "_http_get_bytes",
+                                    return_value=(PAGE.encode(), "text/html")):
+        out = w.web_fetch(url="https://example.org/page2")
+    assert "Heading" in out
 
 
 def test_fetch_error_is_actionable():
