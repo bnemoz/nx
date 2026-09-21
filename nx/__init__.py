@@ -648,6 +648,7 @@ st.COMPRESS_SPILL_MAX = _env_int("NX_COMPRESS_SPILL_MAX", 6)
 st.COMPRESS_SOURCE = os.environ.get("NX_COMPRESS_SOURCE", "").strip()
 st.COMPRESS_MODEL = os.environ.get("NX_COMPRESS_MODEL", "").strip()
 st._COMPRESS_SOURCE_WARNED = False
+st._SUBAGENT_SOURCE_WARNED = False
 # (e) Bound the summary answer; the window-aware clamp still applies.
 st.COMPRESS_SUMMARY_TOKENS = _env_int("NX_COMPRESS_SUMMARY_TOKENS", 1536)
 
@@ -769,6 +770,14 @@ NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 # them live.
 NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
+# Per-subagent model routing (0.86.0): NX_SUBAGENT_MODEL (alone = same client,
+# different model id) and/or NX_SUBAGENT_SOURCE (that source's client + default
+# model; combined with _MODEL = that source + the named model). Unset → sub-
+# agents inherit the parent's active source/model. Consumed by
+# nx/_subagent_model.py at each agent start; kept here like the other
+# NX_SUBAGENT_* knobs so tests/REPL can flip them live.
+NX_SUBAGENT_MODEL = os.environ.get("NX_SUBAGENT_MODEL", "").strip()
+NX_SUBAGENT_SOURCE = os.environ.get("NX_SUBAGENT_SOURCE", "").strip()
 NX_VISION = _env_int("NX_VISION", 0)
 # --- SoL-Pi ports (0.67.0) ---------------------------------------------------
 # Action fusion (nx/_fusion.py): NX_FUSION lets write_file/edit_file/

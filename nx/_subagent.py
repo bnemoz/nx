@@ -281,7 +281,7 @@ def _subagent_stream_cut_limit(default: int) -> int:
 class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
-    __slots__ = ("table", "active", "write", "quiet")
+    __slots__ = ("table", "active", "write", "quiet", "model_target")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False) -> None:
@@ -289,6 +289,10 @@ class _SubagentContext:
         self.active = True
         self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
         self.quiet = quiet  # no terminal writes (async worker threads)
+        # (client, model, extra_request_kwargs) this agent's model calls use,
+        # or None to inherit the parent's active source/model. Pinned by
+        # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
+        self.model_target = None
 
 
 def _subagent_ctx() -> "_SubagentContext | None":
@@ -870,7 +874,10 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     # manual, serial-only fallback for tests.
     table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
-    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=write, quiet=quiet)
+    ctx = _SubagentContext(table, write=write, quiet=quiet)
+    from ._subagent_model import install as _install_model_target
+    _install_model_target(ctx)
+    _SUBAGENT_TLS.ctx = ctx
     # YOLO/APPROVE_LEVEL are process-global: snapshot+swap under the spawn lock
     # so two concurrent agents can't restore each other's snapshot out of order
     # (a leaked YOLO=True would silently disable the parent's approval gate).

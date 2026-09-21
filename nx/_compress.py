@@ -505,7 +505,21 @@ def open_stream(
     # this module — a lazy import here (instead of at module scope) avoids a
     # circular import between the two.
     from ._turn import _LoggingStream
-    assert st.client is not None and st.MODEL is not None
+    # 0.86.0: sub-agent loops ride their own (client, model, extra) when
+    # NX_SUBAGENT_SOURCE/_MODEL are set — resolved per-thread from the
+    # agent's _SubagentContext, so concurrent agents never swap globals.
+    # Everything downstream (window clamp, ladder pinning, the request)
+    # uses this target instead of the parent's st.ACTIVE/st.MODEL.
+    target = None
+    from ._subagent import _subagent_ctx
+    ctx = _subagent_ctx()
+    if ctx is not None:
+        target = ctx.model_target
+    if target is not None and st.client is not None and st.MODEL is not None:
+        call_client, call_model, call_extra, call_src = target
+    else:
+        call_client, call_model, call_extra, call_src = st.client, st.MODEL, None, st.ACTIVE
+    assert call_client is not None and call_model is not None
     if tool_choice is None and tools:
         # Default posture (0.54.0): tool_choice="auto". The pre-0.54 default
         # was "none" — send tools= so the schema renders into the prompt, but
@@ -547,8 +561,8 @@ def open_stream(
         # Per-request body fields (e.g. OpenRouter provider routing) ride in
         # extra_body. Merged here once so both the tools and no-tools fallback
         # branches below carry it through unchanged.
-        if st.ACTIVE:
-            request_opts.update(st.ACTIVE.extra_request_kwargs())
+        if call_extra:
+            request_opts.update(call_extra)
         grammar_extra = _grammar_extra_body(tools)
         if grammar_extra:
             # Merge (not overwrite) — a source's own extra_body (e.g.
@@ -561,7 +575,7 @@ def open_stream(
         # first one. pinned_index is a dict read; on a fresh source/model it is
         # 0 and this loop walks the ladder exactly as before, then remembers.
         from ._manifest import LADDER, RUNG_TAG, pin as _pin_shape, pinned_index
-        rung = pinned_index(st.ACTIVE, st.MODEL)
+        rung = pinned_index(call_src, call_model)
         stream = None
         while True:
             tools_ok, extra_ok = LADDER[rung]
@@ -574,12 +588,12 @@ def open_stream(
             if not tools_ok:
                 opts.pop("tool_choice", None)
             _tag = RUNG_TAG[rung]
-            _log_event("req", {"model": st.MODEL, "messages": messages,
+            _log_event("req", {"model": call_model, "messages": messages,
                                "tools": tools if tools_ok else None, "stream": True,
                                **({"_fallback": _tag} if _tag else {}), **opts})
             try:
-                stream = st.client.chat.completions.create(
-                    model=st.MODEL, messages=messages,
+                stream = call_client.chat.completions.create(
+                    model=call_model, messages=messages,
                     tools=tools if tools_ok else None, stream=True,
                     stream_options={"include_usage": True}, **opts)
                 break  # succeeded — remember the shape for the next turn
@@ -610,14 +624,14 @@ def open_stream(
                 if rung >= len(LADDER) - 1:
                     raise  # all rungs exhausted
                 rung += 1  # try the next reduced shape
-        _pin_shape(st.ACTIVE, st.MODEL, rung)
+        _pin_shape(call_src, call_model, rung)
         # Wrap the stream so every chunk is captured to the log on its way out.
         return _LoggingStream(stream, _llog)
     except (APIConnectionError, httpx.HTTPError) as e:
         st._LAST_API_ERROR = f"{type(e).__name__}: {e}"
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():
-            print(f"{C.ERROR}  ✗ can't reach {st.client.base_url} — is the server up? "
+            print(f"{C.ERROR}  ✗ can't reach {call_client.base_url} — is the server up? "
                   f"Set NX_BASE_URL (and NX_MODEL) to point at it.{RESET}")
     except Exception as e:
         # A context-length rejection can also surface on a fallback attempt
