@@ -65,12 +65,13 @@ def install_local_searx() -> str | None:
     success, or None when unsupported/unavailable/failed — the wizard then
     falls back to the paste-a-URL path so nothing is lost.
     """
-    # sys.platform, not os.name: macOS is also "posix" but has no systemd, so
-    # gating on os.name let Mac users walk into a doomed install (clone + venv
-    # + guaranteed-dead systemctl step).
-    if sys.platform != "linux":
-        print("  ✗ automated install needs Linux + systemd; on macOS, install "
-              "SearXNG manually (see SEARXNG_SETUP.md) and paste its URL.")
+    # sys.platform, not os.name: macOS is also "posix", and each platform
+    # gets its own service manager branch below (systemd user unit on Linux,
+    # a LaunchAgent plist on macOS). Anything else is unsupported.
+    if sys.platform not in ("linux", "darwin"):
+        print("  ✗ automated install supports Linux (systemd) and macOS "
+              "(launchd); elsewhere, install SearXNG manually and paste "
+              "its URL.")
         return None
     if not _have("git"):
         print("  ✗ git not found — install git first, or paste an existing "
@@ -135,38 +136,84 @@ def install_local_searx() -> str | None:
                 "    - html\n"
                 "    - json                    # required: nx queries ?format=json\n")
 
-    # 3. systemd user service -------------------------------------------------
-    unit_dir = os.path.join(home, ".config/systemd/user")
-    os.makedirs(unit_dir, exist_ok=True)
-    unit = os.path.join(unit_dir, "searxng.service")
-    if not os.path.exists(unit):
-        with open(unit, "w", encoding="utf-8") as f:
-            f.write(
-                "[Unit]\n"
-                "Description=SearXNG metasearch (local, for nx web_fetch)\n\n"
-                "[Service]\n"
-                f"ExecStart={py} -m searx.webapp\n"
-                f"Environment=SEARXNG_SETTINGS_PATH={cfg_dir}/settings.yml\n"
-                f"WorkingDirectory={src}\n"
-                "Restart=on-failure\n\n"
-                "[Install]\n"
-                "WantedBy=default.target\n")
-    _run(["systemctl", "--user", "daemon-reload"])
-    if not _run(["systemctl", "--user", "enable", "--now", "searxng"]):
-        print("  ✗ systemd unit failed to start — check "
-              "`journalctl --user -u searxng`. You can paste a SearXNG URL "
-              "instead.")
-        return None
-    # Linger check (boot-time autostart); advisory only.
+    # 3. service manager: LaunchAgent on macOS, systemd user unit on Linux ----
     import subprocess
-    try:
-        out = subprocess.check_output(
-            ["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger"])
-        if b"Linger=no" in out:
-            print("  ! Linger=no — the service won't autostart at boot. Enable "
-                  "with: sudo loginctl enable-linger $USER")
-    except (OSError, subprocess.CalledProcessError):
-        pass  # no loginctl (e.g. macOS server, containers) — advisory only
+    if sys.platform == "darwin":
+        # launchd has no per-user "enable" state: a plist in
+        # ~/Library/LaunchAgents is loaded and RunAtLoad keeps it alive
+        # across reboots. `launchctl setenv` is not needed since the env
+        # vars travel inside the plist itself.
+        launch_dir = os.path.join(home, "Library/LaunchAgents")
+        os.makedirs(launch_dir, exist_ok=True)
+        plist = os.path.join(launch_dir, "io.github.searxng.nx.plist")
+        log = os.path.join(cfg_dir, "searxng.log")
+        if not os.path.exists(plist):
+            with open(plist, "w", encoding="utf-8") as f:
+                f.write(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                    "<plist version=\"1.0\">\n<dict>\n"
+                    "  <key>Label</key><string>io.github.searxng.nx</string>\n"
+                    "  <key>ProgramArguments</key>\n  <array>\n"
+                    f"    <string>{py}</string>\n"
+                    "    <string>-m</string>\n"
+                    "    <string>searx.webapp</string>\n"
+                    "  </array>\n"
+                    "  <key>EnvironmentVariables</key>\n  <dict>\n"
+                    "    <key>SEARXNG_SETTINGS_PATH</key>\n"
+                    f"    <string>{cfg_dir}/settings.yml</string>\n"
+                    "  </dict>\n"
+                    f"  <key>WorkingDirectory</key><string>{src}</string>\n"
+                    "  <key>RunAtLoad</key><true/>\n"
+                    "  <key>KeepAlive</key><true/>\n"
+                    "  <key>StandardOutPath</key>\n"
+                    f"    <string>{log}</string>\n"
+                    "  <key>StandardErrorPath</key>\n"
+                    f"    <string>{log}</string>\n"
+                    "</dict>\n</plist>\n")
+        # kickstart -k (re)starts now; bootout first so an edited plist is
+        # re-read (idempotent: bootout of an unloaded label just fails, fine).
+        _run(["launchctl", "bootout", "gui", plist])
+        if not _run(["launchctl", "bootstrap", "gui", plist]) or not _run(
+                ["launchctl", "kickstart", "-k",
+                 f"gui/{os.getuid()}/io.github.searxng.nx"]):
+            print("  ✗ launchd agent failed to start — check "
+                  f"`launchctl list | grep searxng` and {log}. You can paste "
+                  "a SearXNG URL instead.")
+            return None
+    else:
+        unit_dir = os.path.join(home, ".config/systemd/user")
+        os.makedirs(unit_dir, exist_ok=True)
+        unit = os.path.join(unit_dir, "searxng.service")
+        if not os.path.exists(unit):
+            with open(unit, "w", encoding="utf-8") as f:
+                f.write(
+                    "[Unit]\n"
+                    "Description=SearXNG metasearch (local, for nx web_fetch)\n\n"
+                    "[Service]\n"
+                    f"ExecStart={py} -m searx.webapp\n"
+                    f"Environment=SEARXNG_SETTINGS_PATH={cfg_dir}/settings.yml\n"
+                    f"WorkingDirectory={src}\n"
+                    "Restart=on-failure\n\n"
+                    "[Install]\n"
+                    "WantedBy=default.target\n")
+        _run(["systemctl", "--user", "daemon-reload"])
+        if not _run(["systemctl", "--user", "enable", "--now", "searxng"]):
+            print("  ✗ systemd unit failed to start — check "
+                  "`journalctl --user -u searxng`. You can paste a SearXNG URL "
+                  "instead.")
+            return None
+        # Linger check (boot-time autostart); advisory only.
+        try:
+            out = subprocess.check_output(
+                ["loginctl", "show-user",
+                 os.environ.get("USER", ""), "-p", "Linger"])
+            if b"Linger=no" in out:
+                print("  ! Linger=no — the service won't autostart at boot. "
+                      "Enable with: sudo loginctl enable-linger $USER")
+        except (OSError, subprocess.CalledProcessError):
+            pass  # no loginctl (e.g. containers) — advisory only
 
     # 4. wait briefly for the port, then probe --------------------------------
     import time
@@ -310,7 +357,7 @@ def run_onboarding(interactive: bool = True) -> bool:
 
     print("\nOptional: set up SearXNG for web search (the preferred backend;\n"
           "without it nx falls back to DuckDuckGo, which rate-limits).\n"
-          "Install a fresh local instance? (Linux + systemd; ~5 min: clones\n"
+          "Install a fresh local instance? (Linux or macOS; ~5 min: clones\n"
           "SearXNG, builds a venv, loopback-only service) [Y/n]")
     searx = ""
     if _prompt("Install SearXNG locally? (Y/n)", "y").strip().lower() != "n":

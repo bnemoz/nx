@@ -161,14 +161,41 @@ def test_wizard_refuses_non_tty(env_file, monkeypatch, capsys):
 # --- local SearXNG installer (yes-branch; _run mocked, no network) ----------
 
 def test_install_local_searx_rejects_non_linux(monkeypatch, capsys):
-    """macOS is posix but has no systemd — the installer must bail BEFORE
-    cloning anything (regression: os.name gate let Macs into a doomed install)."""
-    monkeypatch.setattr(_onboard.sys, "platform", "darwin")
+    """Only Linux and macOS are automated (systemd / launchd); anything else
+    must bail BEFORE running any command."""
+    monkeypatch.setattr(_onboard.sys, "platform", "win32")
     monkeypatch.setattr(_onboard, "_run",
                         lambda cmd: (_ for _ in ()).throw(
                             AssertionError("must not run any command")))
     assert _onboard.install_local_searx() is None
-    assert "macOS" in capsys.readouterr().out
+    assert "Linux (systemd) and macOS" in capsys.readouterr().out
+
+
+def test_install_local_searx_macos_launchd(tmp_path, monkeypatch):
+    """On darwin the installer writes a LaunchAgent plist (RunAtLoad/KeepAlive,
+    same settings path as Linux) and bootstraps it via launchctl — no systemd
+    anywhere."""
+    home = tmp_path
+    src = home / ".local/share/searxng-src"
+    (src / "searx").mkdir(parents=True)  # post-clone tree
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(_onboard.sys, "platform", "darwin")
+    monkeypatch.setattr(_onboard, "_probe_searx", lambda url: None)
+    calls = []
+    monkeypatch.setattr(_onboard, "_run", lambda cmd: calls.append(cmd) or True)
+    monkeypatch.setattr(_onboard, "_have", lambda c: c in ("uv", "git"))
+    assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
+    plist = home / "Library/LaunchAgents/io.github.searxng.nx.plist"
+    text = plist.read_text()
+    assert "<string>-m</string>" in text and "<string>searx.webapp</string>" in text
+    assert "RunAtLoad" in text and "KeepAlive" in text
+    assert ".local/share/searxng/settings.yml" in text
+    assert not any("systemctl" in c for c in calls)
+    assert any(c[0] == "launchctl" and c[1] == "bootstrap" for c in calls)
+    assert any(c[0] == "launchctl" and c[1] == "kickstart" for c in calls)
+    assert ["uv", "pip", "install", "--python",
+            str(src / ".venv/bin/python"), "-r",
+            str(src / "requirements.txt")] in calls
 
 
 def test_install_local_searx_uses_uv_pip_for_uv_venvs(tmp_path, monkeypatch):

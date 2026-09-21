@@ -60,7 +60,8 @@ Either way, `uv tool upgrade nx` pulls the latest later on.
 short wizard asks you to paste an API base URL and key, then saves them to
 `~/.env` — next launch just works. It also offers web-search setup: point it
 at an existing SearXNG instance, let it **install a fresh loopback-only one
-for you** (Linux + systemd; automates the SEARXNG_SETUP.md steps), or skip.
+for you** (Linux or macOS; automates the SEARXNG_SETUP.md steps — a systemd
+user unit on Linux, a LaunchAgent on macOS), or skip.
 Re-run any time with `nx setup`.
 
 Prefer to configure by hand? `nx` reads credentials from `~/.env`

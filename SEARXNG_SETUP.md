@@ -126,13 +126,16 @@ Then in a fresh nx session, confirm `web_fetch` with a `query` uses SearXNG
 
 ## Checklist for the second machine
 
-(Or: let the nx onboarding wizard do all of this — `nx setup`, option [2]
-automates steps 1–4 and verifies with the step-5 probe. The manual path is
-below.)
+(Or: let the nx onboarding wizard do all of this — `nx setup` automates
+steps 1–4 and verifies with the step-5 probe, on Linux (systemd) and macOS
+(launchd). The manual path is below.)
 
 1. Clone source + venv (step 1)
 2. Write `settings.yml` with a **fresh** `secret_key`, loopback bind, json format (step 2)
-3. Install + enable the systemd unit; check lingering (step 3)
+3. Linux: install + enable the systemd unit; check lingering. macOS: the
+   wizard writes `~/Library/LaunchAgents/io.github.searxng.nx.plist`
+   (RunAtLoad + KeepAlive, same settings path) and bootstraps it; logs land
+   in `~/.local/share/searxng/searxng.log` (step 3)
 4. Export `NX_SEARX_URL=http://127.0.0.1:8888` (step 4)
 5. Run all three verification commands (step 5)
 6. Optionally update the nx project memory note for that machine
