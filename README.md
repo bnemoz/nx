@@ -200,7 +200,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_ENV_FILE` | `.env` file to auto-load (default `~/.env`) |
 | `NX_SESSION_IMAGES` | keep `read_image` payloads out of session JSON (default `1`): the base64 lives content-addressed in `<sessions>/_images/<sha256>.b64` — deduped across sessions, written once, garbage-collected to the images still referenced by any session — and messages carry a small `image_ref` (hash, mime, size, original path) that resume expands back into the live transcript. A missing/corrupt sidecar degrades that image to a text note instead of a 400. `0` restores 0.38.x inline-base64 storage for NEW saves; already-stored payloads are still garbage-collected (since 0.45 they were orphaned forever under `0`) |
 | `NX_IMAGES_QUOTA_MB` | size cap on the `_images/` payload dir (default `200` MB, `0` disables): once over quota, the oldest unreferenced payloads are evicted first, then — only if still over — the oldest referenced ones (their resume degrades to the missing-sidecar note). Enforced after every indexed save and by `nx sessions --prune` |
-| `NX_THEME` | `mocha` (default) / `latte` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
+| `NX_THEME` | `mocha` (default) / `latte` / `frappe` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `amethyst` |
 | `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users. While a tool runs the line also carries live progress (`· 12s · 2/3 · compiling 3/40`) — see [Live tool progress](#live-tool-progress); under `0` that tail is suppressed, since a redraw-once line cannot show a moving clock |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior. The probe's response budget is `NX_THINKING_PROBE_MAX_TOKENS` (default 256) — generous on purpose: a reasoning model's thinking phase counts against `max_tokens`, and a tight budget cut the probe mid-think before any reasoning token landed, recording the wrong answer for the (source, model) pair |
@@ -367,8 +367,12 @@ trailing note cannot fold away your last real tool result.
 
 ### Themes
 
-Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
-`magenta`, `gray`, `blue`, and `orange` — that ten semantic roles draw from:
+Each theme supplies twelve palette hues — `cyan`, `green`, `yellow`, `red`,
+`magenta`, `gray`, `blue`, `orange`, `purple`, `teal`, `pink`, and `brown` —
+that ten semantic roles draw from. All twelve slots are used: the roles take
+the original eight, and the say-panel's markdown + code rendering maps the
+rest (purple bullets/numbers, teal table borders, brown link URLs and
+docstrings, pink decorators):
 
 | role | default hue | what it colors |
 | --- | --- | --- |
@@ -386,7 +390,7 @@ Each theme supplies eight palette hues — `cyan`, `green`, `yellow`, `red`,
 `/theme` switches themes live and saves `NX_THEME` to `~/.env`. Any single
 role can be repinned independently of the theme with
 `NX_<ROLE>_COLOR=<hue|hex>` — the value is either a palette key (one of the
-eight hues above, resolved against the *active* theme so it tracks
+twelve hues above, resolved against the *active* theme so it tracks
 `/theme` switches) or a literal 6-digit hex (theme-independent). For example,
 `NX_ACCENT_COLOR=magenta` makes borders/prompt magenta in every theme, while
 `NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
@@ -398,9 +402,15 @@ links use the `ACCENT` hue, code uses `TEXT`, bullets use `LABEL`), so
 `/theme` and the `NX_<ROLE>_COLOR` overrides restyle the markdown panel too —
 it is not a separate fixed palette.
 
+`frappe` is Catppuccin Frappé — the medium-dark sibling of the default `mocha`
+(dark) and `latte` (light) flavors, with all twelve hues taken from the
+official flavor palette.
+
 `amethyst` is a monochrome purple theme: every hue is a violet/orchid/pink
 shade, so the ten roles stay separable by lightness and by position in the
-violet→pink band instead of by hue. `gray` (`REASONING_TEXT`) deliberately
+violet→pink band instead of by hue (the four extra hues follow the same rule:
+`purple`/`teal` sit violet-side, `pink` pushes past magenta, and `brown` is a
+muted mauve). `gray` (`REASONING_TEXT`) deliberately
 stays a neutral gray — reasoning text is the one thing that doesn't go purple.
 If you want it purple too, `NX_REASONING_TEXT_COLOR=magenta` does that.
 

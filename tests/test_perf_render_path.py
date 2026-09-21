@@ -95,11 +95,11 @@ def _feed(total_chars, chunk_chars, step=0.05):
     clock by `step` per chunk (a slower-than-real stream, so the throttle is
     the only thing that can hold the frame count down). Return
     (total_bytes_parsed_as_markdown, number_of_markdown_parses)."""
-    saved_live, saved_md, saved_time = sp.Live, sp.Markdown, sp.time.time
+    saved_live, saved_md, saved_time = sp.Live, sp.themed_markdown, sp.time.time
     _CountingMarkdown.parses = []
     clock = _Clock()
     sp.Live = _CountingLive
-    sp.Markdown = _CountingMarkdown
+    sp.themed_markdown = _CountingMarkdown
     sp.time.time = clock
     try:
         p = StreamParser(_NoLive()(), 0.0)
@@ -157,11 +157,11 @@ def test_final_parse_skipped_when_nothing_arrived():
     """`stop_say_live` must not re-parse the whole answer when the last
     throttled frame already covers every byte received (PF-04's 'no double
     final parse')."""
-    saved_live, saved_md, saved_time = sp.Live, sp.Markdown, sp.time.time
+    saved_live, saved_md, saved_time = sp.Live, sp.themed_markdown, sp.time.time
     _CountingMarkdown.parses = []
     clock = _Clock()
     sp.Live = _CountingLive
-    sp.Markdown = _CountingMarkdown
+    sp.themed_markdown = _CountingMarkdown
     sp.time.time = clock
     try:
         p = StreamParser(_NoLive()(), 0.0)

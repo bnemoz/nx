@@ -27,10 +27,11 @@ import nx as m  # noqa: E402
 
 from nx import _ansi  # noqa: E402
 
-PALETTE = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")
+PALETTE = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
+           "purple", "teal", "pink", "brown")
 
 
-def test_every_theme_supplies_all_eight_distinct_hues():
+def test_every_theme_supplies_all_twelve_distinct_hues():
     for tname, hexes in _ansi.THEMES.items():
         assert set(hexes) == set(PALETTE), f"{tname} missing/extra hues: {set(hexes)}"
         assert len(set(hexes.values())) == len(PALETTE), (
@@ -130,13 +131,13 @@ def test_set_theme_round_trip_resets_eight_hues():
     _apply_with_no_overrides("nord")
     nord = {k: getattr(m.C, k.upper()) for k in PALETTE}
     assert orig != nord, "nord should differ from the default (mocha)"
-    assert len(set(nord.values())) == 8, "nord hues not all distinct"
+    assert len(set(nord.values())) == 12, "nord hues not all distinct"
     _apply_with_no_overrides(_ansi.DEFAULT_THEME)
     for k in PALETTE:
         assert getattr(m.C, k.upper()) == orig[k], f"{k} not restored"
 
 
-def test_swatch_renders_all_eight_hues():
+def test_swatch_renders_all_twelve_hues():
     # each hue contributes one "██" terminated by RESET
     s = _ansi.swatch("mocha")
     assert s.count(_ansi.RESET) == len(PALETTE)
@@ -249,6 +250,84 @@ def test_rich_console_styles_markdown_with_theme_palette():
         out = buf.getvalue()
         expected = "\x1b[1;38;2;137;180;250m"  # ACCENT hue, bold (h1)
         assert expected in out, "say-panel markdown not rendered in theme hue"
+    finally:
+        console.file = rich_stdout
+        _ansi.set_theme(orig)
+
+
+def test_rich_table_border_follows_theme():
+    """The table border style is themed (TEAL — its own hue, distinct from the
+    ACCENT headings), not rich's default cyan."""
+    from rich.markdown import Markdown  # noqa: F401  (import path guard)
+    from nx import _rich, _turn
+    console = _turn._say_console
+    orig = _ansi.C.name
+    try:
+        _ansi.set_theme("mocha")
+        styles = _rich._build_theme().styles
+        assert "#" + _ansi.THEMES["mocha"]["teal"] in str(styles["markdown.table.border"])
+    finally:
+        _ansi.set_theme(orig)
+
+
+def test_code_blocks_derive_pygments_colors_from_palette():
+    """Fenced code blocks are colored from the ACTIVE theme's palette via
+    _PaletteSyntaxTheme — not a fixed pygments style, and not a name→name
+    mapping. A /theme switch must move the token hues."""
+    from pygments.token import Token
+    from nx import _rich
+    orig = _ansi.C.name
+    try:
+        _ansi.set_theme("mocha")
+        th_mocha = _rich.code_theme()
+        kw = th_mocha.get_style_for_token(Token.Keyword)
+        assert kw.color.get_truecolor().hex \
+            == "#" + _ansi.THEMES["mocha"]["blue"], \
+            "Keyword hue should be the theme's accent blue"
+        cm = th_mocha.get_style_for_token(Token.Comment)
+        assert cm.color.get_truecolor().hex == "#" + _ansi.THEMES["mocha"]["gray"]
+        # hierarchical lookup: a deep token inherits its ancestor's hue
+        d = th_mocha.get_style_for_token(Token.Literal.String.Double)
+        assert d.color.get_truecolor().hex == "#" + _ansi.THEMES["mocha"]["green"]
+        # a theme switch re-derives (fresh instance per call)
+        _ansi.set_theme("latte")
+        th_latte = _rich.code_theme()
+        assert th_latte.get_style_for_token(Token.Keyword).color \
+            .get_truecolor().hex == "#" + _ansi.THEMES["latte"]["blue"]
+        # and the hexes differ between dark and light themes
+        assert (th_mocha.get_style_for_token(Token.Keyword).color
+                != th_latte.get_style_for_token(Token.Keyword).color)
+    finally:
+        _ansi.set_theme(orig)
+
+
+def test_rendered_code_block_uses_theme_hues_end_to_end():
+    """Full render path: the say-console + themed_markdown must emit the
+    theme's own hues in the ANSI stream for a fenced code block."""
+    import io
+    from nx import _rich, _turn
+    console = _turn._say_console
+    orig = _ansi.C.name
+
+    def rgb(h):
+        return "38;2;%d;%d;%d" % (int(h[:2], 16), int(h[2:4], 16), int(h[4:], 16))
+
+    try:
+        _ansi.set_theme("mocha")
+        rich_stdout = console.file
+        buf = io.StringIO()
+        console.file = buf
+        console._force_terminal = True
+        console._color_system = "truecolor"
+        console.print(_rich.themed_markdown(
+            "```python\ndef f():  # c\n    return 42\n```"))
+        out = buf.getvalue()
+        hexes = _ansi.THEMES["mocha"]
+        assert rgb(hexes["blue"]) in out, "keyword not in accent hue"
+        assert rgb(hexes["gray"]) in out, "comment not in reasoning gray"
+        assert rgb(hexes["purple"]) in out, "number not in purple"
+        # monokai's signature keyword cyan must be gone
+        assert "102;217;239" not in out, "still rendering monokai hues"
     finally:
         console.file = rich_stdout
         _ansi.set_theme(orig)

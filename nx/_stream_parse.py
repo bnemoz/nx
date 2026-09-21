@@ -17,7 +17,8 @@ from typing import Any
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
+
+from ._rich import themed_markdown
 
 from ._ansi import DIM, CLEAR_LINE, C, RESET, strip_ansi_for_display
 from ._special_tokens import (
@@ -192,7 +193,7 @@ class StreamParser:
             # PF-04: Live(transient=False) already froze the last frame; only
             # re-parse the whole answer if content arrived since that render.
             if self._clean_len != self._last_render_len:
-                self.say_live.update(Markdown(self._clean_str))
+                self.say_live.update(themed_markdown(self._clean_str))
                 self._last_render_len = self._clean_len
             self.say_live.stop()
             self.say_live = None
@@ -422,7 +423,7 @@ class StreamParser:
                         _SAY_MIN_INTERVAL * self._clean_len / _SAY_THROTTLE_SCALE_BYTES)
                     if not self.quiet and self.say_live is not None \
                             and now - self.last_say_render >= interval:
-                        self.say_live.update(Markdown(self._clean_str))
+                        self.say_live.update(themed_markdown(self._clean_str))
                         self.last_say_render = now
                         self._last_render_len = self._clean_len
                 else:
@@ -449,7 +450,7 @@ class StreamParser:
                                              refresh_per_second=12, transient=False)
                         self.say_live.start()
                     if self.say_live is not None:
-                        self.say_live.update(Markdown(prefix))
+                        self.say_live.update(themed_markdown(prefix))
                         self.say_live.stop()
                         self.say_live = None
                     self._live_committed = True

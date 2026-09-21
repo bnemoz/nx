@@ -44,43 +44,66 @@ def strip_ansi_for_display(text: str) -> str:
     text = _OTHER_ESC_RE.sub("", text)
     return _C0_RE.sub("", text)
 
-# Eight hex values per theme: cyan/green/yellow/red/magenta, plus "gray",
-# "blue", and "orange". blue backs the ACCENT role (borders, model name, the
-# chatbox prompt) so it no longer collides with STATUS_BAR's cyan; orange backs
-# LABEL (source/session badges) so it no longer collides with TOOL_OUTPUT's
-# magenta. "gray" is used for reasoning-block text, where plain SGR-2 dim or
-# ANSI bright-black (90) is unreadable on many terminals, so it needs its own
-# legible-but-muted hue per theme rather than a fixed gray.
+# Twelve hex values per theme: cyan/green/yellow/red/magenta + gray, blue,
+# orange (the original eight), plus purple, teal, pink, and brown. Every slot
+# is expected to be *used* somewhere: the ten semantic roles draw from eight of
+# them (ROLE_DEFAULTS below), and _rich.py maps markdown styles and code-block
+# syntax tokens onto the rest (purple bullets/numbers, pink decorators/links,
+# brown docstrings/link URLs, teal table borders). "gray" is reasoning text,
+# where plain SGR-2 dim or ANSI bright-black (90) is unreadable on many
+# terminals, so it needs its own legible-but-muted hue per theme rather than a
+# fixed gray. A new theme must be designed as a whole: all twelve slots
+# distinct in RGB space, and the amethyst monochrome rule (below) is the
+# exception that proves it.
 THEMES: dict[str, dict[str, str]] = {
     "mocha": {   # Catppuccin Mocha (default) — dark
         "cyan": "89dceb", "green": "a6e3a1", "yellow": "f9e2af",
         "red": "f38ba8", "magenta": "cba6f7", "gray": "7f849c",
         "blue": "89b4fa", "orange": "fab387",
+        "purple": "b4befe", "teal": "94e2d5", "pink": "f5c2e7",
+        "brown": "e0b089",
     },
     "latte": {   # Catppuccin Latte — light
         "cyan": "04a5e5", "green": "40a02b", "yellow": "df8e1d",
         "red": "d20f39", "magenta": "8839ef", "gray": "6c6f85",
         "blue": "1e66f5", "orange": "fe640b",
+        "purple": "7287fd", "teal": "179299", "pink": "ea76cb",
+        "brown": "9a6b4f",
     },
     "dracula": {
         "cyan": "8be9fd", "green": "50fa7b", "yellow": "f1fa8c",
         "red": "ff5555", "magenta": "bd93f9", "gray": "6272a4",
         "blue": "7aa6da", "orange": "ffb86c",
+        "purple": "aa87f0", "teal": "5af0c8", "pink": "ff79c6",
+        "brown": "c9a56e",
     },
     "nord": {
         "cyan": "88c0d0", "green": "a3be8c", "yellow": "ebcb8b",
         "red": "bf616a", "magenta": "b48ead", "gray": "4c566a",
         "blue": "81a1c1", "orange": "d08770",
+        "purple": "9d7fc9", "teal": "8fbcbb", "pink": "d8a1c0",
+        "brown": "a97c5e",
     },
     "gruvbox": {   # Gruvbox dark
         "cyan": "8ec07c", "green": "b8bb26", "yellow": "fabd2f",
         "red": "fb4934", "magenta": "d3869b", "gray": "928374",
         "blue": "83a598", "orange": "fe8019",
+        "purple": "b16286", "teal": "689d6a", "pink": "e78a4e",
+        "brown": "af3a03",
     },
     "vaporwave": {   # neon pastel — fluorescent but soft
         "cyan": "5ffbf1", "green": "8aff80", "yellow": "fdfd96",
         "red": "ff6ec7", "magenta": "d183ff", "gray": "9a86b3",
         "blue": "7aa2f7", "orange": "ff9e64",
+        "purple": "a44dff", "teal": "3dfcd2", "pink": "ff9ecb",
+        "brown": "d9a05b",
+    },
+    "frappe": {   # Catppuccin Frappé — medium-dark
+        "cyan": "81c8be", "green": "a6d189", "yellow": "e5c890",
+        "red": "e78284", "magenta": "ca9ee6", "gray": "838ba7",
+        "blue": "8caaee", "orange": "ef9f76",
+        "purple": "babbf1", "teal": "99d1db", "pink": "f4b8e4",
+        "brown": "d699b6",
     },
     "amethyst": {   # monochrome purple — every hue is a violet/orchid/pink
         # shade, so roles stay distinguishable by lightness and by position in
@@ -89,14 +112,19 @@ THEMES: dict[str, dict[str, str]] = {
         "cyan": "b581f8", "green": "dfccff", "yellow": "b433ff",
         "red": "f65aa3", "magenta": "ec8fff", "gray": "9e9eaa",
         "blue": "6655fc", "orange": "fa47cd",
+        "purple": "8a5cf6", "teal": "c4a8ff", "pink": "ff8ad8",
+        "brown": "b092d9",
     },
 }
 DEFAULT_THEME = "mocha"
-_PALETTE_KEYS: tuple[str, ...] = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")
+_PALETTE_KEYS: tuple[str, ...] = (
+    "cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
+    "purple", "teal", "pink", "brown",
+)
 
-# Semantic roles used across the codebase, each backed by one of the eight
+# Semantic roles used across the codebase, each backed by one of the twelve
 # palette hues above by default. Centralizing the role→hue mapping here means
-# a new theme only has to supply the eight palette hexes (above) — it never
+# a new theme only has to supply the twelve palette hexes (above) — it never
 # needs to know about roles. Each role can also be overridden independently
 # via `NX_<ROLE>_COLOR` (see _parse_color_override), e.g. NX_TEXT_COLOR=green,
 # NX_STATUS_BAR_COLOR=ffaa00, NX_REASONING_TEXT_COLOR=gray.
@@ -154,6 +182,10 @@ class _Colors:
     GRAY: str
     BLUE: str
     ORANGE: str
+    PURPLE: str
+    TEAL: str
+    PINK: str
+    BROWN: str
     TEXT: str
     REASONING_TEXT: str
     STATUS_BAR: str
@@ -178,6 +210,10 @@ class _Colors:
         self.GRAY = _rgb(hexes["gray"])
         self.BLUE = _rgb(hexes["blue"])
         self.ORANGE = _rgb(hexes["orange"])
+        self.PURPLE = _rgb(hexes["purple"])
+        self.TEAL = _rgb(hexes["teal"])
+        self.PINK = _rgb(hexes["pink"])
+        self.BROWN = _rgb(hexes["brown"])
         for role, palette_key in ROLE_DEFAULTS.items():
             override = _ROLE_OVERRIDES.get(role)
             if override is None:
@@ -215,9 +251,10 @@ def set_theme(name: str) -> bool:
 
 
 def swatch(theme_name: str) -> str:
-    """Return a one-line rendered sample of `theme_name`'s palette (the eight hue slots)."""
+    """Return a one-line rendered sample of `theme_name`'s palette (the twelve hue slots)."""
     hexes = THEMES[theme_name]
-    order = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange")
+    order = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
+             "purple", "teal", "pink", "brown")
     return " ".join(f"{_rgb(hexes[k])}██{RESET}" for k in order)
 
 
