@@ -34,6 +34,10 @@ Commands:
   run <file>     Batch mode: every JSONL line is one task, one JSON result
                  line per task on stdout. Flags: --parallel N, --max-turns N,
                  --timeout SEC, --continue-on-error, plus the global ones below.
+  telegram       Long-poll a Telegram bot and run one turn per allowed-chat
+                 message. Needs NX_TELEGRAM_BOT_TOKEN and
+                 NX_TELEGRAM_ALLOWED_CHATS (hard allowlist — empty refuses to
+                 serve). Gated calls auto-deny unless started with --yolo.
   sessions       List/filter saved sessions and exit (--page N --limit N to
                  page). "nx sessions --prune" runs the store's GC by hand:
                  reconcile vanished rows, collect unreferenced image payloads,
@@ -135,7 +139,7 @@ def _cli_version() -> str:
         return "unknown"
 
 
-_VERBS = ("run", "config", "eval", "sessions", "ls", "list", "prune", "setup")
+_VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup")
 
 
 def _cli_help_or_version(argv: list[str]) -> bool:
@@ -333,6 +337,14 @@ def main() -> None:
     if sys.argv[1:2] == ["run"]:
         from ._batch import run_batch
         sys.exit(run_batch(sys.argv[2:]))
+    # `nx telegram` — the Telegram gateway: long-poll one bot, one turn per
+    # allowed-chat message. Env-gated (token + allowlist), so it exits 2 with
+    # guidance rather than touching the network when unconfigured.
+    if sys.argv[1:2] == ["telegram"]:
+        from ._env import _load_env_file
+        _load_env_file()
+        from ._telegram import cli_telegram
+        sys.exit(cli_telegram(sys.argv[2:]))
     # `nx config list|get|set|path|doctor` — viewer/doctor over the env layer
     # (P3-9). Read-only except `set`, which goes through _env._set_env_var.
     # Never touches the network: nx/__init__.py skips switch_source()'s
