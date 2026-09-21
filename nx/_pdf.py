@@ -3,11 +3,11 @@ reaches the model the same way a text-file mention does.
 
 Extraction goes through pymupdf4llm (PyMuPDF's LLM-oriented markdown
 extractor), which keeps headings, lists, and tables as markdown instead of
-the flat word soup a naive text dump produces. The dependency is OPTIONAL and
-heavy, so the import is lazy — `nx` starts fine without it, and a mention of a
-PDF when it is missing carries a one-line note naming the install command
-(mirroring how an image mention with NX_VISION off names its gate), not an
-error. Pure function, no globals/state.
+the flat word soup a naive text dump produces. The dependency is HARD (in
+`dependencies` since 0.75.0) but imported lazily — `nx` startup shouldn't
+load PyMuPDF's ~30 MB unless a PDF is actually mentioned, and a missing or
+broken install surfaces as a one-line error in the mention block rather than
+aborting the turn. Pure function, no globals/state.
 """
 from __future__ import annotations
 
@@ -18,10 +18,6 @@ from ._env import _env_int
 # header names the range it actually carried so the truncation is visible.
 PDF_MAX_PAGES = 50
 
-# Named dependency, not a hard one: lighter installs that never mention a PDF
-# shouldn't pay for PyMuPDF's ~30 MB.
-_INSTALL_HINT = ("pymupdf4llm is not installed — PDF mentions need it: "
-                 "`uv pip install pymupdf4llm` (or `pip install 'nx[pdf]'`)")
 
 
 def _pdf_max_pages() -> int:
@@ -34,13 +30,16 @@ def extract_pdf(path: str, token: str | None = None) -> str:
     """Return a `--- @token ---` block holding the PDF's text as markdown, or
     a one-line note when extraction isn't possible (missing dependency, open
     failure, empty). Never raises: a mention must degrade to text, not abort
-    the turn."""
+    the turn. pymupdf4llm is a hard dependency, so the missing-dependency
+    path only fires on a broken/partial install."""
     label = token or path
     head = f"\n\n--- @{label} ---\n"
     try:
-        import pymupdf4llm  # lazy: optional, heavy
-    except ImportError:
-        return head + f"(a PDF you asked about — not inlined: {_INSTALL_HINT})"
+        import pymupdf4llm  # lazy: startup shouldn't load PyMuPDF's ~30 MB
+    except ImportError as e:
+        return head + ("ERROR: pymupdf4llm is a required nx dependency but "
+                       f"failed to import ({e}) — reinstall: "
+                       "`uv pip install -e .`")
     # pymupdf4llm depends on PyMuPDF, so `pymupdf` is importable alongside it;
     # we open the doc ourselves to learn the page count and cap the extraction.
     try:

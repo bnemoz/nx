@@ -224,7 +224,7 @@ def test_midfile_window_carries_search_steering():
 def test_pdf_path_routes_to_extractor(monkeypatch):
     # A PDF read through read_file must not hit the UTF-8 error path (models
     # retry that forever); it routes to the markdown extractor, which without
-    # pymupdf4llm installed returns the one-line install note — never an error.
+    # missing pymupdf4llm surfaces as a broken-install ERROR — never an abort.
     path = _write("doc.pdf", b"%PDF-1.4 fake binary not utf8 \xff\xfe".decode("latin-1"))
     out = m.read_file(path)
     assert "ERROR" not in out or "could not open PDF" in out or "pymupdf4llm" in out

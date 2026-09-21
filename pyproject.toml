@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.74.0"
+version = "0.75.0"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -14,17 +14,12 @@ classifiers = [
 ]
 dependencies = [
     "httpx",
+    "pymupdf4llm",
     "rich",
 ]
 
 [project.scripts]
 nx = "nx:main"
-
-[project.optional-dependencies]
-# Optional, heavy: enables the @doc.pdf mention (nx/_pdf.py). Not installed by
-# default so a plain `nx` install stays small; the mention names the install
-# when it is absent.
-pdf = ["pymupdf4llm"]
 
 [tool.setuptools]
 packages = ["nx"]

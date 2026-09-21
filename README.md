@@ -210,7 +210,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_READ_FILE_MAX_LINES` | ceiling on the `read_file` window in lines (default 25000; `0` disables). A larger `limit` is refused with steering toward `search_files`, so a model cannot fill its context by paging a huge file with ever-bigger windows. `.pdf` paths bypass paging entirely and route to the markdown extractor (`NX_PDF_MAX_PAGES`) |
 | `NX_MENTION_INLINE_LIMIT` | max size in bytes for a file `@mention` to inline whole (default 4096). Bigger files get a stub naming the size and pointing at `read_file`/`search_files`. CSV/TSV/`.tab` over 1 KB always take the preview path instead: header + first 10 data rows + row count, since the columns are nearly all a data-file mention is about |
 | `NX_MENTION_CSV_SCAN_BYTES` | max CSV/TSV preview size for the row-count scan (default 1048576 = 1 MB); bigger files skip the full read and report `N+` rows instead of an exact count |
-| `NX_PDF_MAX_PAGES` | pages a `@doc.pdf` mention extracts to markdown (default 50; `0` = no cap). A longer PDF is extracted up to the cap and the block header names the range carried (`PDF, 300 pages — carried the first 50`), so the truncation is visible and a bigger pull is one env var away. Extraction needs the optional `pymupdf4llm` dependency (`pip install pymupdf4llm`); without it the mention carries a one-line note naming the install instead of erroring |
+| `NX_PDF_MAX_PAGES` | pages a `@doc.pdf` mention extracts to markdown (default 50; `0` = no cap). A longer PDF is extracted up to the cap and the block header names the range carried (`PDF, 300 pages — carried the first 50`), so the truncation is visible and a bigger pull is one env var away. Extraction needs `pymupdf4llm`, a hard dependency since 0.75.0; a broken install surfaces as an `ERROR:` line in the mention block instead of erroring out the turn |
 | `NX_READ_FILE_SCAN_LINES` | how far past a windowed `read_file` the header's exact line-count scan may reach (default 200000); beyond it the header reports a lower bound as `N+` instead of scanning an unbounded file |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables). Override the file itself with `NX_INPUT_HISTORY_FILE` |
 | `NX_LOG_MAX_BYTES` | size cap on the per-session request log (`~/.nx/logs`, default 10 MB) — the log rolls rather than growing without bound |
@@ -510,10 +510,10 @@ In the REPL input box:
   accepts image content parts. A **`@doc.pdf`** mention is extracted to
   markdown (headings, lists, and tables preserved) with
   [pymupdf4llm](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/) and
-  inlined as text — an optional dependency, so `pip install pymupdf4llm` (or
-  `nx[pdf]`) is needed for it; a mention without it carries a note naming the
-  install. The page range carried is capped by `NX_PDF_MAX_PAGES` and named in
-  the block header.
+  inlined as text — a hard dependency since 0.75.0, so no extra install is
+  needed; a broken install surfaces as an `ERROR:` line in the mention block
+  rather than aborting the turn. The page range carried is capped by
+  `NX_PDF_MAX_PAGES` and named in the block header.
 
 A plain `input()` fallback is used when stdin/stdout isn't a TTY.
 

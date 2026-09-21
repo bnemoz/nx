@@ -465,17 +465,13 @@ wheels = [
 
 [[package]]
 name = "nx"
-version = "0.74.0"
+version = "0.75.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
-    { name = "rich" },
-]
-
-[package.optional-dependencies]
-pdf = [
     { name = "pymupdf4llm", version = "0.0.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "pymupdf4llm", version = "1.28.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
@@ -488,10 +484,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx" },
-    { name = "pymupdf4llm", marker = "extra == 'pdf'" },
+    { name = "pymupdf4llm" },
     { name = "rich" },
 ]
-provides-extras = ["pdf"]
 
 [package.metadata.requires-dev]
 dev = [

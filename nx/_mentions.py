@@ -4,7 +4,7 @@ context without a separate tool round-trip. An image mention (@shot.png) goes
 further: when NX_VISION is on, the image itself is attached as content parts
 (see _images.read_image), so the model SEES the picture on the turn that asks
 about it. A `.pdf` mention is extracted to markdown text (see _pdf.extract_pdf;
-optional pymupdf4llm dependency). Pure function, no globals/state.
+pymupdf4llm, a hard lazily-imported dependency). Pure function, no globals/state.
 """
 from __future__ import annotations
 

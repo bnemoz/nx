@@ -1,6 +1,7 @@
 """0.65.0: @pdf mentions — an @doc.pdf token is extracted to markdown text via
-pymupdf4llm and inlined like any other mention. pymupdf4llm is an OPTIONAL
-dependency, so these tests drive the extractor through a fake module injected
+pymupdf4llm and inlined like any other mention. pymupdf4llm is a HARD
+dependency since 0.75.0 (lazily imported); these tests drive the extractor
+through a fake module injected
 on sys.modules (offline, no PyMuPDF needed) and cover the missing-dependency
 note, the page cap, and the two failure modes.
 """
@@ -89,16 +90,17 @@ def test_pdf_mention_inlines_markdown(nx_fresh, monkeypatch):
     assert seen["pages"] is None  # 3 pages under the 50 default → whole doc
 
 
-def test_pdf_mention_missing_dependency_names_install(nx_fresh, monkeypatch):
+def test_pdf_mention_missing_dependency_is_error(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
     # sys.modules[name] = None makes `import name` raise ImportError, even
-    # when the package is installed here.
+    # when the package is installed here. Hard dependency since 0.75.0: a
+    # missing import is a broken install, reported as ERROR (not a soft note).
     monkeypatch.setitem(sys.modules, "pymupdf4llm", None)
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("read @doc.pdf")
     assert isinstance(out, str)
-    assert "pymupdf4llm is not installed" in out
+    assert "ERROR" in out and "pymupdf4llm" in out
 
 
 def test_pdf_page_cap_truncates_and_names_range(nx_fresh, monkeypatch):
