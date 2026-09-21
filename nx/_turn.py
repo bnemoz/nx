@@ -15,10 +15,10 @@ from typing import Any, Callable, Optional
 
 from ._openai_client import APIConnectionError, APIError, probe_scope
 import httpx
-from rich.console import Console
 from ._ansi import (
     DIM, RESET, LifeSpinner, C, strip_ansi_for_display,
 )
+from ._rich import themed_console, retheme_console
 from ._approval import _EscToChat
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
@@ -54,7 +54,10 @@ from ._batch import _batch_active
 from ._plan import plan_active
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-_say_console = Console()  # renders the assistant's final-answer markdown live
+# renders the assistant's final-answer markdown live — themed like the rest
+# of the terminal (raw-ANSI `C` roles elsewhere) instead of rich's default
+# palette; retheme_console() restyles it on a live /theme switch.
+_say_console = themed_console()
 
 Message = dict[str, Any]  # one entry in the OpenAI-style `messages` array
 

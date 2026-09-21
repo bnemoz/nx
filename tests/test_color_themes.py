@@ -200,3 +200,56 @@ def test_amethyst_switches_via_set_theme():
     finally:
         _ansi.set_theme(orig)
 
+
+# --- the rich say-panel follows the theme ---------------------------------------
+# The assistant's final answer renders through rich.markdown.Markdown on a
+# Console in _turn.py. Before the _rich.py bridge, that console used rich's
+# DEFAULT_STYLES palette (fixed dim-yellow headings, pale-blue code) — the one
+# surface in the terminal that ignored NX_THEME // /theme entirely.
+
+def test_rich_say_panel_tracks_theme():
+    from nx import _rich, _turn
+    console = _turn._say_console
+    orig = _ansi.C.name
+    try:
+        _ansi.set_theme("mocha")
+        mocha = _rich._build_theme()
+        _ansi.set_theme("nord")
+        nord = _rich._build_theme()
+        # headings come from ACCENT; a theme switch must move them
+        assert (mocha.styles["markdown.h1"] != nord.styles["markdown.h1"])
+        assert "#" + _ansi.THEMES["nord"]["blue"] in str(nord.styles["markdown.h1"])
+        # inline code follows TEXT (green)
+        assert "#" + _ansi.THEMES["nord"]["green"] in str(nord.styles["markdown.code"])
+        # set_theme() pushed our themed style onto the live say-panel console
+        from rich.console import Console
+        assert isinstance(console, Console)
+        assert "#" + _ansi.THEMES[_ansi.C.name]["blue"] \
+            in str(console._theme_stack._entries[-1])
+    finally:
+        _ansi.set_theme(orig)
+
+
+def test_rich_console_styles_markdown_with_theme_palette():
+    """End-to-end: the themed say-console must emit ANSI in the theme's hue
+    for a markdown element rich would otherwise paint its own color."""
+    from rich.markdown import Markdown
+    from nx import _rich, _turn
+    console = _turn._say_console
+    orig = _ansi.C.name
+    try:
+        _ansi.set_theme("mocha")
+        rich_stdout = console.file
+        import io
+        buf = io.StringIO()
+        console.file = buf
+        console._force_terminal = True
+        console._color_system = "truecolor"
+        console.print(Markdown("# Hi"))
+        out = buf.getvalue()
+        expected = "\x1b[1;38;2;137;180;250m"  # ACCENT hue, bold (h1)
+        assert expected in out, "say-panel markdown not rendered in theme hue"
+    finally:
+        console.file = rich_stdout
+        _ansi.set_theme(orig)
+

@@ -392,6 +392,12 @@ eight hues above, resolved against the *active* theme so it tracks
 `NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
 theme. Invalid values are ignored with a warning.
 
+The assistant's final answer is rendered as markdown through rich; its
+heading/code/link/bullet colors come from the same active theme (headings and
+links use the `ACCENT` hue, code uses `TEXT`, bullets use `LABEL`), so
+`/theme` and the `NX_<ROLE>_COLOR` overrides restyle the markdown panel too —
+it is not a separate fixed palette.
+
 `amethyst` is a monochrome purple theme: every hue is a violet/orchid/pink
 shade, so the ten roles stay separable by lightness and by position in the
 violet→pink band instead of by hue. `gray` (`REASONING_TEXT`) deliberately
