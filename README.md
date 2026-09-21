@@ -56,7 +56,15 @@ Either way, `uv tool upgrade nx` pulls the latest later on.
 
 ### Add an endpoint
 
-`nx` reads credentials from `~/.env` (auto-loaded at startup — no config file):
+**First run does it for you**: launch `nx` with no endpoint configured and a
+short wizard asks you to paste an API base URL and key, then saves them to
+`~/.env` — next launch just works. It also offers web-search setup: point it
+at an existing SearXNG instance, let it **install a fresh loopback-only one
+for you** (Linux + systemd; automates the SEARXNG_SETUP.md steps), or skip.
+Re-run any time with `nx setup`.
+
+Prefer to configure by hand? `nx` reads credentials from `~/.env`
+(auto-loaded at startup — no config file):
 
 ```bash
 export NX_BASE_URL=http://localhost:8080/v1
@@ -220,7 +228,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_DELEGATION_NUDGE_READS` | how many consecutive self-performed exploration calls (read_file/list_dir/search_files, cache hits included) with no `spawn_agent` in between before a one-time runtime note tells the model to delegate the rest of the sweep (default `8`; only fires while `NX_SUBAGENTS=1`; `0` disables) |
 | `NX_GARBLE_GUARD` | scan every edit's `new` text for model-garble signatures — duplicated lines, stuttered words/phrases, line-boundary splices, mid-sentence abandoned rewrites (default `1`; `0` disables). Unambiguous garble is repaired before the write (the tool result says so); ambiguous garble is refused once, then written as-is if the model resubmits the byte-identical edit |
 | `NX_PLAN_MAX_WORDS` | slug length cap for `/plan <goal>` → `.nx/<slug>.md` (default 8 words) |
-| `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default off — `1` enables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and spawns run in the background by default (job id now, answer as a short `[Runtime note]` + report path on a later turn; `/bg` lists them; full answer in `~/.nx/agents/<job>.md`). Enabled sessions also get a one-time `[Delegation note:]` steering the model to spawn agents proactively, plus the `NX_DELEGATION_NUDGE_READS` streak nudge |
+| `NX_SUBAGENTS` | offer the read-only `spawn_agent` tool (default **on** since 0.77.0 — `0` disables; adds a schema to every turn's floor). Sub-agents get read/search tools plus a bash allowlist (grep/ls/du/ps/git log); 2+ `spawn_agent` calls in one turn run concurrently, and spawns run in the background by default (job id now, answer as a short `[Runtime note]` + report path on a later turn; `/bg` lists them; full answer in `~/.nx/agents/<job>.md`). Enabled sessions also get a one-time `[Delegation note:]` steering the model to spawn agents proactively, plus the `NX_DELEGATION_NUDGE_READS` streak nudge |
 | `NX_SUBAGENT_ASYNC` | sub-agent execution default (`1` = background, the default): a spawn returns a job id immediately and its answer arrives as a head + report-path `[Runtime note]`, so the parent TUI stays quiet during a fan-out. `0` restores the old foreground default, which renders the sub-agent's search/tool activity live and returns its answer inline |
 | `NX_SUBAGENT_MAX_CONCURRENT` | how many background sub-agents may stream at once (default `4`; `0` = unbounded). Each async agent is its own thread + HTTP stream + parser, so a spawn beyond the cap parks as `queued` (shown by `/bg`) and starts when a running one finishes (PF-17) |
 | `NX_SUBAGENT_MAX_FINISHED` | finished async-agent records kept after their answer has been announced (default `20`; `0` = keep all). Older announced records are evicted so a long session's agent ledger does not grow without bound; a finished-but-unannounced answer is never evicted (PF-16) |

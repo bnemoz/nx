@@ -126,6 +126,10 @@ Then in a fresh nx session, confirm `web_fetch` with a `query` uses SearXNG
 
 ## Checklist for the second machine
 
+(Or: let the nx onboarding wizard do all of this — `nx setup`, option [2]
+automates steps 1–4 and verifies with the step-5 probe. The manual path is
+below.)
+
 1. Clone source + venv (step 1)
 2. Write `settings.yml` with a **fresh** `secret_key`, loopback bind, json format (step 2)
 3. Install + enable the systemd unit; check lingering (step 3)

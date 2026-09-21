@@ -735,9 +735,11 @@ from ._tool_cache import (  # noqa: F401 (re-export for tests)
 # spawn_agent runs a focused sub-loop with a read-only toolset so exploratory
 # reads (find X, summarize module Y, list callers of Z) don't bloat the main
 # context with intermediate tool output. Schema above; machinery in
-# nx/_subagent.py. OFF by default (NX_SUBAGENTS=1 to enable) — it adds a tool
-# schema to every turn's floor, so it's opt-in like NX_GRAMMAR.
-NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 0)
+# nx/_subagent.py. ON by default (NX_SUBAGENTS=0 to disable) — 0.77.0 flips
+# the default: user-friendly out of the box; the schema fits the recorded
+# ~4K floor (see test_initial_context.py, ~3.5K with spawn_agent included).
+# Budget-gated: BUDGET_TOKENS still fails the suite if the floor overruns.
+NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 1)
 # Sub-agent default execution mode (NX_SUBAGENT_ASYNC, default 1): a spawn runs
 # in the background by default — quiet worker thread, answer lands as a short
 # head + report-path [Runtime note] on a later turn (full answer on disk under

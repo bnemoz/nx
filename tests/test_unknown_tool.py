@@ -60,7 +60,12 @@ def test_withheld_read_image_names_the_gate():
 
 
 def test_withheld_spawn_agent_names_the_gate():
-    out = run_tool("spawn_agent", {"instruction": "q"})
+    # spawn_agent is ON by default since 0.77.0; force the withheld path.
+    saved, m.NX_SUBAGENTS = m.NX_SUBAGENTS, 0
+    try:
+        out = run_tool("spawn_agent", {"instruction": "q"})
+    finally:
+        m.NX_SUBAGENTS = saved
     assert "not available in this session" in out
     assert "NX_SUBAGENTS" in out
     assert "search_files" in out  # the alternative

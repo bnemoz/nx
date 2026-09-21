@@ -45,12 +45,12 @@ def nx_fresh(tmp_path, monkeypatch):
 def test_schema_gated_by_env(nx_fresh):
     from nx._dispatch import _active_tools
     names = [t["function"]["name"] for t in _active_tools()]
-    assert "spawn_agent" not in names  # default off
-    assert any(t["function"]["name"] == "spawn_agent" for t in nx_fresh.TOOLS)  # but in full schema
-    nx_fresh.NX_SUBAGENTS = 1
-    names = [t["function"]["name"] for t in _active_tools()]
-    assert "spawn_agent" in names
+    assert "spawn_agent" in names  # default ON since 0.77.0
+    assert any(t["function"]["name"] == "spawn_agent" for t in nx_fresh.TOOLS)
     nx_fresh.NX_SUBAGENTS = 0
+    names = [t["function"]["name"] for t in _active_tools()]
+    assert "spawn_agent" not in names  # explicit opt-out still honored
+    nx_fresh.NX_SUBAGENTS = 1
 
 
 def test_subagent_loop_uses_readonly_dispatch(nx_fresh, monkeypatch):

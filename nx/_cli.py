@@ -10,6 +10,7 @@ compression, the REPL loop itself) already has a stable home, so this is
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -40,6 +41,8 @@ Commands:
   config         View/check the env layer: list [filter] / get NAME /
                  set NAME VALUE / path / doctor. Never touches the network,
                  so it works against a dead endpoint.
+  setup          First-run (or re-run) onboarding: paste an API base URL
+                 and key; optionally install/point at SearXNG. Saves to ~/.env.
   eval           Offline eval corpus: replays recorded stub-server scenarios
                  through the real batch harness and scores each
                  (list / run [--source, --out, --filter ID, --parallel N,
@@ -132,7 +135,7 @@ def _cli_version() -> str:
         return "unknown"
 
 
-_VERBS = ("run", "config", "eval", "sessions", "ls", "list", "prune")
+_VERBS = ("run", "config", "eval", "sessions", "ls", "list", "prune", "setup")
 
 
 def _cli_help_or_version(argv: list[str]) -> bool:
@@ -298,6 +301,25 @@ def main() -> None:
     # --help/--version short-circuit before any source/network setup.
     if _cli_help_or_version(sys.argv[1:]):
         return
+    # First-run onboarding (0.77.0): `nx setup` re-runs the wizard on demand;
+    # a bare `nx` with NO endpoint configured anywhere walks the user through
+    # pasting one before `import nx` fires its startup network probes (which
+    # would just hang against a nonexistent endpoint). Needs the env file
+    # loaded into os.environ first so _needs_onboarding() sees ~/.env keys.
+    if sys.argv[1:2] == ["setup"]:
+        from ._onboard import cli_onboard
+        sys.exit(cli_onboard(sys.argv[2:]))
+    if sys.argv[1:2] != ["config"]:
+        from ._env import _load_env_file
+        _load_env_file()
+        from ._onboard import _needs_onboarding
+        if _needs_onboarding():
+            from ._onboard import run_onboarding
+            # A False return (aborted, or non-interactive stdin) falls
+            # through to normal startup — the legacy `local` source still
+            # registers, and one-shot mode surfaces its usual "no source
+            # configured" exit.
+            run_onboarding()
     # `nx run ...` — headless batch mode: every line of a JSONL file is one
     # task, each runs the one-shot machinery on its own quiet thread and
     # emits one JSONL result line; the process exit code summarizes the run.
