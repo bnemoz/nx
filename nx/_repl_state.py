@@ -6,6 +6,7 @@ command modules, so none of them have to import each other to reach these.
 from __future__ import annotations
 
 import os
+import signal
 from typing import Any
 
 from ._metrics import _Metrics, _env_metrics_url
@@ -52,6 +53,37 @@ def _save_current(
     """
     if state.session_id is None:
         return
+    # The save path is the critical path of the ^C handler (`except
+    # KeyboardInterrupt: ... _save_current`) and of the per-turn finally, so a
+    # SECOND Ctrl+C that lands mid-save (the session-body join over a large
+    # session can take a while) used to raise out of the handler itself and
+    # crash the REPL with a traceback from inside _write_session. Block SIGINT
+    # for the duration: the ^C that triggered this save is already handled, and
+    # one pressed during the save can wait for the next prompt.
+    blockable = (hasattr(signal, "pthread_sigmask")
+                 and hasattr(signal, "SIGINT"))
+    sigmask = {signal.SIGINT} if blockable else set()
+    if blockable:
+        signal.pthread_sigmask(signal.SIG_BLOCK, sigmask)
+    try:
+        _save_current_locked(state, meta, update_index)
+    except KeyboardInterrupt:
+        # A ^C that arrived in the window before the mask took effect: the
+        # save must still complete — swallow it here rather than dying mid-IO.
+        pass
+    finally:
+        if blockable:
+            try:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, sigmask)
+            except KeyboardInterrupt:
+                pass  # a pending ^C delivered on unmask — next prompt sees it
+
+
+def _save_current_locked(
+    state: "_ReplState", meta: dict[str, Any] | None = None,
+    update_index: bool = True,
+) -> None:
+    """Body of `_save_current`, run with SIGINT blocked."""
     m = dict(meta or {})
     if "title" not in m:
         first_user = next(
