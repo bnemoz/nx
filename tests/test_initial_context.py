@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Guard the README's "under ~4K tokens on a bare hey" claim.
+"""Guard the README's "under ~5K tokens on a bare hey" claim.
 
-The README advertises that a bare `hey` costs under ~4K tokens of initial
+The README advertises that a bare `hey` costs under ~5K tokens of initial
 context. That bounded floor is the whole reason nx exists — it stays trivial
 against the 128K-1M-token windows today's models ship with, unlike the
 harnesses that spend 20K-50K before you've typed anything — so this test

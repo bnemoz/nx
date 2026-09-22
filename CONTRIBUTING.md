@@ -74,10 +74,10 @@ CLAUDE.md. Beyond the schema itself:
 - Dispatch: wire it into `run_tool()`.
 - Tiering (0.62.0, the feature-cost rule): a new always-on tool adds to the
   per-turn floor that every session pays. Prefer making it tier-2 first: add a
-  `_TOOL_GATES` entry in `nx/_dispatch.py` so it is withheld until relevant
+  `_TOOL_GATES` entry in `nx/_tool_gates.py` so it is withheld until relevant
   and surfaced on demand by `search_tools` (0 tokens until used). An always-on
   tool may instead raise `BUDGET_TOKENS` in `tests/test_initial_context.py`
-  with a ledger entry justifying the cost — the ceiling is ~4K tokens, and the
+  with a ledger entry justifying the cost — the ceiling is ~5K tokens, and the
   point is to stay under it, not to compress every schema to the minimum.
   `tests/perf/baselines.json`'s `active_tools_floor` pins the always-on count.
 - Risk classification: if the tool can write or execute, confirm
@@ -236,7 +236,7 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
 - [ ] If it touches `TOOLS`/`FINAL_ANSWER_TOOL`/`SYSTEM`, is the added text as
       *clear and complete* as the model benefits from — every argument
       documented, overlapping tools named — rather than squeezed to the fewest
-      possible characters? The floor is budgeted (~4K), so favor description
+      possible characters? The floor is budgeted (~5K), so favor description
       over terseness.
 
 ## Adding a tool: self-healing checklist

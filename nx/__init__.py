@@ -561,13 +561,9 @@ st.RISK_CONNECTION_RETRY_SECONDS = _env_int("NX_RISK_RETRY_SECONDS", 1)
 # Resolved here (not at the sessions-section top) because _env_int() is
 # defined just above. See the comment at _DESC_REFRESH_DEFAULT for behavior.
 SESSION_DESC_REFRESH = _env_int("NX_SESSION_DESC_REFRESH", _DESC_REFRESH_DEFAULT)
-DESC_SYSTEM = (
-    "You summarize coding-agent conversations into one short line. "
-    "Given the transcript, reply with ONLY a single line of at most 70 "
-    "characters describing what this session is about / working on — the "
-    "current task, key files, or goal. No preamble, no quotes, no trailing "
-    "punctuation. Write in the same language as the conversation."
-)
+# DESC_SYSTEM lives in the prompt registry (nx/_prompts.py) with the other
+# satellite system prompts; re-exported here for the existing import surface.
+from ._prompts import DESC_SYSTEM  # noqa: F401 (re-export)
 # Global cross-run input recall (Up/Down at the prompt): how many past
 # submissions ~/.nx/input_history.json holds. 0 disables recall entirely.
 # Resolved here (not in _input_history.py) because _env_int() is defined

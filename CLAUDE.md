@@ -23,7 +23,7 @@ Context-frugality — keeping the per-turn token floor low relative to heavier a
 frameworks — is still a real design value (see `README.md` and `nx --tokens`), but
 it is no longer the sole organizing constraint: don't block a clean module boundary or
 a useful dependency just to preserve the old one-file/zero-deps posture. The floor is
-held under a hard ~4K-token budget (`BUDGET_TOKENS` in `tests/test_initial_context.py`),
+held under a hard ~5K-token budget (`BUDGET_TOKENS` in `tests/test_initial_context.py`),
 which leaves room for descriptive tool schemas (`TOOLS`, `FINAL_ANSWER_TOOL`,
 `SYSTEM`) — favor clarity over terseness within that ceiling, since they are sent on
 every turn regardless of how the code is organized internally.
@@ -154,7 +154,7 @@ one module plus a touch point in `model_turn()` or `TOOLS`/`SYSTEM`.
   new config file format.
 - **Tool schemas are load-bearing on token cost.** Any change to `TOOLS`, `FINAL_ANSWER_TOOL`,
   or `SYSTEM` directly changes the per-turn token floor the project is built around. That
-  floor is held under a hard ~4K-token budget (`BUDGET_TOKENS` in
+  floor is held under a hard ~5K-token budget (`BUDGET_TOKENS` in
   `tests/test_initial_context.py`), which is roomy enough for genuinely descriptive
   schemas — document every argument, name overlapping tools, spell out self-healing
   behavior — rather than squeezing each one to a cryptic minimum. Growth past the budget

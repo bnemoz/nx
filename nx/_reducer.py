@@ -32,6 +32,7 @@ import re
 from typing import Any
 
 from ._env import _env_int
+from ._prompts import reducer_system_prompt  # prompt text lives in the prompt registry
 
 REDUCER_ENABLED = _env_int("NX_REDUCER", 0)
 MIN_BYTES = _env_int("NX_REDUCER_MIN_BYTES", 4096)
@@ -60,23 +61,9 @@ LIKELY_SECRET = re.compile(
     r"(?:api[_-]?key|authorization|bearer|access[_-]?token|secret)"
     r"[^\n]{0,32}[=:][^\n]+", re.IGNORECASE)
 
-REDUCER_SYSTEM_PROMPT = (
-    "You reduce long diagnostic logs (build/test output) to a compact receipt. "
-    "Reply with ONLY one JSON object, no markdown fence:\n"
-    '{"schema":"sol-pi-evidence-receipt/1","source_sha256":"<hex>",'
-    '"status":"success|failure","uncertain":<bool>,"evidence":['
-    '{"kind":"fatal|failure|warning|target|summary","quote":"<exact text>",'
-    '"uncertain":<bool>}...]}\n'
-    "Rules: every quote MUST be copied byte-for-byte from the log (it is "
-    f"verified mechanically; any mismatch rejects the whole receipt). At most "
-    f"{MAX_EVIDENCE_ITEMS} evidence items, each quote at most {MAX_QUOTE_CHARS} "
-    "characters. kinds: fatal = the error that ended the run, failure = a "
-    "failed test/build step, warning = compiler/linter warnings worth seeing, "
-    "target = which file/test target failed, summary = one line of what the "
-    "run was. Set uncertain=true when the log does not clearly show the "
-    "outcome. Do not diagnose, do not propose fixes, do not adjudicate "
-    "pass/fail beyond what the log states."
-)
+# The prompt text lives in the prompt registry (nx/_prompts.py); the caps are
+# env-owned here, so the string is built once at import with them filled in.
+REDUCER_SYSTEM_PROMPT = reducer_system_prompt(MAX_EVIDENCE_ITEMS, MAX_QUOTE_CHARS)
 
 
 def reducer_enabled() -> bool:
