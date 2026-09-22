@@ -90,17 +90,16 @@ def test_pdf_mention_inlines_markdown(nx_fresh, monkeypatch):
     assert seen["pages"] is None  # 3 pages under the 50 default → whole doc
 
 
-def test_pdf_mention_missing_dependency_is_error(nx_fresh, monkeypatch):
+def test_pdf_mention_missing_dependency_is_soft_note(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
-    # sys.modules[name] = None makes `import name` raise ImportError, even
-    # when the package is installed here. Hard dependency since 0.75.0: a
-    # missing import is a broken install, reported as ERROR (not a soft note).
+    # pymupdf4llm is an OPTIONAL dependency since 0.91.0: a missing install is
+    # a soft note (naming the install command), not an ERROR.
     monkeypatch.setitem(sys.modules, "pymupdf4llm", None)
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("read @doc.pdf")
     assert isinstance(out, str)
-    assert "ERROR" in out and "pymupdf4llm" in out
+    assert "not inlined" in out and "pymupdf4llm" in out and "nx[pdf]" in out
 
 
 def test_pdf_page_cap_truncates_and_names_range(nx_fresh, monkeypatch):
