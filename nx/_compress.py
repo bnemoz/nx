@@ -1,4 +1,4 @@
-"""Streaming completion requests, recovery sampling, and context compression.
+"""Streaming completion requests and context compression.
 
 open_stream() is the one place every model call funnels through (normal
 turns and the loop-breaking "recovery" retries alike). compress() (manual
@@ -9,7 +9,14 @@ summary turn, keeping the system prompt and the most recent turns verbatim
 doing. Unlike manual /compress (which keeps only COMPRESS_KEEP=2 turns),
 auto-compress is conservative: it keeps roughly the last third of the
 conversation so in-progress work isn't disturbed.
-"""
+
+Split (0.88.1): the runtime-note contract lives in `nx/_runtime_notes.py`
+(nudges, note flushing, keep-window sizing), request shaping in
+`nx/_request_opts.py` (recovery sampler, grammar, /toolcalls mode, the
+max_tokens clamp), and error classification in `nx/_stream_errors.py`.
+Names moved there are re-exported below so the existing import surface
+(`nx/__init__.py`, `_turn.py`, tests patching `nx._compress.*`) keeps
+working unchanged."""
 from __future__ import annotations
 
 import os
@@ -19,7 +26,7 @@ from typing import Any
 import httpx
 from ._openai_client import APIConnectionError
 
-from ._ansi import DIM, RESET, C
+from ._ansi import C, DIM, RESET
 from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
 from ._sessions_io import _prune_empty_assistant_messages, _drop_leading_dangling_tool_turns
@@ -27,167 +34,27 @@ from ._ctxreport import _pinned_indexes
 from ._todo import _latest_todo_turn
 from ._plan import _latest_plan_turn
 from ._metrics import _abbr, _record_usage
-from ._grammar import build_tool_call_grammar
 from . import _state as st
 from . import TOOLS
 
-# Every one-time injection into the model's transcript (recovery nudges,
-# backgrounded-job guidance, async sub-agent answers, verification results) is
-# a user-role message whose content starts with this prefix and ends with `]`.
-RUNTIME_NOTE_PREFIX = "[Runtime note: "
+# --- re-exports from the split-out layers (single import surface preserved) ---
+from ._runtime_notes import (  # noqa: F401 (re-exports)
+    RUNTIME_NOTE_PREFIX, _flush_pending_background_notice,
+    _is_runtime_note, _keep_past_notes, _last_is_dangling_tool,
+    _nudge_current_user_turn,
+)
+from ._request_opts import (  # noqa: F401 (re-exports)
+    _clamp_max_tokens, _default_tool_choice, _grammar_extra_body,
+    _prompt_estimate, _recovery_sampling_opts, set_toolcalls_mode,
+    toolcalls_mode,
+)
+from ._stream_errors import (  # noqa: F401 (re-exports)
+    _CTX_OVERFLOW_RE, _is_context_overflow_error, _is_request_field_rejection,
+)
 
-
-def _is_runtime_note(msg: Any) -> bool:
-    """True if `msg` is one of nx's own injected notes rather than something the
-    user or the model wrote. Several places need to know whether a message
-    counts as a real turn boundary (see _last_is_dangling_tool)."""
-    content = msg.get("content")
-    return (msg.get("role") == "user" and isinstance(content, str)
-            and content.lstrip().startswith(RUNTIME_NOTE_PREFIX))
-
-
-def _nudge_current_user_turn(messages: list[dict[str, Any]], nudge: str) -> None:
-    """Inject a recovery nudge as a fresh trailing user message.
-
-    APPEND-ONLY ON PURPOSE (0.40, ROADMAP 1.1). This function used to rewrite
-    the last user turn in place, stripping the previous note with a regex and
-    re-attaching a new one. That is a prompt-cache bullet: the rewritten message
-    is always one the model has ALREADY been sent, so every recovery rung —
-    malformed args, empty turn, reasoning stall, length continuation —
-    invalidated the server's prefix cache from that point on, on exactly the
-    turns with the largest prompt. nx bills itself on `cached:` in the footer
-    and documents append-only staging in _flush_pending_background_notice for
-    precisely this reason; recovery is now consistent with it. A repeated nudge
-    stacks (bounded by each failure family's own retry limit) instead of
-    replacing, which also gives the transcript an honest record of how many
-    rescues fired.
-
-    Notes are still deduped when the identical one is already the pending tail,
-    so a loop that re-enters the same rung with the same text can't double it."""
-    note = f"{RUNTIME_NOTE_PREFIX}{nudge}]"
-    if messages and messages[-1].get("content") == note:
-        return
-    messages.append({"role": "user", "content": note})
-
-
-def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
-    """Append BACKGROUND_GUIDANCE once, if run_tool() just saw the first
-    backgrounded run_bash result this session. Appends a brand-new tail
-    message (never rewrites an earlier one) so it can't invalidate a
-    server's prompt-prefix cache."""
-    if st._PENDING_BACKGROUND_NOTICE:
-        messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
-        st._PENDING_BACKGROUND_NOTICE = None
-    if getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None):
-        messages.append({"role": "user", "content": st._PENDING_BG_COMPLETION_NOTICE})
-        st._PENDING_BG_COMPLETION_NOTICE = None
-    # Finished async sub-agent answer(s): staged by the agent worker itself
-    # (nx/_subagent.py) the moment the sub-loop completes, swept by run_tool()'s
-    # first-tool-of-turn scan, and delivered here as the parent's runtime note.
-    subagent_note = getattr(st, "_PENDING_SUBAGENT_NOTICE", None)
-    if subagent_note:
-        messages.append({"role": "user", "content": subagent_note})
-        st._PENDING_SUBAGENT_NOTICE = None
-    # Online Context Compact (0.67.0): the post-compaction continuation note
-    # (re-issue the plan) staged by _occompact.maybe_compact_after_boundary.
-    occ_note = getattr(st, "_PENDING_OCC_REMINDER", None)
-    if occ_note:
-        messages.append({"role": "user", "content": occ_note})
-        st._PENDING_OCC_REMINDER = None
-    # The remaining staged notices all share one shape (a runtime-note string
-    # on an st slot, consumed once), so they flush in a loop. The delegation
-    # streak notice is staged by run_tool(); NX_VERIFY_CMD's outcome by
-    # _dispatch._scan_background_completions.
-    for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
-                  "_PENDING_DELEGATION_NOTICE"):
-        _text = getattr(st, _slot, None)
-        if _text:
-            messages.append({"role": "user", "content": _text})
-            setattr(st, _slot, None)
-
-
-def _keep_past_notes(body: list[dict[str, Any]], keep: int) -> int:
-    """Smallest keep-count whose verbatim tail still holds `keep` real turns.
-
-    Injected runtime-note messages (recovery nudges, background-job and
-    sub-agent announcements) are not conversation turns, and since 0.40 the
-    recovery stack appends one per rescue. `keep` counts MESSAGES, so a couple
-    of trailing notes would otherwise eat the whole verbatim window of a manual
-    /compress (COMPRESS_KEEP=2) and fold away the last real tool result."""
-    if keep <= 0 or not body:
-        return keep
-    real = sum(1 for m in body[-keep:] if not _is_runtime_note(m))
-    size = keep
-    while real < keep and size < len(body):
-        size += 1
-        real = sum(1 for m in body[-size:] if not _is_runtime_note(m))
-    return size
-
-
-def _last_is_dangling_tool(messages: list[dict[str, Any]]) -> bool:
-    """True if the last real turn is a `tool` result with no assistant turn after it.
-
-    This is the layout right after a tool ran and before the model follows up: an
-    empty assistant turn here is most suspicious — the model produced nothing in
-    response to a fresh tool result, so the user sees the agent "finish" with no
-    answer. Auto-continue is most warranted in exactly this case.
-
-    Trailing runtime notes are skipped (0.40): nudges now arrive as their own
-    user message, and a note is not a turn boundary — the tool result underneath
-    it is still the thing awaiting a follow-up.
-    """
-    for msg in reversed(messages):
-        if _is_runtime_note(msg):
-            continue
-        return msg.get("role") == "tool"
-    return False
-
-
+# --- env-derived request flags (owned here: tests reload this module and
+# patch these names — _request_opts reads them lazily at call time) ----------
 MAX_COMPLETION_TOKENS = _env_int("NX_MAX_TOKENS", 16000)
-
-
-def _prompt_estimate(messages: list[dict[str, Any]]) -> int:
-    """Best-effort prompt size in tokens for the max_tokens clamp: the exact
-    server /tokenize count when the source is local and has one (never a
-    remote round-trip), else the chars/4 estimate — the same estimator /ctx
-    reports with, plus the per-turn tools-schema overhead it adds."""
-    try:
-        from ._ctxreport import _message_tokens, _tokenize_total, _turn_overhead_est
-        if st.TOKENIZE_PREFLIGHT and st.ACTIVE is not None:
-            n = _tokenize_total(messages)
-            if isinstance(n, int) and n > 0:
-                return n
-        body = sum(_message_tokens(m) for m in messages)
-        return body + (_turn_overhead_est() if st.ACTIVE is not None else 0)
-    except Exception:  # noqa: BLE001 — an estimate must never break the request
-        return 0
-
-
-def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
-    """Clamp `requested` to what the source's context window can actually
-    answer: window - prompt_estimate - margin, never above `requested`.
-
-    The window comes from the source's startup probe (resolve_context_window);
-    when it is unknown — remote aggregator, probes skipped — the clamp is a
-    no-op and the request is exactly what it was before 0.41. The floor keeps
-    a degenerate (room <= 0) request well-formed: an 8k window with a 7.9k
-    prompt still asks for a minimum-sized answer and lets the overflow-retry
-    machinery handle the refusal, instead of sending max_tokens=0."""
-    if requested <= 0:
-        return requested  # 0 = "omit the field" contract in open_stream
-    src = st.ACTIVE
-    if src is None:
-        return requested
-    window = None
-    try:
-        window = src.resolve_context_window()
-    except Exception:  # noqa: BLE001 — probe failures must not break requests
-        window = None
-    if not isinstance(window, int) or window <= 0:
-        return requested
-    room = window - _prompt_estimate(messages) - st.TOKENS_MARGIN
-    floor = max(1, st.MIN_COMPLETION_TOKENS)
-    return max(floor, min(requested, room))
 
 # Backend hint. Set NX_BACKEND=vllm to disable llama.cpp-only recovery
 # knobs (min_p, repeat_penalty, DRY) that vLLM's speculative decoder rejects.
@@ -232,7 +99,7 @@ RECOVERY_DRY_SEQUENCE_BREAKERS = None if RECOVERY_BACKEND == "vllm" else ["\n", 
 # together outright). So once a session is confirmed native, we stop
 # attaching ours and just let llama.cpp's built-in constraint do the job;
 # right up until that first confirmation (and for servers/templates that
-# never go native, i.e. permanently text-protocol), our `<tool_call>`-tag
+# never go native, i.e. permanently text-protocol), our <tool_call>-tag
 # grammar is the only thing constraining malformed JSON, so it stays on.
 # NX_GRAMMAR is now only a fallback gate: once the startup capability probe
 # (nx/_capability.py, run at each switch_source()) lands on a source, its
@@ -262,158 +129,6 @@ NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0", "auto",
 # the default posture). Kept as a separate name so the config viewer/doctor
 # and the vision gate read intent, not a double negative.
 NATIVE_TOOLS_DEFAULT = not NX_NATIVE_TOOLS
-_grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
-# 0.30.0: /toolcalls text|native|auto — the escalation ladder's rung PAST the
-# breaker. Once native tool-calling is confirmed, _grammar_extra_body() stops
-# attaching (above), so an endpoint whose NATIVE args keep truncating has no
-# mid-session route back to grammar-constrained text protocol; this override
-# ("text") un-confirms the flag for the session so the text-protocol ladder
-# (grammar + client-side repair) takes over again. "auto" clears the override
-# (the reactive default); "native" re-arms the flag so native is used
-# immediately without waiting for a confirming turn. None = no override.
-_TOOLCALLS_MODE_OVERRIDE: str | None = None
-
-
-def toolcalls_mode() -> str:
-    """The effective tool-calling mode: the /toolcalls override when set,
-    else the reactive default ('auto')."""
-    return _TOOLCALLS_MODE_OVERRIDE or "auto"
-
-
-def set_toolcalls_mode(mode: str | None) -> bool:
-    """Apply a /toolcalls override; returns False for an unknown mode.
-    None (or 'auto') clears the override and re-derives the flag reactively."""
-    global _TOOLCALLS_MODE_OVERRIDE
-    mode = (mode or "auto").strip().lower()
-    if mode not in ("auto", "text", "native"):
-        return False
-    _TOOLCALLS_MODE_OVERRIDE = None if mode == "auto" else mode
-    if mode == "text":
-        # Un-confirm native so _grammar_extra_body() re-attaches and
-        # tool_choice goes back to "none" (the text-protocol posture).
-        st._NATIVE_TOOL_CALLS_CONFIRMED = False
-    elif mode == "native":
-        st._NATIVE_TOOL_CALLS_CONFIRMED = True
-    return True
-
-
-def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    if not tools:
-        return None
-    # /toolcalls text override (0.30.0): the user forced the text protocol for
-    # this session — the grammar attaches even past the two vetoes below
-    # (native-confirmed, or a CAPABILITY_NATIVE probe verdict), because that
-    # rung exists exactly for endpoints whose NATIVE args keep truncating.
-    if toolcalls_mode() != "text":
-        if st._NATIVE_TOOL_CALLS_CONFIRMED:
-            return None
-        # The startup capability probe (nx/_capability.py) takes precedence over
-        # the NX_GRAMMAR opt-in once it lands: CAPABILITY_NATIVE means llama.cpp
-        # is already constraining tool_calls itself (skip, same as the reactive
-        # _NATIVE_TOOL_CALLS_CONFIRMED check above); CAPABILITY_GRAMMAR means the
-        # grammar demonstrably helps on this source, so attach it even without
-        # NX_GRAMMAR set; CAPABILITY_TEXT means it didn't help in the probe, so
-        # skip it (plain text-protocol parsing only). While the probe is still
-        # pending (None), fall back to the old NX_GRAMMAR env-var gate.
-        capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
-        if capability is not None:
-            from ._capability import CAPABILITY_GRAMMAR
-            if capability != CAPABILITY_GRAMMAR:
-                return None
-        elif not NX_GRAMMAR:
-            return None
-    key = tuple(t.get("function", {}).get("name") for t in tools)
-    if key not in _grammar_cache:
-        grammar, trigger = build_tool_call_grammar(tools)
-        _grammar_cache[key] = None if grammar is None else {
-            "grammar": grammar,
-            "grammar_triggers": [{"type": "word", "value": trigger}],
-        }
-    return _grammar_cache[key]
-
-
-def _recovery_sampling_opts() -> dict[str, Any]:
-    """Loop-breaking sampler for recovery retries (see RECOVERY_* constants).
-
-    temperature/top_p are standard OpenAI params and go top-level. min_p,
-    repeat_penalty, repeat_last_n and the DRY family are llama.cpp extensions the
-    OpenAI SDK won't accept as kwargs, so they ride in extra_body — llama.cpp's
-    server merges that into the request body; non-llama.cpp endpoints ignore
-    unknown keys. Set any RECOVERY_* value negative to omit it.  When
-    NX_BACKEND=vllm the llama.cpp-only knobs are set to None instead of
-    their defaults, so the checks below miss them automatically."""
-    opts = {}
-    if st.RECOVERY_TEMPERATURE is not None and st.RECOVERY_TEMPERATURE >= 0:
-        opts["temperature"] = st.RECOVERY_TEMPERATURE
-    if st.RECOVERY_TOP_P is not None and st.RECOVERY_TOP_P >= 0:
-        opts["top_p"] = st.RECOVERY_TOP_P
-    extra = {}
-    if RECOVERY_MIN_P is not None and RECOVERY_MIN_P >= 0:
-        extra["min_p"] = RECOVERY_MIN_P
-    if RECOVERY_REPEAT_PENALTY is not None and RECOVERY_REPEAT_PENALTY >= 0:
-        extra["repeat_penalty"] = RECOVERY_REPEAT_PENALTY
-        if RECOVERY_REPEAT_LAST_N is not None:
-            extra["repeat_last_n"] = RECOVERY_REPEAT_LAST_N
-    if RECOVERY_DRY_MULTIPLIER is not None and RECOVERY_DRY_MULTIPLIER > 0:
-        extra["dry_multiplier"] = RECOVERY_DRY_MULTIPLIER
-        if RECOVERY_DRY_BASE is not None:
-            extra["dry_base"] = RECOVERY_DRY_BASE
-        if RECOVERY_DRY_ALLOWED_LENGTH is not None:
-            extra["dry_allowed_length"] = RECOVERY_DRY_ALLOWED_LENGTH
-        if RECOVERY_DRY_SEQUENCE_BREAKERS is not None:
-            extra["dry_sequence_breakers"] = RECOVERY_DRY_SEQUENCE_BREAKERS
-    if extra:
-        opts["extra_body"] = extra
-    return opts
-
-
-# Match the context-length rejection wording the startup probe already relies
-# on (_sources._CTX_LIMIT_RE: OpenAI/Together-style "This model's maximum
-# context length is N tokens …"). Lowered/kept broad on purpose: llama.cpp,
-# vLLM and proxies vary the surrounding text ("maximum context length",
-# "context length exceeded", "reduce the length of the messages"); a relaxed
-# pattern over a 400 response is specific enough that false positives are
-# effectively limited to other genuine request-size rejections.
-_CTX_OVERFLOW_RE = re.compile(
-    r"(maximum context length|context length(?:\s+\w+)?\s+(?:is|exceed|exceeded)|"
-    r"reduce the (?:length|size) of)", re.IGNORECASE)
-
-
-def _is_request_field_rejection(e: BaseException) -> bool:
-    """True if `e` is a server response that rejected a FIELD of the request
-    (bad tools=/extra_body content) rather than a transport/status failure —
-    the only case where open_stream()'s no-tools / no-extra fallback ladder
-    should re-send.
-
-    The signal: a deterministic validation-shaped status (400/422) from a
-    server that parsed the request. 429/5xx mean busy or broken upstream —
-    _send has already spent its NX_HTTP_RETRIES on them, and the fallback
-    ladder would only multiply that amplification (each rung is a fresh
-    multi-attempt _send cycle against a degraded endpoint). Anything without
-    an int status_code (unexpected error shapes) also propagates: no evidence
-    the server understood and objected to a field, so no evidence a retry
-    without it would help."""
-    status = getattr(e, "status_code", None)
-    if not isinstance(status, int):
-        return False
-    if status not in (400, 422):
-        return False
-    text = " ".join(str(x) for x in (
-        getattr(e, "message", ""), getattr(e, "body", ""), str(e)) if x)
-    return bool(text)  # any body at all — validation errors always carry one
-
-
-def _is_context_overflow_error(e: BaseException) -> bool:
-    """True if exception `e` looks like a context-window-length rejection (an
-    HTTP 400 whose body/message matches the over-limit wording). Needs the
-    APIError.status_code added by nx's own client; any other error shape is
-    not an overrun (returns False → normal terminal-failure handling)."""
-    status = getattr(e, "status_code", None)
-    if not isinstance(status, int) or status != 400:
-        return False
-    text = " ".join(str(x) for x in (
-        getattr(e, "message", ""), getattr(e, "body", ""), str(e)) if x)
-    return bool(_CTX_OVERFLOW_RE.search(text))
 
 
 def _compress_for_overrun(messages: list[dict[str, Any]], tier: int = 0) -> bool:
@@ -469,24 +184,6 @@ def _evict_largest_tool_results(messages: list[dict[str, Any]]) -> int:
     busting spill; prefer spilling at append time (never mutate sent bytes)."""
     return _spill_tool_results(messages, set(_pinned_indexes()),
                                st.OVERFLOW_EVICT_MIN_CHARS, st.OVERFLOW_EVICT_MAX)
-
-
-def _default_tool_choice() -> str:
-    """The tool_choice open_stream() applies when the caller didn't force one:
-    "auto" unless (a) the session explicitly forced the text protocol
-    (/toolcalls text — the rung past the malformed-args breaker) or (b)
-    NX_NATIVE_TOOLS=0 opted the source out of native tool_calls entirely.
-    A stall/empty-escalated retry (st._STALL_FORCE_NATIVE, set by
-    _turn._maybe_arm_native_escalation) overrides (b): the stall is evidence
-    the opt-out took away the model's only action channel. See open_stream's
-    long comment for why "auto" is the default."""
-    if toolcalls_mode() == "text":
-        return "none"
-    if st._STALL_FORCE_NATIVE:
-        return "auto"
-    if NX_NATIVE_TOOLS:
-        return "none"
-    return "auto"
 
 
 def open_stream(
