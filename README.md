@@ -41,6 +41,18 @@ later. `/help` lists all slash commands.
 
 Install it as a `nx` command on your `$PATH`:
 
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nmishra93/nx/main/install.sh | sh
+```
+
+This bootstraps `uv` if missing (to `~/.local/bin`, no root needed), installs
+`nx` as a `uv tool` from this repo, and prints how to upgrade later
+(`uv tool upgrade nx`).
+
+### Install from source
+
 ```bash
 uv tool install git+https://github.com/nmishra93/nx.git
 ```
