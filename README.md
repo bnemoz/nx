@@ -6,6 +6,16 @@ OpenAI-compatible endpoint — a local llama.cpp / vLLM / SGLang server, or a
 remote API like OpenRouter, Together, or Z.ai — and get an agent that reads,
 writes, edits, and runs shell commands in your project.
 
+### Origins
+
+nx started (v0.1.0) as a fork-inspired experiment based on
+[Sentdex/minion](https://github.com/Sentdex/minion) — at the time a single
+~5.5K-line monolithic Python file. Since then nx has been rewritten
+end-to-end: it is now a package of small focused modules (`nx/_turn.py`,
+`nx/_dispatch.py`, ...) with a hard token budget, risk-classified approvals,
+multi-source routing, and a test suite. Little of the original code survives;
+minion deserves credit as the spark, not the blueprint.
+
 ## Why a bounded floor
 
 Most agent harnesses burn 20K-50K+ tokens of system prompt and tool schemas
