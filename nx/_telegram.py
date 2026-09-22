@@ -130,12 +130,28 @@ def _chunk(text: str, limit: int = TG_MAX_MESSAGE) -> list[str]:
     return chunks
 
 
+def _call_base(line: str) -> str:
+    """A call line without any folded-on result suffix — the dedup key."""
+    i = line.find("  ok")
+    if i != -1:
+        line = line[:i]
+    j = line.find(" ×")
+    if j != -1:
+        line = line[:j]
+    return line
+
+
 def _describe_step(messages: list, seen_len: int) -> list[str]:
     """Human-readable lines for everything appended to `messages` since the
     last model-turn boundary (the on_step seam gives no payload; the
     transcript diff is the payload). Assistant prose gets its own line; tool
-    calls and results pair up. Returns [] when the step added nothing."""
+    calls and results pair up. Returns [] when the step added nothing.
+
+    Clutter rules (0.91.3): a plain-`ok` result folds into the preceding
+    call line (sized results attach their count) instead of adding its own
+    line; consecutive identical call lines collapse to `name: args ×N`."""
     lines: list[str] = []
+    pending_tool: list[int] = []   # indices of call lines awaiting a result
     for m in messages[seen_len:]:
         role = m.get("role")
         if role == "assistant":
@@ -149,12 +165,41 @@ def _describe_step(messages: list, seen_len: int) -> list[str]:
                         args = {}
                 if not isinstance(args, dict):
                     args = {}
-                lines.append(_tool_line(fn.get("name") or "?", args))
+                line = _tool_line(fn.get("name") or "?", args)
+                base = _call_base(line)
+                if lines and _call_base(lines[-1]) == base:
+                    prev = lines[-1]
+                    n = 2
+                    j = base.find(" ×")
+                    if j != -1:
+                        n = int(prev[j + 2:].split(" ", 1)[0]) + 1
+                    # keep any folded result suffix after the new ×N
+                    suffix = ""
+                    k = prev.find("  ok")
+                    if k != -1:
+                        suffix = prev[k:]
+                    lines[-1] = f"{base} ×{n}{suffix}"
+                    pending_tool.append(len(lines) - 1)
+                else:
+                    lines.append(line)
+                    pending_tool.append(len(lines) - 1)
             text = (m.get("content") or "")
             if isinstance(text, str) and text.strip():
                 lines.append("💬 " + _brief(text.strip(), 120))
         elif role == "tool":
             line = _tool_result_line(m)
+            # A plain-`ok` result: fold it into the call line instead of
+            # emitting a separate `ok` line (sized results attach their count).
+            if pending_tool and (line == "ok" or
+                                 line.startswith("ok (")) and lines:
+                idx = pending_tool.pop()
+                if line != "ok":
+                    p = lines[idx].find("  ok")
+                    stripped = lines[idx] if p == -1 else lines[idx][:p]
+                    lines[idx] = stripped + "  " + line
+                continue
+            if pending_tool:
+                pending_tool.pop()
             if line:
                 lines.append(line)
     return lines
@@ -300,19 +345,20 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
 
     status = _send(api, chat_id, _compose_status([], 0, 0))
     status_id = status.get("message_id")
-    seen = len(messages)
+    turn_start = len(messages)   # activity re-renders the whole turn
     activity: list[str] = []   # every line so far this turn
     tool_n = 0                 # tool calls so far
     note_n = 0                 # assistant prose notes so far
 
     def on_step() -> None:
-        nonlocal tool_n, note_n
-        new_lines = _describe_step(messages, seen)
-        if not new_lines:
+        nonlocal tool_n, note_n, activity
+        activity = _describe_step(messages, turn_start)
+        if not activity:
             return
-        activity.extend(new_lines)
-        tool_n += sum(1 for ln in new_lines if not ln.startswith(("💬", "ok")))
-        note_n += sum(1 for ln in new_lines if ln.startswith("💬"))
+        tool_n = sum(1 for m in messages[turn_start:]
+                     if m.get("role") == "assistant"
+                     for _ in (m.get("tool_calls") or []))
+        note_n = sum(1 for ln in activity if ln.startswith("💬"))
         if status_id:
             try:
                 api("editMessageText", {"chat_id": chat_id,

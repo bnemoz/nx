@@ -122,12 +122,43 @@ def test_describe_step_pairs_calls_with_results():
         {"role": "assistant", "content": "Found the bug."},
     ]
     lines = tg._describe_step(msgs, 0)
-    assert len(lines) == 3
+    # call + result now fold onto one line; note keeps its own
+    assert len(lines) == 2
     assert lines[0].startswith("\u25b6") and "run_bash" in lines[0]
     assert "cargo test -p x" in lines[0] and "second line" not in lines[0]
-    assert "512 chars" in lines[1] and "error: boom" in lines[1]
-    assert lines[2].startswith("\U0001f4ac") and "Found the bug." in lines[2]
+    assert "512 chars" in lines[0] and "error: boom" in lines[0]
+    assert lines[1].startswith("\U0001f4ac") and "Found the bug." in lines[1]
     assert tg._describe_step(msgs, 3) == []
+
+
+def test_describe_step_collapses_duplicate_calls_and_ok():
+    # the real example that motivated 0.91.3: the model re-runs the same
+    # list_dir probe and each call was followed by its own `ok` line.
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "1", "function": {"name": "list_dir",
+             "arguments": json.dumps({"path": "."})}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "x" * 300},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "2", "function": {"name": "list_dir",
+             "arguments": json.dumps({"path": "."})}}]},
+        {"role": "tool", "tool_call_id": "2", "content": "x" * 300},
+    ]
+    lines = tg._describe_step(msgs, 0)
+    assert len(lines) == 1
+    assert lines[0].startswith("\U0001f4c2 list_dir: . ×2  ok (300 chars)")
+
+
+def test_describe_step_nonok_result_still_gets_own_line():
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "1", "function": {"name": "run_bash",
+             "arguments": json.dumps({"command": "pytest"})}}]},
+        {"role": "tool", "tool_call_id": "1",
+         "content": "y" * 300 + "\nerror: boom"},
+    ]
+    lines = tg._describe_step(msgs, 0)
+    assert lines[0].startswith("\u25b6") and "error: boom" in lines[0]
 
 
 def test_describe_step_home_shortening_and_bad_args():
