@@ -1,11 +1,18 @@
-"""Tool dispatch: the DISPATCH table, run_tool() (approval/spinner/cache/undo
-wrapping around each call), the read-only result cache, the per-session
-one-time nudge messages (backgrounding, multi_edit batching), and the
-fresh-session message list.
+"""Tool dispatch: the DISPATCH table and run_tool() (plan gate, refusal
+ladder, arg repair, write fence, hooks, cache, undo, approval, spinner, and
+the result box) plus the read-only result cache glue.
 
 TOOLS/FINAL_ANSWER_TOOL/SYSTEM themselves stay in __init__.py (see
 CLAUDE.md: they're load-bearing on the per-turn token floor and meant to be
 easy to find) — this module is the glue around them, not the schemas.
+
+Split (0.88.3): the tiered registry (gates/`_active_tools`/search_tools/
+refusals) lives in `nx/_tool_gates.py`, the malformed-args breaker in
+`nx/_breaker.py`, the fresh-session preamble + one-time nudge strings in
+`nx/_session_preamble.py`, and the bg-completion sweep in
+`nx/_bg_completions.py`. Names moved there are re-exported below so the
+existing import surface (`nx/__init__.py`, `_turn.py`, tests) keeps working
+unchanged.
 
 `TOOLS` and `SYSTEM` are monkeypatched/read from the top-level `nx` module in
 a couple of tests, so they're looked up lazily via `import nx as _m` rather
@@ -15,12 +22,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from typing import Any
 
 from . import _state as st
-from ._env import _env_int
 from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._tool_cache import (
     cache_touch, cache_valid, drop_changed_entries,
@@ -34,7 +39,8 @@ from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, plan_active, check_gate
-from ._subagent import spawn_agent, _delegation_enabled
+from ._subagent import spawn_agent
+from ._delegation_note import _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._duckdb import duckdb_query
@@ -44,6 +50,25 @@ from ._obs import obs_recall
 from ._webfetch import web_fetch
 from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
+
+# --- re-exports from the split-out layers (single import surface preserved) ---
+from ._tool_gates import (  # noqa: F401 (re-exports)
+    _TOOL_GATES, _TOOL_LIST_CACHE, _active_tools, _gate_vector,
+    _invalidate_tool_list_cache, _unknown_tool_error, _withheld_tool_error,
+    _m_safe, search_tools,
+)
+from ._breaker import (  # noqa: F401 (re-exports)
+    _breaker_broken, _breaker_decay, _breaker_endpoint_key, _breaker_views,
+)
+from ._session_preamble import (  # noqa: F401 (re-exports)
+    BACKGROUND_GUIDANCE, DELEGATION_STREAK_NOTICE, MULTI_EDIT_GUIDANCE,
+    _DELEGATION_NUDGE_THRESHOLD, _MULTI_EDIT_NUDGE_THRESHOLD, _initial_messages,
+    _messages_show_prior_backgrounding, _messages_show_prior_delegation_nudge,
+    _messages_show_prior_multi_edit_nudge,
+)
+from ._bg_completions import (  # noqa: F401 (re-exports)
+    _BG_SCAN_LOCK, _run_bg_completion_scan, _scan_background_completions,
+)
 
 DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
@@ -84,414 +109,17 @@ st._PENDING_BG_COMPLETION_NOTICE = None  # set by that scan; flushed with the ot
 # first-tool-of-turn scan below, flushed once with the other runtime notes.
 st._PENDING_SUBAGENT_NOTICE = None
 st._BG_NOTICE_SEEN = None  # pids already announced (None → seed from _BG_NOTICE_BASELINE)
-# The scan runs from both the model turn (run_tool's first-tool hook) and the
-# wake poller thread; the seen-set is read-modify-rewritten, so both sides
-# serialize on this (also held by _bash_jobs._mark_bg_notice_seen).
-_BG_SCAN_LOCK = threading.Lock()
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
-
-_MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires
-
-# Delegation nudge (see DELEGATION_STREAK_NOTICE below): streak counter, once
-# flag and staged notice — same three-piece shape as the multi_edit nudge.
 st._READ_STREAK = 0  # how many exploration reads in a row with no spawn_agent
 st._DELEGATION_NUDGED = False  # flips True once the delegation nudge has fired this session
 st._PENDING_DELEGATION_NOTICE = None  # staged notice, flushed with the other runtime notes
 
-# ≥ this many such reads before the nudge fires. Deliberately above any
-# legitimate single-task read count (an edit usually touches 1-3 files) and far
-# below the 20-40-read sweeps models grind through when they never think to
-# delegate. NX_DELEGATION_NUDGE_READS=0 disables the nudge.
-_DELEGATION_NUDGE_THRESHOLD = _env_int("NX_DELEGATION_NUDGE_READS", 8)
-
-
-def _breaker_endpoint_key() -> tuple[str | None, str | None]:
-    """Identity of the endpoint the malformed-args evidence was gathered
-    against: (active source name, active model). A per-model key because
-    `/source <name> <model>` can point one Source at any model on a
-    multi-model host, and truncation is a property of the weights + server
-    pair, not of the Source row."""
-    return (st.ACTIVE.name if st.ACTIVE is not None else None, st.MODEL)
-
-
-def _breaker_views() -> tuple[dict[str, int], set[str]]:
-    """(failures, broken) — the breaker's live containers, after re-keying.
-
-    0.40: the breaker is evidence about ONE endpoint. It used to be
-    process-global, so switching to a healthy source left the model permanently
-    missing tools that endpoint handles fine. Every reader goes through here:
-    if the (source, model) identity changed since the evidence was gathered,
-    the streaks are dropped in place (clear, not reassign — the conftest state
-    rewind and `nx.<name>` proxy both rely on container identity).
-
-    Lazy rather than a hook in switch_source(): tests (and future callers) may
-    reassign st.ACTIVE/st.MODEL directly, and a read-time check cannot be
-    bypassed by forgetting to call a notifier.
-
-    The first observation just adopts the key without clearing — there is no
-    prior-endpoint evidence to drop yet, and the containers may legitimately
-    hold state installed by a caller (a test, or /toolcalls reset) rather than
-    by an observed truncation."""
-    key = _breaker_endpoint_key()
-    observed = st._BREAKER_ENDPOINT_KEY
-    if observed != key:
-        if observed != st.BREAKER_UNOBSERVED:
-            st._MALFORMED_TOOL_FAILURES.clear()
-            st._MALFORMED_TOOL_BROKEN.clear()
-        st._BREAKER_ENDPOINT_KEY = key
-    return st._MALFORMED_TOOL_FAILURES, st._MALFORMED_TOOL_BROKEN
-
-
-def _breaker_broken(name: str) -> bool:
-    """True if `name` is currently dropped by the malformed-args breaker."""
-    return name in _breaker_views()[1]
-
-
-# --- tiered tool registry (0.62.0, PERF §6 items 1-2) -----------------------
-# A declarative (name -> gate) table replacing five sequential O(N) filter
-# passes over the schema list. `_active_tools()` is memoized on the gate-vector
-# (a tuple of booleans rebuilt per turn is one dict lookup + one list comp).
-#
-# Tier 2 (meta-tool) is not yet occupied by any schema: `search_tools` lifts a
-# tier-2 tool's full schema into context on demand, so a future always-on tool
-# can ship at ~0 token rent instead of ~150 (the 0.62 feature-cost rule).
-_TOOL_GATES: dict[str, Any] = {
-    # name -> callable returning True when the schema should be OFFERED this
-    # turn. Unlisted names are always-on. The malformed-args breaker is a veto
-    # applied after the gates (a broken tool is dropped, not gated in).
-    "wait_background": lambda: st._SESSION_HAS_BACKGROUNDED,
-    "spawn_agent": _delegation_enabled,
-    "read_image": lambda: bool(_m_safe().NX_VISION) and st._NATIVE_TOOL_CALLS_CONFIRMED,
-    "plan_edit": plan_active,
-    # SoL-Pi ports (0.67.0): obs_recall only once a pack handle exists
-    # (packing never happened otherwise — nothing to recall).
-    "obs_recall": lambda: bool(_m_safe().NX_OBS),
-    # web_fetch (0.70.0): keyless DuckDuckGo-lite search + page fetch. Tier-2
-    # (0 schema tokens until a session needs the outside world) — surfaced by
-    # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).
-    "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
-}
-
-_TOOL_LIST_CACHE: dict[tuple, list] = {}
-
-
-def _m_safe():
-    import nx as _m
-    return _m
-
-
-def _gate_vector() -> tuple:
-    import nx as _m
-    broken = _breaker_views()[1]
-    return (
-        bool(st._SESSION_HAS_BACKGROUNDED),
-        bool(_m.NX_SUBAGENTS),
-        bool(_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED),
-        bool(plan_active()),
-        bool(getattr(_m, "NX_OBS", 0)),
-        bool(getattr(_m, "NX_WEBFETCH", 0)),
-        tuple(sorted(broken)) if broken else (),
-    )
-
-
-def _active_tools() -> list[dict[str, Any]]:
-    """The tool schema list to send this turn (0.62.0 tiered registry).
-
-    wait_background is included only once run_bash has actually backgrounded
-    this session — see run_tool(); spawn_agent (read-only sub-agent) only when
-    NX_SUBAGENTS=1; read_image only when NX_VISION=1 AND native tool_calls have
-    been confirmed this session (a text-protocol tool result can't carry a
-    content-parts array); plan_edit only while a plan is active (/plan <goal> —
-    see _plan.py). Memoized on the gate-vector: one tuple rebuild + dict hit
-    per turn instead of five full list copies (PERF §6 item 1)."""
-    import nx as _m
-    key = _gate_vector()
-    cached = _TOOL_LIST_CACHE.get(key)
-    if cached is not None:
-        return cached
-    broken = set(key[-1])
-    tools = []
-    for t in _m.TOOLS:
-        name = t["function"]["name"]
-        gate = _TOOL_GATES.get(name)
-        if gate is not None and not gate():
-            continue
-        if name in broken:
-            continue
-        tools.append(t)
-    _TOOL_LIST_CACHE.clear()  # keep exactly the current gate-vector hot
-    _TOOL_LIST_CACHE[key] = tools
-    return tools
-
-
-def _invalidate_tool_list_cache() -> None:
-    """Call when TOOLS membership itself changes (a schema is added/removed at
-    runtime) — the gate-vector key cannot see that."""
-    _TOOL_LIST_CACHE.clear()
-
-
-# The search_tools schema literal lives in __init__.py TOOLS (single source);
-# this module only defines the search_tools() body registered in DISPATCH.
-
-
-def search_tools(pattern: str = "") -> str:
-    """The tier-2 meta-tool (0.62.0, PERF §6 item 2): surfaces the full schema
-    of a tool that `_active_tools()` withheld this turn (gated, broken, or
-    tier-2-only), so the model can call it next turn without it costing tokens
-    in sessions that never need it."""
-    import nx as _m
-    active = {t["function"]["name"] for t in _active_tools()}
-    listed = []
-    for t in _m.TOOLS:
-        name = t["function"]["name"]
-        if name in active:
-            continue
-        if pattern:
-            try:
-                rx = re.compile(pattern, re.IGNORECASE)
-            except re.error as e:
-                return f"invalid pattern {pattern!r}: {e}"
-            blob = name + " " + json.dumps(t)
-            if not rx.search(blob):
-                continue
-        listed.append(f"{name}: {json.dumps(t)}")
-    if not listed:
-        return "No withheld tools matched" + (f" {pattern!r}." if pattern else ".")
-    return ("Withheld tool schemas (not offered this turn; a call to one next "
-            "turn opens the gate or is refused with its reason):\n"
-            + "\n".join(listed))
-
-
-def _messages_show_prior_backgrounding(messages: list[dict[str, Any]]) -> bool:
-    """True if a loaded transcript already contains a backgrounded run_bash
-    result, so resuming a session doesn't lose wait_background access it
-    already had (see call sites in main())."""
-    for msg in messages:
-        if msg.get("role") == "tool":
-            content = msg.get("content")
-            if isinstance(content, str) and content.startswith("[background]"):
-                return True
-    return False
-
-
-def _messages_show_prior_multi_edit_nudge(messages: list[dict[str, Any]]) -> bool:
-    """True if a loaded transcript already used multi_edit, or made ≥2
-    edit_file calls, so resuming doesn't re-fire a nudge run_tool() would
-    already have sent by now (see call sites in _repl.py)."""
-    edit_calls = 0
-    for msg in messages:
-        for call in (msg.get("tool_calls") or []):
-            fn_name = (call.get("function") or {}).get("name")
-            if fn_name == "multi_edit":
-                return True
-            if fn_name == "edit_file":
-                edit_calls += 1
-                if edit_calls >= _MULTI_EDIT_NUDGE_THRESHOLD:
-                    return True
-    return False
-
-
-def _messages_show_prior_delegation_nudge(messages: list[dict[str, Any]]) -> bool:
-    """True if a loaded transcript already spawned an agent or already received
-    the delegation nudge, so resuming doesn't re-nudge a model that has already
-    shown it delegates (or was already told once this session)."""
-    for msg in messages:
-        for call in (msg.get("tool_calls") or []):
-            if (call.get("function") or {}).get("name") == "spawn_agent":
-                return True
-        content = msg.get("content")
-        if isinstance(content, str) and ("[Delegation note:" in content
-                                         or "without using spawn_agent" in content):
-            return True
-    return False
-
-
-def _initial_messages() -> list[dict[str, Any]]:
-    """Fresh-session message list: SYSTEM followed by the canonical prefix block
-    (AGENTS.md note, memory index, orientation, delegation guidance). The block
-    itself is built by _prefix.prefix_notes() — the single source of truth shared
-    with the resume path (PERF.md PF-15) — and each note is kept out of SYSTEM so
-    the per-turn token floor doesn't grow with project size (see _agents.py).
-
-    Also (re)pins the block: a fresh session defines the bytes every later
-    request must still open with (see _prefix.pin_prefix)."""
-    from ._prefix import pin_prefix, prefix_notes
-    import nx as _m
-    messages = [{"role": "system", "content": _m.SYSTEM}]
-    messages.extend(prefix_notes())
-    pin_prefix(messages)
-    return messages
-
-
-# Paid once, only in sessions where it's actually relevant: a run_bash command
-# backgrounding is the exception, not the norm, so the detailed operating
-# guidance for it (and the wait_background tool schema — see _active_tools())
-# don't belong in every single turn's SYSTEM/TOOLS floor. Instead this is
-# injected as a one-time "[Runtime note: …]" user-role message the first time
-# `run_tool()` sees a run_bash result start with "[background]" (see
-# st._SESSION_HAS_BACKGROUNDED / st._PENDING_BACKGROUND_NOTICE below and the flush
-# in model_turn). Appending it at the tail keeps every earlier turn's bytes
-# untouched, so it never invalidates a server's prompt-prefix cache.
-BACKGROUND_GUIDANCE = (
-    "[Runtime note: a command you ran just backgrounded (didn't finish within "
-    "the short poll window) — wait_background is now available as a tool. "
-    "Guidance for backgrounded commands:\n"
-    "- Do NOT use `sleep N && …` as a chaining trick — the whole command is "
-    "detached (setsid) so it backgrounds too. Only pass `timeout=N` to run_bash when "
-    "you KNOW the command finishes in ~N seconds (e.g. `timeout=35` for "
-    "`sleep 30`).\n"
-    "- For commands of unknown duration (docker pull, builds, servers), let "
-    "them background, then call `wait_background(pid=...)` — it waits "
-    "indefinitely until the command finishes; Esc cancels the WAIT, never the "
-    "process.\n"
-    "- A process with no new log output is NOT necessarily dead. Docker's "
-    "layer-extraction, AOT compilation, and CUDA/graph-cache builds are "
-    "legitimately silent for minutes. Check `/proc/<pid>/io`, `du -sh`, or "
-    "`ps` CPU% BEFORE declaring a hang.\n"
-    "- NEVER `pkill -f '<the thing we just started>'` as a \"clean restart\" "
-    "— that destroys a job that may be 99% done. Prove it's stuck first (ps, "
-    "/proc/<pid>/io, du), and only kill it if genuinely hung.\n"
-    "- Treat exit 130 (SIGINT) / `context canceled` as a signal-of-a-signal, "
-    "not a command failure — check the command's own logs before retrying.]"
-)
-
-# Same pattern as BACKGROUND_GUIDANCE above: paid once, only in sessions where
-# it's relevant. Fires the first time _CONSECUTIVE_EDITS hits
-# _MULTI_EDIT_NUDGE_THRESHOLD, to steer away from the observed failure mode of
-# grinding through several more single edit_file calls on the same file
-# instead of switching to one multi_edit batch (multi_edit's schema is sent
-# from the start — see _active_tools — this is a usage nudge, not an unlock).
-MULTI_EDIT_GUIDANCE = (
-    "[Runtime note: you've made several edit_file calls in a row. If you have "
-    "more literal find/replace changes left to make in a file (even just 2-3 "
-    "more), batch them into ONE multi_edit call (edits=[{old,new},...]) "
-    "instead of continuing with separate edit_file calls — it's one approval "
-    "instead of several, and applies atomically.]"
-)
-
-# Third instance of the same paid-once pattern: staged when the model has made
-# _DELEGATION_NUDGE_THRESHOLD exploration calls itself without ever spawning a
-# sub-agent. Only staged while the spawn_agent schema is actually offered
-# (NX_SUBAGENTS=1) — see run_tool()'s counter and _subagent._delegation_enabled.
-DELEGATION_STREAK_NOTICE = (
-    "[Runtime note: you've read or searched many files yourself without using "
-    "spawn_agent. The remaining investigation is exactly what sub-agents are "
-    "for: issue one spawn_agent call per remaining independent question in a "
-    "single turn (they run concurrently, return only their findings, and keep "
-    "their intermediate reads out of this context), then work from their "
-    "answers. If the files you're reading are the exact ones an edit already "
-    "in hand needs, ignore this and continue.]"
-)
-
-
-def _scan_background_completions() -> str | None:
-    """One-time notice for tracked background jobs that finished since the
-    model last looked (checked on the first tool call of each turn).
-
-    The model must otherwise REMEMBER to wait_background/read_file a job it
-    backgrounded turns ago; a build that failed 20 minutes ago doesn't
-    announce itself. Returns the note text (or None): lists finished jobs with
-    exit codes once, then marks them seen — no repeated noise."""
-    from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
-    from ._verify import _is_verify_job  # verify jobs report via _stage_verify_outcome instead
-    with _BG_SCAN_LOCK:
-        try:
-            jobs = list_bg_jobs()
-        except Exception:
-            return None
-        mine = os.getpid()
-        seen = getattr(st, "_BG_NOTICE_SEEN", None)
-        if seen is None:
-            seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
-        notes = []
-        finished = []
-        for j in jobs:
-            try:
-                pid = str(j.get("pid", ""))
-                if not pid:
-                    continue
-                # only jobs this nx process launched — never another session's strays
-                if j.get("owner_pid") != mine:
-                    continue
-                if _is_verify_job(j):
-                    continue  # NX_VERIFY_CMD outcome has its own dedicated note path
-                if j.get("alive"):
-                    continue  # still running — the existing [background] flow covers it
-                if pid in seen:
-                    continue
-                # A dead job whose log is already gone has nothing left to
-                # announce: its output reached the model another way (run_bash
-                # finished inside its own poll window, wait_background, or a
-                # read_file of the log) and _finish_bg_job deleted the log.
-                # "pid N exited (code unknown)" with no tail is pure noise —
-                # and each such orphan woke a pointless auto-continuation turn
-                # — so mark it consumed silently (0.37.4).
-                if not j.get("log_path") or not os.path.exists(j["log_path"]):
-                    seen.add(pid)
-                    continue
-                seen.add(pid)
-                finished.append(j)
-                code = _read_bg_exit_status(pid)[1]
-                tail = (j.get("tail") or "").strip()[:80]
-                code_s = "unknown" if code is None else str(code)
-                notes.append(f"  pid {pid} exited (code {code_s})" + (f" — tail: {tail}" if tail else ""))
-            except Exception:
-                # One malformed job must not discard the whole sweep: the
-                # marks made so far are committed below either way, so a probe
-                # that raises can never make the same pid re-announce forever.
-                continue
-        st._BG_NOTICE_SEEN = seen
-    if not notes:
-        return None
-    return ("[Runtime note: background job(s) you started have finished:\n"
-            + "\n".join(notes)
-            + "\nCheck their output with read_file(log) or wait_background before relying on them.]")
+# (Thresholds, guidance strings, _BG_SCAN_LOCK and the fresh-session preamble
+# live in _session_preamble / _bg_completions — re-exported above.)
 
 _CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search")
-
-
-def _run_bg_completion_scan() -> None:
-    """The completion sweep run_tool() runs on the first tool call of a turn:
-    scan finished bg jobs, NX_VERIFY_CMD outcomes, and finished async agents,
-    staging each as its one-time [Runtime note]. The wake path shares it —
-    see _autowake.wake_due for why a wake turn must not fire on an empty
-    sweep."""
-    note = _scan_background_completions()
-    if note:
-        # Merge, don't overwrite: a staged note can still be unflushed here
-        # (the poller's own sweep staged one before this turn's first tool
-        # call). Assigning would drop the earlier job's exit line — it is
-        # already marked seen in _BG_NOTICE_SEEN, so no later scan would
-        # ever re-announce it. _stage_subagent_answer merges the same way.
-        prev = getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None)
-        if prev:
-            # Dedup (0.37.4): the poller thread and this turn can both sweep
-            # the same job in a race — _BG_SCAN_LOCK marks it seen once, but
-            # each sweep may have already staged its own copy of the note.
-            fresh = [ln for ln in note.splitlines()
-                     if ln.strip().startswith("pid ") and ln not in prev]
-            if fresh:
-                note = f"{prev}\n" + "\n".join(fresh)
-            # else: every line already staged — keep prev untouched
-        st._PENDING_BG_COMPLETION_NOTICE = note
-    # NX_VERIFY_CMD job just finished? Its outcome is staged as its own
-    # pending notice (independent of the generic bg-completion note).
-    from ._verify import _stage_verify_outcome
-    try:
-        _stage_verify_outcome()
-    except Exception:
-        pass
-    # Async sub-agent finished since the last look? Its answer is normally
-    # staged by the worker itself; this sweep catches any finished-but-unstaged
-    # stragglers (idempotent per job id).
-    from ._subagent import _stage_subagent_completions
-    try:
-        _stage_subagent_completions()
-    except Exception:
-        pass
-
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -538,87 +166,6 @@ def _commit_tool_cache() -> None:
     - `drop_vcs_entries` drops git_* unconditionally (a stamp can miss)."""
     drop_changed_entries(st._TOOL_RESULT_CACHE)
     drop_vcs_entries(st._TOOL_RESULT_CACHE)
-
-
-def _withheld_tool_error(name: str) -> str:
-    """Refusal for a tool that exists but is NOT offered this turn: a session
-    gate (sub-agents off, no backgrounded job yet, no plan active) or the
-    malformed-args breaker. run_tool() applies it to RESOLVED names (0.40) —
-    a repaired spelling like `multi_edits` -> `multi_edit` used to bypass both
-    the early breaker check (which saw only the emitted name) and the gate
-    checks, and the fall-through 'unknown tool' text then sent the model off to
-    invent a substitute instead of fixing its spelling or its formatting.
-    Empty for a tool that is in fact offered, so callers fall through."""
-    if _breaker_broken(name):
-        from ._turn import _malformed_args_nudge  # call-time: _turn imports this module
-        return _malformed_args_nudge(name, broken_now=True)
-    if name in {t["function"]["name"] for t in _active_tools()}:
-        return ""
-    return _unknown_tool_error(name)
-
-
-def _unknown_tool_error(name: str) -> str:
-    """Error text for a tool name that resolved to nothing in the dispatch table.
-
-    Three distinct situations hide behind a failed lookup, and a flat "unknown
-    tool" answers only the first: (a) the name really is made up (suggest the
-    closest real names); (b) the tool exists but is withheld this session by a
-    gate — the model never saw its schema this turn, so a bare "unknown" reads
-    as "this capability does not exist at all" and the model abandons the task
-    (small models do this; seen live with wait_background/read_image/spawn_agent);
-    (c) the malformed-args circuit breaker dropped it — the model must know the
-    tool died for cause, and that the failure is about ITS formatting, not the
-    tool's existence. Never raises; unknown names fall to the generic wording."""
-    import nx as _m
-    known = {t["function"]["name"] for t in _m.TOOLS}
-    known.update(t["function"]["name"] for t in getattr(_m, "_EXTRA_TOOL_SCHEMAS", ()) or ())
-    if name not in known:
-        import difflib
-        suggestions = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.7)
-        if suggestions:
-            return (f"ERROR: unknown tool {name} — did you mean {', '.join(suggestions)}? "
-                    f"Available tools: {', '.join(sorted(known))}")
-        return f"ERROR: unknown tool {name} — Available tools: {', '.join(sorted(known))}"
-    # Withheld this session: name the gate and the alternative, so the model
-    # doesn't conclude the capability doesn't exist.
-    if name == "wait_background":
-        return (f"ERROR: {name} is not available in this session (no command has backgrounded "
-                "yet — nothing to wait on). run_bash returns a '[background] PID' line when a "
-                "command needs waiting on; read_file that log path in the meantime.")
-    if name == "read_image":
-        return (f"ERROR: {name} is not available in this session (NX_VISION is off, or native "
-                "tool calls are not confirmed on this source). Describe images by other means "
-                "or ask the user to paste the relevant details.")
-    if name == "spawn_agent":
-        return (f"ERROR: {name} is not available in this session (NX_SUBAGENTS is off). Do the "
-                "investigation yourself with search_files/read_file/list_dir.")
-    if name == "plan_edit":
-        return (f"ERROR: {name} is not available in this session (no plan is active). Start one "
-                "with /plan <goal>, or just proceed with the normal edit tools.")
-    if name == "obs_recall":
-        return (f"ERROR: {name} is not available in this session (NX_OBS is off — "
-                "nothing was packed, so there is nothing to recall).")
-    if name == "web_fetch":
-        return (f"ERROR: {name} is not available in this session (NX_WEBFETCH is off, "
-                "or the gate has not opened). Work from local files, or ask the user "
-                "to paste the relevant page/search results.")
-    return (f"ERROR: {name} is not available in this session (withheld by the current session "
-            "configuration). Use one of: " + ", ".join(sorted(known)))
-
-
-def _breaker_decay(name: str) -> None:
-    """0.29.9: one clean execution of `name` clears its malformed-args streak
-    (and re-arms the tool if the breaker had dropped it). Two consecutive
-    truncations on a flaky local server were routine; losing a tool for the
-    whole session on that evidence was too heavy. A deliberately BROKEN tool
-    (the model can't reach it anyway) only decays when the user re-offers it
-    via /toolcalls reset — direct run_tool() calls (tests, hooks) count.
-
-    0.40: reads through _breaker_views() first, so a clean dispatch on a NEW
-    endpoint can never inherit a stale `broken` mark from the previous one."""
-    failures, broken = _breaker_views()
-    if failures.pop(name, None) is not None:
-        broken.discard(name)
 
 
 def run_tool(name: str, args: dict[str, Any]) -> str | list:
@@ -741,7 +288,18 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     from ._batch import _batch_active
     if not st._BG_SCAN_DONE and _subagent_ctx() is None and not _batch_active():
         st._BG_SCAN_DONE = True
-        _run_bg_completion_scan()
+        # Module-attribute call so a test patching nx._dispatch._scan_background_completions
+        # (the historical seam) lands — see test_batch_run.test_verify_and_bg_scan_gated_off_for_batch.
+        import sys as _sys
+        _scan = _sys.modules[__name__]._scan_background_completions
+        note = _scan()
+        if note:
+            from ._bg_completions import _stage_bg_note
+            _stage_bg_note(note)
+        from ._bg_completions import (_stage_verify_outcome_safe,
+                                      _stage_subagent_completions_safe)
+        _stage_verify_outcome_safe()
+        _stage_subagent_completions_safe()
     # Delegation streak counter (runs BEFORE the cache lookup so a cache-hit
     # read still counts): exploration calls accumulate, a spawn_agent resets,
     # anything else (an edit, a bash run, a todo) breaks the streak — those
