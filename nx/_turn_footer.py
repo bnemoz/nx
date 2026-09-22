@@ -1,0 +1,260 @@
+"""The per-turn stats footer and the context-window probe.
+
+Split out of `_turn.py` (which keeps model_turn / the loop). `_print_stats_footer`
+prefers llama.cpp `timings` (server-measured, real tok/s); `_capture_last_prompt_tokens`
+runs on EVERY settled stream — including give-up paths that return before the
+footer is ever printed — so `_maybe_autocompress()` never checks a stale token
+count. `_ensure_ctx_probe` resolves a Source's max context window on a
+background thread, sharing `_capability.STARTUP_PROBE_LOCK` so the two probes
+don't both queue ahead of the user's first prompt."""
+from __future__ import annotations
+
+import threading
+from typing import Any, Optional
+
+from ._ansi import DIM, RESET, C
+from ._metrics import _abbr
+from . import _state as st
+
+# renders the assistant's final-answer markdown live — themed like the rest
+# of the terminal (raw-ANSI `C` roles elsewhere) instead of rich's default
+# palette; retheme_console() restyles it on a live /theme switch.
+_say_console = themed_console = None  # replaced below
+
+
+def _init_console():
+    global _say_console, themed_console
+    from ._rich import themed_console as _tc
+    themed_console = _tc
+    _say_console = _tc()
+
+
+_init_console()
+del _init_console
+
+
+def _ctx_field(prompt_n: int) -> str:
+    """The colored `ctx` field for the stats footer: `<cur>/<max> ctx`.
+    The max context window is cyan; the current context is colored by
+    utilization — green under 30%, yellow under 60%, red at or above.
+    When the max isn't known yet (probe still pending or unreachable)
+    the field degrades to `<cur> ctx` with no color, and a background
+    probe is kicked off so a later turn can fill in the max."""
+    from ._turn import _ensure_ctx_probe
+    cur = _abbr(prompt_n)
+    if st.ACTIVE is None:
+        return f"{cur} ctx"
+    mx = st.ACTIVE._context_window
+    if not isinstance(mx, int) or mx <= 0:
+        _ensure_ctx_probe(st.ACTIVE)
+        return f"{cur} ctx"
+    mx_s = _abbr(mx)
+    ratio = prompt_n / mx if mx > 0 else 0.0
+    if ratio < 0.30:
+        color = C.GREEN
+    elif ratio < 0.60:
+        color = C.WARNING
+    else:
+        color = C.ERROR
+    # RESET after each colored run, then re-apply DIM so the rest of the
+    # footer (joined around this field) stays dim.
+    return f"{color}{cur}{RESET}{DIM}/{C.STATUS_BAR}{mx_s}{RESET}{DIM} ctx"
+
+
+_CTX_PROBE_STARTED = {}  # id(Source) -> PROBE_GENERATION being probed (no dupes)
+
+
+def _ensure_ctx_probe(src: Any) -> None:
+    """Start a background thread to resolve a Source's max context window if
+    it isn't already known, it has not already missed, and no probe is in
+    flight for it. The result lands in src._context_window; the footer picks
+    it up on a later turn. Idempotent via _CTX_PROBE_STARTED (cleared when the
+    thread finishes).
+
+    A local server's metadata endpoints can 503 "Loading model" for tens of
+    seconds at cold start (the weights are still mmapping) even while a chat
+    slot is already serving. A retry must be explicitly requested after that
+    state changes: retrying automatically is unsafe because some servers
+    silently clamp the oversized chat probe and may generate until their
+    context limit instead of returning a 400.
+
+    Shares _capability.STARTUP_PROBE_LOCK with the capability probe so the two
+    background probes don't both queue a request against a single-slot local
+    server ahead of the user's actual first prompt."""
+    from ._openai_client import probe_scope
+    if getattr(src, "_context_window_probe_attempted", False):
+        return
+    sid = id(src)
+    gen = st.PROBE_GENERATION
+    if _CTX_PROBE_STARTED.get(sid) == gen:
+        return
+    _CTX_PROBE_STARTED[sid] = gen
+
+    def _work() -> None:
+        try:
+            if isinstance(src._context_window, int) and src._context_window > 0:
+                return  # resolved by another path (e.g. a /source switch)
+            from ._capability import STARTUP_PROBE_LOCK
+            with STARTUP_PROBE_LOCK:
+                if isinstance(src._context_window, int) and src._context_window > 0:
+                    return
+                with probe_scope(lambda: st.PROBE_GENERATION != gen):
+                    src.resolve_context_window()
+        except Exception:
+            pass  # never raise from a background probe
+        finally:
+            if _CTX_PROBE_STARTED.get(sid) == gen:
+                _CTX_PROBE_STARTED.pop(sid, None)
+
+    t = threading.Thread(target=_work, daemon=True, name="nx-ctx-probe")
+    t.start()
+
+
+def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
+    """Cache the just-seen prompt-token count in st._LAST_PROMPT_TOKENS and the
+    prompt-cache hit fraction in st._LAST_CACHE_HIT.
+
+    Split out of _print_stats_footer so it can run on EVERY settled stream —
+    including the loop_cut give-up paths (collapse / exhausted reasoning-stall
+    retries) that return before the footer is ever printed. Those turns still
+    grow `messages` (captured reasoning, runtime-note nudges), so skipping this
+    left _maybe_autocompress() checking a stale, smaller token count right when
+    autocompress was most needed.
+    """
+    prompt_n = 0
+    cache_n = 0
+    reported = False  # server actually sent a cache breakdown this call?
+    if timings and timings.get("predicted_n"):
+        prompt_n = int(timings.get("prompt_n") or 0)
+        cache_n = int(timings.get("cache_n") or 0)
+        reported = True
+    elif usage and (usage.prompt_tokens or 0):
+        prompt_n = int(usage.prompt_tokens or 0)
+        ptd = getattr(usage, "prompt_tokens_details", None)
+        if ptd is not None and getattr(ptd, "cached_tokens", None) is not None:
+            cache_n = int(ptd.cached_tokens)
+            reported = True
+    if prompt_n:
+        st._LAST_PROMPT_TOKENS = prompt_n
+        # Fraction of the prompt served from the server's KV/prompt cache.
+        # A steady high value here is the regression signal for append-only
+        # discipline (memory_write cache keys, /undo-style message edits): a
+        # silent prefix bust shows up as this collapsing to ~0.
+        #
+        # "Server reported 0" and "server reported nothing" are different
+        # facts, so they render differently: 0.0 (red, a real signal) vs None
+        # (no `cached` field at all). Several OpenAI-compatible backends
+        # (vLLM, some gateways) omit prompt_tokens_details entirely whenever
+        # nothing was served from cache — or always — and rendering that as
+        # 0% cached turns the footer into a permanent false alarm.
+        st._LAST_CACHE_HIT = (min(1.0, cache_n / prompt_n)
+                              if reported else None)
+
+
+def _cache_hit_field(hit: Optional[float]) -> str:
+    """The colored `cached: N%` field for the stats footer. Hit-rate color:
+    green at/above 75%, yellow at/above 40%, red below — a cold (first-turn)
+    or busted prefix is exactly what you want to notice. None (server doesn't
+    report cache numbers) renders nothing."""
+    if hit is None:
+        return ""
+    pct = hit * 100.0
+    if pct >= 75:
+        color = C.GREEN
+    elif pct >= 40:
+        color = C.WARNING
+    else:
+        color = C.ERROR
+    return f"{color}{pct:.0f}%{RESET}{DIM} cached"
+
+
+def _tps_field(tps: float, trusted: bool) -> str:
+    """The colored `tok/s` footer field. Server-reported paces (llama.cpp
+    timings) render bare; client-side estimates render with a `~` whenever the
+    decode window was too short to trust, because five decimals of precision
+    on a 0.1s span is a lie about noise, not a measurement."""
+    num = f"{C.STATUS_BAR}~{tps:5.1f}" if not trusted else f"{C.STATUS_BAR}{tps:5.1f}"
+    return f"{num}{RESET}{DIM} tok/s"
+
+
+def _window_tps(gen_n: float, window: float) -> float:
+    """gen_n tokens over a decode window, 0.0-safe."""
+    return gen_n / window if window > 0 else 0.0
+
+
+def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
+                         elapsed: float, text: str, tcs: dict, messages: Optional[list] = None,
+                         parser: Optional[Any] = None, quiet: bool = False) -> None:
+    """Render the per-turn stats footer.
+
+    Prefers llama.cpp `timings` (server-measured, real tok/s) when present;
+    falls back to the standard streaming `usage` object (OpenAI/Z.ai/vLLM)
+    divided by the client-side generation window (parser.gen_window(): the
+    first→last token span, NOT wall-clock — wall-clock includes the prefill
+    head and the render/teardown tail, which is what made short turns and
+    just-read-a-file turns swing wildly); then to a char-based estimate; then
+    to wall-clock only. Untrustworthy windows (below _stream_parse's
+    _TPS_TRUST_WINDOW) render with a `~` so a burst-delivered short generation
+    doesn't masquerade as a precise measurement.
+    Prompt-token caching itself lives in _capture_last_prompt_tokens(), called
+    separately so it also runs on turns that never reach this footer.
+    """
+    if quiet:
+        return
+    # 0.30.0: one footer field for the self-healing work this turn — args
+    # repairs applied + corrective retries — so the knobs are tunable in
+    # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
+    # (st._TALLY_* route through nx/_recovery.py's descriptors: the running
+    # loop's private tally, or the module globals outside any loop.)
+    tally = ""
+    if st._TALLY_ARG_REPAIRS or st._TALLY_RETRIES:
+        bits = []
+        if st._TALLY_ARG_REPAIRS:
+            bits.append(f"{st._TALLY_ARG_REPAIRS} arg{'s' if st._TALLY_ARG_REPAIRS != 1 else ''} repaired")
+        if st._TALLY_RETRIES:
+            bits.append(f"{st._TALLY_RETRIES} retr{'ies' if st._TALLY_RETRIES != 1 else 'y'}")
+        tally = " · " + " · ".join(bits)
+    if timings and timings.get("predicted_n"):
+        prompt_n = timings.get("prompt_n", 0)
+        gen_n = timings["predicted_n"]
+        tps = timings.get("predicted_per_second", 0)
+        ctx = _ctx_field(prompt_n)
+        prompt_ms = timings.get("prompt_ms", 0)
+        ttft = (prompt_ms / 1000.0) if prompt_ms else t_first
+        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", _tps_field(tps, True), ctx]
+        if st.MODEL:
+            parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
+        cached = _cache_hit_field(st._LAST_CACHE_HIT)
+        if cached:
+            parts.append(cached)
+        if ttft:
+            parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
+        parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+    elif usage and (usage.completion_tokens or 0):
+        gen_n = usage.completion_tokens or 0
+        prompt_n = usage.prompt_tokens or 0
+        window, trusted = (parser.gen_window(elapsed) if parser is not None
+                           else (max(0.0, (elapsed - t_first) if t_first else elapsed), False))
+        ctx = _ctx_field(prompt_n)
+        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok",
+                 _tps_field(_window_tps(gen_n, window), trusted), ctx]
+        if st.MODEL:
+            parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
+        cached = _cache_hit_field(st._LAST_CACHE_HIT)
+        if cached:
+            parts.append(cached)
+        if t_first:
+            parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
+        parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+    elif streamed_chars > 0:
+        gen_n = max(1, streamed_chars // 4)
+        window, trusted = (parser.gen_window(elapsed) if parser is not None
+                           else (max(0.0, (elapsed - t_first) if t_first else elapsed), False))
+        parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
+                 _tps_field(_window_tps(gen_n, window), trusted),
+                 f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall"]
+        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+    elif text or tcs:
+        print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}" + tally)
