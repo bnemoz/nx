@@ -2,12 +2,10 @@
 the /toolcalls mode override, and the max_tokens clamp.
 
 Split out of `_compress.py` (which keeps open_stream — the one funnel that
-consumes these — and the compression machinery, plus the module-level env-
-derived flags: tests reload `_compress` and patch `_compress.NX_NATIVE_TOOLS`,
-so the flags live there and are read from it at call time). Every model call
-rides the options this module derives: the loop-breaking sampler
-(NX_RECOVERY_*), the tool-call grammar (NX_GRAMMAR + the capability probe),
-the tool_choice posture (NX_NATIVE_TOOLS, /toolcalls), and the context-window
+consumes these — and the compression machinery). Every model call rides the
+options this module derives: the loop-breaking sampler (NX_RECOVERY_*), the
+`<tool_call>`-tag grammar (NX_GRAMMAR + the capability probe), the
+tool_choice posture (NX_NATIVE_TOOLS, /toolcalls), and the context-window
 aware max_tokens clamp (NX_MAX_TOKENS)."""
 from __future__ import annotations
 
@@ -64,7 +62,9 @@ def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
     floor = max(1, st.MIN_COMPLETION_TOKENS)
     return max(floor, min(requested, room))
 
+
 _grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
+
 # 0.30.0: /toolcalls text|native|auto — the escalation ladder's rung PAST the
 # breaker. Once native tool-calling is confirmed, _grammar_extra_body() stops
 # attaching (above), so an endpoint whose NATIVE args keep truncating has no
@@ -118,14 +118,13 @@ def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | 
         # skip it (plain text-protocol parsing only). While the probe is still
         # pending (None), fall back to the old NX_GRAMMAR env-var gate.
         capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+        from . import _compress as _c  # lazy: _compress imports this module
         if capability is not None:
             from ._capability import CAPABILITY_GRAMMAR
             if capability != CAPABILITY_GRAMMAR:
                 return None
-        else:
-            from . import _compress as _c  # flags live on _compress (test seam)
-            if not _c.NX_GRAMMAR:
-                return None
+        elif not _c.NX_GRAMMAR:
+            return None
     key = tuple(t.get("function", {}).get("name") for t in tools)
     if key not in _grammar_cache:
         grammar, trigger = build_tool_call_grammar(tools)
@@ -184,11 +183,11 @@ def _default_tool_choice() -> str:
     _turn._maybe_arm_native_escalation) overrides (b): the stall is evidence
     the opt-out took away the model's only action channel. See open_stream's
     long comment for why "auto" is the default."""
+    from . import _compress as _c  # lazy: _compress imports this module
     if toolcalls_mode() == "text":
         return "none"
     if st._STALL_FORCE_NATIVE:
         return "auto"
-    from . import _compress as _c  # flags live on _compress (test seam)
     if _c.NX_NATIVE_TOOLS:
         return "none"
     return "auto"

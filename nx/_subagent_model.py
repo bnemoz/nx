@@ -53,8 +53,8 @@ def _subagent_source() -> str:
 
 
 def subagent_call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
-    """(client, model, extra_request_kwargs, source) a sub-agent loop should
-    call, or None to inherit the parent's active source/model (the default).
+    """(client, model, extra_request_kwargs) a sub-agent loop should call, or
+    None to inherit the parent's active source/model (the default).
 
     Resolved lazily per agent start, so a mid-session /source switch or a
     REPL flip of nx.NX_SUBAGENT_MODEL is picked up by the next agent."""

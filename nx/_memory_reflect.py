@@ -197,8 +197,11 @@ def _confirm_reflect(action: str) -> bool:
 
 # One WRITE per line: `WRITE <scope> <kind>` — scope global|project, kind one
 # of MEMORY_KINDS. The body arrives in the follow-up pass. NOTE lines carry
-# source names; anything else is surfaced as advice.
-_WRITE_RE = re.compile(r"^WRITE\s+(global|project)\s+(\S+)\s*$", re.IGNORECASE)
+# source names; anything else is surfaced as advice. The tail after the kind
+# is not anchored: models habitually append prose/title to the line, and the
+# salvage keeps the write instead of demoting it to advice (which would make
+# the run report "no cross-cutting signal" despite visible WRITE lines).
+_WRITE_RE = re.compile(r"^WRITE\s+(global|project)\s+(\S+)", re.IGNORECASE)
 
 
 class _RefPlan(NamedTuple):

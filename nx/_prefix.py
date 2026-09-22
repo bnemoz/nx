@@ -116,6 +116,21 @@ def pinned_prefix() -> list[str]:
     return list(pinned) if pinned else []
 
 
+def _same_session_head(messages: list[dict[str, Any]]) -> bool:
+    """True if *messages* opens with the same SYSTEM bytes the pin recorded.
+
+    This is the check-side twin of pin_prefix's refusal (line 105): a list
+    whose first message is not the session system prompt — a sub-agent
+    transcript, a test fixture — is not guardable, and checking it against the
+    parent's pin would misfire (a sub-agent head is a *different* prompt by
+    design, not a bust) and then re-pin the global to the sub-agent head,
+    permanently destroying the signal."""
+    if not messages or not isinstance(messages[0], dict) \
+            or messages[0].get("role") != "system":
+        return False
+    return _encode([messages[0]])[0] == pinned[0]
+
+
 def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
     """Verify *messages* still opens with the pinned bytes. Returns True when
     intact (or when nothing was pinned / the list is not guardable).
@@ -127,8 +142,8 @@ def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
     stderr unless *warn* is False (the test surface passes False)."""
     if pinned is None:
         return True
-    if not messages:
-        return True
+    if not _same_session_head(messages):
+        return True  # not the session head (sub-agent turn, fixture): uncheckable
     head = _encode(messages[:len(pinned)])
     if head == pinned:
         return True

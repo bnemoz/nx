@@ -66,6 +66,10 @@ def _write_memory(title, body, scope="project", project_root=None, kind=""):
 def _fresh_root(prefix):
     root = tempfile.mkdtemp(prefix=prefix)
     m.st.SESSION_HOME = root  # isolate the global scope per test too
+    # _collect_reflection reads st.PROJECT_ROOT at call time, but _write_memory
+    # restores the parent root after every write — pin the fresh root as the
+    # project scope so reflect's collector actually sees the seeded notes.
+    m.st.PROJECT_ROOT = root
     return root
 
 
