@@ -218,6 +218,12 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
         # already a list when it reaches the tool, so the string here is the
         # joined form with no room for a metacharacter trick.
         return ("medium", "contained test run")
+    if action.startswith("run duckdb: "):
+        # duckdb's fixed shape (nx/_duckdb.py): the SQL rides a temp file and
+        # the argv is a fixed binary plus flags — no shell to inject into, and
+        # the mutating-statement check already ran before _confirm was
+        # reached. SQL can write files (COPY/EXPORT), so medium, not low.
+        return ("medium", "contained SQL run (mutating statements)")
     if action.startswith("git commit: "):
         # git_commit's fixed shape (nx/_gitcommit.py): the message is not a
         # shell — there is nothing to inject. Committing IS the write, and it

@@ -428,6 +428,15 @@ from ._testrunner import run_tests
 RUN_TESTS_TOOL = {"type": "function", "function": {"name": "run_tests", "description": "Detect and run the project's test suite (pytest/go/cargo/npm), returning a failure-focused summary. Pass targets for a scoped re-run; use run_bash for any other shell command.", "parameters": {"type": "object", "properties": {"targets": {"type": "string", "description": "Optional: a tests dir, test file, or node id to scope the run (default = whole suite at the project root)"}}}}}
 TOOLS.append(RUN_TESTS_TOOL)
 
+# DuckDB analytical-SQL tool (schema here, body in nx/_duckdb.py, 0.87.0):
+# always-on — data-science sessions reach for it on turn 1. Read-only SQL skips
+# approval (the body classifies via _is_read_only); mutating SQL rides the
+# normal confirm gate; plan mode gates it — see PLAN_GATE_TOOLS.
+from ._duckdb import duckdb_query
+
+DUCKDB_TOOL = {"type": "function", "function": {"name": "duckdb", "description": "Run analytical SQL with the DuckDB CLI and return the result table. Preferred over pandas for aggregation/filtering: reads CSV/Parquet/JSON directly in SQL, e.g. SELECT * FROM 'data/*.parquet' — no import step. Read-only queries run without approval; anything mutating (CREATE/INSERT/COPY/ATTACH/INSTALL) asks first. Use run_bash for arbitrary shell or pip-installing python.", "parameters": {"type": "object", "properties": {"sql": {"type": "string", "description": "The SQL to run (one or more statements). Query files directly: read_csv('f.csv'), read_parquet('*.parquet'), read_json_auto('f.json'); schema auto-detected"}, "database": {"type": "string", "description": "Optional path to an existing .duckdb/.ddb database file to open instead of the in-memory default; `~` expands. Omit to query files directly"}, "format": {"enum": ["box", "csv", "json"], "description": "Output rendering: box = aligned table (default, best to read), csv = machine-parseable, json = row objects"}}, "required": ["sql"]}}}  # noqa: E501
+TOOLS.append(DUCKDB_TOOL)
+
 # Commit tool (schema here, body in nx/_gitcommit.py, 0.51.0 / ROADMAP P3-6):
 # stages paths explicitly, shows the staged diff as the approval preview, and
 # secret-scans it before the confirm round-trip. The commit itself is the unit
@@ -490,7 +499,10 @@ in_progress at a time). Re-issue todo_write as the work or its scope grows.
 
 Memory: memory_search before re-deriving something already learned;
 memory_write to persist a durable learning (scope=project for this repo,
-global for cross-project)."""
+global for cross-project).
+
+Data analysis: prefer the duckdb tool (SQL over CSV/Parquet/JSON files
+directly) over pandas scripts for aggregation/filtering."""
 
 from ._env import _env_int, _env_float
 

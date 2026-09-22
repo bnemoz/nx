@@ -1,6 +1,6 @@
 # nx (pronounced "annex")
 
-A coding agent that keeps its per-turn floor under ~4K tokens, so a
+A coding agent that keeps its per-turn floor under ~5K tokens, so a
 128K-1M-token context window stays mostly yours. Point it at any
 OpenAI-compatible endpoint — a local llama.cpp / vLLM / SGLang server, or a
 remote API like OpenRouter, Together, or Z.ai — and get an agent that reads,
@@ -12,7 +12,7 @@ Most agent harnesses burn 20K-50K+ tokens of system prompt and tool schemas
 before your first message even lands — a large slice of a modern context
 window spent before you've typed anything, and paid on *every turn*.
 
-nx holds the floor under a **hard, recorded budget of ~4K tokens**: a
+nx holds the floor under a **hard, recorded budget of ~5K tokens** (4800): a
 `SYSTEM` prompt plus the always-on tool schemas, and nothing else. That is
 roomy enough for genuinely descriptive schemas — every argument the model can
 pass is documented, tools name each other, and self-healing behavior is
@@ -298,7 +298,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_OVERFLOW_EVICT_MIN_CHARS` / `NX_OVERFLOW_EVICT_MAX` | tier-2 spill eviction: the smallest tool result worth replacing with a head/tail + spill-path note mid-run (default 4000 chars) and the per-fold cap on how many are evicted (default 8). Pinned turns are never evicted |
 | `NX_TOKENS_MARGIN` / `NX_MIN_COMPLETION_TOKENS` | when the source's context window is known (probed at startup), every request's `max_tokens` is clamped to `window - prompt_estimate - margin` (default margin 2048) instead of sending the flat `NX_MAX_TOKENS` — on small-window local models this stops the request itself from causing the context 400 and the manufactured length cuts; clamped values are floored at `NX_MIN_COMPLETION_TOKENS` (default 256). An unknown window leaves requests untouched |
 | `NX_TOKENIZE_PREFLIGHT` | `1` (default) sizes the prompt for that clamp with the server's exact `/tokenize` endpoint on local sources (never a remote round-trip); `0` uses the chars/4 estimate only |
-| `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 2900, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
+| `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 4800, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
 | `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_FTS` | `1` (default) keeps a trigram FTS5 index per memories dir (`.memindex.sqlite`, a self-healing cache reconciled by mtime on every search) so `memory_search` answers from the index instead of reading every note; `0` always runs the plain substring scan. The index only widens recall a little (whitespace folding between query characters) and never changes ranking or the result cap; a sqlite build without FTS5 falls back silently |
@@ -314,6 +314,8 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
+| `NX_DUCKDB_TIMEOUT` | wall-clock ceiling for one `duckdb` tool call in seconds (default 300; `0` = no cap). On timeout the result names `run_bash` (which backgrounds) as the investigation path for a genuinely long analytical query |
+| `NX_DUCKDB_NOTES` | SQL file auto-loaded (`-init`) before every `duckdb` query, so views/macros/types from earlier sessions are present without re-defining them (default `.nx-duckdb-notes.sql` under the project root; missing file = no prologue). The model appends reusable SQL to it with write_file/edit_file — the session-memory idea from duckdb-skills, as a plain file |
 | `NX_GITCOMMIT_TIMEOUT` | wall-clock ceiling for one `git_commit` call (the stage + diff + commit sequence) in seconds (default 60) |
 | `NX_TURN_RETRIES` | step-level retries for a mid-stream timeout (the server stopped delivering chunks after the stream began — the one failure the HTTP layer's `NX_HTTP_RETRIES` cannot replay). Same backoff curve and default as the HTTP layer (default 2 beyond the first attempt; `0` restores fail-fast). When the ladder is exhausted the turn reports a real error: batch scores it `error`/exit 4, never `done` |
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
@@ -892,6 +894,7 @@ go through the approval gate above.
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
+| `duckdb` | `sql`, `database?`, `format?` | run analytical SQL with the DuckDB CLI (`duckdb` must be on PATH; install via `curl https://install.duckdb.org \| sh`). Reads CSV/Parquet/JSON directly (`SELECT * FROM 'data/*.parquet'`) — the preferred aggregation path over pandas scripts. Read-only SQL auto-runs; mutating SQL (CREATE/INSERT/COPY/ATTACH/INSTALL and friends) confirms first with a local medium verdict; plan mode gates it; large results fold and spill for `read_file`; `NX_DUCKDB_NOTES` is auto-loaded as a prologue |
 | `git_commit` | `files`, `message`, `path?` | stage `files` (space-separated; `.` = every change) and commit `message` after the user reviews the staged diff. See below |
 | `obs_recall` | `id`, `offset?` | page back the archived original of a large tool result that was replaced by an observation handle (`NX_OBS=1`; the handle stub names its `obs_...` id). Returns whole lines plus `next_offset`; pass it back in until `eof=true`. Byte-exact: the archive is what the model originally saw |
 | `search_tools` | `pattern?` | list tools withheld this turn (gated/tier-2) with their full schemas, so one can be called next turn — read-only, always offered. This is the tier-2 mechanism (0.62.0): a tool that doesn't need to be always-on costs 0 tokens until the model asks for it here |

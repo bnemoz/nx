@@ -97,7 +97,17 @@ import nx as m  # noqa: E402
 # (not cryptic) schemas become affordable. The measured floor (~3.3K) is
 # unchanged; this is deliberate slack so the next few schemas land descriptive
 # instead of compressed. Growth past 4096 still needs a ledger entry.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 4096)  # hard: recorded, justified
+# 0.87: duckdb (the DuckDB analytical-SQL CLI wrapper, nx/_duckdb.py) joins the
+# always-on set — the data-science path the user's sessions live on, and one
+# the model should reach for on turn 1 rather than discovering via search_tools
+# mid-analysis. One required `sql` string plus two optional strings; the schema
+# measured ~1080 chars (~310 tok by the chars/3.5 method) including the
+# one-line pandas-steering line added to SYSTEM. BUDGET_TOKENS rises
+# 4096→4800 by that deliberate, verifiable cost; the published contract is now
+# "under ~5K" (README updated to match). No tier-2 displacement was chosen
+# deliberately: search_tools-discovery costs a round-trip exactly when a data
+# question is already on the table.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 4800)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

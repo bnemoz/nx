@@ -37,6 +37,7 @@ from ._plan import plan_edit, plan_active, check_gate
 from ._subagent import spawn_agent, _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
+from ._duckdb import duckdb_query
 from ._testrunner import run_tests
 from ._gitcommit import git_commit
 from ._obs import obs_recall
@@ -54,6 +55,7 @@ DISPATCH = {
     "memory_delete": memory_delete,
     "spawn_agent": spawn_agent, "read_image": read_image,
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
+    "duckdb": duckdb_query,
     "web_fetch": web_fetch,
 }
 # defined with the tiered registry below; registered here so `nx`'s import-time
