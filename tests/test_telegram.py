@@ -197,3 +197,37 @@ def test_loop_drops_disallowed_chat():
         tg.run_gateway()
     # the disallowed chat never produced a turn, never got a reply
     assert turns == [(111, "Instruction from the user: hello")]
+
+
+# --- main loop: /new resets the conversation ----------------------------------------
+
+def test_slash_new_clears_conversation_without_turn():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    tg._CONVERSATION.extend([{"role": "user", "content": "old"}])
+    calls = []
+    turns = []
+
+    def fake_turn(api, chat_id, instruction, messages):
+        turns.append((chat_id, instruction))
+
+    def fake_api(method, payload=None, timeout=35.0):
+        calls.append((method, payload))
+        if method == "getUpdates":
+            if len(calls) > 1:   # second poll: stop the loop
+                raise KeyboardInterrupt()
+            return {"ok": True, "result": [
+                {"update_id": 1, "message": {"chat": {"id": 111},
+                                             "text": "/new"}},
+            ]}
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with unittest.mock.patch.object(tg, "_api", side_effect=fake_api), \
+         unittest.mock.patch.object(tg, "_run_turn", side_effect=fake_turn), \
+         unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()):
+        tg.run_gateway()
+    assert turns == []                       # /new never reaches a model turn
+    assert tg._CONVERSATION == []            # history wiped in place
+    texts = [args[1].get("text", "") for args in calls
+             if args[0] == "sendMessage"]
+    assert any("cleared" in t for t in texts)

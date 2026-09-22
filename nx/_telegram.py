@@ -20,7 +20,9 @@ Security (mirrors the batch-mode contract in nx/_batch.py):
 Transport: raw Bot-API long polling over urllib (web_fetch already depends
 on nothing richer). Messages > 4096 chars are chunked; progress edits use
 editMessageText on a status message updated once per model-turn boundary via
-the on_step seam of _run_model_turn_loop.
+the on_step seam of _run_model_turn_loop. The model's own auto-compression
+keeps a long session bounded; `/new` from the phone wipes the conversation
+in place for a fresh context without a process restart.
 """
 from __future__ import annotations
 
@@ -326,6 +328,13 @@ def run_gateway() -> int:
                 continue  # not even an error: an open reply is the vulnerability
             instruction = _message_instruction(msg)
             if not instruction:
+                continue
+            if instruction.rstrip().endswith("/new"):
+                # matched after the "Instruction from the user: " wrapper;
+                # a PDF+"/new" is honored too (the intent is unambiguous).
+                with _TURN_LOCK:
+                    _CONVERSATION.clear()
+                _send(_api, chat_id, "✂ conversation cleared — fresh context.")
                 continue
             with _TURN_LOCK:
                 _run_turn(_api, chat_id, instruction, _CONVERSATION)
