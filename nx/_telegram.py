@@ -274,6 +274,20 @@ def _compose_status(lines: list[str], tool_n: int, note_n: int) -> str:
     return body + "\n\n" + tally
 
 
+def _edit_status(api: callable, chat_id: int, message_id: int,
+                 text: str) -> bool:
+    """One editMessageText on the status bubble. Returns False on any
+    failure (message deleted, too old, network) so callers can fall back to
+    sendMessage."""
+    try:
+        r = api("editMessageText", {"chat_id": chat_id,
+                                    "message_id": message_id,
+                                    "text": text})
+        return bool(r.get("ok"))
+    except Exception:
+        return False
+
+
 def _send(api: callable, chat_id: int, text: str) -> dict:
     out = {"message_id": None}
     for chunk in _chunk(text) or ["(empty)"]:
@@ -359,14 +373,10 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
                      if m.get("role") == "assistant"
                      for _ in (m.get("tool_calls") or []))
         note_n = sum(1 for ln in activity if ln.startswith("💬"))
+        # progress is best-effort; never kill the turn over it
         if status_id:
-            try:
-                api("editMessageText", {"chat_id": chat_id,
-                                        "message_id": status_id,
-                                        "text": _compose_status(
-                                            activity, tool_n, note_n)})
-            except Exception:
-                pass  # progress is best-effort; never kill the turn over it
+            _edit_status(api, chat_id, status_id,
+                         _compose_status(activity, tool_n, note_n))
 
     summary = {}
     try:
@@ -387,11 +397,17 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
             if isinstance(content, str) and content.strip():
                 answer = content.strip()
             break
-    if answer:
-        _send(api, chat_id, answer)
-    else:
-        _send(api, chat_id,
-              "(no final answer — status: %s)" % (summary or {}).get("status", "?"))
+    # One bubble per turn: the final answer lands on the status message (as
+    # an edit) unless it can't (no status bubble, oversized, or the edit
+    # failed) — only then does it go out as its own message.
+    if not answer:
+        answer = "(no final answer — status: %s)" % (summary or {}).get("status", "?")
+    final_text = ("\n" * 2).join([_compose_status(activity, tool_n, note_n),
+                                  answer]) if answer and activity else answer
+    if final_text and len(final_text) <= TG_MAX_MESSAGE and status_id \
+            and _edit_status(api, chat_id, status_id, final_text):
+        return
+    _send(api, chat_id, answer)
 
 
 # --- main loop ----------------------------------------------------------------

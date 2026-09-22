@@ -223,11 +223,12 @@ def test_run_turn_sends_progress_and_final_answer():
         tg._run_turn(api, 111, "read this", conv)
 
     methods = [m for m, _ in calls]
-    assert methods.count("sendMessage") >= 2       # status + final answer
+    # ONE bubble per turn: status + final answer on the same message.
+    assert methods.count("sendMessage") == 1
     assert "editMessageText" in methods            # on_step progress happened
     final = calls[-1]
-    assert final[0] == "sendMessage"
-    assert final[1]["text"] == "The paper says X."
+    assert final[0] == "editMessageText"
+    assert "The paper says X." in final[1]["text"]
     assert conv[-1]["role"] == "assistant"         # conversation persists
 
 

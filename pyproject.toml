@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.91.3"
+version = "0.91.4"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
