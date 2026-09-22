@@ -42,19 +42,20 @@ def test_stall_nudge_no_benchmark_paths(nx_fresh):
     assert "write_file" in text and "run_bash" in text
 
 
-# --- run_bash / guidance docs say setsid, not nohup --------------------------
+# --- run_bash / guidance docs describe session detachment, not nohup ---------
 
-def test_run_bash_docstring_says_setsid(nx_fresh):
+def test_run_bash_docstring_says_detached(nx_fresh):
     from nx import _bash_jobs
     doc = _bash_jobs.run_bash.__doc__ or ""
-    assert "setsid" in doc
-    # the retired launcher must not be described as the current mechanism
+    # detached in its own session; the mechanism is start_new_session, and
+    # macOS has no external setsid binary so it must not be the documented way
+    assert "detached" in doc and "own session" in doc
     assert "run via nohup" not in doc
     assert "launched via nohup" not in doc
 
 
-def test_background_guidance_says_setsid(nx_fresh):
-    assert "detached (setsid)" in nx_fresh.BACKGROUND_GUIDANCE
+def test_background_guidance_says_detached(nx_fresh):
+    assert "detached" in nx_fresh.BACKGROUND_GUIDANCE
 
 
 # --- sleep inference covers fractional + suffixed durations ------------------

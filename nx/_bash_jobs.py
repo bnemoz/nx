@@ -1,6 +1,6 @@
 """Background bash job lifecycle: launch, poll, log, and reap.
 
-run_bash always launches detached (setsid) and polls briefly before
+run_bash always launches detached (own session) and polls briefly before
 backgrounding; wait_background resumes polling a job started earlier. Logs
 live under st.SESSION_HOME/bg-logs, auto-trimmed by _delete_old_bg_logs.
 
@@ -130,13 +130,22 @@ def _heredoc_quote_trap(command: str) -> str | None:
 def _run_bash(command: str) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
-    The command is started with ``setsid`` so it runs in a **new session / new
-    process group**, fully detached from nx's controlling terminal. This is
-    important: with plain ``nohup`` the background job stays in nx's
-    process group, so a terminal Ctrl+C (SIGINT to the foreground group) kills
-    it — exactly the failure mode that kept canceling long ``docker pull``s
-    mid-extraction. ``nohup`` only ignores SIGHUP, not SIGINT; ``setsid`` puts
-    the job beyond the reach of terminal-generated signals entirely.
+    The command is started in a **new session / new process group**, fully
+    detached from nx's controlling terminal. This is important: with plain
+    ``nohup`` the background job stays in nx's process group, so a terminal
+    Ctrl+C (SIGINT to the foreground group) kills it — exactly the failure
+    mode that kept canceling long ``docker pull``s mid-extraction. ``nohup``
+    only ignores SIGHUP, not SIGINT; a new session puts the job beyond the
+    reach of terminal-generated signals entirely.
+
+    The new session is created by the launcher subprocess itself via the
+    ``start_new_session`` option of ``subprocess.run`` — the C library's
+    setsid syscall, invoked directly. This replaces the earlier external
+    ``setsid`` binary: macOS does not ship one (it is a util-linux tool), so
+    the old shape failed there with "setsid: command not found" and blocked
+    every command. The syscall path works anywhere Python does, Linux and
+    macOS alike, with identical semantics: the wrapper shell becomes session
+    leader and the backgrounded job inherits that session.
 
     Exit-code capture is inlined into a single ``sh -c`` invocation so no
     wrapper script is needed — avoids a race where the launcher starts after
@@ -158,15 +167,17 @@ def _run_bash(command: str) -> tuple[str, str]:
     # (and this directory is shared by every nx session on the machine).
     touch_private(log_path)
     # Inline: run the command in a subshell, then echo its exit status.
-    # setsid detaches into a new session so terminal Ctrl+C / SIGINT can't
-    # reach the background job. Redirect to the log file ourselves.
+    # start_new_session detaches into a new session so terminal Ctrl+C /
+    # SIGINT can't reach the background job — no external setsid binary
+    # needed (macOS does not ship one). Redirect to the log file ourselves.
     inner = _wrap_exit_trailer(command)
-    wrapped = (f"setsid sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
+    wrapped = (f"sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
                f"echo $!")
-    r = subprocess.run(wrapped, shell=True, capture_output=True, text=True)
+    r = subprocess.run(wrapped, shell=True, capture_output=True, text=True,
+                       start_new_session=True)
     pid = r.stdout.strip()
-    # The launcher must echo exactly the PID of the setsid'd job ($!) — an
-    # integer. Anything else (empty output when setsid/sh died before the
+    # The launcher must echo exactly the PID of the detached job ($!) — an
+    # integer. Anything else (empty output when sh died before the
     # echo, a banner, a multi-line error) means there is no real PID: refuse
     # to mint a ``bg-pid-<garbage>.map`` file for it, so pid→log resolution
     # can never be pointed at a log this process didn't start.
@@ -439,7 +450,7 @@ def _infer_timeout_from_sleep(command: str, default: int) -> int:
 
     This compensates for the natural habit of writing
     ``run_bash("sleep 30 && cat …")`` — a pattern that *seems* like it should
-    block (the shell waits, then cats) but is itself launched detached (setsid), so
+    block (the shell waits, then cats) but is itself launched detached, so
     it gets backgrounded after ~3 s just like anything else.  By recognising
     the sleep we make the "obvious" pattern work again.
 
@@ -528,14 +539,14 @@ def _contains_secret(command: str) -> str | None:
 def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     """Run a shell command.
 
-    Commands always run detached via setsid — they never block the agent loop.
+    Commands always run detached in their own session — they never block the agent loop.
     If the command finishes within a short poll window (~3 s by default),
     output is returned directly and the log file is deleted.  If it's still
     running after the poll window, it continues in the background and you
     get a PID + log path to check later with ``read_file``.
 
     **Do NOT use** ``sleep N && …`` inside the command string as a way to
-    wait — the entire command is launched detached (setsid) so *it* will also
+    wait — the entire command is launched detached in its own session so *it* will also
     be backgrounded after a few seconds.  Instead, pass ``timeout=N`` to tell
     nx to wait synchronously (e.g. ``timeout=35`` for a ``sleep 30``
     command).  As a convenience, if your command *does* start with
@@ -637,9 +648,10 @@ def _maybe_start_watchdog(pid: int | str, command: str, max_seconds: int) -> Non
     A daemon thread sleeps out the remaining budget (poll-window seconds are
     already spent by the time we get here — the watchdog counts from process
     start as closely as we can observe), then SIGTERMs and, after a grace
-    period, SIGKILLs the process group. Setsid put the job in its own session,
-    so killing the group takes down any children it spawned — which is what
-    you want from a ceiling: nothing survives to keep consuming the machine.
+    period, SIGKILLs the process group. The job runs in its own session
+    (start_new_session), so killing the group takes down any children it
+    spawned — which is what you want from a ceiling: nothing survives to keep
+    consuming the machine.
 
     NX_WATCHDOG_POLL_SECONDS (default 0.5) is the _reap poll granularity: how
     often the reaper checks whether the job died on its own before the budget

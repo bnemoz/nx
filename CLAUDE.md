@@ -103,7 +103,7 @@ The package is organized into one module per concern; grep `^# ---` banners insi
    `sed_edit`) live in `nx/_edit_tools.py`, and `run_bash`/`wait_background` live in
    `nx/_bash_jobs.py` — all call `_confirm()`/`_ask_approval()` and touch session/
    background-process globals. All are dispatched through `run_tool()`.
-   `run_bash` always launches detached (`setsid`) and polls briefly before backgrounding —
+   `run_bash` always launches detached (own session via `start_new_session`) and polls briefly before backgrounding —
    see the `SYSTEM` prompt string in `nx/__init__.py` for the exact background/foreground
    contract given to the model; keep that docstring and the tool's actual behavior in sync
    if you touch either.

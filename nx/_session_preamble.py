@@ -97,7 +97,7 @@ BACKGROUND_GUIDANCE = (
     "the short poll window) — wait_background is now available as a tool. "
     "Guidance for backgrounded commands:\n"
     "- Do NOT use `sleep N && …` as a chaining trick — the whole command is "
-    "detached (setsid) so it backgrounds too. Only pass `timeout=N` to run_bash when "
+    "detached (own session) so it backgrounds too. Only pass `timeout=N` to run_bash when "
     "you KNOW the command finishes in ~N seconds (e.g. `timeout=35` for "
     "`sleep 30`).\n"
     "- For commands of unknown duration (docker pull, builds, servers), let "

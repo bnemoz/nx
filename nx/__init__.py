@@ -491,7 +491,7 @@ No native tool calls? Emit text-protocol call exactly:
 <tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>
 Prefer the tag alone; wait for Observation. Tool-call examples in prose/code-block only (not standalone). Task done -> reply plain prose.
 
-Shell cmds run detached (setsid) and never block you: a quick one returns its
+Shell cmds run detached (own session) and never block you: a quick one returns its
 output, a slow one backgrounds (result gives PID + log path -- read_file it).
 
 3-4+ step task -> call todo_write FIRST, before any other tool (one
