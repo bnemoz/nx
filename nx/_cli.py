@@ -51,6 +51,8 @@ Commands:
                  through the real batch harness and scores each
                  (list / run [--source, --out, --filter ID, --parallel N,
                  --json]; exit 0 when all scenarios pass).
+  update         Upgrade nx in place via its package manager (uv tool /
+                 pipx / pip), or just report the install with --check.
 
 Options:
   -f, --prompt-file <path>  Headless one-shot mode; "-" reads stdin. With
@@ -139,7 +141,7 @@ def _cli_version() -> str:
         return "unknown"
 
 
-_VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup")
+_VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup", "update")
 
 
 def _cli_help_or_version(argv: list[str]) -> bool:
@@ -313,6 +315,13 @@ def main() -> None:
     if sys.argv[1:2] == ["setup"]:
         from ._onboard import cli_onboard
         sys.exit(cli_onboard(sys.argv[2:]))
+    # `nx update` — self-update via the package manager (uv tool / pipx /
+    # pip). Purely a local/package-manager operation, so it dispatches before
+    # any env-file/onboarding machinery and works against a dead endpoint
+    # (nx/__init__.py skips switch_source()'s startup probes for this verb).
+    if sys.argv[1:2] == ["update"]:
+        from ._update import _cli_update
+        sys.exit(_cli_update(sys.argv[2:]))
     if sys.argv[1:2] != ["config"]:
         from ._env import _load_env_file
         _load_env_file()
