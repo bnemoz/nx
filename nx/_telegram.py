@@ -130,15 +130,13 @@ def _chunk(text: str, limit: int = TG_MAX_MESSAGE) -> list[str]:
     return chunks
 
 
-def _describe_step(messages: list, seen_len: int) -> str | None:
-    """One progress line for everything appended to `messages` since the last
-    model-turn boundary (the on_step seam gives no payload; the transcript
-    diff is the payload). Returns None when the step produced nothing new."""
-    new = messages[seen_len:]
-    if not new:
-        return None
-    parts = []
-    for m in new:
+def _describe_step(messages: list, seen_len: int) -> list[str]:
+    """Human-readable lines for everything appended to `messages` since the
+    last model-turn boundary (the on_step seam gives no payload; the
+    transcript diff is the payload). Assistant prose gets its own line; tool
+    calls and results pair up. Returns [] when the step added nothing."""
+    lines: list[str] = []
+    for m in messages[seen_len:]:
         role = m.get("role")
         if role == "assistant":
             for tc in (m.get("tool_calls") or []):
@@ -149,19 +147,86 @@ def _describe_step(messages: list, seen_len: int) -> str | None:
                         args = json.loads(args)
                     except Exception:
                         args = {}
-                brief = str(args.get("command") or args.get("path")
-                            or args.get("url") or args.get("query") or "")[:60]
-                parts.append(f"⚙ {fn.get('name')}" + (f": {brief}" if brief else ""))
+                if not isinstance(args, dict):
+                    args = {}
+                lines.append(_tool_line(fn.get("name") or "?", args))
             text = (m.get("content") or "")
             if isinstance(text, str) and text.strip():
-                parts.append("✎ " + text.strip()[:80])
+                lines.append("💬 " + _brief(text.strip(), 120))
         elif role == "tool":
-            body = m.get("content")
-            if isinstance(body, list):
-                body = "[image]"
-            body = str(body or "")
-            parts.append(f"↳ {len(body)} chars")
-    return " · ".join(parts) if parts else None
+            line = _tool_result_line(m)
+            if line:
+                lines.append(line)
+    return lines
+
+
+_ELLIPSIS = "\u2026"
+
+
+def _brief(value: str, limit: int = 64) -> str:
+    """One human-readable line from a tool argument: collapse whitespace,
+    shorten home paths, keep the first line of a command."""
+    s = " ".join(str(value).split())
+    s = s.replace(os.path.expanduser("~"), "~")
+    if len(s) > limit:
+        s = s[:limit - 1] + _ELLIPSIS
+    return s
+
+
+_TOOL_ICONS = {
+    "read_file": "\U0001f4d6", "write_file": "\u270d",
+    "edit_file": "\u270f", "multi_edit": "\u270f",
+    "delete_file": "\U0001f5d1", "list_dir": "\U0001f4c2",
+    "search_files": "\U0001f50d", "run_bash": "\u25b6",
+    "todo_write": "\u2611", "web_fetch": "\U0001f310",
+    "duckdb": "\U0001f5d4", "read_image": "\U0001f5bc",
+    "git_commit": "\u2387", "git_status": "\u2387", "git_diff": "\u2387",
+    "git_log": "\u2387", "run_tests": "\U0001f9ea",
+    "search_tools": "\U0001f527",
+}
+_ICON_DEFAULT = "\U0001f527"
+
+
+def _tool_line(name: str, args: dict) -> str:
+    """One line for a tool call, e.g. `run_bash: cargo test -p somatiq-dp`."""
+    icon = _TOOL_ICONS.get(name, _ICON_DEFAULT)
+    raw = str(args.get("command") or args.get("path") or args.get("url")
+              or args.get("query") or "")
+    first = raw.splitlines()[0] if raw.splitlines() else ""
+    shown = _brief(first)
+    return f"{icon} {name}" + (f": {shown}" if shown else "")
+
+
+def _tool_result_line(role_msg: dict) -> str | None:
+    """One line for a tool result: a short OK, or the meaningful tail of
+    output (errors and test summaries live in the tail)."""
+    body = role_msg.get("content")
+    if isinstance(body, list):
+        return "ok (image)"
+    body = str(body or "")
+    n = len(body)
+    if not body.strip() or n <= 200:
+        return "ok"
+    tail = next((ln.strip() for ln in reversed(body.splitlines())
+                 if ln.strip()), "")
+    tail = _brief(tail, 60)
+    return f"ok ({n} chars)" + (f" \u00b7 {tail}" if tail else "")
+
+
+# cap on how many recent lines the status message shows
+_STATUS_TAIL = 14
+
+
+def _compose_status(lines: list[str], tool_n: int, note_n: int) -> str:
+    """The whole status message: recent activity lines + a footer tally."""
+    shown = lines[-_STATUS_TAIL:]
+    if len(lines) > _STATUS_TAIL:
+        shown.insert(0, f"\u2026 ({len(lines) - _STATUS_TAIL} earlier lines)")
+    body = "\n".join(shown)
+    tally = f"total: {tool_n} tool calls"
+    if note_n:
+        tally += f", {note_n} notes"
+    return body + "\n\n" + tally
 
 
 def _send(api: callable, chat_id: int, text: str) -> dict:
@@ -233,17 +298,27 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
         messages.extend(_initial_messages())
     messages.append({"role": "user", "content": instruction})
 
-    status = _send(api, chat_id, "⚙ working…")
+    status = _send(api, chat_id, _compose_status([], 0, 0))
     status_id = status.get("message_id")
     seen = len(messages)
+    activity: list[str] = []   # every line so far this turn
+    tool_n = 0                 # tool calls so far
+    note_n = 0                 # assistant prose notes so far
 
     def on_step() -> None:
-        line = _describe_step(messages, seen)
-        if line and status_id:
+        nonlocal tool_n, note_n
+        new_lines = _describe_step(messages, seen)
+        if not new_lines:
+            return
+        activity.extend(new_lines)
+        tool_n += sum(1 for ln in new_lines if not ln.startswith(("💬", "ok")))
+        note_n += sum(1 for ln in new_lines if ln.startswith("💬"))
+        if status_id:
             try:
                 api("editMessageText", {"chat_id": chat_id,
                                         "message_id": status_id,
-                                        "text": "⚙ " + line})
+                                        "text": _compose_status(
+                                            activity, tool_n, note_n)})
             except Exception:
                 pass  # progress is best-effort; never kill the turn over it
 

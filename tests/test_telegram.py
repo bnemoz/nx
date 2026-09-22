@@ -111,6 +111,52 @@ def test_non_pdf_document_is_ignored():
     assert instr is None
 
 
+# --- step rendering --------------------------------------------------------------
+
+def test_describe_step_pairs_calls_with_results():
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "1", "function": {"name": "run_bash",
+             "arguments": json.dumps({"command": "cargo test -p x\nsecond line ignored"})}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "y" * 500 + "\nerror: boom"},
+        {"role": "assistant", "content": "Found the bug."},
+    ]
+    lines = tg._describe_step(msgs, 0)
+    assert len(lines) == 3
+    assert lines[0].startswith("\u25b6") and "run_bash" in lines[0]
+    assert "cargo test -p x" in lines[0] and "second line" not in lines[0]
+    assert "512 chars" in lines[1] and "error: boom" in lines[1]
+    assert lines[2].startswith("\U0001f4ac") and "Found the bug." in lines[2]
+    assert tg._describe_step(msgs, 3) == []
+
+
+def test_describe_step_home_shortening_and_bad_args():
+    home = os.path.expanduser("~")
+    msgs = [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": "1", "function": {"name": "read_file",
+         "arguments": json.dumps({"path": home + "/Documents/Projects/x.rs"})}},
+        {"id": "2", "function": {"name": "edit_file", "arguments": "not json"}},
+    ]}]
+    lines = tg._describe_step(msgs, 0)
+    assert home not in lines[0] and "~/Documents/Projects/x.rs" in lines[0]
+    assert "edit_file" in lines[1]          # salvage line, no crash
+
+
+def test_compose_status_tally_and_tail():
+    lines = [f"line{i}" for i in range(20)]
+    out = tg._compose_status(lines, 7, 2)
+    assert "earlier lines" in out
+    assert "line19" in out and "line5" not in out
+    assert "7 tool calls" in out and "2 notes" in out
+    short = tg._compose_status(["only"], 1, 0)
+    assert short == "only\n\ntotal: 1 tool calls"
+
+
+def test_brief_collapses_whitespace_and_caps():
+    assert tg._brief("a\n  b\tc") == "a b c"
+    assert len(tg._brief("x" * 100)) == 64
+
+
 # --- the turn: progress edits + final answer --------------------------------------
 
 class _FakeSource:
