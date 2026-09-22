@@ -320,7 +320,7 @@ def _write_session(
                     data[k] = v
         tmp = f"{path}.{os.getpid()}.tmp"
         with _open_private(tmp) as f:
-            json.dump(data, f, ensure_ascii=False)
+            f.write(json.dumps(data, ensure_ascii=False))
         os.replace(tmp, path)
         try:
             os.utime(path, (data["updated_at"], data["updated_at"]))
@@ -474,9 +474,19 @@ def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
     never data loss). Multi-MB autosaves become KB: the payload is written
     once per unique image, deduped across all sessions by sha256."""
     import copy
-    out = copy.deepcopy(messages)
     if not _env_int("NX_SESSION_IMAGES", 1):
-        return out
+        return copy.deepcopy(messages)
+    # Copy-on-write: a history with no image parts (the overwhelmingly
+    # common case) is returned as a shallow list copy sharing the message
+    # dicts — nothing below mutates them, so the deepcopy per message is
+    # wasted work on every save and scaled with the transcript.
+    if not any(
+        isinstance(p, dict) and p.get("type") == "image_url"
+        for m in messages if isinstance(m, dict)
+        for p in (m.get("content") if isinstance(m.get("content"), list) else ())
+    ):
+        return list(messages)
+    out = copy.deepcopy(messages)
     for m in out:
         c = m.get("content") if isinstance(m, dict) else None
         if not isinstance(c, list):

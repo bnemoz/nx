@@ -190,11 +190,16 @@ _UPSERT_SQL = (
 
 def update_session(session_id: str, data: dict[str, Any], mtime: float,
                    conn: Optional[sqlite3.Connection] = None) -> None:
-    """Refresh one session's listing row AND its FTS row from the full
-    session `data`. Replaces the shard write of the old `_update_index`
-    plus the lazily-built FTS row: one save keeps both in step."""
+    """Refresh one session's listing row from the full session `data`.
+
+    Replaces the shard write of the old `_update_index`. The FTS body is
+    NOT rewritten here: building it (and the FTS5 insert) scales with the
+    transcript, which put an O(transcript) tax on every mid-turn autosave.
+    Instead the FTS row is dropped and `_sessions_search._refresh_index`
+    backfills it from the just-written JSON on the next content search —
+    the on-demand backfill the search module already guarantees. The
+    listing row (cheap, fixed-size) is still kept in step on every save."""
     from ._sessions_io import _summarize_session_data
-    from ._sessions_search import _session_body
     summary = _summarize_session_data(session_id, data)
     own = conn is None
     if own:
@@ -208,14 +213,12 @@ def update_session(session_id: str, data: dict[str, Any], mtime: float,
             conn.execute(_UPSERT_SQL,
                          (session_id,) + _summary_to_row(summary) + (mtime,))
             try:
+                # Drop the FTS row so the next search re-backfills from the
+                # file; keeping a stale body would shadow the new transcript
+                # (the file is always newer than the row by the time a
+                # search runs, so the backfill is guaranteed to fire).
                 conn.execute("DELETE FROM sessions_fts WHERE session_id = ?",
                              (session_id,))
-                conn.execute(
-                    "INSERT INTO sessions_fts (session_id, title, description,"
-                    " body, mtime) VALUES (?, ?, ?, ?, ?)",
-                    (session_id, summary.get("title") or "",
-                     summary.get("description") or "",
-                     _session_body(data), mtime))
             except sqlite3.OperationalError:
                 pass  # no FTS5 here — the listing row is the part that matters
     finally:
