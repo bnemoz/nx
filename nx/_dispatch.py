@@ -191,17 +191,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # thread may call).
     from ._subagent import _subagent_ctx as _gate_ctx
     if _gate_ctx() is None:
-        if name == "wait_background" and not st._SESSION_HAS_BACKGROUNDED:
-            return _unknown_tool_error(name)
-        if name == "read_image" and not (_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED):
-            return _unknown_tool_error(name)
-        if name == "spawn_agent" and not _m.NX_SUBAGENTS:
-            return _unknown_tool_error(name)
-        if name == "plan_edit" and not plan_active():
-            return _unknown_tool_error(name)
-        if name == "obs_recall" and not getattr(_m, "NX_OBS", 0):
-            return _unknown_tool_error(name)
-        if name == "web_fetch" and not getattr(_m, "NX_WEBFETCH", 0):
+        from ._tool_gates import _gate_closed
+        if _gate_closed(name):
             return _unknown_tool_error(name)
     # Malformed-args circuit breaker: the tool was dropped for cause (this
     # endpoint keeps truncating its args), so refuse with the same wording the

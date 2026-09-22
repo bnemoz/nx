@@ -1,9 +1,14 @@
 """The tiered tool registry (0.62.0, PERF §6 items 1-2): gates, the active
-schema list, and the tier-2 search_tools meta-tool.
+schema list, the tier-2 search_tools meta-tool, and the withheld-tool
+refusals — the SINGLE SOURCE for everything "is this tool offered this turn".
 
 A declarative (name -> gate) table replacing five sequential O(N) filter
 passes over the schema list. `_active_tools()` is memoized on the gate-vector
-(a tuple of booleans rebuilt per turn is one dict lookup + one list comp).
+(one dict lookup + one list comp per turn). `_gate_vector()` derives from
+_TOOL_GATES itself, so adding a gate is a one-entry edit. The gate registry
+also drives run_tool()'s pre-dispatch refusal re-check (`run_tool` calls
+`_gate_closed()`) and `_unknown_tool_error()`'s per-gate wording — the three
+places that used to need parallel edits per new gate.
 
 Tier 2 (meta-tool) is not yet occupied by any schema: `search_tools` lifts a
 tier-2 tool's full schema into context on demand, so a future always-on tool
@@ -24,6 +29,8 @@ _TOOL_GATES: dict[str, Any] = {
     # name -> callable returning True when the schema should be OFFERED this
     # turn. Unlisted names are always-on. The malformed-args breaker is a veto
     # applied after the gates (a broken tool is dropped, not gated in).
+    # The per-gate refusal wording lives in _GATE_REFUSALS below; a gate entry
+    # without a refusal falls back to the generic withheld wording.
     "wait_background": lambda: st._SESSION_HAS_BACKGROUNDED,
     "spawn_agent": _delegation_enabled,
     "read_image": lambda: bool(_m_safe().NX_VISION) and st._NATIVE_TOOL_CALLS_CONFIRMED,
@@ -37,6 +44,19 @@ _TOOL_GATES: dict[str, Any] = {
     "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
 }
 
+# Per-gate refusal text (the "why it's closed and what to do instead" line the
+# model needs so it doesn't conclude the capability doesn't exist). Keyed by
+# tool name; a gated tool without an entry gets the generic withheld wording
+# in _unknown_tool_error.
+_GATE_REFUSALS: dict[str, str] = {
+    "wait_background": "(no command has backgrounded yet — nothing to wait on). run_bash returns a '[background] PID' line when a command needs waiting on; read_file that log path in the meantime.",
+    "read_image": "(NX_VISION is off, or native tool calls are not confirmed on this source). Describe images by other means or ask the user to paste the relevant details.",
+    "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/list_dir.",
+    "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
+    "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
+    "web_fetch": "(NX_WEBFETCH is off, or the gate has not opened). Work from local files, or ask the user to paste the relevant page/search results.",
+}
+
 _TOOL_LIST_CACHE: dict[tuple, list] = {}
 
 
@@ -46,18 +66,16 @@ def _m_safe():
 
 
 def _gate_vector() -> tuple:
-    import nx as _m
+    """The memo key for _active_tools(): the evaluated state of EVERY gate,
+    plus the breaker's broken set. Derived from _TOOL_GATES itself — adding a
+    gate is a one-entry edit, not a parallel-tuple edit (the old parallel
+    tuple of positional booleans silently mis-keyed the cache when a gate was
+    added to one table and not the other)."""
     from ._breaker import _breaker_views
     broken = _breaker_views()[1]
-    return (
-        bool(st._SESSION_HAS_BACKGROUNDED),
-        bool(_m.NX_SUBAGENTS),
-        bool(_m.NX_VISION and st._NATIVE_TOOL_CALLS_CONFIRMED),
-        bool(plan_active()),
-        bool(getattr(_m, "NX_OBS", 0)),
-        bool(getattr(_m, "NX_WEBFETCH", 0)),
-        tuple(sorted(broken)) if broken else (),
-    )
+    gate_state = tuple(sorted(
+        (name, bool(gate())) for name, gate in _TOOL_GATES.items()))
+    return (gate_state, tuple(sorted(broken)) if broken else ())
 
 
 def _active_tools() -> list[dict[str, Any]]:
@@ -76,7 +94,7 @@ def _active_tools() -> list[dict[str, Any]]:
     cached = _TOOL_LIST_CACHE.get(key)
     if cached is not None:
         return cached
-    broken = set(key[-1])
+    broken = set(key[1])
     tools = []
     for t in _m.TOOLS:
         name = t["function"]["name"]
@@ -167,27 +185,19 @@ def _unknown_tool_error(name: str) -> str:
                     f"Available tools: {', '.join(sorted(known))}")
         return f"ERROR: unknown tool {name} — Available tools: {', '.join(sorted(known))}"
     # Withheld this session: name the gate and the alternative, so the model
-    # doesn't conclude the capability doesn't exist.
-    if name == "wait_background":
-        return (f"ERROR: {name} is not available in this session (no command has backgrounded "
-                "yet — nothing to wait on). run_bash returns a '[background] PID' line when a "
-                "command needs waiting on; read_file that log path in the meantime.")
-    if name == "read_image":
-        return (f"ERROR: {name} is not available in this session (NX_VISION is off, or native "
-                "tool calls are not confirmed on this source). Describe images by other means "
-                "or ask the user to paste the relevant details.")
-    if name == "spawn_agent":
-        return (f"ERROR: {name} is not available in this session (NX_SUBAGENTS is off). Do the "
-                "investigation yourself with search_files/read_file/list_dir.")
-    if name == "plan_edit":
-        return (f"ERROR: {name} is not available in this session (no plan is active). Start one "
-                "with /plan <goal>, or just proceed with the normal edit tools.")
-    if name == "obs_recall":
-        return (f"ERROR: {name} is not available in this session (NX_OBS is off — "
-                "nothing was packed, so there is nothing to recall).")
-    if name == "web_fetch":
-        return (f"ERROR: {name} is not available in this session (NX_WEBFETCH is off, "
-                "or the gate has not opened). Work from local files, or ask the user "
-                "to paste the relevant page/search results.")
+    # doesn't conclude the capability doesn't exist. The wording comes from
+    # _GATE_REFUSALS (one entry per gate — the same registry the gate itself
+    # lives in); a gated tool without an entry gets the generic wording.
+    if name in _GATE_REFUSALS:
+        return f"ERROR: {name} is not available in this session {_GATE_REFUSALS[name]}"
     return (f"ERROR: {name} is not available in this session (withheld by the current session "
             "configuration). Use one of: " + ", ".join(sorted(known)))
+
+
+def _gate_closed(name: str) -> bool:
+    """True when `name` has a gate in _TOOL_GATES and that gate is CLOSED this
+    turn. run_tool()'s pre-dispatch re-check calls this instead of repeating
+    each gate's condition inline — a new gate needs one entry in _TOOL_GATES,
+    not a fourth hardcoded branch."""
+    gate = _TOOL_GATES.get(name)
+    return gate is not None and not gate()
