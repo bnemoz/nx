@@ -2,7 +2,16 @@
 
 ## Project Structure & Module Organization
 
-`nx/` contains the Python package for the `nx` coding-agent CLI. Keep concerns in focused private modules (for example, `_turn.py`, `_sources.py`, and `_chatbox.py`) and expose/wire them through `nx/__init__.py` only as needed. `tests/` contains one test file per behavior area. `README.md` is the user-facing reference; `CONTRIBUTING.md` documents required touch points for slash commands, tools, and environment variables. `sources.example.env` provides safe configuration examples.
+`nx/` contains the Python package for the `nx` coding-agent CLI. Keep concerns in focused private modules and expose/wire them through `nx/__init__.py` only as needed. The formerly monolithic core files were decomposed across 0.87.2–0.89.2; the current map:
+
+- **Turn loop** — `nx/_turn.py` (model_turn, the loop, tool-call handlers, TURN_* statuses) plus `nx/_turn_footer.py` (stats footer, ctx probe), `nx/_tool_prefetch.py` (read-only parallel fan-out, cache prefetch), `nx/_argsalvage.py` (malformed-args salvage, breaker nudge), `nx/_turn_retry.py` (step retry ladder, batch deadline TLS).
+- **Dispatch** — `nx/_dispatch.py` (DISPATCH table, run_tool) plus `nx/_tool_gates.py` (the tiered registry: `_TOOL_GATES`, `_active_tools`, `_gate_vector`, search_tools, withheld-tool refusals), `nx/_breaker.py` (malformed-args circuit breaker), `nx/_session_preamble.py` (fresh-session message list, one-time nudge strings), `nx/_bg_completions.py` (bg-job completion sweep).
+- **Requests/compression** — `nx/_compress.py` (open_stream, compress, the env-derived request flags) plus `nx/_runtime_notes.py` (the [Runtime note] contract), `nx/_request_opts.py` (recovery sampler, grammar, /toolcalls mode, max_tokens clamp), `nx/_stream_errors.py` (error classification).
+- **Sub-agents** — `nx/_subagent.py` (spawn_agent, async machinery) plus `nx/_subagent_tiers.py` (tool tiers, restricted dispatch tables), `nx/_subagent_bash.py` (read-only bash allowlist), `nx/_delegation_note.py`, `nx/_subagent_tls.py`.
+- **Memory** — `nx/_memory_cmd.py` (the /memory UI + memory_write) plus `nx/_memory_store.py` (the one scanner/writer), `nx/_memory_search.py`, `nx/_memory_note.py`, `nx/_memory_archive.py`.
+- **Prompts** — `nx/_prompts.py` is the single home for the satellite system prompts (RISK_SYSTEM, REDUCER_SYSTEM_PROMPT, DESC_SYSTEM, SUBAGENT_SYSTEM/SUBAGENT_WRITE_SYSTEM); the main `SYSTEM` stays in `nx/__init__.py` (load-bearing on the token floor; its bytes are pinned by `_prefix.py`).
+
+When you split or extend a module, moved names are re-exported from the old home so the import surface (and tests that patch module attributes) keep working. `tests/` contains one test file per behavior area. `README.md` is the user-facing reference; `CONTRIBUTING.md` documents required touch points for slash commands, tools, prompts, and environment variables. `sources.example.env` provides safe configuration examples.
 
 ## Semver Policy
 
@@ -31,7 +40,9 @@ Use standard Python conventions: four-space indentation, `snake_case` functions 
 
 We target models with 128K-1M-token context windows, so the per-turn floor of `SYSTEM` prompt + always-on tool schemas is held under a **hard, recorded budget of ~5K tokens** (`BUDGET_TOKENS` in `tests/test_initial_context.py`; currently 4800, measured floor ~3.4K). Within that ceiling, favor *clarity over terseness*: every argument the model can pass gets a `description`, overlapping tools name each other, and self-healing behavior is spelled out in the schema. Do not abbreviate prose to save a handful of tokens — the budget is enforced mechanically, so a schema only needs trimming when the floor actually approaches the ceiling.
 
-The budget is a forcing function, not a soft warn: a change that pushes the floor past `BUDGET_TOKENS` fails the suite until either a schema is trimmed or the number is raised **with a ledger entry justifying the cost**. A new always-on tool should first consider displacing an existing one into tier 2 (a `_TOOL_GATES` entry in `nx/_tool_gates.py`, surfaced by `search_tools`) — tier-2 tools cost 0 tokens until used. See CONTRIBUTING.md for the tool touch points.
+The budget is a forcing function, not a soft warn: a change that pushes the floor past `BUDGET_TOKENS` fails the suite until either a schema is trimmed or the number is raised **with a ledger entry justifying the cost**. A new always-on tool should first consider displacing an existing one into tier 2 (a `_TOOL_GATES` entry in `nx/_tool_gates.py`, surfaced by `search_tools`) — tier-2 tools cost 0 tokens until used. Adding a gated tool is a **one-file** change: one entry in `_TOOL_GATES` plus one in `_GATE_REFUSALS`, both in `nx/_tool_gates.py` — the gate vector, the withheld-tool refusals, and run_tool's pre-dispatch re-check all derive from that registry. See CONTRIBUTING.md for the tool touch points.
+
+Prompt changes: the satellite system prompts (risk classifier, evidence reducer, session descriptions, sub-agent scopes) live in `nx/_prompts.py` — edit them there, in one file, and the consuming module picks the constant up. Only the main `SYSTEM` lives in `nx/__init__.py`. `tests/perf/baselines.json`'s `conftest_snapshot` ledger pins the module-count cost of the conftest state rewind: splitting a module means re-recording it (and a large split means raising the budget with a justification, as was done for the 0.89.0 decomposition).
 
 Ruff configuration includes intentional import exceptions for `nx/__init__.py`; preserve them rather than rearranging imports solely for linting.
 

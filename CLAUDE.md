@@ -9,8 +9,14 @@ From now on we follow semver; bump version numbers as changes are made.
 ## What this is
 
 `nx` is a lightweight coding agent CLI, packaged under `nx/` (entry point
-`nx/__init__.py`, ~1500 lines, plus over a dozen focused submodules — `_turn.py`,
-`_repl.py`, `_sources.py`, `_chatbox.py`, etc.). It used to be a single ~5300-line
+`nx/__init__.py`, ~940 lines of wiring/schemas, plus ~40 focused submodules —
+see AGENTS.md's Project Structure section for the current map of the
+decomposed core: `_turn.py` + `_turn_footer/_tool_prefetch/_argsalvage/
+_turn_retry`, `_dispatch.py` + `_tool_gates/_breaker/_session_preamble/
+_bg_completions`, `_compress.py` + `_runtime_notes/_request_opts/
+_stream_errors`, `_subagent.py` + its tiers/bash/delegation splits, the
+memory family, and `nx/_prompts.py` for the satellite system prompts). It
+used to be a single ~5300-line
 `nx.py` file kept deliberately dependency-minimal; it has since been split into a
 proper package (see the "Extract ... into nx/_x.py" commits in the git log) and
 picked up real dependencies (`httpx`, `rich`) where they earn their keep. It talks to

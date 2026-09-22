@@ -10,7 +10,8 @@ A slash command has **three** touch points. Miss one and the command "works"
 but is broken in a way that's easy to not notice:
 
 1. **Dispatch** — `nx/_repl.py`, the `_REPL_COMMANDS` dict (command → handler
-   from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py`, and
+   from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py` (whose
+   storage layers live in `_memory_store.py` / `_memory_search.py`), and
    subcommand modules like `_memory_optimize.py` reached via their parent
    handler). This is where the command actually runs.
 2. **Chatbox hint menu** — `nx/_chatbox.py`, the `SLASH_COMMANDS` list
@@ -68,17 +69,27 @@ CLAUDE.md. Beyond the schema itself:
 - Tool body: read-only tools go in `nx/_tools.py`; state-touching tools
   (anything calling `_confirm()` or touching session/background-process
   globals) go in a focused submodule (e.g. `nx/_edit_tools.py` for the
-  write/edit tools, `nx/_memory_cmd.py` for the memory tools), not loose in
-  `__init__.py` — the same "prefer a new `nx/_feature.py` over growing
-  `__init__.py`" rule from AGENTS.md.
-- Dispatch: wire it into `run_tool()`.
+  write/edit tools, `nx/_memory_cmd.py` for the memory slash-command UI and
+  `memory_write`), not loose in `__init__.py` — the same "prefer a new
+  `nx/_feature.py` over growing `__init__.py`" rule from AGENTS.md.
+- Schema: added to `TOOLS` in `nx/__init__.py` (single source — the
+  `search_tools` meta-tool serves withheld schemas from there; do not
+  duplicate a schema literal elsewhere).
+- Dispatch: one `DISPATCH["name"] = body` entry in `nx/_dispatch.py`.
 - Tiering (0.62.0, the feature-cost rule): a new always-on tool adds to the
-  per-turn floor that every session pays. Prefer making it tier-2 first: add a
-  `_TOOL_GATES` entry in `nx/_tool_gates.py` so it is withheld until relevant
-  and surfaced on demand by `search_tools` (0 tokens until used). An always-on
-  tool may instead raise `BUDGET_TOKENS` in `tests/test_initial_context.py`
-  with a ledger entry justifying the cost — the ceiling is ~5K tokens, and the
-  point is to stay under it, not to compress every schema to the minimum.
+  per-turn floor that every session pays. Prefer making it tier-2 first: a
+  **one-file** change in `nx/_tool_gates.py` — one `_TOOL_GATES` entry (the
+  gate callable) plus one `_GATE_REFUSALS` entry (the "why it's closed and
+  what to do instead" line). Everything else derives from that registry: the
+  gate vector (`_gate_vector` builds the memo key from `_TOOL_GATES` itself —
+  no parallel boolean tuple to keep in sync), `_active_tools()`, the
+  withheld-tool refusal wording (`_unknown_tool_error` reads
+  `_GATE_REFUSALS`), and run_tool()'s pre-dispatch re-check
+  (`_gate_closed()`). The withheld schema is served by `search_tools`
+  automatically. An always-on tool may instead raise `BUDGET_TOKENS` in
+  `tests/test_initial_context.py` with a ledger entry justifying the cost —
+  the ceiling is ~5K tokens, and the point is to stay under it, not to
+  compress every schema to the minimum.
   `tests/perf/baselines.json`'s `active_tools_floor` pins the always-on count.
 - Risk classification: if the tool can write or execute, confirm
   `_assess_risk()` (`nx/_risk.py`) handles it sensibly — don't assume a new
@@ -92,6 +103,25 @@ CLAUDE.md. Beyond the schema itself:
   edit_file, edit_file vs multi_edit). `tests/test_tool_schema_invariants.py`
   enforces all three, including the `UNDOCUMENTED_OK` exemption list — add to
   it only when the property name really is the whole contract.
+
+## Adding or editing a system prompt
+
+- **Satellite prompts** (used on dedicated one-off calls, never on the
+  per-turn floor): `nx/_prompts.py` is the single home — `RISK_SYSTEM`,
+  `REDUCER_SYSTEM_PROMPT` (built via `reducer_system_prompt()`, which fills
+  the caps by token replacement — the prompt's JSON braces must survive, so
+  never `str.format` it), `DESC_SYSTEM`, `SUBAGENT_SYSTEM`,
+  `SUBAGENT_WRITE_SYSTEM`. Edit the constant there; the consuming module
+  re-exports it, so existing imports keep working. Keep every constant
+  interpolation-free at module level (no session state, no env reads in the
+  string) — the same byte-stability discipline `_prefix.py` enforces for the
+  main `SYSTEM`.
+- **The main `SYSTEM`** stays in `nx/__init__.py` (see CLAUDE.md: it is
+  load-bearing on the per-turn token floor and its exact bytes are pinned as
+  the prompt-cache head). Editing it requires re-checking
+  `tests/test_initial_context.py` (ledger entry if the floor grows) and — if
+  it changes the tool-call protocol dialect — `nx/_grammar.py` and
+  `nx/_text_fallback.py`, which must keep parsing what `SYSTEM` teaches.
 
 ## SoL-Pi mechanism ports (0.67.0)
 
@@ -263,12 +293,13 @@ complete. When you add an entry to `TOOLS`:
       properties; the no-clobber rule applies automatically.
 - [ ] If the model should be steered to a sibling tool when this one's args
       keep truncating, make sure `_malformed_args_nudge`'s fallback map in
-      `nx/_turn.py` mentions it (or that the generic "use one of: …" wording
+      `nx/_argsalvage.py` mentions it (or that the generic "use one of: …" wording
       is acceptable).
 - [ ] Unknown-tool refusals name the gate for withheld tools: if your tool is
-      conditionally offered by `_active_tools()`, add a branch to
-      `_unknown_tool_error()` in `nx/_dispatch.py` saying why it's missing and
-      what to do instead — and cover it in `tests/test_unknown_tool.py`.
+      conditionally offered by `_active_tools()`, add a `_GATE_REFUSALS` entry
+      in `nx/_tool_gates.py` (the same file as the gate itself) saying why
+      it's missing and what to do instead — and cover it in
+      `tests/test_unknown_tool.py`.
 - [ ] If the tool returns anything but a plain string (a content-parts array,
       like `read_image`), audit every consumer before shipping: the terminal
       preview and the `/tooloutput` stash (nx/_dispatch.py run_tool), the
