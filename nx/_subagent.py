@@ -767,15 +767,6 @@ def _stage_subagent_answer(job_id: str) -> None:
         setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
 
 
-def _prune_queued() -> None:
-    """Stop _ASYNC_QUEUED growing without bound when the parent never reaches
-    the spawn that would dequeue it: drop ids whose record is gone or already
-    finished. Called under _ASYNC_LOCK."""
-    _ASYNC_QUEUED[:] = [jid for jid in _ASYNC_QUEUED
-                        if (rec := _ASYNC_AGENTS.get(jid)) is not None
-                        and rec.get("status") == "queued"]
-
-
 def _spawn_async(instruction: str, max_turns: int) -> str:
     """Launch the agent's turn loop on a quiet daemon thread and return the
     job id result the parent's tool message carries."""

@@ -232,20 +232,8 @@ def _invalidate_tool_list_cache() -> None:
     _TOOL_LIST_CACHE.clear()
 
 
-SEARCH_TOOLS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "search_tools",
-        "description": "List tools not offered this turn (tier-2/withheld), with their full schemas so one can be used on the next turn. Returns name + schema JSON per tool.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Regex (ignored case) matched against tool names and descriptions; empty lists everything withheld"},
-            },
-            "required": [],
-        },
-    },
-}
+# The search_tools schema literal lives in __init__.py TOOLS (single source);
+# this module only defines the search_tools() body registered in DISPATCH.
 
 
 def search_tools(pattern: str = "") -> str:
