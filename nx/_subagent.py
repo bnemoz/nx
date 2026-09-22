@@ -74,6 +74,22 @@ from . import _state as st
 from ._env import _env_int
 from ._progress import note_progress
 
+# --- re-exports from the split-out layers (single import surface preserved) ---
+from ._delegation_note import (  # noqa: F401 (re-exports)
+    DELEGATION_GUIDANCE, DELEGATION_NOTE_MARKER, _add_delegation_note_if_absent,
+    _delegation_enabled, _load_delegation_note,
+)
+from ._subagent_tiers import (  # noqa: F401 (re-exports)
+    _READ_ONLY_TOOL_NAMES, _SUBAGENT_TLS, _SubagentContext, _subagent_active,
+    _subagent_ctx, _subagent_table, _subagent_tools, _write_tier_dispatch,
+    _write_tier_enabled, _write_tier_wrapper, _WRITE_TIER_TOOL_NAMES,
+    _read_only_dispatch,
+)
+from ._subagent_bash import (  # noqa: F401 (re-exports)
+    _SUBAGENT_BASH_ALLOW, _subagent_bash, _subagent_bash_allowed,
+)
+
+
 SUBAGENT_SYSTEM = (
     "You are a focused read-only sub-agent answering ONE question about this "
     "codebase for a parent agent. Read files, search, and inspect; then reply "
@@ -96,67 +112,6 @@ SUBAGENT_WRITE_SYSTEM = (
     "with what changed (paths + what each edit did) and anything the parent "
     "must finish itself — no preamble, no plan narration."
 )
-
-# Session-start delegation guidance, injected ONLY when the spawn_agent schema
-# is actually offered (NX_SUBAGENTS=1) — see _dispatch._initial_messages().
-# The tool description alone wasn't enough: models left spawn_agent unused and
-# ground through dozens of sequential read_file/search_files calls themselves
-# unless the user explicitly asked for a fan-out. A schema description reads as
-# a *permission*, this reads as an *expectation*, and it's the layer that
-# carries the trigger list (unfamiliar codebase, cross-module trace, callers of
-# a symbol, 2+ unrelated questions). Kept out of the static SYSTEM string so a
-# sub-agents-disabled session (the default) pays nothing for it.
-DELEGATION_GUIDANCE = (
-    "[Delegation note: the spawn_agent tool is available this session — reach "
-    "for it PROACTIVELY, without being asked.\n"
-    "- Answering or editing about code you haven't read, when the question "
-    "spans 2+ files or modules? Spawn one read-only agent per independent area "
-    "instead of reading them yourself, then work from their findings.\n"
-    "- Independent/unrelated questions go in ONE turn as separate spawn_agent "
-    "calls — they run concurrently, and their intermediate greps/reads never "
-    "enter your context (that's the whole point: delegation without bloat).\n"
-    "- Map an unfamiliar repo, trace a behavior across modules, or enumerate a "
-    "symbol's callers: delegate the sweep, keep the answer.\n"
-    "- Do it yourself for a file you've already read, one targeted "
-    "search_files/read_file, and every edit you're making.\n"
-    "- spawn_agent is backgrounded by default: you get a job id now and the "
-    "answer arrives as a [Runtime note] plus report path on a later turn; "
-    "async=false runs it in the foreground instead.]"
-)
-
-
-def _delegation_enabled() -> bool:
-    """True when the spawn_agent schema is being offered this session.
-    Resolved through the top-level module attribute (NX_SUBAGENTS) so
-    tests/REPL can flip it live; falls back to the env var."""
-    import nx as _m
-    try:
-        return bool(_m.NX_SUBAGENTS)
-    except AttributeError:
-        return bool(_env_int("NX_SUBAGENTS", 0))
-
-
-def _load_delegation_note() -> dict[str, str] | None:
-    """User-role session-start note with the delegation triggers, or None when
-    sub-agents are disabled (nothing to steer toward)."""
-    if not _delegation_enabled():
-        return None
-    return {"role": "user", "content": DELEGATION_GUIDANCE}
-
-
-def _add_delegation_note_if_absent(messages: list) -> None:
-    """Give a resumed session the same note a fresh one gets (its saved
-    transcript may predate the feature). Mirrors
-    _memory_cmd._add_memory_note_if_absent's marker-scan contract."""
-    for m in messages:
-        if (m.get("role") == "user" and isinstance(m.get("content"), str)
-                and "[Delegation note:" in m["content"]):
-            return
-    note = _load_delegation_note()
-    if note is not None:
-        at = 1 if (messages and messages[0].get("role") == "system") else 0
-        messages.insert(at, note)
-
 
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
 # was the other half of the 0.19 cap-outs: real investigations (orient, read
@@ -198,40 +153,6 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
     }, "required": ["instruction"]},
 }}
-
-# Tools the sub-agent may call: the read-only dispatch entries (derived from
-# the same tuple run_tool() result-caches, plus list_dir) + run_bash, which is
-# gated to the read-only allowlist by _subagent_bash(). Never mutating tools,
-# never wait_background.
-_READ_ONLY_TOOL_NAMES = (
-    "read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log",
-    "memory_search", "run_bash",
-)
-
-# Per-agent sub-loop context. A global flag/table can't express two agents
-# running at once (the second's finally would clear the first's table), so
-# spawn_agent() installs its restricted table on a threading.local slot and
-# run_tool() resolves tool calls through it. Falls back to the plain globals
-# for code (tests, REPL) that sets them directly.
-_SUBAGENT_TLS = threading.local()
-
-# Tools offered only when the write tier is on (NX_SUBAGENT_WRITE=1): the
-# schemas come from the parent TOOLS list, but inside a tier-enabled sub-loop
-# they resolve to the confirm-through wrappers in _write_tier_dispatch().
-# delete_file is deliberately excluded (removal, not creation — a delete is
-# one edit away from a recreate, but its undo snapshot belongs to the parent);
-# so are apply_patch (one call already covers multi-file restructures),
-# memory_write, and run_bash (the read-only allowlist tier covers inspection).
-# run_tests IS included (0.49.0): a write-tier agent that can edit but not
-# verify can only guess. It runs through the same user-gated _confirm() the
-# parent's run_tests hits (the wrapper tears down the sub-agent context), so
-# it is exactly as approved as a parent run — just tagged (sub-agent). It
-# stays refused for READ-ONLY agents: their table never contains it.
-# git_commit IS included (0.51.0): an agent that edits but cannot land its
-# work strands its changes. Same gate: the parent's _confirm shows the staged
-# diff (and the secret scan runs before it) exactly as a parent call would.
-_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit",
-                          "run_tests", "git_commit")
 
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
@@ -276,187 +197,6 @@ def _subagent_stream_cut_limit(default: int) -> int:
     if _subagent_ctx() is not None and _SUBAGENT_RECOVERY_RETRIES >= 0:
         return _SUBAGENT_RECOVERY_RETRIES
     return default
-
-
-class _SubagentContext:
-    """One running sub-agent's restricted-dispatch state (thread-local)."""
-
-    __slots__ = ("table", "active", "write", "quiet", "model_target")
-
-    def __init__(self, table: dict[str, Any], write: bool = False,
-                 quiet: bool = False) -> None:
-        self.table = table
-        self.active = True
-        self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
-        self.quiet = quiet  # no terminal writes (async worker threads)
-        # (client, model, extra_request_kwargs) this agent's model calls use,
-        # or None to inherit the parent's active source/model. Pinned by
-        # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
-        self.model_target = None
-
-
-def _subagent_ctx() -> "_SubagentContext | None":
-    return getattr(_SUBAGENT_TLS, "ctx", None)
-
-
-def _subagent_table() -> dict[str, Any] | None:
-    """The restricted dispatch table for THIS thread, or None outside a
-    sub-agent loop. TLS wins over the global flag (concurrent agents)."""
-    ctx = _subagent_ctx()
-    if ctx is not None:
-        return ctx.table
-    return st._SUBAGENT_DISPATCH
-
-
-def _subagent_active() -> bool:
-    if _subagent_ctx() is not None:
-        return True
-    # global fallback is for serial callers/tests that set it directly; under
-    # concurrent agents it's racy (a sibling's True is visible here), so TLS
-    # is the authoritative signal and the global is never read on agent
-    # threads' entry paths.
-    return bool(st._SUBAGENT_ACTIVE)
-
-
-def _subagent_tools() -> list[dict[str, Any]]:
-    """Tool schemas for the sub-loop: read-only entries, plus the write tier
-    when NX_SUBAGENT_WRITE=1 (only when a write-capable sub-agent is actually
-    being spawned — see spawn_agent)."""
-    import nx as _m
-    wanted = set(_READ_ONLY_TOOL_NAMES)
-    if _write_tier_enabled():
-        wanted.update(_WRITE_TIER_TOOL_NAMES)
-    return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
-
-
-def _read_only_dispatch() -> dict[str, Any]:
-    from ._dispatch import DISPATCH
-    table = {name: DISPATCH[name] for name in _READ_ONLY_TOOL_NAMES if name in DISPATCH}
-    table["run_bash"] = _subagent_bash  # ty: ignore[invalid-assignment]  # allowlist gate in front of run_bash
-    return table
-
-
-def _write_tier_enabled() -> bool:
-    """NX_SUBAGENT_WRITE=1 opts into write-capable sub-agents. Read from the
-    top-level module attribute first (resolved from the env at import, like
-    NX_SUBAGENTS) so tests/REPL code can flip it live; the env is the
-    fallback when the attribute isn't there (partially-initialized module)."""
-    import nx as _m
-    try:
-        return bool(int(_m.NX_SUBAGENT_WRITE))
-    except (AttributeError, TypeError, ValueError):
-        from ._env import _env_int
-        return bool(_env_int("NX_SUBAGENT_WRITE", 0))
-
-
-def _write_tier_dispatch() -> dict[str, Any]:
-    """Dispatch table for a write-tier sub-agent: the read-only entries (bash
-    still allowlist-gated — git diff/grep for verifying an edit) plus the four
-    file-mutation tools bound to _write_tier_wrapper, which runs the parent's
-    real tool body OUTSIDE the sub-agent context. The body's own _confirm()
-    then hits the normal gate — risk classification, the Y/n prompt with the
-    same colored diff preview the parent's writes show — so a sub-agent edit
-    is exactly as approved as a parent edit, just tagged (sub-agent) in the
-    tool box."""
-    table = _read_only_dispatch()
-    for name in _WRITE_TIER_TOOL_NAMES:
-        table[name] = _write_tier_wrapper(name)
-    return table
-
-
-def _write_tier_wrapper(name: str):
-    """Build the confirm-through binding for one write-tier tool.
-
-    Closures over the parent's real body (resolved at spawn time) so a test
-    or hook that swaps nx.write_file still governs what actually runs. The
-    wrapper tears down this thread's sub-agent context around the body so
-    _confirm() sees the parent's real approval state (and a nested
-    spawn_agent from inside a hook would be refused, not looped)."""
-    from ._dispatch import DISPATCH
-
-    def _run(**args: Any) -> str:
-        body = DISPATCH.get(name)
-        if body is None:
-            return f"ERROR: {name} is unavailable"
-        ctx = _subagent_ctx()
-        if ctx is None:  # defensive: a wrapper escaped its sub-agent context
-            return f"ERROR: {name} write-tier wrapper used outside a sub-agent"
-        prev_ctx = _SUBAGENT_TLS.ctx
-        _SUBAGENT_TLS.ctx = None  # body + _confirm() run as the parent
-        try:
-            return body(**args)
-        finally:
-            _SUBAGENT_TLS.ctx = prev_ctx
-
-    _run.__name__ = f"_subagent_write_{name}"
-    return _run
-
-
-# Read-only binaries the sub-agent tier may run as a single bare command
-# (no pipes/redirection/&&/globs — the same no-metacharacters constraint
-# _risk.py applies before its own allowlist). Deliberately EXCLUDES the
-# write-capable entries the parent's _SAFE_BASH_COMMANDS contains for its
-# approval fast path (mkdir, touch, echo, env, ...) — a sub-agent has no
-# user watching a Y/n prompt, so the allowlist itself is the safety.
-# git commands are resolved through _local_risk_hint_bash() instead (see
-# _subagent_bash_allowed) so only its read-only verdicts pass.
-_SUBAGENT_BASH_ALLOW = frozenset((
-    "grep", "egrep", "fgrep", "rg", "ls", "pwd", "cat", "head", "tail", "wc",
-    "find", "du", "df", "stat", "file", "diff", "tree", "realpath", "basename",
-    "dirname", "which", "type", "ps", "pgrep", "md5sum", "sha256sum",
-))
-
-
-def _subagent_bash_allowed(command: str) -> bool:
-    """True when `command` is a single bare read-only command the sub-agent
-    tier may run: one allowlisted binary (_SUBAGENT_BASH_ALLOW) or a git
-    invocation the parent's own _risk.py classifier scores "low"
-    (status/diff/log/show/tag/blame, listing-only branch/remote). Anything
-    else — pipes, &&, redirection, globs, env-prefixing, unknown binaries,
-    write-shaped commands — is refused; the sub-agent reports what it needs
-    and the parent runs it."""
-    if not isinstance(command, str) or not command.strip():
-        return False
-    from ._risk import (_local_risk_hint_bash, _strip_shell_comment,
-                        _SHELL_METACHARACTERS_RE)
-    cmd = _strip_shell_comment(command.strip())
-    if _SHELL_METACHARACTERS_RE.search(cmd):
-        return False
-    try:
-        parts = shlex.split(cmd)
-    except ValueError:
-        return False
-    if not parts:
-        return False
-    argv = parts[1:]
-    head = parts[0]
-    if head == "git":
-        hint = _local_risk_hint_bash(cmd)
-        return hint is not None and hint[0] == "low"
-    if head not in _SUBAGENT_BASH_ALLOW:
-        return False
-    # find is allowlisted only in its listing form; these flags delete files or
-    # execute arbitrary commands (the same veto _risk.py's classifier applies).
-    if head == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
-                              for a in argv[1:]):
-        return False
-    return True
-
-
-def _subagent_bash(command: str, **_: Any) -> str:
-    """run_bash replacement installed in the sub-agent's dispatch table: runs
-    the command only when it passes the read-only allowlist. The sub-loop
-    already forces YOLO (read-only tools never prompt), and an allowlisted
-    single command can't carry redirection/chaining, so there is no approval
-    path to reason about. wait_background is not offered at all — if an
-    allowlisted command somehow outlives the poll window, the [background]
-    result tells the sub-agent to read the log with read_file."""
-    if not _subagent_bash_allowed(command):
-        return ("ERROR: sub-agent bash is limited to single read-only commands "
-                f"(grep/ls/du/ps/pgrep/git log/git status/...); refused: {command!r}. "
-                "Report what you need and let the parent run it.")
-    from ._bash_jobs import run_bash
-    return run_bash(command)
 
 
 # --- async (background) sub-agents ------------------------------------------
