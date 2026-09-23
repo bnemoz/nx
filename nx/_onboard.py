@@ -57,7 +57,8 @@ def _have(cmd: str) -> bool:
 def install_local_searx() -> str | None:
     """Automate the SEARXNG_SETUP.md steps for a fresh local instance: clone
     the source into ~/.local/share/searxng-src, build a uv venv (with the
-    --no-build-isolation workaround for upstream's undeclared build deps),
+    --no-build-isolation workaround for upstream's undeclared build deps;
+    setuptools is installed explicitly since uv venvs don't seed it),
     write a loopback-only settings.yml with a fresh random secret_key, and
     install a systemd **user** service (Linux only; linger check included).
 
@@ -103,16 +104,21 @@ def install_local_searx() -> str | None:
         # venv-module venvs bundle pip; uv-created ones do NOT (uv never needs
         # it), so `python -m pip` there fails with "No module named pip". Route
         # installs through uv's own resolver against the venv instead.
+        # The editable install runs with --no-build-isolation (SearXNG's
+        # build backend is undeclared upstream), so setuptools must already
+        # be IN the venv. Neither uv venv (never seeds it) nor python -m
+        # venv on 3.12+ (dropped setuptools from seed packages) provides it
+        # — install it explicitly alongside the runtime requirements.
         if use_uv:
             if not _run(["uv", "pip", "install", "--python", py, "-r",
-                         os.path.join(src, "requirements.txt")]):
+                         os.path.join(src, "requirements.txt"), "setuptools"]):
                 return None
             if not _run(["uv", "pip", "install", "--python", py,
                          "--no-build-isolation", "-e", src]):
                 return None
         else:
             if not _run([py, "-m", "pip", "install", "-r",
-                         os.path.join(src, "requirements.txt")]):
+                         os.path.join(src, "requirements.txt"), "setuptools"]):
                 return None
             if not _run([py, "-m", "pip", "install", "--no-build-isolation",
                          "-e", src]):

@@ -195,7 +195,7 @@ def test_install_local_searx_macos_launchd(tmp_path, monkeypatch):
     assert any(c[0] == "launchctl" and c[1] == "kickstart" for c in calls)
     assert ["uv", "pip", "install", "--python",
             str(src / ".venv/bin/python"), "-r",
-            str(src / "requirements.txt")] in calls
+            str(src / "requirements.txt"), "setuptools"] in calls
 
 
 def test_install_local_searx_uses_uv_pip_for_uv_venvs(tmp_path, monkeypatch):
@@ -213,7 +213,7 @@ def test_install_local_searx_uses_uv_pip_for_uv_venvs(tmp_path, monkeypatch):
     assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
     assert ["uv", "pip", "install", "--python",
             str(src / ".venv/bin/python"), "-r",
-            str(src / "requirements.txt")] in calls
+            str(src / "requirements.txt"), "setuptools"] in calls
     assert not any("-m" in c and "pip" in c for c in calls)
 
 def test_install_local_searx_happy_path(tmp_path, monkeypatch):
