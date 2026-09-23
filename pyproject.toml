@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.91.4"
+version = "0.91.5"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -15,10 +15,8 @@ classifiers = [
 dependencies = [
     "httpx",
     "rich",
+    "pymupdf4llm",
 ]
-
-[project.optional-dependencies]
-pdf = ["pymupdf4llm"]
 
 [project.scripts]
 nx = "nx:main"

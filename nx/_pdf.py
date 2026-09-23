@@ -3,11 +3,9 @@ reaches the model the same way a text-file mention does.
 
 Extraction goes through pymupdf4llm (PyMuPDF's LLM-oriented markdown
 extractor), which keeps headings, lists, and tables as markdown instead of
-the flat word soup a naive text dump produces. The dependency is OPTIONAL and
-heavy, so the import is lazy — `nx` starts fine without it, and a mention of a
-PDF when it is missing carries a one-line note naming the install command
-(mirroring how an image mention with NX_VISION off names its gate), not an
-error. Pure function, no globals/state.
+the flat word soup a naive text dump produces. The dependency is HARD (a core
+pyproject dependency since 0.91.5) but the import stays lazy — it is heavy and
+only needed on the first PDF mention. Pure function, no globals/state.
 """
 from __future__ import annotations
 
@@ -18,10 +16,11 @@ from ._env import _env_int
 # header names the range it actually carried so the truncation is visible.
 PDF_MAX_PAGES = 50
 
-# Named dependency, not a hard one: lighter installs that never mention a PDF
-# shouldn't pay for PyMuPDF's ~30 MB.
-_INSTALL_HINT = ("pymupdf4llm is not installed — PDF mentions need it: "
-                 "`uv pip install pymupdf4llm` (or `pip install 'nx[pdf]'`)")
+# Named dependency since 0.91.5 (listed in pyproject's core dependencies, not an
+# extra). The import stays lazy because it is heavy, but a missing/broken
+# install is an environment error, not an optional-gate note.
+_INSTALL_HINT = ("pymupdf4llm is required for PDF mentions but not installed — "
+                 "run `uv pip install pymupdf4llm`")
 
 
 def _pdf_max_pages() -> int:

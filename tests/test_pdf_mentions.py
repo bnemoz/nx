@@ -93,13 +93,14 @@ def test_pdf_mention_inlines_markdown(nx_fresh, monkeypatch):
 def test_pdf_mention_missing_dependency_is_soft_note(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
-    # pymupdf4llm is an OPTIONAL dependency since 0.91.0: a missing install is
-    # a soft note (naming the install command), not an ERROR.
+    # pymupdf4llm is a hard core dependency since 0.91.5, but the import stays
+    # lazy: a broken install still degrades to a one-line note naming the fix,
+    # never an aborted turn.
     monkeypatch.setitem(sys.modules, "pymupdf4llm", None)
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("read @doc.pdf")
     assert isinstance(out, str)
-    assert "not inlined" in out and "pymupdf4llm" in out and "nx[pdf]" in out
+    assert "not inlined" in out and "pymupdf4llm" in out and "uv pip install" in out
 
 
 def test_pdf_page_cap_truncates_and_names_range(nx_fresh, monkeypatch):
