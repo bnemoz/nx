@@ -324,6 +324,10 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_VERIFY_CMD` | command auto-run ~20s after the last `.py` edit settles (e.g. `uv run pytest -q`); its pass/fail is injected as a `[Runtime note: …]` when it finishes. Set/clear/force with `/verify [cmd\|off\|run]` |
 | `NX_VERIFY_SETTLE_SECS` | quiet period after the last edit before `NX_VERIFY_CMD` fires (default 20) |
 | `NX_TESTRUNNER_TIMEOUT` | wall-clock ceiling for one `run_tests` tool call in seconds (default 600; `0` = no cap, a hung suite then wedges the turn). On timeout the result names `run_bash` (which backgrounds) as the investigation path |
+| `NX_LINT` | `1` enables the tier-2 `lint_check` tool (default off — 0 schema tokens until enabled; surfaced via `search_tools`) |
+| `NX_LINT_CMD` | fixed lint command lint_check runs verbatim (shell-parsed), overriding the built-in per-ecosystem shapes — e.g. `NX_LINT_CMD="ruff check --select I"` |
+| `NX_LINT_TIMEOUT` | wall-clock ceiling for one `lint_check` call in seconds (default 120) |
+| `NX_TODO_FILE` | where `todo_write` mirrors its list so fresh sessions pick up the plan (default `.nx/todo.md` under the project root; empty value disables). A leading `# nx todos` header marks it auto-managed |
 | `NX_DUCKDB_TIMEOUT` | wall-clock ceiling for one `duckdb` tool call in seconds (default 300; `0` = no cap). On timeout the result names `run_bash` (which backgrounds) as the investigation path for a genuinely long analytical query |
 | `NX_DUCKDB_NOTES` | SQL file auto-loaded (`-init`) before every `duckdb` query, so views/macros/types from earlier sessions are present without re-defining them (default `.nx-duckdb-notes.sql` under the project root; missing file = no prologue). The model appends reusable SQL to it with write_file/edit_file — the session-memory idea from duckdb-skills, as a plain file |
 | `NX_GITCOMMIT_TIMEOUT` | wall-clock ceiling for one `git_commit` call (the stage + diff + commit sequence) in seconds (default 60) |
@@ -514,6 +518,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search) |
 | `/export [md] [path]` | write the current session to a markdown transcript |
 | `/save [title]` | save the current session |
+| `/fork [title]` | branch the current conversation into a new session id — every message carried, the original kept on disk (resume either). Prompt-cache-friendly: the fork is prefix-identical to the parent, so no context rebuild cost when exploring an alternative approach |
 | `/delete [target]` | delete a saved session |
 | `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
 | `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
@@ -531,6 +536,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |
 | `/todo` | show the model's current `todo_write` list |
+| `/wip [note]` | snapshot work state (branch, dirty files, todos, optional note) into the session; `/resume` prints it in the banner so you pick up the *task*, not just the transcript |
 | `/plan [goal\|done\|off\|discard]` | plan mode: `/plan <goal>` writes `.nx/<slug>.md` and gates every mutating tool call (`write_file`, `edit_file`, `multi_edit`, `sed_edit`, `apply_patch`, `delete_file`, `run_bash`, `memory_write/delete`) behind a gate message until you run `/plan done`; the model refines the plan with `plan_edit` while gated; `discard` also deletes the file |
 | `/reset` / `/clear` / `/new` | clear conversation, start a fresh session |
 | `/quit` / `/exit` | exit |
@@ -904,6 +910,7 @@ go through the approval gate above.
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
+| `lint_check` | `paths?` | tier-2 (`NX_LINT=1`): run the detected linter (ruff/py_compile, go vet, cargo check, eslint) read-only over the given files — or, with no paths, the files edited this session (from the undo stack). Fixed command shapes, never free-text shell, never writes, no approval; arbitrary lint flags via `run_bash` or `NX_LINT_CMD` |
 | `duckdb` | `sql`, `database?`, `format?` | run analytical SQL with the DuckDB CLI (`duckdb` must be on PATH; install via `curl https://install.duckdb.org \| sh`). Reads CSV/Parquet/JSON directly (`SELECT * FROM 'data/*.parquet'`) — the preferred aggregation path over pandas scripts. Read-only SQL auto-runs; mutating SQL (CREATE/INSERT/COPY/ATTACH/INSTALL and friends) confirms first with a local medium verdict; plan mode gates it; large results fold and spill for `read_file`; `NX_DUCKDB_NOTES` is auto-loaded as a prologue |
 | `git_commit` | `files`, `message`, `path?` | stage `files` (space-separated; `.` = every change) and commit `message` after the user reviews the staged diff. See below |
 | `obs_recall` | `id`, `offset?` | page back the archived original of a large tool result that was replaced by an observation handle (`NX_OBS=1`; the handle stub names its `obs_...` id). Returns whole lines plus `next_offset`; pass it back in until `eof=true`. Byte-exact: the archive is what the model originally saw |

@@ -510,6 +510,43 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     resume_session(new_sid, state, header="resumed")
 
 
+def _cmd_fork(user: str, state: _ReplState) -> None:
+    """Handle /fork — branch the current conversation into a NEW session id,
+    keeping every message so far (a prefix-identical copy, so the prompt
+    cache stays warm) and leaving the original session untouched on disk.
+    The classic use: explore an alternative approach without losing the
+    main thread, and without a /compress-rebuild round trip."""
+    if not state.messages or not any(m.get("role") == "user"
+                                     for m in state.messages):
+        print(f"{DIM}  nothing to fork yet — send a message first{RESET}")
+        return
+    from ._sessions_io import _new_session_id
+    label = user.split(None, 1)[1].strip() if " " in user else ""
+    # Persist the outgoing session first so the fork point is on disk under
+    # the ORIGINAL id too (fork = copy, not move).
+    if state.session_dirty:
+        _save_current(state)
+    old_id = state.session_id
+    new_id = _new_session_id()
+    # Carry the transcript + endpoint context into the new session file via
+    # the normal save path, under the new id. _save_current_locked merges
+    # metadata (title/source/cwd/metrics) the same way /resume would see it.
+    from ._repl_state import _save_current_locked, _fresh_metrics
+    state.session_id = new_id
+    state.session_dirty = True
+    meta: dict = {"forked_from": old_id}
+    if label:
+        meta["title"] = label
+    _save_current_locked(state, meta)
+    state.session_dirty = False
+    # Fresh cumulative-token recorder for the new id (metrics are per-session).
+    st._METRICS = _fresh_metrics(new_id)
+    shown = f" as {label!r}" if label else ""
+    print(f"{DIM}  ⑂ forked to session {new_id}{shown} "
+          f"({len(state.messages)} messages carried; original {old_id} "
+          f"kept — /resume to switch back){RESET}")
+
+
 def _cmd_save(user: str, state: _ReplState) -> None:
     title = user.split(None, 1)[1].strip() if " " in user else None
     _save_current(state, {"title": title} if title else {})

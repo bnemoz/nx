@@ -170,6 +170,14 @@ def resume_session(session_id: str, state: Any, *, show_transcript: bool = True,
 
     title = data.get("title") or "(untitled)"
     print(f"{DIM}  ↻ {header} {session_id} ({title!r}, {n_msgs} messages){RESET}")
+    # Work-state snapshot (0.94.0): the stored /wip summary, if any.
+    try:
+        from ._wip import render_wip
+        wip_line = render_wip(data.get("wip"))
+    except Exception:  # noqa: BLE001 — presentation only
+        wip_line = None
+    if wip_line:
+        print(f"{DIM}  ⚑ wip: {wip_line}{RESET}")
     if show_transcript and n_msgs:
         from ._sessions_cmd import _print_transcript
         print()

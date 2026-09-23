@@ -36,6 +36,19 @@ from ._env import _env_int
 # TIMEOUT=0 disables the cap (the process must then be trusted to exit).
 _DEFAULT_TIMEOUT = 600
 
+# Test-impact map (0.94.0): per-project JSONL of {file -> [node ids]} recorded
+# from each run's failures, so a scoped re-run after editing one file can
+# propose the tests that failed there last time instead of the whole suite.
+# Lives under the sessions store (NX_HOME), keyed by project root hash.
+
+def _testmap_path() -> str:
+    import hashlib
+    root = st.PROJECT_ROOT or os.getcwd()
+    h = hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:12]
+    home = os.environ.get("NX_HOME") or os.path.expanduser(
+        os.path.join("~", ".nx"))
+    return os.path.join(home, "testmaps", f"{h}.jsonl")
+
 # Fold budget: per-failure-block caps (head/tail of each traceback) and the
 # whole-result cap. Sized so ~40 failing pytest blocks still fit the default
 # NX_TOOL_RESULT_CHARS with room for the summary.
@@ -213,6 +226,65 @@ def _summarize(runner: str, out: str, exit_code: int | None) -> str:
     return "\n".join(result)
 
 
+def _record_failures(runner: str, out: str) -> None:
+    """Append file -> failing-node-id pairs from a run's output to the project
+    test map. Fire-and-forget: any error is swallowed (the map is an
+    optimization, never a correctness dependency). Only pytest node ids and
+    go/cargo/npm failure lines that clearly carry a path are recorded."""
+    try:
+        pairs: list[tuple[str, str]] = []
+        if runner == "pytest":
+            for ln in out.splitlines():
+                m = re.match(r"(FAILED|ERROR)\s+(\S+)", ln.strip())
+                if not m:
+                    continue
+                node = m.group(2).split(" - ")[0]
+                path = node.split("::")[0]
+                if path.endswith(".py"):
+                    pairs.append((path, node))
+        else:
+            for ln in out.splitlines():
+                p = _extract_path(ln)
+                if p and ("FAIL" in ln or "failed" in ln or "Error" in ln):
+                    pairs.append((p, ln.strip()[:120]))
+        if not pairs:
+            return
+        path = _testmap_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        import json
+        with open(path, "a", encoding="utf-8") as f:
+            for src, node in pairs:
+                f.write(json.dumps({"f": src, "t": node}) + "\n")
+    except Exception:  # noqa: BLE001 — never break the test run
+        pass
+
+
+def _mapped_targets(files: list[str]) -> list[str]:
+    """Node ids that previously failed in the given source files (most recent
+    first, deduped, capped at 20). Empty when the map has nothing for them."""
+    try:
+        import json
+        path = _testmap_path()
+        if not os.path.exists(path):
+            return []
+        want = {os.path.relpath(f, st.PROJECT_ROOT or ".") if os.path.isabs(f) else f
+                for f in files}
+        want = {w.replace("\\", "/") for w in want}
+        hits: list[str] = []
+        with open(path, encoding="utf-8") as fh:
+            for ln in fh:
+                try:
+                    rec = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                f = str(rec.get("f", "")).replace("\\", "/")
+                if f in want and rec.get("t") and rec["t"] not in hits:
+                    hits.append(rec["t"])
+        return hits[-20:]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _spin_out(out: str) -> list[str]:
     return out.splitlines()
 
@@ -236,6 +308,22 @@ def run_tests(targets: str = "", **_: Any) -> str:
         detect_dir = parent if os.path.isdir(parent) else (st.PROJECT_ROOT or ".")
     elif not target_dir:
         detect_dir = st.PROJECT_ROOT or "."
+    # Test-impact targeting (0.94.0): a bare run right after edits to files
+    # that previously failed proposes those tests first, as a scoped hint —
+    # never a silent restriction of the run itself.
+    map_hint = ""
+    if not target_dir:
+        try:
+            from ._undo import list_checkpoints
+            edited = [f.path for cp in list_checkpoints()
+                      for f in (cp.files or ())]
+        except Exception:  # noqa: BLE001
+            edited = []
+        mapped = _mapped_targets(edited) if edited else []
+        if mapped:
+            map_hint = ("\nnote: previously failed in the files edited this "
+                        f"session: {', '.join(mapped[:8])} — re-run with "
+                        "targets to scope to them once green")
     runner = _detect_runner(detect_dir)
     if runner is None:
         return ("ERROR: run_tests found no test project at "
@@ -264,6 +352,7 @@ def run_tests(targets: str = "", **_: Any) -> str:
                 "or run the suite with run_bash instead")
     out = ((r.stdout or "") + (r.stderr or ""))
     body = _summarize(runner, out, exit_code)
+    _record_failures(runner, out)
     lines = out.splitlines()
     folded = (len(lines) > _LOG_MIN_LINES
               and len(_spin_out(body)) < len(lines))
@@ -279,4 +368,4 @@ def run_tests(targets: str = "", **_: Any) -> str:
     verdict = ("All tests passed." if exit_code == 0
                else f"{runner} tests FAILED")
     return (f"[run_tests: {runner}] {verdict} (exit {exit_code})\n"
-            f"{body}{log_line}")
+            f"{body}{map_hint}{log_line}")

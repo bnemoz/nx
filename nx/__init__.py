@@ -448,6 +448,12 @@ from ._gitcommit import git_commit
 GIT_COMMIT_TOOL = {"type": "function", "function": {"name": "git_commit", "description": "Stage `files` (space-separated; `.` = all changes) and commit with `message` after the user reviews the staged diff. Any other git operation -> run_bash.", "parameters": {"type": "object", "properties": {"files": {"type": "string", "description": "Files to stage, space-separated; `.` = every change"}, "message": {"type": "string", "description": "Commit message (first line, verbatim)"}, "path": {"type": "string", "description": "Repo/directory (default: project root)"}}, "required": ["files", "message"]}}}
 TOOLS.append(GIT_COMMIT_TOOL)
 
+# lint_check (schema here, body in nx/_lint.py, 0.94.0): read-only lint
+# over edited files, tier-2 gated on NX_LINT (default OFF — 0 schema tokens
+# until a session opts in) so linting never costs the always-on floor.
+from ._lint import LINT_CHECK_TOOL, LINT_ENABLED
+TOOLS.append(LINT_CHECK_TOOL)
+
 # web_fetch (schema here, body in nx/_webfetch.py, 0.70.0): keyless web
 # access — DuckDuckGo *lite* HTML search (no API key) and a GET-only page
 # fetch stripped to readable text. Tier-2 gated on NX_WEBFETCH (default ON
@@ -814,6 +820,10 @@ NX_PLAN_MAX_WORDS = _env_int("NX_PLAN_MAX_WORDS", 8)
 # itself is tier-2, so even an enabled session pays 0 tokens until the model
 # asks search_tools for it. NX_WEBFETCH_* tunables live in _webfetch.py.
 NX_WEBFETCH = WEBFETCH_ENABLED
+# lint_check (nx/_lint.py, 0.94.0): NX_LINT=1 opts IN to the tier-2 lint
+# tool (default off — most sessions lint via CI or verify hooks instead).
+# NX_LINT_CMD overrides the fixed command shape; NX_LINT_TIMEOUT caps the call.
+NX_LINT = LINT_ENABLED
 
 
 from ._compress import (

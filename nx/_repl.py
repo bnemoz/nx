@@ -41,7 +41,7 @@ from ._sessions_cmd import (
     _cli_prune_sessions,
     _cmd_sessions, _cmd_resume, _cmd_delete,
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
-    _cmd_export,
+    _cmd_export, _cmd_fork,
 )
 from ._memory_cmd import (
     _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
@@ -49,6 +49,8 @@ from ._memory_cmd import (
     _render_transcript_for_memory, memory_write, memory_search, memory_delete,
     _load_memory_note, _write_memory_file, _note_kind, MEMORY_KINDS,
 )
+from ._todo import load_persisted_todos
+from ._wip import _cmd_wip
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
 from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for tests)
 from ._repl_settings_cmds import (
@@ -117,10 +119,12 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/sessions": _cmd_sessions_handler,
     "/resume": _cmd_resume_handler,
     "/export": _cmd_export,
+    "/fork": _cmd_fork,
     "/save": _cmd_save,
     "/memory": _cmd_memory_handler,
     "/delete": _cmd_delete_handler,
     "/todo": _cmd_todo,
+    "/wip": _cmd_wip,
     "/plan": _cmd_plan,
     "/verify": _cmd_verify,
 }
@@ -183,6 +187,13 @@ def _repl() -> None:
         # recorder for this id. The optional HTTP push (NX_METRICS_URL) is off
         # by default — see _Metrics.
         st._METRICS = _fresh_metrics(session_id)
+        # Persistent todo file (0.94.0): a fresh session picks up the task
+        # plan a previous session wrote through todo_write (see _todo.py).
+        # The /todo command views it; the next todo_write overwrites both.
+        if not resumed:
+            _persisted = load_persisted_todos()
+            if _persisted:
+                st._TODOS = _persisted
 
     while True:
         try:

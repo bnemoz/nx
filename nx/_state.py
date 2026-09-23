@@ -409,6 +409,11 @@ _TOOL_RESULT_CACHE: dict = {}
 # restores it (see _repl_state.py's _save_current/_reload_metrics_totals).
 _TODOS: list[dict[str, str]] = []
 
+# Work-state snapshot (0.94.0, nx/_wip.py): the /wip record — branch, dirty
+# files, todos, note — carried in the session JSON's "wip" key. None = no
+# snapshot this session; /resume restores it.
+_WIP: dict | None = None
+
 # --- plan mode -----------------------------------------------------------------
 # Plan-mode state machine (see _plan.py): while _PLAN_ACTIVE is True every
 # mutating tool call is refused by run_tool()'s gate check with a gate message

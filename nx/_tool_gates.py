@@ -42,6 +42,9 @@ _TOOL_GATES: dict[str, Any] = {
     # (0 schema tokens until a session needs the outside world) — surfaced by
     # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).
     "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
+    # lint_check (0.94.0): tier-2, opt-in via NX_LINT=1. Read-only lint over
+    # edited files without an approval-gated run_bash round-trip.
+    "lint_check": lambda: bool(getattr(_m_safe(), "NX_LINT", 0)),
 }
 
 # Per-gate refusal text (the "why it's closed and what to do instead" line the
@@ -55,6 +58,7 @@ _GATE_REFUSALS: dict[str, str] = {
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
     "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
     "web_fetch": "(NX_WEBFETCH is off, or the gate has not opened). Work from local files, or ask the user to paste the relevant page/search results.",
+    "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}

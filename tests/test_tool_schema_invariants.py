@@ -85,8 +85,8 @@ def test_every_tool_appears_once():
     names = [_fn(t)["name"] for t in _all_tools()]
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     # test_background_gating pins the exact count when a tool is added/removed.
-    # 0.87.0: duckdb joins (27).
-    assert len(names) == 27
+    # 0.87.0: duckdb joins (27). 0.94.0: lint_check joins (28).
+    assert len(names) == 28
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])

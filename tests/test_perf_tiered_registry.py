@@ -50,7 +50,8 @@ def test_default_withholds_the_gated_four():
     assert sorted(names) == sorted(
         n for n in all_names if n not in ("wait_background", "spawn_agent",
                                           "read_image", "plan_edit",
-                                          "obs_recall"))  # web_fetch is ON by default (0.71.0), so it stays in names
+                                          "obs_recall",
+                                          "lint_check"))  # web_fetch is ON by default (0.71.0), so it stays in names; lint_check is OFF by default (0.94.0)
 
 
 def test_memoized_on_the_gate_vector():

@@ -14,10 +14,25 @@ on-screen tool-output box and the `/todo` slash command.
 """
 from __future__ import annotations
 
+import os
+
 from typing import Any
 
 from ._ansi import C, RESET, strip_ansi_for_display
 from . import _state as st
+
+
+def _todo_file() -> str | None:
+    """The persistent todo file (0.94.0): NX_TODO_FILE when set (an empty
+    value disables persistence); default .nx/todo.md under the project root.
+    None = persistence off."""
+    v = os.environ.get("NX_TODO_FILE")
+    if v is not None:
+        return os.path.expanduser(v) if v.strip() else None
+    root = st.PROJECT_ROOT
+    if not root:
+        return None
+    return os.path.join(root, ".nx", "todo.md")
 
 _STATUS_MARK = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
 # Status -> semantic color ROLE whose hue is resolved dynamically at render
@@ -74,6 +89,7 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
             status = "pending"
         cleaned.append({"text": str(item.get("text", "")), "status": status})
     st._TODOS = cleaned
+    _persist(cleaned)
     # Online Context Compact (0.67.0): a todo_write that newly completes >= 1
     # item is a plan-step boundary — the OCC module decides at the next
     # settled turn whether the economics justify a native fold.
@@ -83,6 +99,42 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
     except Exception:  # noqa: BLE001 — never break the todo tool
         pass
     return render_todos(cleaned)
+
+
+def _persist(todos: list[dict[str, str]]) -> None:
+    """Write-through the todo list to the persistent todo file, if enabled.
+    Fire-and-forget: persistence is an enhancement, never a failure path."""
+    try:
+        path = _todo_file()
+        if not path:
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        body = render_todos(todos)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"# nx todos (auto-managed; safe to delete)\n\n{body}\n")
+    except OSError:
+        pass
+
+
+def load_persisted_todos() -> list[dict[str, str]]:
+    """Read the persistent todo file back into the st._TODOS shape. Returns
+    [] when there is no file or it parses to nothing. Used at session start
+    so a fresh session picks up the plan a previous session recorded."""
+    try:
+        path = _todo_file()
+        if not path or not os.path.isfile(path):
+            return []
+        out = []
+        for ln in open(path, encoding="utf-8"):
+            ln = ln.strip()
+            for status, mark in _STATUS_MARK.items():
+                if ln.startswith(mark + " "):
+                    out.append({"text": ln[len(mark) + 1:].strip(),
+                                "status": status})
+                    break
+        return out
+    except OSError:
+        return []
 
 
 def _latest_todo_turn(body: list[dict[str, Any]]) -> int | None:

@@ -48,6 +48,7 @@ from ._testrunner import run_tests
 from ._gitcommit import git_commit
 from ._obs import obs_recall
 from ._webfetch import web_fetch
+from ._lint import lint_check
 from ._toolblocks import ToolBlock, current_recorder, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
@@ -82,6 +83,7 @@ DISPATCH = {
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
     "duckdb": duckdb_query,
     "web_fetch": web_fetch,
+    "lint_check": lint_check,
 }
 # defined with the tiered registry below; registered here so `nx`'s import-time
 # `from ._dispatch import (...)` (and any test table) sees one flat dispatch map.
