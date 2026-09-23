@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import urllib.error
 import threading
 import time
 import urllib.parse
@@ -81,8 +82,30 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
         url, data=data, method="POST",
         headers={"Content-Type": "application/json",
                  "User-Agent": "nx-telegram-gateway"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    for attempt in range(2):
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "nx-telegram-gateway"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                r = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            # 429 arrives as an HTTP error whose body is still JSON
+            try:
+                r = json.loads(e.read().decode("utf-8", errors="replace"))
+            except Exception:
+                if attempt == 0 and getattr(e, "code", None) == 429:
+                    time.sleep(3.0)
+                    continue
+                raise
+        if not r.get("ok") and attempt == 0:
+            wait = (r.get("parameters") or {}).get("retry_after")
+            if wait:
+                time.sleep(min(float(wait), 30.0) + 0.5)
+                continue
+        return r
+    return r
 
 
 def _download_file(file_id: str) -> bytes:
@@ -103,13 +126,20 @@ def _download_file(file_id: str) -> bytes:
 
 # --- rendering helpers -------------------------------------------------------
 
+def _u16len(s: str) -> int:
+    """Telegram counts message length in UTF-16 code units, not code points
+    (emoji are 2); len() under-counts, so the API 400s on emoji-heavy text
+    that looks short enough locally."""
+    return len(s.encode("utf-16-le")) // 2
+
+
 def _chunk(text: str, limit: int = TG_MAX_MESSAGE) -> list[str]:
     """Split into Telegram-sized messages, preferring paragraph/code-fence
     boundaries over hard cuts so a fenced block is less likely to be split."""
-    if len(text) <= limit:
+    if _u16len(text) <= limit:
         return [text] if text else []
     chunks = []
-    while len(text) > limit:
+    while _u16len(text) > limit:
         window = text[:limit]
         # Latest safe cut: a fence closer, else a paragraph break, else hard.
         cut = window.rfind("\n```")
@@ -170,7 +200,8 @@ def _describe_step(messages: list, seen_len: int) -> list[str]:
                 if lines and _call_base(lines[-1]) == base:
                     prev = lines[-1]
                     n = 2
-                    j = base.find(" ×")
+                    # search prev (base was already stripped of any ×N)
+                    j = prev.find(" ×")
                     if j != -1:
                         n = int(prev[j + 2:].split(" ", 1)[0]) + 1
                     # keep any folded result suffix after the new ×N
@@ -192,14 +223,16 @@ def _describe_step(messages: list, seen_len: int) -> list[str]:
             # emitting a separate `ok` line (sized results attach their count).
             if pending_tool and (line == "ok" or
                                  line.startswith("ok (")) and lines:
-                idx = pending_tool.pop()
+                idx = pending_tool.pop(0)
                 if line != "ok":
                     p = lines[idx].find("  ok")
                     stripped = lines[idx] if p == -1 else lines[idx][:p]
                     lines[idx] = stripped + "  " + line
                 continue
             if pending_tool:
-                pending_tool.pop()
+                # results arrive in call order (FIFO), so pop the OLDEST
+                # pending call, not the newest
+                pending_tool.pop(0)
             if line:
                 lines.append(line)
     return lines
@@ -274,6 +307,15 @@ def _compose_status(lines: list[str], tool_n: int, note_n: int) -> str:
     return body + "\n\n" + tally
 
 
+def _typing(api: callable, chat_id: int) -> None:
+    """sendChatAction: typing — fail-soft; keeps the phone from looking dead
+    during a long turn."""
+    try:
+        api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except Exception:
+        pass
+
+
 def _edit_status(api: callable, chat_id: int, message_id: int,
                  text: str) -> bool:
     """One editMessageText on the status bubble. Returns False on any
@@ -289,11 +331,23 @@ def _edit_status(api: callable, chat_id: int, message_id: int,
 
 
 def _send(api: callable, chat_id: int, text: str) -> dict:
-    out = {"message_id": None}
-    for chunk in _chunk(text) or ["(empty)"]:
-        r = api("sendMessage", {"chat_id": chat_id, "text": chunk})
+    """Send (chunked). Fail-soft: the returned dict records ok/error instead
+    of raising, but failures are never silently indistinguishable from
+    success. Chunks are throttled to stay under the per-chat flood limit."""
+    out = {"message_id": None, "ok": True}
+    for i, chunk in enumerate(_chunk(text) or ["(empty)"]):
+        if i:
+            time.sleep(0.6)
+        try:
+            r = api("sendMessage", {"chat_id": chat_id, "text": chunk})
+        except Exception as e:
+            out["ok"], out["error"] = False, f"{type(e).__name__}: {e}"
+            continue
         if r.get("ok"):
             out["message_id"] = r["result"]["message_id"]
+        else:
+            out["ok"] = False
+            out["error"] = r.get("description") or "sendMessage failed"
     return out
 
 
@@ -357,46 +411,69 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
         messages.extend(_initial_messages())
     messages.append({"role": "user", "content": instruction})
 
-    status = _send(api, chat_id, _compose_status([], 0, 0))
-    status_id = status.get("message_id")
+    # No empty "total: 0 tool calls" bubble before any work: the status
+    # bubble is created lazily at the first progress edit (or by the final
+    # answer when the turn was a pure one-shot reply).
+    status_id = None
     turn_start = len(messages)   # activity re-renders the whole turn
     activity: list[str] = []   # every line so far this turn
     tool_n = 0                 # tool calls so far
     note_n = 0                 # assistant prose notes so far
 
     def on_step() -> None:
-        nonlocal tool_n, note_n, activity
-        activity = _describe_step(messages, turn_start)
-        if not activity:
-            return
-        tool_n = sum(1 for m in messages[turn_start:]
-                     if m.get("role") == "assistant"
-                     for _ in (m.get("tool_calls") or []))
-        note_n = sum(1 for ln in activity if ln.startswith("💬"))
+        nonlocal tool_n, note_n, activity, status_id
         # progress is best-effort; never kill the turn over it
-        if status_id:
-            _edit_status(api, chat_id, status_id,
-                         _compose_status(activity, tool_n, note_n))
+        try:
+            activity = _describe_step(messages, turn_start)
+            if not activity:
+                return
+            tool_n = sum(1 for m in messages[turn_start:]
+                         if m.get("role") == "assistant"
+                         for _ in (m.get("tool_calls") or []))
+            note_n = sum(1 for ln in activity if ln.startswith("💬"))
+            if status_id is None:
+                sent = _send(api, chat_id, _compose_status(activity, tool_n, note_n))
+                status_id = sent.get("message_id")
+                _typing(api, chat_id)
+            else:
+                _edit_status(api, chat_id, status_id,
+                             _compose_status(activity, tool_n, note_n))
+        except Exception:
+            pass
 
+    # Approval auto-deny, as documented: without the quiet slot, _confirm
+    # falls through to a terminal prompt there is nobody to answer (and on a
+    # TTY, a stray Enter approves). Batch mode sets the same slot.
+    from ._subagent import _ASYNC_QUIET_SLOTS
+    _ASYNC_QUIET_SLOTS.quiet = True
     summary = {}
     try:
-        summary = _run_model_turn_loop(messages, on_step=on_step)
-    except Exception as e:
-        _send(api, chat_id, f"nx: turn failed — {type(e).__name__}: {e}")
-        return
+        try:
+            _typing(api, chat_id)
+            summary = _run_model_turn_loop(messages, on_step=on_step)
+        except Exception as e:
+            _send(api, chat_id, f"nx: turn failed — {type(e).__name__}: "
+                                f"{str(e)[:200]}")
+            return
+        finally:
+            st._METRICS = _fresh_metrics(session_id="telegram")
     finally:
-        st._METRICS = _fresh_metrics(session_id="telegram")
+        _ASYNC_QUIET_SLOTS.quiet = False
+        _repair_conversation(messages)
 
-    # The final answer is the tail of assistant text after the last tool call.
+    # The final answer is the last non-empty assistant text, skipping any
+    # trailing tool-call message (an empty assistant tail must not hide a
+    # real answer further up).
     answer = None
     for m in reversed(messages):
-        if m.get("role") == "assistant":
-            if m.get("tool_calls"):
-                break
-            content = m.get("content") or ""
-            if isinstance(content, str) and content.strip():
-                answer = content.strip()
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content") or ""
+        if isinstance(content, str) and content.strip():
+            answer = content.strip()
             break
+        if m.get("tool_calls"):
+            continue   # look further up for a real answer
     # One bubble per turn: the final answer lands on the status message (as
     # an edit) unless it can't (no status bubble, oversized, or the edit
     # failed) — only then does it go out as its own message.
@@ -404,7 +481,7 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
         answer = "(no final answer — status: %s)" % (summary or {}).get("status", "?")
     final_text = ("\n" * 2).join([_compose_status(activity, tool_n, note_n),
                                   answer]) if answer and activity else answer
-    if final_text and len(final_text) <= TG_MAX_MESSAGE and status_id \
+    if final_text and _u16len(final_text) <= TG_MAX_MESSAGE and status_id \
             and _edit_status(api, chat_id, status_id, final_text):
         return
     _send(api, chat_id, answer)
@@ -459,27 +536,51 @@ def run_gateway() -> int:
             continue
         for upd in r.get("result") or []:
             offset = max(offset, upd["update_id"] + 1)
-            msg = upd.get("message") or {}
-            chat_id = (msg.get("chat") or {}).get("id")
-            if chat_id not in allowed:
-                continue  # not even an error: an open reply is the vulnerability
-            instruction = _message_instruction(msg)
-            if not instruction:
-                continue
-            if instruction.rstrip().endswith("/new"):
-                # matched after the "Instruction from the user: " wrapper;
-                # a PDF+"/new" is honored too (the intent is unambiguous).
-                with _TURN_LOCK:
-                    _CONVERSATION.clear()
-                _send(_api, chat_id, "✂ conversation cleared — fresh context.")
-                continue
-            with _TURN_LOCK:
-                _run_turn(_api, chat_id, instruction, _CONVERSATION)
+            try:
+                _handle_update(upd, allowed)
+            except Exception as e:
+                # one bad update (flaky upload, malformed message) must not
+                # kill the gateway
+                print(f"nx telegram: update dropped: {type(e).__name__}: "
+                      f"{str(e)[:200]}")
 
 
 # One conversation for the process (the single-chat constraint, stated in the
 # module docstring). Survives across messages; a bot restart starts fresh.
 _CONVERSATION: list = []
+
+
+def _handle_update(upd: dict, allowed: set) -> None:
+    """Allowlist check, instruction translation, /new handling, one turn.
+    Raises on bad updates; run_gateway catches per-update."""
+    msg = upd.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    if chat_id not in allowed:
+        return  # not even an error: an open reply is the vulnerability
+    text = (msg.get("text") or "").strip()
+    if text == "/new":
+        with _TURN_LOCK:
+            _CONVERSATION.clear()
+        _send(_api, chat_id, "✂ conversation cleared — fresh context.")
+        return
+    instruction = _message_instruction(msg)
+    if not instruction:
+        return
+    with _TURN_LOCK:
+        _run_turn(_api, chat_id, instruction, _CONVERSATION)
+
+
+def _repair_conversation(messages: list) -> None:
+    """Drop assistant tool_calls whose results never arrived — a failed turn
+    can leave them dangling, and most OpenAI-compatible endpoints then reject
+    EVERY subsequent turn until the prefix is cleaned (or /new)."""
+    answered = {m.get("tool_call_id") for m in messages
+                if m.get("role") == "tool"}
+    messages[:] = [
+        m for m in messages
+        if not (m.get("role") == "assistant" and m.get("tool_calls")
+                and any((tc.get("id") not in answered)
+                        for tc in m["tool_calls"]))]
 
 
 def cli_telegram(argv: list[str]) -> int:

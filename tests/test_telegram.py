@@ -23,6 +23,11 @@ import nx  # noqa: E402
 import nx._telegram as tg  # noqa: E402
 
 
+import pytest
+
+_ELLIPSIS = "\u2026"
+
+
 # --- fakes ---------------------------------------------------------------------
 
 def _fake_api(calls=None, responses=None):
@@ -264,7 +269,7 @@ def test_loop_drops_disallowed_chat():
     def fake_api(method, payload=None, timeout=35.0):
         calls.append(method)
         if method == "getUpdates":
-            if len(calls) > 1:   # second poll: stop the loop
+            if calls.count("getUpdates") > 1:   # second poll: stop the loop
                 raise KeyboardInterrupt()
             return {"ok": True, "result": updates}
         return {"ok": True, "result": {"message_id": 1}}
@@ -275,6 +280,165 @@ def test_loop_drops_disallowed_chat():
         tg.run_gateway()
     # the disallowed chat never produced a turn, never got a reply
     assert turns == [(111, "Instruction from the user: hello")]
+
+
+# --- fixes: quiet-slot auto-deny, ×N counter, repair, /new exactness -------
+
+def test_run_turn_sets_quiet_slot_during_loop():
+    import threading
+    seen = {}
+    conv = []
+
+    def fake_loop(messages, on_step=None, **kw):
+        from nx._subagent import _ASYNC_QUIET_SLOTS, _subagent_quiet
+        seen["during"] = _subagent_quiet()
+        seen["tls"] = bool(getattr(_ASYNC_QUIET_SLOTS, "quiet", False))
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done"}
+
+    with unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()), \
+         unittest.mock.patch("nx._turn._run_model_turn_loop",
+                             side_effect=fake_loop), \
+         unittest.mock.patch("nx._dispatch._initial_messages",
+                             return_value=[]), \
+         unittest.mock.patch("nx._turn._ensure_ctx_probe",
+                             lambda *a, **k: None):
+        tg._run_turn(_fake_api(), 111, "hi", conv)
+    assert seen == {"during": True, "tls": True}   # auto-deny is live mid-turn
+
+
+def test_describe_step_collapses_three_identical_calls():
+    msgs = []
+    for i in "123":
+        msgs += [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": i, "function": {"name": "list_dir",
+                 "arguments": json.dumps({"path": "."})}}]},
+            {"role": "tool", "tool_call_id": i, "content": "x" * 300},
+        ]
+    lines = tg._describe_step(msgs, 0)
+    # results pair FIFO; call lines dedup, so both results fold onto the ONE
+    # shared line (the counter proves both arrived)
+    assert len(lines) == 1
+    assert lines[0].startswith("📂 list_dir: . ×3  ok (300 chars)")
+
+
+def test_describe_step_pairs_parallel_results_in_call_order():
+    msgs = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "A", "function": {"name": "run_bash",
+             "arguments": json.dumps({"command": "first"})}},
+            {"id": "B", "function": {"name": "run_bash",
+             "arguments": json.dumps({"command": "second"})}},
+        ]},
+        {"role": "tool", "tool_call_id": "A", "content": "y" * 300 + "\nFROM A"},
+        {"role": "tool", "tool_call_id": "B", "content": "y" * 300 + "\nFROM B"},
+    ]
+    lines = tg._describe_step(msgs, 0)
+    # results pair FIFO with their own calls (the audit's mis-pairing bug)
+    assert len(lines) == 2
+    assert "first" in lines[0] and "FROM A" in lines[0]
+    assert "second" in lines[1] and "FROM B" in lines[1]
+
+
+def test_repair_conversation_drops_unanswered_tool_calls():
+    conv = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "1", "function": {"name": "x", "arguments": "{}"}},
+            {"id": "2", "function": {"name": "y", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "1", "content": "ok"},
+    ]
+    tg._repair_conversation(conv)
+    # the dangling call is gone; the answered pair survives untouched
+    assert conv == [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "1", "content": "ok"},
+    ]
+    tg._repair_conversation([{"role": "user", "content": "clean"}])
+    assert len(conv) == 2   # no-op on a clean prefix
+
+
+def test_u16len_counts_emoji_as_two():
+    assert tg._u16len("hi") == 2
+    assert tg._u16len("🙂") == 2       # astral-plane code point
+    assert tg._u16len("a" * 4095 + "🙂") == 4097  # len() says 4096
+
+
+def test_send_reports_api_failure_instead_of_swallowing():
+    def bad_api(method, payload=None, timeout=35.0):
+        return {"ok": False, "description": "chat not found"}
+    out = tg._send(bad_api, 111, "hello")
+    assert out["ok"] is False and "chat not found" in out["error"]
+
+
+def test_slash_new_requires_exact_match():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    tg._CONVERSATION.extend([{"role": "user", "content": "old"}])
+    turns = []
+
+    def fake_turn(api, chat_id, instruction, messages):
+        turns.append(instruction)
+
+    polls = []
+
+    def fake_api(method, payload=None, timeout=35.0):
+        if method == "getUpdates":
+            polls.append(method)
+            if len(polls) > 1:
+                raise KeyboardInterrupt()
+            return {"ok": True, "result": [
+                {"update_id": 1, "message": {"chat": {"id": 111},
+                                             "text": "look at src/new"}},
+                {"update_id": 2, "message": {"chat": {"id": 111},
+                                             "text": "/new"}},
+            ]}
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with unittest.mock.patch.object(tg, "_api", side_effect=fake_api), \
+         unittest.mock.patch.object(tg, "_run_turn", side_effect=fake_turn), \
+         unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()):
+        import pytest
+        try:
+            tg.run_gateway()
+        except KeyboardInterrupt:
+            pass
+    # "look at src/new" went to a turn; only the exact "/new" wiped the
+    # conversation
+    assert len(turns) == 1
+    assert tg._CONVERSATION == []
+
+
+def test_bad_update_does_not_kill_gateway():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    calls = []
+
+    polls = []
+
+    def fake_api(method, payload=None, timeout=35.0):
+        if method == "getUpdates":
+            polls.append(method)
+            if len(polls) > 1:
+                raise KeyboardInterrupt()
+            return {"ok": True, "result": [
+                # a document whose download explodes mid-instruction
+                {"update_id": 1, "message": {"chat": {"id": 111},
+                                             "document": {"file_id": "BAD",
+                                                          "mime_type": "application/pdf"}}},
+                {"update_id": 2, "message": {"chat": {"id": 111},
+                                             "text": "still alive"}},
+            ]}
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with unittest.mock.patch.object(tg, "_api", side_effect=fake_api), \
+         unittest.mock.patch.object(tg, "_run_turn") as fake_turn, \
+         unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()):
+        tg.run_gateway()
+    # the second update still got a turn despite the first one blowing up
+    assert fake_turn.call_count == 1
 
 
 # --- main loop: /new resets the conversation ----------------------------------------
@@ -292,7 +456,7 @@ def test_slash_new_clears_conversation_without_turn():
     def fake_api(method, payload=None, timeout=35.0):
         calls.append((method, payload))
         if method == "getUpdates":
-            if len(calls) > 1:   # second poll: stop the loop
+            if sum(1 for m, _ in calls if m == "getUpdates") > 1:
                 raise KeyboardInterrupt()
             return {"ok": True, "result": [
                 {"update_id": 1, "message": {"chat": {"id": 111},
