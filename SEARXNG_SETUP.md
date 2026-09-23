@@ -22,9 +22,12 @@ If the editable install fails with `ModuleNotFoundError: msgspec` (or `yaml` /
 (verified 2026-09-20 on the second machine):
 
 ```bash
-uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python setuptools -r requirements.txt
 uv pip install --python .venv/bin/python --no-build-isolation -e .
 ```
+
+(`setuptools` is needed first: uv venvs on 3.12+ no longer seed it, and with
+`--no-build-isolation` the build backend has nothing to import it from.)
 
 ## 2. Settings
 

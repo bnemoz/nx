@@ -184,7 +184,7 @@ def test_install_local_searx_macos_launchd(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(_onboard, "_run", lambda cmd: calls.append(cmd) or True)
     monkeypatch.setattr(_onboard, "_have", lambda c: c in ("uv", "git"))
-    assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
+    assert _onboard.install_local_searx().startswith("http://127.0.0.1:")
     plist = home / "Library/LaunchAgents/io.github.searxng.nx.plist"
     text = plist.read_text()
     assert "<string>-m</string>" in text and "<string>searx.webapp</string>" in text
@@ -210,7 +210,7 @@ def test_install_local_searx_uses_uv_pip_for_uv_venvs(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(_onboard, "_run", lambda cmd: calls.append(cmd) or True)
     monkeypatch.setattr(_onboard, "_have", lambda c: c in ("uv", "git"))
-    assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
+    assert _onboard.install_local_searx().startswith("http://127.0.0.1:")
     assert ["uv", "pip", "install", "--python",
             str(src / ".venv/bin/python"), "-r",
             str(src / "requirements.txt"), "setuptools"] in calls
@@ -229,8 +229,9 @@ def test_install_local_searx_happy_path(tmp_path, monkeypatch):
     # Pretend systemctl exists; the unit file gets written by the installer.
     monkeypatch.setattr("shutil.which", lambda c: "/usr/bin/" + c)
     url = _onboard.install_local_searx()
-    assert url == "http://127.0.0.1:8888"
+    assert url and url.startswith("http://127.0.0.1:")
     settings = (tmp_path / ".local/share/searxng/settings.yml").read_text()
+    assert f"port: {url.rsplit(':', 1)[1]}" in settings
     assert 'bind_address: "127.0.0.1"' in settings
     assert "- json" in settings
     assert "secret_key" in settings and "PASTE_RANDOM" not in settings
@@ -256,7 +257,7 @@ def test_install_local_searx_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(_onboard, "_probe_searx", lambda url: None)
     monkeypatch.setattr(_onboard, "_run", lambda cmd: True)
-    assert _onboard.install_local_searx() == "http://127.0.0.1:8888"
+    assert _onboard.install_local_searx().startswith("http://127.0.0.1:")
     assert "keep" in (home / ".local/share/searxng/settings.yml").read_text()
     assert "# custom" in (home / ".config/systemd/user/searxng.service").read_text()
 
@@ -265,6 +266,110 @@ def test_install_local_searx_git_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(_onboard, "_run", lambda cmd: False)
     assert _onboard.install_local_searx() is None
+
+
+def test_pick_searx_port_skips_taken(tmp_path, monkeypatch):
+    """Port selection must never land on a taken loopback port — 8888 is
+    Jupyter's default and notebook containers run one there (regression: the
+    installer pointed NX_SEARX_URL at the Jupyter server, whose /search 404s
+    fall back to DDG)."""
+    import socket
+    # Occupy two REAL ports (not the fixed candidates, which another test
+    # run / the dev box's live searxng may already hold) and point the
+    # candidate list at them: first taken, second free.
+    import socket
+    s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s1.bind(("127.0.0.1", 0))
+    s1.listen(1)
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind(("127.0.0.1", 0))
+    s2.listen(1)
+    free_port = s2.getsockname()[1]
+    s2.close()  # the free candidate must be genuinely free when picked
+    try:
+        taken_port = s1.getsockname()[1]
+        real_pick = _onboard._pick_impl
+        monkeypatch.setattr(_onboard, "_pick_searx_port",
+                            lambda c=None: real_pick((taken_port, free_port)))
+        assert _onboard._pick_searx_port() == free_port
+    finally:
+        s1.close()
+        s2.close()
+
+def test_install_local_searx_reuses_existing_settings_port(tmp_path, monkeypatch):
+    """An existing settings.yml decides the port even when 8888 is free — a
+    prior install's unit/plist is already pointed at it."""
+    home = tmp_path
+    src = home / ".local/share/searxng-src"
+    (src / "searx").mkdir(parents=True)
+    (src / ".venv/bin").mkdir(parents=True)
+    (src / ".venv/bin/python").write_text("")
+    cfg = home / ".local/share/searxng"
+    cfg.mkdir(parents=True)
+    (cfg / "settings.yml").write_text(
+        "server:\n  port: 9444\nsearch:\n  formats: [html, json]\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(_onboard.sys, "platform", "linux")
+    monkeypatch.setattr(_onboard, "_probe_searx", lambda url: None)
+    monkeypatch.setattr(_onboard, "_run", lambda cmd: True)
+    assert _onboard.install_local_searx() == "http://127.0.0.1:9444"
+    assert "port: 9444" in (cfg / "settings.yml").read_text()
+
+
+def test_install_local_searx_container_fallback(tmp_path, monkeypatch):
+    """No systemd user session (containers): the installer must still leave a
+    working instance — detached webapp process (start_new_session, never an
+    external setsid) with SEARXNG_SETTINGS_PATH in its env — instead of
+    failing the whole install."""
+    home = tmp_path
+    src = home / ".local/share/searxng-src"
+    (src / "searx").mkdir(parents=True)
+    (src / ".venv/bin").mkdir(parents=True)
+    (src / ".venv/bin/python").write_text("")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(_onboard.sys, "platform", "linux")
+    monkeypatch.setattr(_onboard, "_probe_searx", lambda url: None)
+    monkeypatch.setattr(_onboard, "_run",
+                        lambda cmd: cmd[0] != "systemctl")  # systemd unusable
+    spawned = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            spawned.append((cmd, kw))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, *a, **kw):
+            return b"", b""
+
+        @property
+        def args(self):
+            return []
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+    url = _onboard.install_local_searx()
+    assert url and url.startswith("http://127.0.0.1:")
+    assert len(spawned) == 1
+    cmd, kw = spawned[0]
+    assert cmd[1:3] == ["-m", "searx.webapp"]
+    assert kw["start_new_session"] is True
+    assert kw["env"]["SEARXNG_SETTINGS_PATH"].endswith("settings.yml")
+    out = (home / ".local/share/searxng/searxng.log").read_text()  # created
+    assert isinstance(out, str)
+
 
 
 def test_wizard_yes_installs_searx(env_file, monkeypatch):

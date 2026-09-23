@@ -54,17 +54,48 @@ def _have(cmd: str) -> bool:
     return which(cmd) is not None
 
 
+def _pick_impl(candidates):
+    """The real port-picker logic, shared with _pick_searx_port so tests can
+    call it directly with custom candidates (avoiding recursion when the
+    module attribute is patched)."""
+    import socket
+    for port in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    return 0
+
+
+def _pick_searx_port(candidates: tuple[int, ...] = (8888, 8090, 8080, 9090)) -> int:
+    """First loopback port free among the candidates, verified by
+    bind-and-release. 8888 is the documented default but is ALSO Jupyter's
+    default — in notebook containers a hardcoded 8888 either fails to start
+    or, worse, gets nx pointed at the notebook server. Returns 0 when every
+    candidate is taken."""
+    return _pick_impl(candidates)
+
+
 def install_local_searx() -> str | None:
     """Automate the SEARXNG_SETUP.md steps for a fresh local instance: clone
     the source into ~/.local/share/searxng-src, build a uv venv (with the
     --no-build-isolation workaround for upstream's undeclared build deps;
     setuptools is installed explicitly since uv venvs don't seed it),
     write a loopback-only settings.yml with a fresh random secret_key, and
-    install a systemd **user** service (Linux only; linger check included).
+    keep it running: a systemd **user** service on Linux, a LaunchAgent on
+    macOS, or — where neither exists (containers, chroots) — a detached
+    background process with a persistence hint.
 
-    Returns the URL to store in NX_SEARX_URL ("http://127.0.0.1:8888") on
-    success, or None when unsupported/unavailable/failed — the wizard then
-    falls back to the paste-a-URL path so nothing is lost.
+    The port is chosen to avoid collisions: an existing settings.yml keeps
+    the port it configures; otherwise the first free candidate among
+    8888/8090/8080/9090 is picked (8888 alone is not safe — it is Jupyter's
+    default port).
+
+    Returns the URL to store in NX_SEARX_URL on success, or None when
+    unsupported/unavailable/failed — the wizard then falls back to the
+    paste-a-URL path so nothing is lost.
     """
     # sys.platform, not os.name: macOS is also "posix", and each platform
     # gets its own service manager branch below (systemd user unit on Linux,
@@ -124,10 +155,30 @@ def install_local_searx() -> str | None:
                          "-e", src]):
                 return None
 
-    # 2. settings.yml — fresh secret per machine, loopback bind, json format
+    # 2. settings.yml — fresh secret per machine, loopback bind, json format.
+    # Port: reuse what an existing settings.yml configures (a prior install
+    # may already have a unit/plist pointed at it); for a fresh file, pick a
+    # free port instead of trusting 8888 (Jupyter's default — inside notebook
+    # containers it is taken, and nx must never point at Jupyter by accident).
+    import re as _re
     import secrets
     os.makedirs(cfg_dir, exist_ok=True)
     settings = os.path.join(cfg_dir, "settings.yml")
+    port = 0
+    if os.path.exists(settings):
+        try:
+            with open(settings, encoding="utf-8") as f:
+                m = _re.search(r"^\s*port:\s*(\d+)", f.read(), _re.M)
+            if m:
+                port = int(m.group(1))
+        except OSError:
+            pass
+    if not port:
+        port = _pick_searx_port()
+        if not port:
+            print("  ✗ no free loopback port among 8888/8090/8080/9090 — "
+                  "free one up and re-run `nx setup`.")
+            return None
     if not os.path.exists(settings):
         with open(settings, "w", encoding="utf-8") as f:
             f.write(
@@ -135,7 +186,7 @@ def install_local_searx() -> str | None:
                 "server:\n"
                 f"  secret_key: \"{secrets.token_hex(32)}\"\n"
                 "  bind_address: \"127.0.0.1\"   # loopback ONLY\n"
-                "  port: 8888\n"
+                f"  port: {port}\n"
                 "  limiter: false              # private instance\n\n"
                 "search:\n"
                 "  formats:\n"
@@ -204,26 +255,46 @@ def install_local_searx() -> str | None:
                     "Restart=on-failure\n\n"
                     "[Install]\n"
                     "WantedBy=default.target\n")
-        _run(["systemctl", "--user", "daemon-reload"])
-        if not _run(["systemctl", "--user", "enable", "--now", "searxng"]):
-            print("  ✗ systemd unit failed to start — check "
-                  "`journalctl --user -u searxng`. You can paste a SearXNG URL "
-                  "instead.")
-            return None
-        # Linger check (boot-time autostart); advisory only.
+        started = False
         try:
-            out = subprocess.check_output(
-                ["loginctl", "show-user",
-                 os.environ.get("USER", ""), "-p", "Linger"])
-            if b"Linger=no" in out:
-                print("  ! Linger=no — the service won't autostart at boot. "
-                      "Enable with: sudo loginctl enable-linger $USER")
-        except (OSError, subprocess.CalledProcessError):
-            pass  # no loginctl (e.g. containers) — advisory only
+            _run(["systemctl", "--user", "daemon-reload"])
+            started = _run(["systemctl", "--user", "enable", "--now", "searxng"])
+        except OSError:
+            started = False  # no systemd user session at all (containers)
+        if not started:
+            # Container / chroot / systemd-less box: run the webapp directly
+            # as a detached child (own session via start_new_session — never
+            # an external setsid binary, see the 0.91.1 macOS fix), logging
+            # to cfg_dir/searxng.log. It does not survive a container
+            # restart; the printed hint says where to add the launch.
+            log_path = os.path.join(cfg_dir, "searxng.log")
+            with open(log_path, "ab") as log:
+                subprocess.Popen(
+                    [py, "-m", "searx.webapp"],
+                    cwd=src,
+                    env={**os.environ,
+                         "SEARXNG_SETTINGS_PATH": os.path.join(cfg_dir, "settings.yml")},
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True)
+            print(f"  ! no systemd user session here (container?) — SearXNG "
+                  f"started as a plain background process (log: {log_path}). "
+                  "It will NOT restart on reboot: add the launch to the "
+                  "container entrypoint or ~/.bashrc.")
+        else:
+            # Linger check (boot-time autostart); advisory only.
+            try:
+                out = subprocess.check_output(
+                    ["loginctl", "show-user",
+                     os.environ.get("USER", ""), "-p", "Linger"])
+                if b"Linger=no" in out:
+                    print("  ! Linger=no — the service won't autostart at boot. "
+                          "Enable with: sudo loginctl enable-linger $USER")
+            except (OSError, subprocess.CalledProcessError):
+                pass  # no loginctl — advisory only
 
     # 4. wait briefly for the port, then probe --------------------------------
     import time
-    url = "http://127.0.0.1:8888"
+    url = f"http://127.0.0.1:{port}"
     for _ in range(20):
         if _probe_searx(url) is None:
             print(f"  ✓ SearXNG installed and answering at {url}")
