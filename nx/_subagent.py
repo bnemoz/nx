@@ -420,14 +420,31 @@ def _async_duplicate_running(instruction: str) -> str | None:
     return None
 
 
-def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
+def _run_async_agent(job_id: str, instruction: str, max_turns: int,
+                     tier: str = "read",
+                     scope: "list[str] | None" = None) -> None:
     """Worker body: run the sub-loop, then stage the parent's notice.
 
     On any failure the job is still finalized (status=error) and staged, so
     the parent gets exactly one note — never a dangling, silently-dead agent
     it waits on forever."""
+    # Per-agent worktree (0.97.0): a write-tier agent with
+    # NX_SUBAGENT_WORKTREE=1 edits/verifies/commits in its own checkout so a
+    # headless swarm never tramples the parent's tree or a sibling's. Failure
+    # to create one is NOT fatal — the agent falls back to the shared tree
+    # (scope gates still apply), and the report says so.
+    worktree = None
+    wt_note = None
+    if tier in ("write", "implement"):
+        from ._worktree import _worktree_enabled, create_worktree
+        if _worktree_enabled():
+            worktree, err = create_worktree(job_id)
+            if worktree is None:
+                wt_note = (f"worktree isolation unavailable ({err}) — the "
+                           "agent ran in the shared tree")
     try:
-        answer = _run_sync_agent_body(instruction, max_turns)
+        answer = _run_sync_agent_body(instruction, max_turns, tier=tier,
+                                      scope=scope, worktree=worktree)
         # The unwrapped body: the worker does its OWN report write + [Runtime
         # note] staging below; _run_sync_agent's head+path tool-result wrapper
         # is for the parent's synchronous tool call only. The body turns most
@@ -438,12 +455,21 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
     except Exception as e:  # noqa: BLE001 — a failed agent is a note, not a crash
         answer = f"{type(e).__name__}: {e}"
         status = "error"
+    if worktree:
+        answer += (f"\n\n[Worktree: this agent's edits are in {worktree} "
+                   "(detached HEAD from the project root at spawn time) — "
+                   "merge or cherry-pick from there; the shared tree is "
+                   "untouched.]")
+    elif wt_note:
+        answer += f"\n\n[{wt_note}]"
     with _ASYNC_LOCK:
         rec = _ASYNC_AGENTS.get(job_id)
         if rec is not None:
             rec["answer"] = answer
             rec["status"] = status
             rec["finished"] = time.time()
+            if worktree:
+                rec["worktree"] = worktree
     # Full answer to disk first (both done and error), so the runtime note can
     # stay a short head + path instead of dumping thousands of chars of
     # exploration into the parent's context.
@@ -493,7 +519,8 @@ def _stage_subagent_answer(job_id: str) -> None:
         setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
 
 
-def _spawn_async(instruction: str, max_turns: int) -> str:
+def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
+                 scope: "list[str] | None" = None) -> str:
     """Launch the agent's turn loop on a quiet daemon thread and return the
     job id result the parent's tool message carries."""
     job_id = _new_job_id()
@@ -530,7 +557,8 @@ def _spawn_async(instruction: str, max_turns: int) -> str:
                 _prune_queued()
         _ASYNC_QUIET_SLOTS.quiet = True
         try:
-            _run_async_agent(job_id, instruction, max_turns)
+            _run_async_agent(job_id, instruction, max_turns, tier=tier,
+                             scope=scope)
         finally:
             _ASYNC_QUIET_SLOTS.quiet = False
             if acquired and sem is not None:
@@ -604,9 +632,13 @@ def _lean_result(answer, job_id, instruction):
 
 
 def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
-                         scope: "list[str] | None" = None) -> str:
+                         scope: "list[str] | None" = None,
+                         worktree: "str | None" = None) -> str:
     """The actual foreground sub-loop (wrapped by _run_sync_agent, which adds
-    the report-file + head/path staging shared with the async path)."""
+    the report-file + head/path staging shared with the async path).
+    `worktree` (0.97.0): when set, write-tier calls are rewritten into that
+    tree (see _subagent_tiers._worktree_args) — the agent edits its own
+    checkout, never the parent's working tree."""
     if st.client is None or st.MODEL is None:
         return "ERROR: no active model source"
     if st.YOLO is None:  # pragma: no cover — defensive; YOLO is always a bool
@@ -648,7 +680,8 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # manual, serial-only fallback for tests.
     table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
-    ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope)
+    ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
+                           worktree=worktree)
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
     _SUBAGENT_TLS.ctx = ctx
@@ -833,7 +866,7 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         if dup is not None:
             return (f"ERROR: an identical async agent is already running as job {dup} "
                     "— its answer will arrive as a [Runtime note]; do not re-spawn it")
-        return _spawn_async(instruction, max_turns)
+        return _spawn_async(instruction, max_turns, tier=t, scope=scope)
     return _run_sync_agent(instruction, max_turns, tier=t, scope=scope)
 
 

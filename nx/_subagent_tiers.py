@@ -57,10 +57,12 @@ _SUBAGENT_TLS = threading.local()
 class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
-    __slots__ = ("table", "active", "write", "quiet", "model_target", "scope")
+    __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
+                 "worktree")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
-                 quiet: bool = False, scope: "list[str] | None" = None) -> None:
+                 quiet: bool = False, scope: "list[str] | None" = None,
+                 worktree: "str | None" = None) -> None:
         self.table = table
         self.active = True
         self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
@@ -70,6 +72,11 @@ class _SubagentContext:
         # whose target falls OUTSIDE the scope is refused with an explicit
         # error naming the scope — never a silent denial. None = unrestricted.
         self.scope = list(scope) if scope else None
+        # Per-agent git worktree (NX_SUBAGENT_WORKTREE=1, 0.97.0): when set,
+        # the write-tier wrapper rewrites relative paths into this tree and
+        # run_tests/git_commit default to it — the agent edits and verifies in
+        # its own checkout, never the parent's working tree. None = shared tree.
+        self.worktree = worktree
         # (client, model, extra_request_kwargs) this agent's model calls use,
         # or None to inherit the parent's active source/model. Pinned by
         # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
@@ -154,12 +161,14 @@ def _write_tier_dispatch() -> dict[str, Any]:
 def _scope_check(path: str) -> str | None:
     """Refusal message when `path` falls outside the CURRENT thread's sub-agent
     scope, or None when allowed (no scope set, or any glob matches). Matched
-    against the path relative to PROJECT_ROOT, and also against its basename
-    as a fallback so scope=["*.md"] works."""
+    against the path relative to the agent's worktree when it has one (the
+    agent's relative paths name ITS tree), else PROJECT_ROOT, plus the
+    basename as a fallback so scope=["*.md"] works."""
     ctx = _subagent_ctx()
     if ctx is None or not ctx.scope:
         return None
-    rel = os.path.relpath(os.path.abspath(path), st.PROJECT_ROOT)
+    root = getattr(ctx, "worktree", None) or st.PROJECT_ROOT
+    rel = os.path.relpath(os.path.abspath(path), root)
     for pat in ctx.scope:
         if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(os.path.basename(rel), pat):
             return None
@@ -195,6 +204,9 @@ def _write_tier_wrapper(name: str):
         ctx = _subagent_ctx()
         if ctx is None:  # defensive: a wrapper escaped its sub-agent context
             return f"ERROR: {name} write-tier wrapper used outside a sub-agent"
+        worktree = getattr(ctx, "worktree", None)
+        if worktree:
+            args = _worktree_args(name, args, worktree)
         # Path scope gate BEFORE the body/approval: an out-of-scope write is
         # an explicit refusal, never a prompt and never a silent denial.
         target = _scope_target(name, args)
@@ -211,6 +223,28 @@ def _write_tier_wrapper(name: str):
 
     _run.__name__ = f"_subagent_write_{name}"
     return _run
+
+
+def _worktree_args(name: str, args: dict[str, Any], worktree: str) -> dict[str, Any]:
+    """Rewrite a write-tier call's path arguments into the agent's worktree
+    (NX_SUBAGENT_WORKTREE=1). Relative paths — what the agent names — map to
+    the tree; absolute paths inside it pass through; absolute paths outside
+    are left for the scope gate / write fence to refuse. run_tests gets its
+    targets and cwd anchored; git_commit lands in the tree."""
+    from ._worktree import rewrite_path
+    args = dict(args)
+    for key in ("path", "file", "targets"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            args[key] = rewrite_path(v, worktree)
+        elif isinstance(v, list):
+            args[key] = [rewrite_path(x, worktree) if isinstance(x, str) else x
+                         for x in v]
+    if name == "git_commit" and not str(args.get("path", "")).strip():
+        args["path"] = worktree
+    if name == "run_tests":
+        args.setdefault("path", worktree)
+    return args
 
 
 def _scope_target(name: str, args: dict[str, Any]) -> str | None:
