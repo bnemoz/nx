@@ -81,6 +81,9 @@ _ALLOWLIST = {
     "NX_SUBAGENT_MAX_NESTED": "internal: 1 lets a sub-agent fan out (default 0)",
     # swarm P6: amortized session-store maintenance (prune + image GC):
     "NX_SESSION_SWEEP_INTERVAL": "internal: min seconds between session-store sweeps (default 300)",
+    # swarm P7: shared prompt-cache routing key for a swarm (co-locates
+    # agents that share prefix bytes on one replica/KV block):
+    "NX_CACHE_ROUTING_GROUP": "internal: shared prompt_cache_key group ('1' = derive from project+model)",
     # swarm P3 knobs (per-process memory): undo stack byte cap and the
     # retained async-answer body in a finished job record:
     "NX_MAX_UNDO_BYTES": "internal: undo checkpoint stack byte cap (default 32MB)",

@@ -150,7 +150,23 @@ def routing_identity() -> str | None:
     what a router needs to pin a session to a replica/KV block. Returns None
     when there is no session (import-time probes, batch workers before their
     recorder is installed), in which case nothing is attached.
+
+    Swarm P7: per-session keys spread a swarm's agents across replicas, so the
+    SHARED prompt head (SYSTEM + prefix notes — byte-identical for every agent
+    from the same project+model) is cold-prefilled N times instead of once.
+    NX_CACHE_ROUTING_GROUP set to a non-empty value overrides the session id
+    with that shared key (e.g. derived from project root + model), co-locating
+    agents whose prefixes share bytes on one replica/KV block. Set it to "1"
+    for an automatic project+model-derived group key.
     """
+    group = os.environ.get("NX_CACHE_ROUTING_GROUP", "").strip()
+    if group:
+        if group == "1":
+            root = getattr(st, "PROJECT_ROOT", None) or os.getcwd()
+            model = getattr(st, "MODEL", None) or ""
+            import hashlib
+            return "nxgrp-" + hashlib.sha256(f"{root}|{model}".encode()).hexdigest()[:16]
+        return f"nxgrp-{group}"
     m = st._active_metrics()
     sid = getattr(m, "session_id", None) if m is not None else None
     if not sid:
