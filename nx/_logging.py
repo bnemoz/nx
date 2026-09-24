@@ -28,6 +28,15 @@ from ._private import private_dir
 LOG_PATH = os.path.join(st.SESSION_HOME, "logs", "llamacpp.log")
 LOG_MAX_BYTES = _env_int("NX_LOG_MAX_BYTES", 10000000)
 
+# Swarm P4: the request log json.dumps's the ENTIRE prompt (and httpx
+# serializes it again for the wire) on every model call — pure harness CPU on
+# the agent's thread, and with N agents the shared queue is an unbounded RAM
+# backlog. NX_LOG_REQUESTS=0 (also settable per run with NX_LOG_REQUESTS=0 in
+# the environment) drops req/resp bodies to a stub line: streams still log
+# chunk-free metadata elsewhere, and the request is still fully recoverable
+# from the session transcript. Default ON (1) preserves the old behavior.
+LOG_REQUESTS = _env_int("NX_LOG_REQUESTS", 1)
+
 
 class _AsyncLogWriter:
     """Drop-in replacement for a file object's `.write(line)` that hands the
@@ -38,13 +47,29 @@ class _AsyncLogWriter:
     def __init__(self, path: str, max_bytes: int) -> None:
         self._path = path
         self._max_bytes = max_bytes
-        self._queue: queue.Queue[str] = queue.Queue()
+        # Bounded (swarm P4): the writer is one line-buffered daemon thread;
+        # if it falls behind N streaming agents, an unbounded queue is an
+        # unbounded RAM backlog. drop-oldest past 4096 lines (~tens of MB of
+        # worst-case lines): diagnostics degrade, the agents never block.
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=4096)
         self._thread = threading.Thread(target=self._run, daemon=True,
                                          name="nx-log-writer")
         self._thread.start()
 
     def write(self, line: str) -> None:
-        self._queue.put(line)
+        try:
+            self._queue.put_nowait(line)
+        except queue.Full:
+            # Drop-oldest, keep the new line: the freshest diagnostics matter.
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except (queue.Empty, ValueError):
+                pass
+            try:
+                self._queue.put_nowait(line)
+            except queue.Full:
+                pass
 
     def flush(self) -> None:
         """Block until every currently queued line has been written. Called
@@ -98,5 +123,18 @@ atexit.register(_llog.flush)
 def _log_event(direction: str, payload: Any) -> None:
     """direction: 'req' (outgoing) or 'resp' (incoming SSE chunk). Enqueues
     onto the background writer thread (see _AsyncLogWriter) rather than
-    writing inline, so a slow disk never adds latency to the caller."""
+    writing inline, so a slow disk never adds latency to the caller.
+
+    NX_LOG_REQUESTS=0 (swarm P4) logs a stub for req/resp bodies instead of
+    the full payload: the per-request json.dumps of a 100K-token prompt is
+    ~400KB of CPU per model call per agent, and the transcript already holds
+    everything the log would."""
+    if not LOG_REQUESTS and direction in ("req", "resp"):
+        stub = {k: v for k, v in payload.items()
+                if not isinstance(v, (list, dict))} if isinstance(payload, dict) else {}
+        if isinstance(payload, dict):
+            # keep byte-sizes so the stub is still useful for debugging
+            stub["_logged_bytes"] = {k: len(str(v)) for k, v in payload.items()
+                                     if isinstance(v, (list, dict))}
+        payload = {"_stub": True, **stub}
     _llog.write(json.dumps({"ts": time.time(), "dir": direction, "data": payload}) + "\n")
