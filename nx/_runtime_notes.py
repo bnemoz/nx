@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import _state as st
+from . import _notices
 
 # Every one-time injection into the model's transcript (recovery nudges,
 # backgrounded-job guidance, async sub-agent answers, verification results) is
@@ -64,16 +65,17 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     if st._PENDING_BACKGROUND_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
         st._PENDING_BACKGROUND_NOTICE = None
-    if getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None):
-        messages.append({"role": "user", "content": st._PENDING_BG_COMPLETION_NOTICE})
-        st._PENDING_BG_COMPLETION_NOTICE = None
+    if _notices.get("_PENDING_BG_COMPLETION_NOTICE"):
+        messages.append({"role": "user",
+                         "content": _notices.get("_PENDING_BG_COMPLETION_NOTICE")})
+        _notices.set_("_PENDING_BG_COMPLETION_NOTICE", None)
     # Finished async sub-agent answer(s): staged by the agent worker itself
     # (nx/_subagent.py) the moment the sub-loop completes, swept by run_tool()'s
     # first-tool-of-turn scan, and delivered here as the parent's runtime note.
-    subagent_note = getattr(st, "_PENDING_SUBAGENT_NOTICE", None)
+    subagent_note = _notices.get("_PENDING_SUBAGENT_NOTICE")
     if subagent_note:
         messages.append({"role": "user", "content": subagent_note})
-        st._PENDING_SUBAGENT_NOTICE = None
+        _notices.set_("_PENDING_SUBAGENT_NOTICE", None)
     # Online Context Compact (0.67.0): the post-compaction continuation note
     # (re-issue the plan) staged by _occompact.maybe_compact_after_boundary.
     occ_note = getattr(st, "_PENDING_OCC_REMINDER", None)
@@ -86,10 +88,10 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     # _dispatch._scan_background_completions.
     for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
                   "_PENDING_DELEGATION_NOTICE"):
-        _text = getattr(st, _slot, None)
+        _text = _notices.get(_slot)
         if _text:
             messages.append({"role": "user", "content": _text})
-            setattr(st, _slot, None)
+            _notices.set_(_slot, None)
 
 
 def _keep_past_notes(body: list[dict[str, Any]], keep: int) -> int:

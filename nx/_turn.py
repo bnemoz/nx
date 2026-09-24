@@ -451,7 +451,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # on _subagent_ctx(), because the notices belong to the PARENT's
     # transcript; the flag here just mirrors the reset for the parent turn.
     if not quiet:
-        st._BG_SCAN_DONE = False
+        from . import _notices
+        _notices.set_("_BG_SCAN_DONE", False)
     # Clear the "termios restored" flag BEFORE arming so we can wait on it
     # after disarm. The watcher sets it in its inner finally once it has
     # restored cooked mode. Without this handshake the watcher's termios
@@ -810,6 +811,13 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
     REPL, model_turn() called directly)."""
     from . import _recovery
     _recovery.install()
+    # Swarm (P2): per-loop notice slots. Without this, two concurrent turn
+    # loops (parallel batch, async fan-out under --yolo) stage and flush
+    # runtime notes into ONE process-wide str — agent A's finished answer
+    # landed in agent B's transcript. Seeded from / folded back into the
+    # enclosing loop by _notices, so nesting behaves exactly as before.
+    from . import _notices
+    _notice_frame = _notices.install_notice_ctx()
     try:
         return _run_model_turn_loop_inner(messages, force_final, recovery_sampling,
                                           on_step, max_turns_override)
@@ -823,6 +831,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
         ctx = _recovery.current()
         if ctx is not None:
             _recovery.copy_back_and_reset(ctx)
+        _notices.pop_notice_ctx(_notice_frame)
 
 
 def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = False,

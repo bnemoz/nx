@@ -146,7 +146,8 @@ def _stage_verify_outcome() -> None:
     """Scan tracked bg jobs for a finished NX_VERIFY_CMD launch and stage its
     outcome as _PENDING_VERIFY_NOTICE (once per pid). Called from run_tool()'s
     first-tool-of-turn scan; flushed by _flush_pending_background_notice."""
-    if st._PENDING_VERIFY_NOTICE or not verify_enabled():
+    from . import _notices
+    if _notices.get("_PENDING_VERIFY_NOTICE") or not verify_enabled():
         return
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
     for j in list_bg_jobs():
@@ -160,14 +161,14 @@ def _stage_verify_outcome() -> None:
         code = _read_bg_exit_status(pid)[1]
         cmd = j.get("command") or ""
         if code == 0:
-            st._PENDING_VERIFY_NOTICE = (
+            _notices.set_("_PENDING_VERIFY_NOTICE", (
                 f"[Runtime note: NX_VERIFY_CMD {cmd!r} passed (exit 0) — "
-                "your recent edits verified.]")
+                "your recent edits verified.]"))
         else:
             log_path = j.get("log_path") or ""
             code_s = code if code is not None else "unknown"
-            st._PENDING_VERIFY_NOTICE = (
+            _notices.set_("_PENDING_VERIFY_NOTICE", (
                 f"[Runtime note: NX_VERIFY_CMD {cmd!r} FAILED (exit {code_s}) — "
                 f"read_file({log_path!r}) for output, fix the breakage, then "
-                "re-run it yourself before declaring done.]")
+                "re-run it yourself before declaring done.]"))
         return

@@ -114,9 +114,15 @@ st._BG_NOTICE_SEEN = None  # pids already announced (None → seed from _BG_NOTI
 st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (any other tool call resets it)
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
+st._PENDING_DELEGATION_NOTICE = None  # ditto (delegation streak nudge)
+
+# Swarm (P2): the two staged notices above plus _PENDING_BG_COMPLETION_NOTICE,
+# _PENDING_SUBAGENT_NOTICE, _PENDING_VERIFY_NOTICE, _BG_SCAN_DONE and
+# _BG_NOTICE_SEEN route through nx._notices — per-turn-loop slots resolved by
+# thread — so concurrent turn loops never consume each other's runtime notes.
+# Outside a turn loop (tests, import time) the module dict remains the store.
 st._READ_STREAK = 0  # how many exploration reads in a row with no spawn_agent
 st._DELEGATION_NUDGED = False  # flips True once the delegation nudge has fired this session
-st._PENDING_DELEGATION_NOTICE = None  # staged notice, flushed with the other runtime notes
 
 # (Thresholds, guidance strings, _BG_SCAN_LOCK and the fresh-session preamble
 # live in _session_preamble / _bg_completions — re-exported above.)
@@ -279,8 +285,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # keep them out anymore.
     from ._subagent import _subagent_ctx
     from ._batch import _batch_active
-    if not st._BG_SCAN_DONE and _subagent_ctx() is None and not _batch_active():
-        st._BG_SCAN_DONE = True
+    from . import _notices
+    if not _notices.get("_BG_SCAN_DONE") and _subagent_ctx() is None and not _batch_active():
+        _notices.set_("_BG_SCAN_DONE", True)
         # Module-attribute call so a test patching nx._dispatch._scan_background_completions
         # (the historical seam) lands — see test_batch_run.test_verify_and_bg_scan_gated_off_for_batch.
         import sys as _sys
@@ -310,7 +317,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
                 if (st._READ_STREAK >= _DELEGATION_NUDGE_THRESHOLD
                         and not st._DELEGATION_NUDGED and _delegation_enabled()):
                     st._DELEGATION_NUDGED = True
-                    st._PENDING_DELEGATION_NOTICE = DELEGATION_STREAK_NOTICE
+                    from . import _notices
+                    _notices.set_("_PENDING_DELEGATION_NOTICE", DELEGATION_STREAK_NOTICE)
         else:
             st._READ_STREAK = 0
     if name in _CACHEABLE_READ_TOOLS:
@@ -621,7 +629,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         st._CONSECUTIVE_EDITS += 1
         if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_NUDGE_THRESHOLD and not st._MULTI_EDIT_NUDGED:
             st._MULTI_EDIT_NUDGED = True
-            st._PENDING_MULTI_EDIT_NOTICE = MULTI_EDIT_GUIDANCE
+            from . import _notices
+            _notices.set_("_PENDING_MULTI_EDIT_NOTICE", MULTI_EDIT_GUIDANCE)
     elif name != "edit_file":
         st._CONSECUTIVE_EDITS = 0
     # read_file just returned a bg job's log in full? If the job has already

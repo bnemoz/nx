@@ -375,10 +375,28 @@ _SUBAGENT_ACTIVE: bool = False
 # --- bg-job / sub-agent completion sweep ---------------------------------------
 # Per-turn scan flags and staged runtime-note text, owned by _dispatch.py's
 # first-tool-of-turn scan (initial values assigned there).
+#
+# Swarm (0.98): the pending-notice slots used to be one process-wide str each.
+# A parallel batch (`nx run --parallel > 1`) or concurrent in-process agents
+# stage their finished answers into the SAME slot, and whichever transcript
+# called _flush_pending_background_notice next consumed them — an async
+# agent's answer landed in a sibling task's turn (documented in _batch.py).
+# They are now thread-isolated: default values live in _NOTICE_DEFAULTS and
+# every running turn loop installs its own dict of slots (see
+# _notices.py). Outside a loop (tests, import time) the module-global default
+# store keeps every existing test's `st._PENDING_* = x` write working.
 _BG_SCAN_DONE: bool = False
 _PENDING_BG_COMPLETION_NOTICE: str | None = None
 _PENDING_SUBAGENT_NOTICE: str | None = None
 _BG_NOTICE_SEEN: set[str] | None = None
+# One turn loop's private notice slots; installed per-thread by _notices.py.
+_NOTICE_DEFAULTS: dict[str, Any] = {
+    "_BG_SCAN_DONE": False,
+    "_PENDING_BG_COMPLETION_NOTICE": None,
+    "_PENDING_SUBAGENT_NOTICE": None,
+    "_BG_NOTICE_SEEN": None,
+    "_PENDING_VERIFY_NOTICE": None,
+}
 
 # --- post-edit verification (NX_VERIFY_CMD) ------------------------------------
 # Owned by _verify.py (initial values assigned there): timestamps of recent

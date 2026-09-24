@@ -98,6 +98,22 @@ def _pending_notice_slots() -> tuple[str, ...]:
             "_PENDING_VERIFY_NOTICE", "_PENDING_DELEGATION_NOTICE")
 
 
+def _any_pending_notice() -> bool:
+    """True when any runtime-note slot holds staged text. The slots routed by
+    nx._notices (swarm P2) are read through it; _PENDING_BACKGROUND_NOTICE
+    (staged inline by run_bash on the caller's own thread) stays a plain
+    module global. getattr-default, not bare st.X: a conftest rewind can drop
+    names from _state's dict."""
+    from . import _notices
+    for s in _pending_notice_slots():
+        if s == "_PENDING_BACKGROUND_NOTICE":
+            if getattr(st, s, None):
+                return True
+        elif _notices.get(s):
+            return True
+    return False
+
+
 def _finished_unstaged_subagents() -> list[str]:
     """Async agents whose answer exists but whose note isn't staged yet."""
     try:
@@ -173,7 +189,7 @@ def wake_due() -> bool:
             return False
     except Exception:
         return False
-    if any(getattr(st, s, None) for s in _pending_notice_slots()):
+    if _any_pending_notice():
         return True
     # Nothing staged: maybe a sweep would stage one now. Run the SAME scan
     # run_tool()'s first-tool-of-turn hook runs (0.36.3): it marks what it
@@ -187,7 +203,7 @@ def wake_due() -> bool:
         _run_bg_completion_scan()
     except Exception:
         pass
-    if any(getattr(st, s, None) for s in _pending_notice_slots()):
+    if _any_pending_notice():
         return True
     # Anything left here is finished-but-unstaged work the sweep could not
     # announce (e.g. a sub-agent record with no answer) — still wake-worthy.

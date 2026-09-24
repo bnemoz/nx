@@ -465,11 +465,14 @@ def test_repl_user_turn_clears_stale_wake_flag(monkeypatch):
             calls["wake_turns"] += 1
             return m.TURN_DONE
         # The user turn's own first tool call drains the staged note —
-        # mirror _compress._flush_pending_background_notice.
-        if m.st._PENDING_SUBAGENT_NOTICE:
+        # mirror _compress._flush_pending_background_notice. Stage/drain goes
+        # through nx._notices (swarm P2): the turn loop holds a per-thread
+        # notice frame, so a bare module-global write wouldn't reach it.
+        from nx import _notices
+        if _notices.get("_PENDING_SUBAGENT_NOTICE"):
             messages.append({"role": "user",
-                             "content": m.st._PENDING_SUBAGENT_NOTICE})
-            m.st._PENDING_SUBAGENT_NOTICE = None
+                             "content": _notices.get("_PENDING_SUBAGENT_NOTICE")})
+            _notices.set_("_PENDING_SUBAGENT_NOTICE", None)
         return m.TURN_DONE
 
     # Scripted prompts: a user turn whose start races the flag on, then /quit.

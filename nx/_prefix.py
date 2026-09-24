@@ -44,8 +44,40 @@ PREFIX_MARKERS = (
 # This session's pinned head: the JSON of SYSTEM followed by the prefix notes as
 # they stood when the session started. None = nothing pinned (e.g. a sub-agent
 # turn whose messages do not begin with the session SYSTEM, or a test that never
-# called pin_prefix). A plain module global, rewound by tests/conftest.py.
+# called pin_prefix). Used to be one plain module global — concurrent turn loops
+# in one process (parallel batch, async fan-out) clobbered each other's pin, so
+# check_prefix warned spuriously and re-pinned to the wrong head (swarm audit
+# P2). Now: a per-thread pin lives on _PREFIX_TLS while a loop holds it (see
+# _prefix_pin_ctx); the module global remains the default store outside that —
+# tests, import time, and every existing read keep working.
+import threading
+_PREFIX_TLS = threading.local()
 pinned: Optional[list[str]] = None
+
+
+def _get_pinned() -> Optional[list[str]]:
+    v = getattr(_PREFIX_TLS, "pinned", _PREFIX_TLS)
+    if v is not _PREFIX_TLS:
+        return v
+    return pinned
+
+
+def _set_pinned(v: Optional[list[str]]) -> None:
+    _PREFIX_TLS.pinned = v
+
+
+class _prefix_pin_ctx:
+    """Scope a per-thread pin: entered by a turn loop that pinned its own head
+    (pin_prefix), left in place on exit (re-pin-to-global never happens — the
+    module-global pin is only ever written by the outermost, single-session
+    driver, exactly as pre-swarm)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        _set_pinned(None)
+        return False
 
 
 def is_prefix_note(msg: Any) -> bool:
@@ -103,17 +135,17 @@ def pin_prefix(messages: list[dict[str, Any]]) -> bool:
     Only pins a genuine head: it refuses a list whose first message is not the
     session system prompt (a sub-agent transcript, a test fixture), so a check
     can never fire on a list this module was never asked to guard."""
-    global pinned
     n = _head_len(messages)
     if n == 0:
         return False
-    pinned = _encode(messages[:n])
+    _set_pinned(_encode(messages[:n]))
     return True
 
 
 def pinned_prefix() -> list[str]:
     """The pinned head as a copy (test/debug surface). [] when nothing pinned."""
-    return list(pinned) if pinned else []
+    p = _get_pinned()
+    return list(p) if p else []
 
 
 def _same_session_head(messages: list[dict[str, Any]]) -> bool:
@@ -128,7 +160,7 @@ def _same_session_head(messages: list[dict[str, Any]]) -> bool:
     if not messages or not isinstance(messages[0], dict) \
             or messages[0].get("role") != "system":
         return False
-    return _encode([messages[0]])[0] == pinned[0]
+    return _encode([messages[0]])[0] == _get_pinned()[0]
 
 
 def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
@@ -140,12 +172,13 @@ def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
     exactly the failure PERF.md I-3/I-4 forbid (a mid-history rewrite or insert),
     and it is otherwise invisible — the turn simply costs more. Warns once to
     stderr unless *warn* is False (the test surface passes False)."""
-    if pinned is None:
+    if _get_pinned() is None:
         return True
     if not _same_session_head(messages):
         return True  # not the session head (sub-agent turn, fixture): uncheckable
-    head = _encode(messages[:len(pinned)])
-    if head == pinned:
+    cur = _get_pinned()
+    head = _encode(messages[:len(cur)])
+    if head == cur:
         return True
     if warn:
         if not _warned[0]:

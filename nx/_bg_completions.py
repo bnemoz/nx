@@ -10,6 +10,7 @@ import os
 import threading
 
 from . import _state as st
+from . import _notices
 
 # The scan runs from both the model turn (run_tool's first-tool hook) and the
 # wake poller thread; the seen-set is read-modify-rewritten, so both sides
@@ -33,7 +34,7 @@ def _scan_background_completions() -> str | None:
         except Exception:
             return None
         mine = os.getpid()
-        seen = getattr(st, "_BG_NOTICE_SEEN", None)
+        seen = _notices.get("_BG_NOTICE_SEEN")
         if seen is None:
             seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
         notes = []
@@ -71,7 +72,7 @@ def _scan_background_completions() -> str | None:
                 # marks made so far are committed below either way, so a probe
                 # that raises can never make the same pid re-announce forever.
                 continue
-        st._BG_NOTICE_SEEN = seen
+        _notices.set_("_BG_NOTICE_SEEN", seen)
     if not notes:
         return None
     return ("[Runtime note: background job(s) you started have finished:\n"
@@ -84,7 +85,7 @@ def _stage_bg_note(note: str) -> None:
     monolithic _run_bg_completion_scan (a staged note can still be unflushed
     here — the poller's own sweep may have staged one before this turn's
     first tool call; assigning would drop the earlier job's exit line)."""
-    prev = getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None)
+    prev = _notices.get("_PENDING_BG_COMPLETION_NOTICE")
     if prev:
         # Dedup (0.37.4): the poller thread and this turn can both sweep
         # the same job in a race — _BG_SCAN_LOCK marks it seen once, but
@@ -96,7 +97,7 @@ def _stage_bg_note(note: str) -> None:
         # else: every line already staged — keep prev untouched
         else:
             note = prev
-    st._PENDING_BG_COMPLETION_NOTICE = note
+    _notices.set_("_PENDING_BG_COMPLETION_NOTICE", note)
 
 
 def _stage_verify_outcome_safe() -> None:

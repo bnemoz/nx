@@ -72,6 +72,7 @@ from typing import Any
 from ._private import atomic_write_private, private_dir
 from . import _state as st
 from ._env import _env_int
+from . import _notices
 from ._progress import note_progress
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
@@ -497,7 +498,7 @@ def _stage_subagent_answer(job_id: str) -> None:
         rec["announced"] = True
         status, answer = rec.get("status", "done"), rec.get("answer") or ""
         report = rec.get("report")
-        prev = getattr(st, _PENDING_NOTICE_KEY, None)
+        prev = _notices.get(_PENDING_NOTICE_KEY)
         if status == "done":
             head = answer[:_ASYNC_REPORT_CHARS]
             marker = " ...[truncated]" if len(answer) > _ASYNC_REPORT_CHARS else ""
@@ -516,7 +517,7 @@ def _stage_subagent_answer(job_id: str) -> None:
             note = "[Runtime note: background sub-agent " + job_id + \
                 " FAILED — " + answer[:600] + "\n" + \
                 "Retry the task inline (async=false) if it still matters.]"
-        setattr(st, _PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
+        _notices.set_(_PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
 
 
 def _spawn_async(instruction: str, max_turns: int, tier: str = "read",

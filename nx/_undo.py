@@ -153,6 +153,13 @@ def list_checkpoints() -> list[Checkpoint]:
 # --- persistence (2.2, 0.47.0) -------------------------------------------------
 
 def _undo_path() -> str:
+    # Swarm (P2): one fixed path meant N concurrent nx processes rewrote the
+    # same undo.json each turn — last writer wins, /undo across the swarm was
+    # meaningless. Namespaced per session id when one exists (st.SESSION_ID is
+    # absent in some tests/embedded uses), keeping the legacy path as fallback.
+    sid = getattr(st, "SESSION_ID", None)
+    if sid:
+        return os.path.join(st.SESSION_HOME, "undo", f"{sid}.json")
     return os.path.join(st.SESSION_HOME, "undo.json")
 
 
