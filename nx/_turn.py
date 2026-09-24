@@ -440,8 +440,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # agent thread clearing/restoring it would eat keystrokes or break Esc.
     # Idempotent and event-neutral when the thread is already alive: only the
     # non-quiet path below arms it (a quiet thread must not touch the handshake).
+    # Swarm P12: a quiet loop never arms (and never STARTS the thread — see
+    # _ensure_interrupt_watcher); NX_INTERRUPT_WATCHER=0 disables arming for
+    # the whole process (headless runs have no tty to steal).
+    from ._interrupt import _watcher_disabled
     _ensure_interrupt_watcher()
-    if not quiet:
+    if not quiet and not _watcher_disabled():
         _USER_INTERRUPTED.clear()
         st._INTERRUPT_REDIRECT_TEXT = ""
         st._INTERRUPT_REDIRECT_SUBMITTED = False
@@ -468,7 +472,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # "did not confirm input-mode restore" warning), and in the worst
     # interleaving lets the parent proceed before cooked mode is confirmed.
     # Mirrors _watch_for_interrupts ownership and _poll_pid's check_esc gating.
-    if not quiet:
+    if not quiet and not _watcher_disabled():
         _INTERRUPT_RESTORED.clear()
         _INTERRUPT_ARMED.set()
     parser = StreamParser(_say_console, t0, quiet=quiet)

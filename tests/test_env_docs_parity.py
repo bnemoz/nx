@@ -91,6 +91,9 @@ _ALLOWLIST = {
     # swarm P11: per-call SQLite busy wait on the two stores (was a hardcoded
     # 5 s block per contending save/search under a shared NX_HOME):
     "NX_STORE_BUSY_TIMEOUT_MS": "internal: store busy_timeout ms (default 750)",
+    # swarm P12: stdin interrupt-watcher kill switch for headless runs
+    # (no tty to steal — the thread + termios snapshot is per-process rent):
+    "NX_INTERRUPT_WATCHER": "internal: 0 disables the stdin Esc watcher (default 1)",
     # swarm P10: the shared content-addressed tool-result store (obsstore):
     "NX_OBS_MAX_TRACKED": "internal: bounded in-process obs send counters (default 4096)",
     "NX_OBS_STORE_TTL_DAYS": "internal: obsstore object TTL days (default 7)",

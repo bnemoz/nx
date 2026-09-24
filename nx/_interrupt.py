@@ -66,6 +66,7 @@ from typing import Any
 
 from . import _state as st
 from ._env import _env_float
+from ._subagent_tls import _subagent_ctx
 from ._tty import (
     IS_WINDOWS, apply_interrupt_mode, capture_input_mode, read_byte,
     restore_input_mode, wait_ready, wait_ready_any,
@@ -305,14 +306,34 @@ def _drain_redirect_text(fd: int, old_mode: Any) -> str:
     return "".join(buf)
 
 
+def _watcher_disabled() -> bool:
+    """NX_INTERRUPT_WATCHER=0 opts out of the stdin watcher entirely (swarm
+    P12): a headless run (`nx run -f`, --prompt-file, --parallel) has no tty
+    to steal and no user to interrupt, so the thread (and its one-time
+    termios snapshot) is pure per-process overhead there. A disabled watcher
+    never arms: model_turn's non-quiet arm path checks this too, so an
+    interactive session cannot silently lose Esc by a stale env value read
+    at import — the flag is read at call time."""
+    from ._env import _env_int
+    return _env_int("NX_INTERRUPT_WATCHER", 1) == 0
+
+
 def _ensure_interrupt_watcher() -> None:
     """Start the singleton interrupt watcher thread if it isn't already alive.
 
     Called lazily before the first model turn (and defensively on every turn —
     cheap because a living thread short-circuits the check). Guaranteed exactly
     one reader of stdin across the whole process lifetime.
-    """
+
+    Swarm P12: a QUIET loop (async sub-agent, batch worker) must never START
+    the thread — it will never arm it, so the start is pure overhead (one
+    thread + a termios snapshot) multiplied by every agent in an in-process
+    swarm; the owner of stdin starts it when its first non-quiet turn runs.
+    NX_INTERRUPT_WATCHER=0 disables it for the whole process (headless
+    deployments)."""
     if st._INTERRUPT_THREAD is not None and st._INTERRUPT_THREAD.is_alive():
+        return
+    if _watcher_disabled() or _subagent_ctx() is not None:
         return
     _INTERRUPT_EXIT.clear()
     _INTERRUPT_ARMED.clear()
@@ -339,7 +360,13 @@ def _watch_for_interrupts():
     while Esc is meaningful. Keeping the arm/disarm and input-mode-restore
     handshake here makes those windows identical, and guarantees the watcher
     is parked again before the chatbox or another operation can read input.
-    """
+
+    Swarm P12: NX_INTERRUPT_WATCHER=0 disables the whole handshake — a
+    no-op yield (nothing ever arms, _USER_INTERRUPTED stays clear, and the
+    disarm path's restore-wait is skipped)."""
+    if _watcher_disabled():
+        yield
+        return
     _ensure_interrupt_watcher()
     capture_redirect = _INTERRUPT_CAPTURE_REDIRECT.is_set()
     _INTERRUPT_CAPTURE_REDIRECT.clear()
