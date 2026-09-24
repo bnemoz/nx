@@ -17,6 +17,9 @@ from ._env import _env_int
 
 # Session-start delegation guidance, injected ONLY when the spawn_agent schema
 # is actually offered (NX_SUBAGENTS=1) — see _dispatch._initial_messages().
+# The write-tier guidance (WRITE_TIER_GUIDANCE) is appended at note time only
+# when this session actually authorizes write-capable agents
+# (NX_SUBAGENT_WRITE=1) — a read-only session must not invite tier:'write'.
 DELEGATION_GUIDANCE = (
     "[Delegation note: the spawn_agent tool is available this session — reach "
     "for it PROACTIVELY, without being asked.\n"
@@ -35,6 +38,21 @@ DELEGATION_GUIDANCE = (
     "async=false runs it in the foreground instead.]"
 )
 
+# Appended to DELEGATION_GUIDANCE when this session authorizes write-capable
+# sub-agents (NX_SUBAGENT_WRITE=1): names the tiers, the scope discipline, and
+# the foreground-only constraint, so the model can delegate implementation —
+# not just investigation — without guessing at the contract.
+WRITE_TIER_GUIDANCE = (
+    "- This session authorizes write-capable sub-agents: pass tier='write' "
+    "(plain edits) or 'implement' (adds the implementer discipline prompt: "
+    "read before editing, verify as you go, change approach after two "
+    "failures, stop and report rather than churn).\n"
+    "- Write/implement agents MUST be foreground (async=false — a detached "
+    "thread cannot show approval prompts) and SHOULD carry scope (path globs "
+    "like ['nx/_turn*.py']); disjoint scopes are what makes parallel "
+    "implementers safe.]"
+)
+
 # The marker _add_delegation_note_if_absent scans for (and _memory_note.py's
 # session-start note contract mirrors).
 DELEGATION_NOTE_MARKER = "[Delegation note:"
@@ -51,12 +69,25 @@ def _delegation_enabled() -> bool:
         return bool(_env_int("NX_SUBAGENTS", 0))
 
 
+def _write_authorized() -> bool:
+    """True when this session's sub-agents may edit files. Reads the live
+    top-level attribute first (tests/REPL flip it), then the env var."""
+    import nx as _m
+    if "NX_SUBAGENT_WRITE" in vars(_m):
+        return bool(_m.NX_SUBAGENT_WRITE)
+    return bool(_env_int("NX_SUBAGENT_WRITE", 0))
+
+
 def _load_delegation_note() -> dict[str, str] | None:
     """User-role session-start note with the delegation triggers, or None when
-    sub-agents are disabled (nothing to steer toward)."""
+    sub-agents are disabled (nothing to steer toward). The write-tier guidance
+    is appended only when NX_SUBAGENT_WRITE authorizes it this session."""
     if not _delegation_enabled():
         return None
-    return {"role": "user", "content": DELEGATION_GUIDANCE}
+    text = DELEGATION_GUIDANCE
+    if _write_authorized():
+        text = text[:-1] + "\n" + WRITE_TIER_GUIDANCE
+    return {"role": "user", "content": text}
 
 
 def _add_delegation_note_if_absent(messages: list) -> None:
