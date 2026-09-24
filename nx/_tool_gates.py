@@ -26,6 +26,22 @@ from ._plan import plan_active
 from ._delegation_note import _delegation_enabled
 from ._obs import obs_enabled as _obs_enabled  # noqa: F401 (gate callable)
 
+def _floor_slimmed() -> bool:
+    """NX_TOOL_FLOOR_SLIM=1 withholds the slimming-set schemas behind
+    search_tools (swarm P13): every agent in a swarm pays the always-on
+    floor ×N, so the tools a swarm member rarely calls on turn 1 (duckdb,
+    read_image) cost 0 schema tokens until the model asks search_tools for
+    them. Purely additive: withheld tools still dispatch via search_tools
+    discovery + the normal refusal wording."""
+    from ._env import _env_int
+    return _env_int("NX_TOOL_FLOOR_SLIM", 0) == 1
+
+
+# Tools withheld when the floor-slim gate is on (a gate entry below decides
+# their per-turn visibility; this predicate is ANDed into it).
+_SLIMMABLE = ("duckdb", "read_image")
+
+
 _TOOL_GATES: dict[str, Any] = {
     # name -> callable returning True when the schema should be OFFERED this
     # turn. Unlisted names are always-on. The malformed-args breaker is a veto
@@ -34,7 +50,9 @@ _TOOL_GATES: dict[str, Any] = {
     # without a refusal falls back to the generic withheld wording.
     "wait_background": lambda: st._SESSION_HAS_BACKGROUNDED,
     "spawn_agent": _delegation_enabled,
-    "read_image": lambda: bool(_m_safe().NX_VISION) and st._NATIVE_TOOL_CALLS_CONFIRMED,
+    "read_image": lambda: (bool(_m_safe().NX_VISION)
+                            and st._NATIVE_TOOL_CALLS_CONFIRMED
+                            and not _floor_slimmed()),
     "plan_edit": plan_active,
     # SoL-Pi ports (0.67.0): obs_recall only once a pack handle exists
     # (packing never happened otherwise — nothing to recall).
@@ -46,6 +64,10 @@ _TOOL_GATES: dict[str, Any] = {
     # (0 schema tokens until a session needs the outside world) — surfaced by
     # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).
     "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
+    # duckdb (0.87.0, always-on by design): NX_TOOL_FLOOR_SLIM=1 demotes it
+    # to tier-2 for swarms — a member rarely analyzes data on turn 1, and
+    # ~310 tok ×N agents of rent is the point of the slimming knob.
+    "duckdb": lambda: not _floor_slimmed(),
     # lint_check (0.94.0): tier-2, opt-in via NX_LINT=1. Read-only lint over
     # edited files without an approval-gated run_bash round-trip.
     "lint_check": lambda: bool(getattr(_m_safe(), "NX_LINT", 0)),
@@ -57,12 +79,13 @@ _TOOL_GATES: dict[str, Any] = {
 # in _unknown_tool_error.
 _GATE_REFUSALS: dict[str, str] = {
     "wait_background": "(no command has backgrounded yet — nothing to wait on). run_bash returns a '[background] PID' line when a command needs waiting on; read_file that log path in the meantime.",
-    "read_image": "(NX_VISION is off, or native tool calls are not confirmed on this source). Describe images by other means or ask the user to paste the relevant details.",
+    "read_image": "(NX_VISION is off, native tool calls are not confirmed on this source, or NX_TOOL_FLOOR_SLIM=1 withholds it this session). Describe images by other means or ask the user to paste the relevant details.",
     "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/list_dir.",
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
     "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
     "web_fetch": "(NX_WEBFETCH is off, or the gate has not opened). Work from local files, or ask the user to paste the relevant page/search results.",
     "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
+    "duckdb": "(NX_TOOL_FLOOR_SLIM=1 — the SQL tool is tier-2 in this session to keep the shared floor small). Ask search_tools for its schema, or shell out to the duckdb CLI with run_bash.",
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}

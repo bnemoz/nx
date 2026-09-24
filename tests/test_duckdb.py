@@ -204,9 +204,19 @@ def test_notes_file_is_init_loaded(monkeypatch, stub_bin, tmp_path):
 def test_duckdb_is_always_on_and_in_dispatch():
     names = {t["function"]["name"] for t in m.TOOLS}
     assert "duckdb" in names
-    assert "duckdb" not in m._dispatch._TOOL_GATES, (
-        "always-on by design (0.87.0 ledger) — a _TOOL_GATES entry would "
-        "make it tier-2 and stall data-science sessions on search_tools")
+    # 0.87.0 ledger: always-on by design. Swarm P13 (0.98.1) adds ONE
+    # opt-in gate entry (NX_TOOL_FLOOR_SLIM=1 demotes it to tier-2 for
+    # swarms); the DEFAULT (env unset) keeps it always-on.
+    assert "duckdb" in m._dispatch._TOOL_GATES
+    from nx._tool_gates import _floor_slimmed
+    import os as _os
+    saved = _os.environ.pop("NX_TOOL_FLOOR_SLIM", None)
+    try:
+        assert m._dispatch._TOOL_GATES["duckdb"]() is True, (
+            "default must stay always-on (0.87.0 ledger)")
+    finally:
+        if saved is not None:
+            _os.environ["NX_TOOL_FLOOR_SLIM"] = saved
     assert m._dispatch.DISPATCH["duckdb"] is dd.duckdb_query
     assert "duckdb" in dd.__doc__ or True
 
