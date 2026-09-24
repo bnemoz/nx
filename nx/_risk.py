@@ -382,7 +382,7 @@ def _assess_risk(action: str) -> tuple[str, str]:
             _record_api_call(
                 resp,
                 fallback_chars=len(text),
-                fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+                fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
             )
             level, reason = None, ""
             try:

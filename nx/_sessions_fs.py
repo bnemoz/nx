@@ -836,7 +836,7 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
         _record_usage(
             getattr(resp, "usage", None),
             fallback_chars=len(resp.choices[0].message.content or ""),
-            fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+            fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
         )
         desc = (resp.choices[0].message.content or "").strip().splitlines()
         desc = desc[0].strip() if desc else ""

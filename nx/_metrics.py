@@ -23,6 +23,7 @@ import threading
 import time
 import urllib.request
 from os import environ
+from collections.abc import Callable
 from typing import Any, TypedDict
 
 from . import _state as st
@@ -100,8 +101,8 @@ class UsageDelta(TypedDict):
 def _normalize_usage(
     usage: Any,
     timings: Any,
-    fallback_chars: int = 0,
-    fallback_prompt_chars: int = 0,
+    fallback_chars: int | Callable[[], int] = 0,
+    fallback_prompt_chars: int | Callable[[], int] = 0,
 ) -> UsageDelta | None:
     """Pull a {input, output, cache_read, reasoning} token dict out of a
     finished model call, from whichever the server gave us: the standard
@@ -129,7 +130,15 @@ def _normalize_usage(
     for input_tokens. This ensures backends like vLLM without
     `stream_options` support still report token counts to agentdash instead
     of silently reporting zero input tokens every turn.
+
+    Swarm P8 (PERF.md PF-23): either fallback may be a zero-arg callable,
+    computed ONLY when the estimate path actually runs. Callers used to build
+    sum(len(str(m.get("content"))) for messages) eagerly on every settled
+    stream - a full-prompt str()+len() scan per turn per agent, wasted on any
+    server that reports usage.
     """
+    def _resolve(v):
+        return v() if callable(v) else v
     # llama.cpp: no `usage`, but a `timings` object on the final chunk with
     # prompt_n / predicted_n / cache_n. There's no reasoning split here —
     # predicted_n is all generated tokens.
@@ -148,6 +157,8 @@ def _normalize_usage(
         # Fallback: estimate from client-side character count (~4 chars/token).
         # Flagged `estimated: 1` so accounting (and /cost) can show the
         # provenance instead of billing an estimate as a measured number.
+        fallback_chars = _resolve(fallback_chars)
+        fallback_prompt_chars = _resolve(fallback_prompt_chars)
         if fallback_chars > 0 or fallback_prompt_chars > 0:
             estimated_out = max(1, fallback_chars // 4) if fallback_chars > 0 else 0
             estimated_in = max(1, fallback_prompt_chars // 4) if fallback_prompt_chars > 0 else 0
@@ -192,8 +203,8 @@ def _normalize_usage(
 def _record_usage(
     usage: Any,
     timings: Any = None,
-    fallback_chars: int = 0,
-    fallback_prompt_chars: int = 0,
+    fallback_chars: int | Callable[[], int] = 0,
+    fallback_prompt_chars: int | Callable[[], int] = 0,
 ) -> None:
     """Add one completed API call to the active session's totals.
 

@@ -665,7 +665,7 @@ def compress(
     _record_usage(
         getattr(resp, "usage", None),
         fallback_chars=len(resp.choices[0].message.content or ""),
-        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in payload),
+        fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
     )
 
     summary = (resp.choices[0].message.content or "").strip()

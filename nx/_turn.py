@@ -545,7 +545,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     _record_usage(
         parser.usage, parser.timings,
         fallback_chars=parser.streamed_chars + sum(len(part) for part in parser.reasoning_parts),
-        fallback_prompt_chars=sum(len(str(m.get("content") or "")) for m in messages),
+        fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in messages),
     )
     if stream_error is not None:
         if isinstance(stream_error, httpx.TimeoutException):

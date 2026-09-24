@@ -532,6 +532,10 @@ here so the next audit does not re-open it as an obvious win.
 **PF-23 · LOW · `_turn.py:1411` `sum(len(str(m.get("content") or "")) for m in
 messages)`** scans the whole prompt to compute a fallback estimate even when the
 server reported `usage`. Fix: skip when usage is present.
+**Shipped in 0.98.0 (swarm P8):** the fallback is now a zero-arg lambda
+resolved inside `_normalize_usage` only when the estimate path actually runs;
+all four eager full-prompt scans (`_turn.py`, `_compress.py`, `_risk.py`,
+`_sessions_fs.py`) are lazy.
 
 ---
 
