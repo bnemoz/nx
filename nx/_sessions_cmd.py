@@ -185,7 +185,8 @@ insensitive) across title, description, preview and id.
   nx sessions --prune  run the store's GC by hand and exit: drop rows whose
                        session JSON vanished, collect unreferenced image
                        payloads immediately, enforce the NX_IMAGES_QUOTA_MB
-                       cap. One line per action.
+                       cap, and sweep expired/over-quota objects from the
+                       shared tool-result store (obsstore). One line per action.
 
 Resume with: nx --resume <n|short-id|title>
 """

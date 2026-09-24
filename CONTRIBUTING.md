@@ -135,7 +135,7 @@ three default OFF; see README's env table):
   `DISPATCH[name] is nx.write_file` true for the schema-introspection and
   sub-agent-write tests. Markers: `[then_run:succeeded|failed|skipped]`.
 - **Observation pack** (`nx/_obs.py`, `NX_OBS=1`): large tool results are
-  archived under `~/.nx/observations/` and replaced by an `obs_...` handle
+  archived verbatim in the shared content-addressed store (nx/_obsstore.py, ~/.nx/obsstore/ — deduped by content across tools/sessions/processes) and replaced by an obs_ handle
   after `NX_OBS_FULL_SENDS` provider requests; the tier-2-gated `obs_recall`
   tool pages them back byte-exactly. Applied in `run_tool` after
   `_sanitize_tool_result`, fail-open.

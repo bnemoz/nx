@@ -1,11 +1,13 @@
 # Swarm optimization audit — `nx`
 
-> **Implementation status (0.98.0):** P1–P8 below have landed as one focused
-> commit each (see git log: `fb34fc5` P1 … `1dd8191` P8). Each item's fix and
-> its knob are noted inline where it applies; the table is kept as written for
-> the original audit record. Remaining open items: per-process RSS floor
-> measurement, `NX_OCC` benchmarking, tier-2 tool-floor slimming, the
-> stdin-watcher/tty constraint, and the pymupdf4llm extra.
+> **Implementation status (0.99.0):** P1–P8 landed in 0.98.0 as one focused
+> commit each (see git log: `fb34fc5` P1 … `1dd8191` P8); P10–P13 landed in
+> 0.99.0 the same way (`6c45fb1` P11 store contention, `45a6a3c` P10 the
+> cross-process obsstore, `b62601b` P12 headless watcher gate, `9db6971` P13
+> tier-2 floor slimming). Each item's fix and its knob are noted inline where
+> it applies; the table is kept as written for the original audit record.
+> Remaining open items: per-process RSS floor measurement, `NX_OCC`
+> benchmarking, and the pymupdf4llm extra.
 
 **Scope:** memory/processor optimization of the `nx` harness for a move toward an
 agentic-swarm deployment (many concurrent sub-agents on one host).
@@ -225,15 +227,39 @@ threads per process.
 - **P8 `1dd8191`** — PF-23: lazy fallback token estimate (no eager full-prompt
   scan when the server reports usage).
 
+## Landed fixes, by phase (0.99.0)
+- **P11 `6c45fb1`** — store contention: `NX_STORE_BUSY_TIMEOUT_MS` (default
+  750, was a hardcoded 5 s block) on both SQLite stores; busy-vs-corrupt
+  retry split (a locked store retries with jittered backoff and is NEVER
+  set aside as `.corrupt`); `prune_stale` and `search_sessions` use ONE
+  connection per call (was two connects + 2 PRAGMAs each).
+- **P10 `45a6a3c`** — `nx/_obsstore.py`: the cross-process content-addressed
+  tool-result store. Object identity is the sha256 of the CONTENT (the old
+  tool+call_key identity defeated dedup — two agents reading the same file
+  wrote two objects); no-clobber `os.link` publish; TTL
+  (`NX_OBS_STORE_TTL_DAYS`, 7) + byte quota (`NX_OBS_STORE_MAX_MB`, 512)
+  GC amortized behind the P6 sweep gate and wired into `nx sessions
+  --prune`; the unbounded `ledger.jsonl` is gone; `_SEND_COUNTS` bounded
+  (`NX_OBS_MAX_TRACKED`, 4096); obs ids keyed on content so a 24-hex
+  handle resolves across processes; legacy `~/.nx/observations/` objects
+  still recall.
+- **P12 `b62601b`** — the stdin-stealing interrupt watcher is no longer
+  started (nor armed) by a quiet loop — headless/async sub-agents pay
+  zero for it; `NX_INTERRUPT_WATCHER=0` disables it process-wide for
+  headless runs. The "must run headless or one-agent-per-tty" density
+  constraint is now: in-process density costs one watcher thread total
+  (the parent's), not one per agent — and zero with the knob off.
+- **P13 `9db6971`** — `NX_TOOL_FLOOR_SLIM=1` demotes `duckdb` + `read_image`
+  to tier-2 (withheld behind `search_tools`, gate refusal names the knob);
+  default unchanged (the 0.87.0 always-on duckdb ledger holds).
+
 ## Still open (ranked)
-1. Cross-process content-addressed tool-result store (promote `NX_OBS`) —
-   the biggest remaining memory×N term.
-2. In-process density hard limit: stdin-stealing interrupt watcher + tty-global
-   termios ⇒ headless only (`nx run --parallel`) or one-agent-per-tty.
-3. Tier-2 tool floor slimming (20 always-on schemas ×N agents of token rent).
-4. `NX_OCC=1` benchmarking for aggregate KV pressure.
-5. Per-process RSS floor measurement + cache soak (commands below).
-6. SQLite connect-per-call in the two stores; shared-`NX_HOME` 5 s busy waits.
+1. `NX_OCC=1` benchmarking for aggregate KV pressure.
+2. Per-process RSS floor measurement + cache soak (commands below).
+3. The pymupdf4llm extra (install-size, not runtime).
+4. Tier-2 floor slimming has two occupants (`duckdb`, `read_image`);
+   candidates for a further pass: nothing else is clearly swarm-irrelevant
+   without hurting single-agent UX.
 
 ## Not verified (audit budget)
 - No runtime measurements on this box; absolute numbers quoted from `PERF.md §1`.

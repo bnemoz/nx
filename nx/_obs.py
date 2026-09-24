@@ -1,13 +1,16 @@
 """Observation Pack (SoL-Pi port, 0.67.0): the full text of large tool
-results is sent for the first N provider requests, then replaced — in the
-PROJECTED context only, never in the stored transcript — by a short handle
-with exact paged recall via the `obs_recall` tool.
+results is sent for the first N provider requests, then replaced — at the
+run_tool history-append seam — by a short handle with exact paged recall
+via the `obs_recall` tool. (The pack replaces the string run_tool RETURNS,
+so the handle is what enters `messages` and the saved session; the
+archived original lives in the shared content-addressed store,
+nx/_obsstore.py, and outlives the session.)
 
-Why a projection and not a rewrite: nx's transcript bytes are the prompt-cache
-contract (`_prefix.check_prefix`) and the session-save format. Rewriting a
-mid-history tool result (as the spill-evictors do under pressure) invalidates
-the whole prefix. Packing at request time instead keeps stored history intact
-across compress/resume and still bills less on every later request.
+Why pack at the append seam and not a mid-history rewrite: rewriting a
+tool result already in transcript bytes (as the spill-evictors do under
+pressure) invalidates the prompt-cache prefix. Packing when the result is
+first appended keeps later turns' history stable across compress/resume
+and still bills less on every subsequent request.
 
 Port deltas from SoL-Pi:
   - No per-request hook exists in nx, so packing runs inside
