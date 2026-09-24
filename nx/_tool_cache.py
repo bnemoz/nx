@@ -317,12 +317,34 @@ def bound_cache(cache: dict) -> None:
             total -= len(entry.result or "")
 
 
-def drop_changed_entries(cache: dict) -> None:
+def drop_changed_entries(cache: dict, full_tree_walk: bool | None = None) -> None:
     """Drop only entries whose backing paths changed since they were stored —
-    the mtime-aware replacement for the old whole-cache clear on run_bash."""
+    the mtime-aware replacement for the old whole-cache clear on run_bash.
+
+    Per-path anchors are re-statted (one os.stat each — cheap). Tree-stamped
+    entries (search_files) used to re-walk up to NX_TOOL_CACHE_TREE_FILES
+    entries *per entry* here, which after every edit/run_bash cost tens of
+    thousands of stats across a populated cache (swarm audit, P1). The sweep
+    is only eager cleanup — the honest check is cache_valid's tree walk on
+    *hit*, which stays in place. So the sweep now uses a fast path: a
+    tree-stamped entry is dropped iff its root directory's mtime moved
+    (create/delete/rename under the root moves it; a pure content edit does
+    not, and is caught on the next hit's full walk). Set
+    NX_TOOL_CACHE_SWEEP_TREE_WALK=1 to restore the legacy eager walk.
+
+    Deletion is pop(key, None): the mixed-turn prefetch pool inserts
+    concurrently (run_tool), so a check-then-del raced a KeyError into the
+    dispatcher (swarm audit, P1)."""
+    if full_tree_walk is None:
+        full_tree_walk = bool(_env_int("NX_TOOL_CACHE_SWEEP_TREE_WALK", 0))
     for key, entry in list(cache.items()):
+        if getattr(entry, "tree_stamp", None) is not None and not full_tree_walk:
+            # Fast path: one stat on the searched root decides eager eviction.
+            if _mtime_ns_of(entry.path) != entry.mtime_ns:
+                cache.pop(key, None)
+            continue
         if not cache_valid(entry):
-            del cache[key]
+            cache.pop(key, None)
 
 
 def drop_vcs_entries(cache: dict) -> None:

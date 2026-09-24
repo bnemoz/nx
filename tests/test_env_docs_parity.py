@@ -72,6 +72,9 @@ _ALLOWLIST = {
     "NX_RISK_RETRIES": "internal: risk-classifier connection retries (default 3)",
     "NX_RISK_RETRY_SECONDS": "internal: risk-classifier retry backoff s (default 1)",
     "NX_PRICE_ZAI_OUTPUT": "NX_PRICE_<SOURCE>_<IO> family instance",
+    # swarm-internal sweep knob (P1): restores the legacy eager tree walk in
+    # drop_changed_entries; default fast-path needs no README entry:
+    "NX_TOOL_CACHE_SWEEP_TREE_WALK": "internal: eager tree-walk in the cache sweep (default off)",
 }
 
 
