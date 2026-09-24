@@ -132,7 +132,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
-        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. Both are refused in background mode (a detached thread cannot show approval prompts) — pass async:false."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. In the background (async, the default) they require a yolo session (--yolo); without yolo they are refused — pass async:false so the approval prompt can be shown."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. Strongly recommended for write/implement tiers, and required for running more than one write-capable agent."},
     }, "required": ["instruction"]},
 }}
@@ -620,10 +620,12 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
-    if write and _subagent_quiet():
+    if write and _subagent_quiet() and not st.YOLO:
         return ("ERROR: write-tier spawn_agent refused — a quiet (background/"
                 "headless) thread cannot show the approval prompt an edit "
-                "raises; spawn it foreground (async:false) instead")
+                "raises, and this session is not in yolo mode, so the edits "
+                "would be silently auto-denied; spawn it foreground "
+                "(async:false) or run the session with --yolo")
     # A sub-loop inherits this thread's quiet mode (an async agent's own
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
@@ -811,12 +813,18 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     if want_async:
         # EXPLICIT refusal, never a silent downgrade or silent auto-denial:
         # a detached thread cannot show the approval prompt a write-tier
-        # agent's edits would raise, so async + write tier is refused with
-        # the fix spelled out.
-        if t in ("write", "implement"):
+        # agent's edits would raise — so async + write tier is refused with
+        # the fix spelled out. EXCEPT under YOLO: the approval gate's quiet
+        # path (_approval._confirm) auto-approves without prompting when
+        # st.YOLO holds, so a yolo headless run CAN host background writers
+        # honestly — the user opted out of approval entirely. Refuse only when
+        # the posture could not approve a quiet write.
+        if t in ("write", "implement") and not st.YOLO:
             return ("ERROR: tier='" + t + "' cannot run in the background — "
-                    "a detached thread has nobody to approve its edits. "
-                    "Re-spawn with async:false (foreground).")
+                    "a detached thread has nobody to approve its edits (and "
+                    "this session is not in yolo mode, so they would be "
+                    "silently auto-denied). Re-spawn with async:false, or run "
+                    "with --yolo to authorize unattended background writers.")
         if st.client is None or st.MODEL is None:
             return "ERROR: no active model source"
         if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent

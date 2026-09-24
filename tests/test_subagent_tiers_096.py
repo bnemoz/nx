@@ -49,6 +49,22 @@ def test_write_tier_refused_async_explicitly(tmp_path, monkeypatch):
     assert out.startswith("ERROR:") and "async:false" in out
 
 
+def test_write_tier_async_allowed_under_yolo(tmp_path, monkeypatch):
+    # 0.96.1: a yolo session's approval gate auto-approves quiet writes
+    # (_approval._confirm's quiet path returns True on YOLO), so a background
+    # write agent is honest there — the spawn must NOT be refused.
+    _setup(tmp_path, monkeypatch)
+    nx._state.YOLO = True
+    try:
+        out = S.spawn_agent("x", tier="implement", **{"async": "true"})
+        assert not out.startswith("ERROR:"), out
+    finally:
+        nx._state.YOLO = False
+    # and without yolo the refusal names both fixes (async:false / --yolo)
+    out = S.spawn_agent("x", tier="write", **{"async": "true"})
+    assert "async:false" in out and "--yolo" in out
+
+
 def test_bad_tier_and_scope_refused(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     assert S.spawn_agent("x", tier="nope").startswith("ERROR:")

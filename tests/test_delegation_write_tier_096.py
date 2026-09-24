@@ -25,7 +25,7 @@ def test_write_guidance_present_when_authorized(monkeypatch):
     content = d._load_delegation_note()["content"]
     assert "tier='write'" in content and "'implement'" in content
     assert "async=false" in content and "scope" in content
-    assert content.endswith("implementers safe.]")
+    assert content.endswith("approval prompts can show.]")
 
 
 def test_marker_contract_kept(monkeypatch):

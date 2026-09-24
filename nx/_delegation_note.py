@@ -40,17 +40,18 @@ DELEGATION_GUIDANCE = (
 
 # Appended to DELEGATION_GUIDANCE when this session authorizes write-capable
 # sub-agents (NX_SUBAGENT_WRITE=1): names the tiers, the scope discipline, and
-# the foreground-only constraint, so the model can delegate implementation —
-# not just investigation — without guessing at the contract.
+# the background-mode rule (yolo required; foreground otherwise), so the model
+# can delegate implementation — not just investigation — without guessing at
+# the contract.
 WRITE_TIER_GUIDANCE = (
     "- This session authorizes write-capable sub-agents: pass tier='write' "
     "(plain edits) or 'implement' (adds the implementer discipline prompt: "
     "read before editing, verify as you go, change approach after two "
     "failures, stop and report rather than churn).\n"
-    "- Write/implement agents MUST be foreground (async=false — a detached "
-    "thread cannot show approval prompts) and SHOULD carry scope (path globs "
-    "like ['nx/_turn*.py']); disjoint scopes are what makes parallel "
-    "implementers safe.]"
+    "- Write/implement agents SHOULD carry scope (path globs like "
+    "['nx/_turn*.py']); disjoint scopes are what makes parallel implementers "
+    "safe. Background (async, the default) write agents work only in yolo "
+    "mode; without yolo pass async=false so approval prompts can show.]"
 )
 
 # The marker _add_delegation_note_if_absent scans for (and _memory_note.py's
