@@ -24,6 +24,7 @@ from typing import Any
 from . import _state as st
 from ._plan import plan_active
 from ._delegation_note import _delegation_enabled
+from ._obs import obs_enabled as _obs_enabled  # noqa: F401 (gate callable)
 
 _TOOL_GATES: dict[str, Any] = {
     # name -> callable returning True when the schema should be OFFERED this
@@ -37,7 +38,10 @@ _TOOL_GATES: dict[str, Any] = {
     "plan_edit": plan_active,
     # SoL-Pi ports (0.67.0): obs_recall only once a pack handle exists
     # (packing never happened otherwise — nothing to recall).
-    "obs_recall": lambda: bool(_m_safe().NX_OBS),
+    # obs_recall only once a pack handle exists (packing never happened
+    # otherwise — nothing to recall). P10: the gate reads the env at call
+    # time (via _obs.obs_enabled) instead of the import-time mirror.
+    "obs_recall": lambda: _obs_enabled(),
     # web_fetch (0.70.0): keyless DuckDuckGo-lite search + page fetch. Tier-2
     # (0 schema tokens until a session needs the outside world) — surfaced by
     # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).

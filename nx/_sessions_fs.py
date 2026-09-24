@@ -345,6 +345,9 @@ def _write_session(
             _maybe_gc_image_sidecars(merged_messages)
         else:
             _maybe_gc_image_sidecars(merged_messages)
+        # Swarm P10: obsstore TTL/quota, amortized (own gate) — a packed-
+        # result store must not grow forever now that it is shared.
+        _maybe_gc_obsstore()
 
 
 # --- amortized maintenance sweeps (swarm P6) -----------------------------------
@@ -386,6 +389,22 @@ def _maybe_gc_image_sidecars(merged_messages: list) -> None:
     live |= _scan_session_image_refs()
     _gc_image_sidecars(live, min_age_s=60.0)
     _gc_image_quota()
+
+
+def _maybe_gc_obsstore() -> None:
+    """Swarm P10: obsstore TTL/quota GC, amortized on the same P6 gate as
+    the image sweep. Runs only when the store dir exists (a session that
+    never packs pays nothing — not even a stat)."""
+    import os as _os
+    from . import _obsstore
+    if not _os.path.isdir(_obsstore.store_dir()):
+        return
+    if not _sweep_due("obs_gc"):
+        return
+    try:
+        _obsstore.gc(grace_s=_obsstore.AGE_GRACE_S)
+    except Exception:
+        pass  # the store is an optimization; GC must never break a save
 
 
 def _gc_image_quota() -> int:
@@ -707,9 +726,17 @@ def _prune_sessions_store() -> dict[str, int]:
         kept = 0
     # 3. quota
     quota_removed = _gc_image_quota()
+    # 4. swarm P10: the shared tool-result store (no grace — explicit)
+    try:
+        from . import _obsstore
+        obs_removed = _obsstore.gc(grace_s=0.0)["removed"]
+        obs_stats = _obsstore.store_stats()
+    except Exception:
+        obs_removed, obs_stats = 0, {"objects": 0, "bytes": 0}
     return {"shards_dropped": shards_dropped, "images_removed": images_removed,
             "images_kept": kept, "quota_removed": quota_removed,
-            "rows_pruned": rows_pruned}
+            "rows_pruned": rows_pruned, "obs_removed": obs_removed,
+            "obs_kept": obs_stats["objects"], "obs_bytes": obs_stats["bytes"]}
 
 
 def _delete_session(session_id: str) -> bool:

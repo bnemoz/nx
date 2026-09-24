@@ -407,8 +407,11 @@ if FUSION_ENABLED == 1:
 
 # Observation pack: obs_recall pages an archived large tool result back
 # verbatim (nx/_obs.py). Tier-2 gated on NX_OBS=1 so it costs 0 schema tokens
-# otherwise — a session that never packs never pays.
-from ._obs import OBS_RECALL_TOOL, OBS_ENABLED
+# otherwise — a session that never packs never pays. The gate reads the env
+# at call time (P10); the module attribute is a live mirror for tests/REPL.
+from ._obs import OBS_RECALL_TOOL, obs_enabled as _obs_enabled
+import nx._obs as _obs_mod
+OBS_ENABLED = _obs_mod  # name kept for tests; use _obs.obs_enabled() live
 from ._reducer import REDUCER_ENABLED
 from ._occompact import OCC_ENABLED
 TOOLS.append(OBS_RECALL_TOOL)
@@ -801,7 +804,7 @@ NX_FUSION = FUSION_ENABLED
 # Observation pack (nx/_obs.py): NX_OBS=1 replaces a large tool result with a
 # stable handle after its first NX_OBS_FULL_SENDS provider requests; the
 # obs_recall tool pages the archived original back verbatim.
-NX_OBS = OBS_ENABLED
+NX_OBS = _env_int("NX_OBS", 0)  # live mirror; _obs.obs_enabled() is the truth
 # Evidence-preserving reducer (nx/_reducer.py): NX_REDUCER=1 lets large
 # diagnostic outputs be replaced by a verified receipt (every quote checked
 # byte-for-byte against the on-disk archive; any miss fails open).

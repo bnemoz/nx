@@ -136,6 +136,23 @@ def _big(n_bytes=20000):
     return ("x" * 79 + "\n") * (n_bytes // 80)
 
 
+import contextlib
+
+
+@contextlib.contextmanager
+def _enabled():
+    """NX_OBS=1 for the block (env is read at call time since P10)."""
+    old = os.environ.get("NX_OBS")
+    os.environ["NX_OBS"] = "1"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("NX_OBS", None)
+        else:
+            os.environ["NX_OBS"] = old
+
+
 def test_obs_disabled_by_default(monkeypatch):
     _obs._SEND_COUNTS.clear()
     text = _big()
@@ -143,7 +160,7 @@ def test_obs_disabled_by_default(monkeypatch):
 
 
 def test_obs_full_sends_then_placeholder(monkeypatch):
-    _obs.OBS_ENABLED = 1
+    monkeypatch.setenv("NX_OBS", "1")
     _obs._SEND_COUNTS.clear()
     try:
         text = _big()
@@ -166,28 +183,22 @@ def test_obs_full_sends_then_placeholder(monkeypatch):
         assert body.startswith(text[:10])
         assert len(body.encode()) <= _obs.RECALL_MAX_BYTES
     finally:
-        _obs.OBS_ENABLED = 0
         _obs._SEND_COUNTS.clear()
 
 
 def test_obs_receipt_line_never_packed():
-    _obs.OBS_ENABLED = 1
-    _obs._SEND_COUNTS.clear()
     try:
         text = _big() + "\nsol_pi_evidence_receipt_v1\n"
-        out = _obs.pack_result("run_bash", text, "k3")
+        with _enabled():
+            out = _obs.pack_result("run_bash", text, "k3")
         assert out is text or out == text
     finally:
-        _obs.OBS_ENABLED = 0
         _obs._SEND_COUNTS.clear()
 
 
 def test_obs_small_result_not_packed():
-    _obs.OBS_ENABLED = 1
-    try:
+    with _enabled():
         assert _obs.pack_result("run_bash", "tiny", "k4") == "tiny"
-    finally:
-        _obs.OBS_ENABLED = 0
 
 
 def test_obs_recall_unknown_id():

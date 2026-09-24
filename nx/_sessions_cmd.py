@@ -269,6 +269,12 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     if stats["quota_removed"]:
         print(f"  quota eviction removed {stats['quota_removed']} more payload(s)")
     print(f"  {DIM}{stats['images_kept']} payload(s) still referenced by sessions{RESET}")
+    if stats.get("obs_removed"):
+        print(f"  collected {stats['obs_removed']} expired/unreferenced tool-result "
+              f"object(s) from the shared obsstore")
+    if stats.get("obs_kept"):
+        print(f"  {DIM}{stats['obs_kept']} obsstore object(s) kept "
+              f"({stats['obs_bytes'] // 1024} KiB){RESET}")
     return True
 
 

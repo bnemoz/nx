@@ -14,7 +14,7 @@ Port deltas from SoL-Pi:
     `_sanitize_tool_result`'s caller path: results ARE stored full in history
     and the pack replaces the string only at the moment run_tool returns it
     to the turn loop for messages-history append (see _dispatch.run_tool).
-    Recall sends count via st._OBS_SEND_COUNTS keyed on (tool, callKey).
+    Recall sends count via _SEND_COUNTS keyed on (tool, content).
   - Receipt protection: a tool result containing a line exactly equal to
     sol_pi_evidence_receipt_v1 is never packed (the reducer's receipt IS the
     compact form; packing it would hide verified evidence).
@@ -23,20 +23,23 @@ Port deltas from SoL-Pi:
 
 Env: NX_OBS=1 enables (off by default); NX_OBS_THRESHOLD (default 10240
 bytes, strictly greater to participate); NX_OBS_FULL_SENDS (default 2).
+
+Swarm P10 (0.98.1): storage identity + lifecycle moved to `nx/_obsstore.py`
+— the cross-process content-addressed store. Ids are now obs_ + the first
+24 hex of the CONTENT sha (previously tool+call_key+content, which made
+two agents reading the same file write two objects and defeated dedup).
+The env reads also moved to call time (CONTRIBUTING's rule): tests set the
+NX_* env vars instead of patching module attrs. `_SEND_COUNTS` is bounded
+(NX_OBS_MAX_TRACKED, default 4096, drop-oldest) so a long swarm session
+can't grow it without bound.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import time
-from typing import Any
 
 from ._env import _env_int
 
-OBS_ENABLED = _env_int("NX_OBS", 0)
-THRESHOLD_BYTES = _env_int("NX_OBS_THRESHOLD", 10 * 1024)
-FULL_SENDS = _env_int("NX_OBS_FULL_SENDS", 2)
 PLACEHOLDER_EXCERPT_BYTES = 1024
 CHARS_PER_TOKEN = 4
 
@@ -45,49 +48,35 @@ RECALL_MAX_LINES = 400
 
 RECEIPT_LINE = "sol_pi_evidence_receipt_v1"
 
-# ids look like obs_<24 hex>; objects live under SESSION_HOME/observations/
+# ids look like obs_<24 hex>; objects live in the shared content-addressed
+# store (NX_HOME/obsstore/, nx/_obsstore.py) — P10.
 _ID_PREFIX = "obs_"
-_OBS_DIR_NAME = "observations"
-_LEDGER_NAME = "ledger.jsonl"
 
-# In-memory per-session counters (conftest rewinds module attrs).
+# In-memory per-session counters (conftest rewinds module attrs). Bounded:
+# a swarm session that packs thousands of results used to grow this dict
+# without bound (swarm audit item 3). Drop-oldest past the cap.
+_MAX_TRACKED = _env_int("NX_OBS_MAX_TRACKED", 4096)
 _SEND_COUNTS: dict[str, int] = {}
 
 
 def obs_enabled() -> bool:
-    return OBS_ENABLED == 1
+    return bool(_env_int("NX_OBS", 0))
 
 
-def obs_dir() -> str:
-    from . import _state as st
-    return os.path.join(st.SESSION_HOME, _OBS_DIR_NAME)
+def _threshold_bytes() -> int:
+    return _env_int("NX_OBS_THRESHOLD", 10 * 1024)
 
 
-def objects_dir() -> str:
-    return os.path.join(obs_dir(), "objects")
-
-
-def _ledger_path() -> str:
-    return os.path.join(obs_dir(), _LEDGER_NAME)
-
-
-def _env_int_guard(v: int, lo: int) -> int:
-    return v if v >= lo else lo
+def _full_sends() -> int:
+    return _env_int("NX_OBS_FULL_SENDS", 2)
 
 
 def estimate_tokens(text: str) -> int:
     return -(-len(text) // CHARS_PER_TOKEN)
 
 
-def make_observation_id(tool_name: str, call_key: str, content_hash: str) -> str:
-    h = hashlib.sha256(
-        (tool_name + "\0" + call_key + "\0" + content_hash).encode("utf-8")
-    ).hexdigest()
-    return _ID_PREFIX + h[:24]
-
-
 def content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
 def packable(tool_name: str, result: str) -> bool:
@@ -95,7 +84,7 @@ def packable(tool_name: str, result: str) -> bool:
     not a reducer receipt."""
     if not obs_enabled() or not isinstance(result, str):
         return False
-    if len(result.encode("utf-8", "replace")) <= THRESHOLD_BYTES:
+    if len(result.encode("utf-8", "replace")) <= _threshold_bytes():
         return False
     if "saved to:" in result and OVERFLOW_STUB_HINT in result:
         return False
@@ -126,13 +115,14 @@ def _complete_line_excerpt(text: str, budget: int, tail: bool = False) -> str:
 
 def build_placeholder(text: str, obs_id: str, tool_name: str) -> str:
     raw = text.encode("utf-8", "replace")
+    full = _full_sends()
     head = _complete_line_excerpt(text, PLACEHOLDER_EXCERPT_BYTES // 2)
     tail = _complete_line_excerpt(text, PLACEHOLDER_EXCERPT_BYTES // 2,
                                   tail=True)
     omitted = max(0, len(raw) - len(head.encode("utf-8", "replace"))
                   - len(tail.encode("utf-8", "replace")))
     return "\n".join([
-        f"[large tool result replaced after its first {FULL_SENDS} provider requests]",
+        f"[large tool result replaced after its first {full} provider requests]",
         f"id: {obs_id}",
         f"tool: {tool_name}",
         f"original_bytes: {len(raw)}",
@@ -147,67 +137,56 @@ def build_placeholder(text: str, obs_id: str, tool_name: str) -> str:
     ])
 
 
-def _append_ledger(entry: dict[str, Any]) -> None:
-    try:
-        os.makedirs(obs_dir(), mode=0o700, exist_ok=True)
-        rec = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-               **entry}
-        with open(_ledger_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # ledger is best-effort; packing itself must never fail
+def _bump_send_count(key: str) -> int:
+    """Read-and-increment this process's send counter for `key`, evicting the
+    oldest tracked key past _MAX_TRACKED (bounded RAM, P10)."""
+    sends = _SEND_COUNTS.get(key, 0)
+    if len(_SEND_COUNTS) >= _MAX_TRACKED and key not in _SEND_COUNTS:
+        oldest = next(iter(_SEND_COUNTS), None)
+        if oldest is not None:
+            _SEND_COUNTS.pop(oldest, None)
+    _SEND_COUNTS[key] = sends + 1
+    return sends
 
 
 def ensure_stored(obs_id: str, text: str) -> str | None:
-    """Write objects/<id>.txt (0600, exclusive); return None on success, an
-    error string on integrity failure (fail-open callers leave the original)."""
-    try:
-        odir = objects_dir()
-        os.makedirs(odir, mode=0o700, exist_ok=True)
-        path = os.path.join(odir, obs_id + ".txt")
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            return None
-        except FileExistsError:
-            with open(path, "r", encoding="utf-8") as f:
-                existing = f.read()
-            if existing != text:
-                return f"observation integrity mismatch for {obs_id}"
-            return None
-    except OSError as e:
-        return f"{type(e).__name__}: {e}"
+    """Store `text` in the shared content-addressed store (P10); return None
+    on success, an error string on failure (fail-open callers leave the
+    original). The handle's hex must match the content sha prefix — a
+    mismatch means the caller's id was not derived from this text."""
+    from . import _obsstore
+    resolved = _obsstore.resolve_handle(obs_id)
+    if resolved is None:
+        return f"invalid observation id {obs_id!r}"
+    sha, _path = resolved
+    if _obsstore.content_sha(text)[:len(sha)] != sha:
+        return f"observation integrity mismatch for {obs_id}"
+    return None if _obsstore.put(text) is not None else "obsstore write failed"
 
 
 def pack_result(tool_name: str, result: str, call_key: str = "") -> str:
     """The run_tool seam: full text for the first FULL_SENDS sends of this
-    (tool, result) identity, then the placeholder. Never raises."""
+    (tool, result) identity, then the placeholder. Never raises.
+
+    P10: the identity that counts sends is (tool, content) — the handle is
+    content-keyed — so a re-read of identical bytes still counts as the
+    same identity, and two processes packing the same content share the
+    stored object (each keeps its own send counter; FULL_SENDS is a
+    per-process grace, which is the cheap-correct approximation for a
+    swarm)."""
     try:
         if not packable(tool_name, result):
             return result
         chash = content_hash(result)
-        obs_id = make_observation_id(tool_name, call_key or chash, chash)
+        obs_id = _ID_PREFIX + chash[:24]
         key = f"{tool_name}\0{obs_id}"
-        sends = _SEND_COUNTS.get(key, 0)
+        sends = _bump_send_count(key)
         err = ensure_stored(obs_id, result)
         if err is not None:
             return result  # fail open
-        if sends < FULL_SENDS:
-            _SEND_COUNTS[key] = sends + 1
-            _append_ledger({"kind": "full", "id": obs_id, "tool": tool_name,
-                            "sends": sends + 1,
-                            "bytes": len(result.encode("utf-8", "replace"))})
+        if sends < _full_sends():
             return result
-        placeholder = build_placeholder(result, obs_id, tool_name)
-        _append_ledger({"kind": "placeholder", "id": obs_id,
-                        "tool": tool_name, "sends": sends + 1,
-                        "placeholder_bytes": len(placeholder),
-                        "removed_tokens": max(
-                            0, estimate_tokens(result)
-                            - estimate_tokens(placeholder))})
-        _SEND_COUNTS[key] = sends + 1
-        return placeholder
+        return build_placeholder(result, obs_id, tool_name)
     except Exception:  # noqa: BLE001 — packing must never break a tool result
         return result
 
@@ -248,12 +227,34 @@ OBS_RECALL_TOOL = {
 
 
 def _safe_obs_path(obs_id: str) -> str | None:
-    if not obs_id.startswith(_ID_PREFIX) or not obs_id[len(_ID_PREFIX):].isalnum():
+    """Resolve an obs_ handle to its object path via the shared store (P10).
+    Handles carry the first 24 hex of the content sha; the object file is
+    the full 64-hex name, so a truncated handle globs its fanout dir.
+    Falls back to the legacy per-session layout so objects written by an
+    older nx (or by a session with a different NX_HOME) still recall."""
+    from . import _obsstore
+    resolved = _obsstore.resolve_handle(obs_id)
+    if resolved is None:
         return None
-    path = os.path.join(objects_dir(), obs_id + ".txt")
-    if os.path.realpath(os.path.dirname(path)) != objects_dir():
-        return None
-    return path
+    sha, path = resolved
+    if os.path.isfile(path):
+        return path
+    if len(sha) < 64:
+        # truncated handle: look up the full-sha object in the fanout dir
+        full = _obsstore.expand_prefix(sha)
+        if full is not None:
+            return _obsstore.object_path(full)
+    # legacy layout (pre-P10): SESSION_HOME/observations/objects/<id>.txt
+    legacy = os.path.join(obs_legacy_objects_dir(), obs_id + ".txt")
+    if os.path.realpath(os.path.dirname(legacy)) == obs_legacy_objects_dir() \
+            and os.path.isfile(legacy):
+        return legacy
+    return None
+
+
+def obs_legacy_objects_dir() -> str:
+    from . import _state as st
+    return os.path.join(st.SESSION_HOME, "observations", "objects")
 
 
 def obs_recall(id: str, offset: int = 0) -> str:  # noqa: A002 — schema name
@@ -285,7 +286,4 @@ def obs_recall(id: str, offset: int = 0) -> str:  # noqa: A002 — schema name
               f"next_offset={next_offset} eof={str(eof).lower()}]\n"
               f"[chunk_bytes={len(chunk)} chunk_lines={text.count(chr(10))}; "
               "use next_offset to continue]")
-    _append_ledger({"kind": "recall", "id": id, "offset": offset,
-                    "bytes": len(chunk), "next_offset": next_offset,
-                    "eof": eof})
     return f"{header}\n{text}"
