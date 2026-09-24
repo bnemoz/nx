@@ -42,6 +42,9 @@ def setup_function(_function):
 
 
 def _clear():
+    # Swarm P6: maintenance sweeps are amortized (NX_SESSION_SWEEP_INTERVAL);
+    # tests assert per-save behavior, so reset the amortization clock too.
+    fs._SWEEP_LAST.clear()
     d = _use_test_sessions_dir()
     assert os.path.basename(d).startswith("nx-store-gc-"), d
     for f in os.listdir(d):
@@ -148,6 +151,8 @@ def test_gc_runs_when_session_images_off(monkeypatch):
     old = __import__("time").time() - 120
     os.utime(orphan, (old, old))
     monkeypatch.setenv("NX_SESSION_IMAGES", "0")
+    # Swarm P6: image GC is amortized; reset the clock for this save.
+    fs._SWEEP_LAST.clear()
     m._write_session(sid, [{"role": "user", "content": "still here"}], {})
     assert os.path.exists(orphan) is False      # orphan collected despite =0
 
@@ -183,6 +188,9 @@ def test_indexed_save_sweeps_stale_rows():
     live = "20250101-120000-gcaad"
     m._write_session(dead, [{"role": "user", "content": "doomed"}], {})
     os.remove(m._session_path(dead))
+    # Swarm P6: the prune is amortized (NX_SESSION_SWEEP_INTERVAL); reset the
+    # clock so this save performs the sweep the test asserts on.
+    fs._SWEEP_LAST.clear()
     m._write_session(live, [{"role": "user", "content": "alive"}], {})
     assert dead not in m._load_index()
     assert live in m._load_index()

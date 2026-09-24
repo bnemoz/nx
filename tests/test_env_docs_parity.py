@@ -79,6 +79,8 @@ _ALLOWLIST = {
     "NX_LOG_REQUESTS": "internal: 0 logs stubs instead of full req/resp bodies (default 1)",
     # swarm P5: nested sub-agent fan-out opt-in (default off):
     "NX_SUBAGENT_MAX_NESTED": "internal: 1 lets a sub-agent fan out (default 0)",
+    # swarm P6: amortized session-store maintenance (prune + image GC):
+    "NX_SESSION_SWEEP_INTERVAL": "internal: min seconds between session-store sweeps (default 300)",
     # swarm P3 knobs (per-process memory): undo stack byte cap and the
     # retained async-answer body in a finished job record:
     "NX_MAX_UNDO_BYTES": "internal: undo checkpoint stack byte cap (default 32MB)",

@@ -329,27 +329,63 @@ def _write_session(
         if update_index:
             _update_index(session_id, data)
             # 2.3b: rows whose session JSON vanished (crash, manual rm) are
-            # swept on the next indexed save, so listings and the GC
-            # live-set stop counting dead sessions without waiting for
-            # `nx sessions --prune`.
+            # swept, so listings and the GC live-set stop counting dead
+            # sessions without waiting for `nx sessions --prune`. Swarm P6:
+            # prune_stale is O(#sessions) os.stat — per indexed save that is
+            # a linear tax ×N agents on a shared store. Amortized: at most
+            # once per NX_SESSION_SWEEP_INTERVAL seconds (default 300)
+            # process-wide, so correctness (eventual prune) is unchanged and
+            # the per-save cost becomes once-per-interval.
             try:
                 from . import _storeindex
-                _storeindex.prune_stale()
+                if _sweep_due("prune"):
+                    _storeindex.prune_stale()
             except Exception:
                 pass
-        # Sidecar GC (0.39.0), after the indexed save. Since 2.3b the
-        # live-set comes from the store's `sessions` rows (each carries the
-        # session's sha256s) — no transcript re-parse per save. The
-        # just-merged messages are unioned in: an unindexed mid-turn
-        # autosave may have added refs whose row is stale, and a concurrent
-        # writer's payload gets the same 60s age grace as before. Runs
-        # whenever image sidecars exist: gating it on NX_SESSION_IMAGES=0
-        # used to orphan every already-stored payload the moment the
-        # rollback flag flipped.
-        live = _collect_message_image_refs(merged_messages)
-        live |= _scan_session_image_refs()
-        _gc_image_sidecars(live, min_age_s=60.0)
-        _gc_image_quota()
+            _maybe_gc_image_sidecars(merged_messages)
+        else:
+            _maybe_gc_image_sidecars(merged_messages)
+
+
+# --- amortized maintenance sweeps (swarm P6) -----------------------------------
+# Per-save maintenance that is O(store size) — index prune, image sidecar GC,
+# quota check — amortized to at most once per interval, process-wide. A swarm
+# of agents sharing NX_HOME used to pay an O(#sessions + #images) stat walk on
+# EVERY indexed save. The interval is a ceiling, not a lease: the first agent
+# past it does the sweep while the rest skip.
+
+_SWEEP_LOCK = threading.Lock()
+_SWEEP_LAST: dict[str, float] = {}
+
+
+def _sweep_due(kind: str) -> bool:
+    interval = _env_int("NX_SESSION_SWEEP_INTERVAL", 300)
+    if interval <= 0:
+        return True  # 0/negative = legacy every-save behavior
+    now = time.monotonic()
+    with _SWEEP_LOCK:
+        last = _SWEEP_LAST.get(kind, 0.0)
+        if now - last < interval:
+            return False
+        _SWEEP_LAST[kind] = now
+        return True
+
+
+def _maybe_gc_image_sidecars(merged_messages: list) -> None:
+    """Sidecar GC (0.39.0), amortized once per NX_SESSION_SWEEP_INTERVAL
+    seconds (default 300) — it stats the whole _images/ dir per save
+    otherwise. The just-merged messages are unioned in: an unindexed
+    mid-turn autosave may have added refs whose row is stale, and a
+    concurrent writer's payload gets the same 60s age grace as before.
+    Runs whenever image sidecars exist: gating it on NX_SESSION_IMAGES=0
+    used to orphan every already-stored payload the moment the rollback
+    flag flipped."""
+    if not _sweep_due("image_gc"):
+        return
+    live = _collect_message_image_refs(merged_messages)
+    live |= _scan_session_image_refs()
+    _gc_image_sidecars(live, min_age_s=60.0)
+    _gc_image_quota()
 
 
 def _gc_image_quota() -> int:
