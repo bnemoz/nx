@@ -36,6 +36,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 _DEFAULTS = {
     # --- 1. no startup probes at import --------------------------------------
     "NX_SKIP_STARTUP_PROBES": "1",
@@ -153,12 +155,17 @@ def pytest_collectreport(report):
 
 
 def _restore(fspath):
-    """Rewind NX_* env and nx.* module state to the pristine baseline.
+    """Rewind NX_* env, cwd, and nx.* module state to the pristine baseline.
 
     Runs before every test's setup (so no state leaks in from earlier tests,
     whether serial or xdist-scrambled) and after every test's teardown (so a
     test that forgets to clean up can't poison its neighbors).
     """
+    # cwd: a fixture that os.chdir(tmp_path) without restoring it must not
+    # leave later tests resolving relative paths ("README.md", "foo.py")
+    # against a temp dir — that was the serial-run failure in
+    # test_breaker_ergonomics / test_local_risk_hint (0.95.0).
+    os.chdir(_ROOT)
     # NOTE: do NOT set _INTERRUPT_ARMED/_INTERRUPT_EXIT here. Setting ARMED
     # wakes a parked watcher thread, whose wake path pays the interrupt-restore
     # handshake — doing that 2x per test added ~2 minutes to the serial run.
