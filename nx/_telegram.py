@@ -18,11 +18,15 @@ Security (mirrors the batch-mode contract in nx/_batch.py):
   run `nx telegram` under --yolo only in a vault you accept writes to.
 
 Transport: raw Bot-API long polling over urllib (web_fetch already depends
-on nothing richer). Messages > 4096 chars are chunked; progress edits use
-editMessageText on a status message updated once per model-turn boundary via
-the on_step seam of _run_model_turn_loop. The model's own auto-compression
-keeps a long session bounded; `/new` from the phone wipes the conversation
-in place for a fresh context without a process restart.
+on nothing richer). Messages > 4096 chars are chunked; the phone gets ONE
+status bubble per turn, edited in place at each model-turn boundary via
+editMessageText through the on_step seam of _run_model_turn_loop. Since
+0.95.0 the bubble is a first-and-last summary (the user's ask, the ×N-
+collapsed tool calls, the latest assistant prose, any live sub-agent
+progress, elapsed time) instead of a full transcript diff — the
+first and the final message are what matter on a phone. The model's own
+auto-compression keeps a long session bounded; `/new` from the phone wipes
+the conversation in place for a fresh context without a process restart.
 """
 from __future__ import annotations
 
@@ -171,71 +175,38 @@ def _call_base(line: str) -> str:
     return line
 
 
-def _describe_step(messages: list, seen_len: int) -> list[str]:
-    """Human-readable lines for everything appended to `messages` since the
-    last model-turn boundary (the on_step seam gives no payload; the
-    transcript diff is the payload). Assistant prose gets its own line; tool
-    calls and results pair up. Returns [] when the step added nothing.
-
-    Clutter rules (0.91.3): a plain-`ok` result folds into the preceding
-    call line (sized results attach their count) instead of adding its own
-    line; consecutive identical call lines collapse to `name: args ×N`."""
-    lines: list[str] = []
-    pending_tool: list[int] = []   # indices of call lines awaiting a result
-    for m in messages[seen_len:]:
-        role = m.get("role")
-        if role == "assistant":
-            for tc in (m.get("tool_calls") or []):
-                fn = tc.get("function", {})
-                args = fn.get("arguments") or ""
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-                if not isinstance(args, dict):
+def _describe_turn(messages: list, turn_start: int) -> tuple[list[str], int]:
+    """A first-and-last summary of the whole turn (0.95.0 contract, replaces
+    the per-step transcript diff): the user's ask (truncated), one line per
+    tool call (consecutive identical ones collapse to ×N), and the turn's
+    most recent assistant prose. Returns (lines, real tool call count)."""
+    calls: list[str] = []
+    total = 0
+    for m in messages[turn_start:]:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function", {})
+            args = fn.get("arguments") or ""
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
                     args = {}
-                line = _tool_line(fn.get("name") or "?", args)
-                base = _call_base(line)
-                if lines and _call_base(lines[-1]) == base:
-                    prev = lines[-1]
-                    n = 2
-                    # search prev (base was already stripped of any ×N)
-                    j = prev.find(" ×")
-                    if j != -1:
-                        n = int(prev[j + 2:].split(" ", 1)[0]) + 1
-                    # keep any folded result suffix after the new ×N
-                    suffix = ""
-                    k = prev.find("  ok")
-                    if k != -1:
-                        suffix = prev[k:]
-                    lines[-1] = f"{base} ×{n}{suffix}"
-                    pending_tool.append(len(lines) - 1)
-                else:
-                    lines.append(line)
-                    pending_tool.append(len(lines) - 1)
-            text = (m.get("content") or "")
-            if isinstance(text, str) and text.strip():
-                lines.append("💬 " + _brief(text.strip(), 120))
-        elif role == "tool":
-            line = _tool_result_line(m)
-            # A plain-`ok` result: fold it into the call line instead of
-            # emitting a separate `ok` line (sized results attach their count).
-            if pending_tool and (line == "ok" or
-                                 line.startswith("ok (")) and lines:
-                idx = pending_tool.pop(0)
-                if line != "ok":
-                    p = lines[idx].find("  ok")
-                    stripped = lines[idx] if p == -1 else lines[idx][:p]
-                    lines[idx] = stripped + "  " + line
-                continue
-            if pending_tool:
-                # results arrive in call order (FIFO), so pop the OLDEST
-                # pending call, not the newest
-                pending_tool.pop(0)
-            if line:
-                lines.append(line)
-    return lines
+            if not isinstance(args, dict):
+                args = {}
+            line = _tool_line(fn.get("name") or "?", args)
+            if calls and _call_base(calls[-1]) == _call_base(line):
+                prev = calls[-1]
+                j = prev.find(" ×")
+                n = 2
+                if j != -1:
+                    n = int(prev[j + 2:].split(" ", 1)[0]) + 1
+                calls[-1] = f"{_call_base(prev)} ×{n}"
+            else:
+                calls.append(line)
+            total += 1
+    return calls, total
 
 
 _ELLIPSIS = "\u2026"
@@ -275,36 +246,27 @@ def _tool_line(name: str, args: dict) -> str:
     return f"{icon} {name}" + (f": {shown}" if shown else "")
 
 
-def _tool_result_line(role_msg: dict) -> str | None:
-    """One line for a tool result: a short OK, or the meaningful tail of
-    output (errors and test summaries live in the tail)."""
-    body = role_msg.get("content")
-    if isinstance(body, list):
-        return "ok (image)"
-    body = str(body or "")
-    n = len(body)
-    if not body.strip() or n <= 200:
-        return "ok"
-    tail = next((ln.strip() for ln in reversed(body.splitlines())
-                 if ln.strip()), "")
-    tail = _brief(tail, 60)
-    return f"ok ({n} chars)" + (f" \u00b7 {tail}" if tail else "")
-
-
 # cap on how many recent lines the status message shows
 _STATUS_TAIL = 14
 
 
-def _compose_status(lines: list[str], tool_n: int, note_n: int) -> str:
-    """The whole status message: recent activity lines + a footer tally."""
+def _compose_status(ask: str, lines: list[str], tool_n: int,
+                    note: str | None, elapsed: float | None,
+                    progress: str | None = None) -> str:
+    """The whole status message (0.95.0): the user's ask, the latest tool
+    activity, the most recent assistant prose, a live sub-agent progress
+    note, and a footer tally."""
     shown = lines[-_STATUS_TAIL:]
     if len(lines) > _STATUS_TAIL:
-        shown.insert(0, f"\u2026 ({len(lines) - _STATUS_TAIL} earlier lines)")
+        shown.insert(0, f"\u2026 ({len(lines) - _STATUS_TAIL} earlier calls)")
     body = "\n".join(shown)
-    tally = f"total: {tool_n} tool calls"
-    if note_n:
-        tally += f", {note_n} notes"
-    return body + "\n\n" + tally
+    footer = f"total: {tool_n} tool calls"
+    if progress:
+        footer = f"🤖 {progress} · " + footer
+    if elapsed is not None:
+        footer += f" \u00b7 {int(elapsed)}s"
+    return (f"\u2753 {ask}\n" + body + "\n\n" + footer
+            + (f"\n\U0001f4ac {note}" if note else ""))
 
 
 def _typing(api: callable, chat_id: int) -> None:
@@ -416,28 +378,45 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
     # answer when the turn was a pure one-shot reply).
     status_id = None
     turn_start = len(messages)   # activity re-renders the whole turn
-    activity: list[str] = []   # every line so far this turn
-    tool_n = 0                 # tool calls so far
-    note_n = 0                 # assistant prose notes so far
+    ask = _brief(instruction, 100)
+    started = time.monotonic()
+    # live sub-agent feedback (0.95.0): spawn_agent's per-step note_progress
+    # lands here so the phone sees `🤖 agent turn 3/100` while it waits.
+    progress_note = [None]
+
+    def _sink(text: str) -> None:
+        if text:
+            progress_note[0] = text
+            on_step()
+
+    def _render() -> tuple[str, int, str | None]:
+        """First-and-last status body: the ask, tool calls (×N-collapsed),
+        the latest assistant prose, elapsed time."""
+        calls, tool_n = _describe_turn(messages, turn_start)
+        note = None
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and not m.get("tool_calls"):
+                text = (m.get("content") or "").strip()
+                if text:
+                    note = _brief(text, 160)
+                    break
+        return _compose_status(ask, calls, tool_n, note,
+                               time.monotonic() - started,
+                               progress_note[0]), tool_n, note
 
     def on_step() -> None:
-        nonlocal tool_n, note_n, activity, status_id
         # progress is best-effort; never kill the turn over it
+        nonlocal status_id
         try:
-            activity = _describe_step(messages, turn_start)
-            if not activity:
+            text, tool_n, note = _render()
+            if not (tool_n or note):
                 return
-            tool_n = sum(1 for m in messages[turn_start:]
-                         if m.get("role") == "assistant"
-                         for _ in (m.get("tool_calls") or []))
-            note_n = sum(1 for ln in activity if ln.startswith("💬"))
             if status_id is None:
-                sent = _send(api, chat_id, _compose_status(activity, tool_n, note_n))
+                sent = _send(api, chat_id, text)
                 status_id = sent.get("message_id")
                 _typing(api, chat_id)
             else:
-                _edit_status(api, chat_id, status_id,
-                             _compose_status(activity, tool_n, note_n))
+                _edit_status(api, chat_id, status_id, text)
         except Exception:
             pass
 
@@ -445,7 +424,10 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
     # falls through to a terminal prompt there is nobody to answer (and on a
     # TTY, a stray Enter approves). Batch mode sets the same slot.
     from ._subagent import _ASYNC_QUIET_SLOTS
+    from . import _state as _st
     _ASYNC_QUIET_SLOTS.quiet = True
+    prev_sink = _st._PROGRESS_SINK
+    _st._PROGRESS_SINK = _sink
     summary = {}
     try:
         try:
@@ -458,6 +440,7 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
         finally:
             st._METRICS = _fresh_metrics(session_id="telegram")
     finally:
+        _st._PROGRESS_SINK = prev_sink
         _ASYNC_QUIET_SLOTS.quiet = False
         _repair_conversation(messages)
 
@@ -474,16 +457,15 @@ def _run_turn(api: callable, chat_id: int, instruction: str,
             break
         if m.get("tool_calls"):
             continue   # look further up for a real answer
-    # One bubble per turn: the final answer lands on the status message (as
-    # an edit) unless it can't (no status bubble, oversized, or the edit
-    # failed) — only then does it go out as its own message.
+    # 0.95.0 delivery contract: the final answer is ALWAYS its own new
+    # message (chunked, push notification, guaranteed delivery), and the
+    # status bubble is left as the summary. The old edit-on-status contract
+    # (0.91.4) was the reported bug: an edit of an already-edited bubble can
+    # silently not render (rate-limit / "message is not modified" /
+    # client-side staleness), so the answer sat invisible until the next
+    # turn's activity re-edited the bubble.
     if not answer:
         answer = "(no final answer — status: %s)" % (summary or {}).get("status", "?")
-    final_text = ("\n" * 2).join([_compose_status(activity, tool_n, note_n),
-                                  answer]) if answer and activity else answer
-    if final_text and _u16len(final_text) <= TG_MAX_MESSAGE and status_id \
-            and _edit_status(api, chat_id, status_id, final_text):
-        return
     _send(api, chat_id, answer)
 
 

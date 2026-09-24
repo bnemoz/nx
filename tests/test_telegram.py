@@ -118,27 +118,7 @@ def test_non_pdf_document_is_ignored():
 
 # --- step rendering --------------------------------------------------------------
 
-def test_describe_step_pairs_calls_with_results():
-    msgs = [
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "1", "function": {"name": "run_bash",
-             "arguments": json.dumps({"command": "cargo test -p x\nsecond line ignored"})}}]},
-        {"role": "tool", "tool_call_id": "1", "content": "y" * 500 + "\nerror: boom"},
-        {"role": "assistant", "content": "Found the bug."},
-    ]
-    lines = tg._describe_step(msgs, 0)
-    # call + result now fold onto one line; note keeps its own
-    assert len(lines) == 2
-    assert lines[0].startswith("\u25b6") and "run_bash" in lines[0]
-    assert "cargo test -p x" in lines[0] and "second line" not in lines[0]
-    assert "512 chars" in lines[0] and "error: boom" in lines[0]
-    assert lines[1].startswith("\U0001f4ac") and "Found the bug." in lines[1]
-    assert tg._describe_step(msgs, 3) == []
-
-
-def test_describe_step_collapses_duplicate_calls_and_ok():
-    # the real example that motivated 0.91.3: the model re-runs the same
-    # list_dir probe and each call was followed by its own `ok` line.
+def test_describe_turn_collapses_duplicate_calls():
     msgs = [
         {"role": "assistant", "content": None, "tool_calls": [
             {"id": "1", "function": {"name": "list_dir",
@@ -149,43 +129,30 @@ def test_describe_step_collapses_duplicate_calls_and_ok():
              "arguments": json.dumps({"path": "."})}}]},
         {"role": "tool", "tool_call_id": "2", "content": "x" * 300},
     ]
-    lines = tg._describe_step(msgs, 0)
-    assert len(lines) == 1
-    assert lines[0].startswith("\U0001f4c2 list_dir: . ×2  ok (300 chars)")
+    lines, n = tg._describe_turn(msgs, 0)
+    assert lines == ["📂 list_dir: . ×2"] and n == 2
 
 
-def test_describe_step_nonok_result_still_gets_own_line():
-    msgs = [
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "1", "function": {"name": "run_bash",
-             "arguments": json.dumps({"command": "pytest"})}}]},
-        {"role": "tool", "tool_call_id": "1",
-         "content": "y" * 300 + "\nerror: boom"},
-    ]
-    lines = tg._describe_step(msgs, 0)
-    assert lines[0].startswith("\u25b6") and "error: boom" in lines[0]
-
-
-def test_describe_step_home_shortening_and_bad_args():
+def test_describe_turn_home_shortening_and_bad_args():
     home = os.path.expanduser("~")
     msgs = [{"role": "assistant", "content": None, "tool_calls": [
         {"id": "1", "function": {"name": "read_file",
          "arguments": json.dumps({"path": home + "/Documents/Projects/x.rs"})}},
         {"id": "2", "function": {"name": "edit_file", "arguments": "not json"}},
     ]}]
-    lines = tg._describe_step(msgs, 0)
+    lines, _ = tg._describe_turn(msgs, 0)
     assert home not in lines[0] and "~/Documents/Projects/x.rs" in lines[0]
     assert "edit_file" in lines[1]          # salvage line, no crash
 
 
 def test_compose_status_tally_and_tail():
-    lines = [f"line{i}" for i in range(20)]
-    out = tg._compose_status(lines, 7, 2)
-    assert "earlier lines" in out
+    lines = ["line%d" % i for i in range(20)]
+    out = tg._compose_status("fix the bug", lines, 7, None, 65.0)
+    assert "earlier calls" in out
     assert "line19" in out and "line5" not in out
-    assert "7 tool calls" in out and "2 notes" in out
-    short = tg._compose_status(["only"], 1, 0)
-    assert short == "only\n\ntotal: 1 tool calls"
+    assert "7 tool calls" in out and "65s" in out
+    short = tg._compose_status("q", ["only"], 1, None, None)
+    assert short == "❓ q\nonly\n\ntotal: 1 tool calls"
 
 
 def test_brief_collapses_whitespace_and_caps():
@@ -228,11 +195,12 @@ def test_run_turn_sends_progress_and_final_answer():
         tg._run_turn(api, 111, "read this", conv)
 
     methods = [m for m, _ in calls]
-    # ONE bubble per turn: status + final answer on the same message.
-    assert methods.count("sendMessage") == 1
+    # 0.95.0: status bubble = summary only; the final answer is always its
+    # own sendMessage (guaranteed delivery, was the stale-edit bug).
+    assert methods.count("sendMessage") == 2        # status bubble + answer
     assert "editMessageText" in methods            # on_step progress happened
     final = calls[-1]
-    assert final[0] == "editMessageText"
+    assert final[0] == "sendMessage"
     assert "The paper says X." in final[1]["text"]
     assert conv[-1]["role"] == "assistant"         # conversation persists
 
@@ -307,7 +275,7 @@ def test_run_turn_sets_quiet_slot_during_loop():
     assert seen == {"during": True, "tls": True}   # auto-deny is live mid-turn
 
 
-def test_describe_step_collapses_three_identical_calls():
+def test_describe_turn_collapses_three_identical_calls():
     msgs = []
     for i in "123":
         msgs += [
@@ -316,14 +284,11 @@ def test_describe_step_collapses_three_identical_calls():
                  "arguments": json.dumps({"path": "."})}}]},
             {"role": "tool", "tool_call_id": i, "content": "x" * 300},
         ]
-    lines = tg._describe_step(msgs, 0)
-    # results pair FIFO; call lines dedup, so both results fold onto the ONE
-    # shared line (the counter proves both arrived)
-    assert len(lines) == 1
-    assert lines[0].startswith("📂 list_dir: . ×3  ok (300 chars)")
+    lines, n = tg._describe_turn(msgs, 0)
+    assert lines == ["📂 list_dir: . ×3"] and n == 3
 
 
-def test_describe_step_pairs_parallel_results_in_call_order():
+def test_describe_turn_lists_distinct_calls_in_order():
     msgs = [
         {"role": "assistant", "content": None, "tool_calls": [
             {"id": "A", "function": {"name": "run_bash",
@@ -334,11 +299,9 @@ def test_describe_step_pairs_parallel_results_in_call_order():
         {"role": "tool", "tool_call_id": "A", "content": "y" * 300 + "\nFROM A"},
         {"role": "tool", "tool_call_id": "B", "content": "y" * 300 + "\nFROM B"},
     ]
-    lines = tg._describe_step(msgs, 0)
-    # results pair FIFO with their own calls (the audit's mis-pairing bug)
-    assert len(lines) == 2
-    assert "first" in lines[0] and "FROM A" in lines[0]
-    assert "second" in lines[1] and "FROM B" in lines[1]
+    lines, n = tg._describe_turn(msgs, 0)
+    assert len(lines) == 2 and n == 2
+    assert "first" in lines[0] and "second" in lines[1]
 
 
 def test_repair_conversation_drops_unanswered_tool_calls():

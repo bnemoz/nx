@@ -132,6 +132,12 @@ PROJECT_ROOT_IS_GIT: bool = False
 # Set by run_tool() while a tool body is executing; read by _confirm() to
 # pause/resume the spinner around approval prompts / risk-classifier calls.
 _ACTIVE_SPINNER: Any | None = None
+# Progress sink for headless frontends (0.95.0): when set, note_progress()
+# forwards its text here INSTEAD of only onto the spinner. The Telegram
+# gateway installs one so a sub-agent's `agent turn n/m` notes reach the
+# phone mid-call. A GIL-atomic attribute write; a swallowed note is harmless
+# (display-only).
+_PROGRESS_SINK: Any | None = None
 
 RISK_CONNECTION_RETRIES: int = 3
 RISK_CONNECTION_RETRY_SECONDS: float = 1.0
