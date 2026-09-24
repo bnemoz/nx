@@ -404,6 +404,114 @@ def test_bad_update_does_not_kill_gateway():
     assert fake_turn.call_count == 1
 
 
+# --- 0.95.1 hardening: user allowlist, groups, download cap, cooldown -------
+
+def test_user_allowlist_drops_foreign_sender():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    os.environ["NX_TELEGRAM_ALLOWED_USERS"] = "777"
+    turns = []
+    with unittest.mock.patch.object(tg, "_run_turn",
+                                    side_effect=lambda *a: turns.append(a)):
+        tg._LAST_TURN_AT.clear()
+        tg._handle_update({"update_id": 1, "message": {
+            "chat": {"id": 111, "type": "private"},
+            "from": {"id": 999}, "text": "hi"}}, {111})
+        tg._handle_update({"update_id": 2, "message": {
+            "chat": {"id": 111, "type": "private"},
+            "from": {"id": 777}, "text": "hi"}}, {111})
+    assert len(turns) == 1  # only the allowed user ran a turn
+
+
+def test_group_chat_refused_unless_opted_in():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    os.environ.pop("NX_TELEGRAM_ALLOW_GROUPS", None)
+    turns = []
+    upd = {"update_id": 1, "message": {
+        "chat": {"id": 111, "type": "group"},
+        "from": {"id": 111}, "text": "hi"}}
+    with unittest.mock.patch.object(tg, "_run_turn",
+                                    side_effect=lambda *a: turns.append(a)):
+        tg._LAST_TURN_AT.clear()
+        tg._handle_update(upd, {111})          # group: dropped
+        os.environ["NX_TELEGRAM_ALLOW_GROUPS"] = "1"
+        tg._handle_update(upd, {111})          # opted in: served
+    assert len(turns) == 1
+
+
+def test_download_file_enforces_local_cap():
+    class FakeResp:
+        def read(self, n=-1):
+            return b"x" * n
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    with unittest.mock.patch.object(tg, "_api",
+                                    return_value={"ok": True, "result": {
+                                        "file_path": "docs/x.pdf"}}), \
+         unittest.mock.patch("urllib.request.urlopen",
+                             return_value=FakeResp()):
+        try:
+            tg._download_file("F1")
+            raised = False
+        except RuntimeError as e:
+            raised = "cap" in str(e)
+    assert raised
+
+
+def test_oversize_instruction_rejected_with_reply():
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    sent = []
+    with unittest.mock.patch.object(tg, "_send",
+                                    side_effect=lambda api, cid, text:
+                                        sent.append(text)), \
+         unittest.mock.patch.object(tg, "_run_turn") as turn:
+        tg._LAST_TURN_AT.clear()
+        tg._handle_update({"update_id": 1, "message": {
+            "chat": {"id": 111, "type": "private"},
+            "from": {"id": 111}, "text": "x" * (tg.MAX_INSTRUCTION_CHARS + 1)}},
+            {111})
+    assert turn.call_count == 0 and sent and "8192" in sent[0]
+
+
+def test_cooldown_drops_back_to_back_turns(monkeypatch):
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    monkeypatch.setattr(tg, "_TURN_COOLDOWN_SECS", 60.0)
+    turns = []
+    with unittest.mock.patch.object(tg, "_run_turn",
+                                    side_effect=lambda *a: turns.append(a)):
+        tg._LAST_TURN_AT.clear()
+        msg = {"update_id": 1, "message": {
+            "chat": {"id": 111, "type": "private"},
+            "from": {"id": 111}, "text": "one"}}
+        tg._handle_update(msg, {111})
+        tg._handle_update({"update_id": 2, "message": {
+            "chat": {"id": 111, "type": "private"},
+            "from": {"id": 111}, "text": "two"}}, {111})
+    assert len(turns) == 1  # second message inside the cooldown window dropped
+
+
+def test_gateway_stops_on_rejected_token(capsys):
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    with unittest.mock.patch.object(
+            tg, "_api", return_value={"ok": False, "error_code": 401,
+                                      "description": "Unauthorized"}):
+        assert tg.run_gateway() == 2
+    assert "401" in capsys.readouterr().out
+
+
+def test_allowed_users_defaults_to_chat_ids():
+    os.environ["NX_TELEGRAM_ALLOWED_USERS"] = ""
+    assert tg._allowed_users({111, 222}) == {111, 222}
+    os.environ["NX_TELEGRAM_ALLOWED_USERS"] = "777"
+    assert tg._allowed_users({111}) == {777}
+
+
 # --- main loop: /new resets the conversation ----------------------------------------
 
 def test_slash_new_clears_conversation_without_turn():

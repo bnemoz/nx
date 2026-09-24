@@ -10,6 +10,13 @@ Security (mirrors the batch-mode contract in nx/_batch.py):
 - NX_TELEGRAM_ALLOWED_CHATS is a hard allowlist of chat IDs. A message from
   any other chat is dropped without reply. An EMPTY allowlist disables the
   gateway entirely — the bot must never respond to a chat it wasn't told to.
+- 0.95.1: NX_TELEGRAM_ALLOWED_USERS is a second hard allowlist of user IDs
+  (default: same set as the chats — a chat's members are its users); a
+  message whose from.id is not on it is dropped like a foreign chat. Group
+  chats are refused unless NX_TELEGRAM_ALLOW_GROUPS=1: a group in the
+  allowlist would otherwise let every member drive the host. Status bubbles
+  echo tool arguments (commands, paths, queries) to Telegram's cloud — that
+  is an intended disclosure of this personal gateway.
 - Approval: the turn loop runs with the process's own approval posture, and
   since there is no terminal to answer a Y/n prompt, gated calls auto-DENY
   exactly like batch mode (the `_subagent_quiet` check in _approval makes
@@ -43,6 +50,41 @@ API_BASE = "https://api.telegram.org"
 # Telegram hard limit on one message's text.
 TG_MAX_MESSAGE = 4096
 POLL_TIMEOUT_SECS = 30
+# Local cap on attachment downloads (Telegram's own cap is nominally 20 MB;
+# we enforce it rather than trust the remote side).
+MAX_DOWNLOAD_BYTES = 21 * 1024 * 1024
+# Cap on one instruction's text — a multi-MB message should not become one
+# model turn.
+MAX_INSTRUCTION_CHARS = 8192
+# Minimum seconds between turns from one chat (replay/rate guard).
+_TURN_COOLDOWN_SECS = 2.0
+_LAST_TURN_AT: dict[int, float] = {}
+# Group chats are refused unless this is set: a group in the allowlist would
+# otherwise let every member drive the host.
+_GROUP_FLAG = "NX_TELEGRAM_ALLOW_GROUPS"
+
+
+def _groups_allowed() -> bool:
+    return os.environ.get(_GROUP_FLAG, "").strip().lower() in ("1", "true", "yes")
+
+
+def _allowed_users(allowed: set[int]) -> set[int]:
+    """User allowlist; empty means 'anyone in the allowed chats' (backwards
+    compatible for private chats, where the chat IS the user)."""
+    return _allowed_chats_named("NX_TELEGRAM_ALLOWED_USERS") or allowed
+
+
+def _allowed_chats_named(name: str) -> set[int]:
+    raw = os.environ.get(name, "")
+    out = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.add(int(part))
+            except ValueError:
+                pass
+    return out
 
 
 # --- env (read lazily so tests can set NX_* after import) --------------------
@@ -82,11 +124,9 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
         raise RuntimeError("NX_TELEGRAM_BOT_TOKEN is not set")
     url = f"{API_BASE}/bot{token}/{method}"
     data = json.dumps(payload or {}).encode()
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json",
-                 "User-Agent": "nx-telegram-gateway"})
     for attempt in range(2):
+        # NOTE: the token is part of the URL (Bot API contract) — never log
+        # req.full_url or exception reprs that embed it.
         req = urllib.request.Request(
             url, data=data, method="POST",
             headers={"Content-Type": "application/json",
@@ -125,7 +165,10 @@ def _download_file(file_id: str) -> bytes:
     req = urllib.request.Request(url, method="GET",
                                  headers={"User-Agent": "nx-telegram-gateway"})
     with urllib.request.urlopen(req, timeout=60.0) as resp:  # noqa: S310
-        return resp.read()
+        raw = resp.read(MAX_DOWNLOAD_BYTES)
+    if len(raw) >= MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("attachment exceeds the local download cap")
+    return raw
 
 
 # --- rendering helpers -------------------------------------------------------
@@ -306,7 +349,7 @@ def _send(api: callable, chat_id: int, text: str) -> dict:
             out["ok"], out["error"] = False, f"{type(e).__name__}: {e}"
             continue
         if r.get("ok"):
-            out["message_id"] = r["result"]["message_id"]
+            out["message_id"] = (r.get("result") or {}).get("message_id")
         else:
             out["ok"] = False
             out["error"] = r.get("description") or "sendMessage failed"
@@ -321,6 +364,10 @@ def _message_instruction(msg: dict) -> str | None:
     through verbatim (URLs included — the model fetches them via web_fetch).
     Returns None for messages with nothing actionable."""
     text = (msg.get("text") or msg.get("caption") or "").strip()
+    if len(text) > MAX_INSTRUCTION_CHARS:
+        raise ValueError(
+            f"instruction is {len(text)} chars; the cap is "
+            f"{MAX_INSTRUCTION_CHARS} — split it or send a shorter ask")
     doc = msg.get("document") or {}
     name = doc.get("file_name") or ""
     mime = doc.get("mime_type") or ""
@@ -498,6 +545,10 @@ def run_gateway() -> int:
     if st.ACTIVE is None:
         print("nx telegram: no source configured — run `nx setup`.")
         return 2
+    if not _groups_allowed():
+        print("nx telegram: only private chats are served "
+              f"(set {_GROUP_FLAG}=1 to serve a group you control).")
+    _LAST_TURN_AT.clear()
 
     print(f"nx telegram: polling for chats {sorted(allowed)} …")
     offset = 0
@@ -514,6 +565,12 @@ def run_gateway() -> int:
             time.sleep(_poll_interval())
             continue
         if not r.get("ok"):
+            code = (r.get("parameters") or {}).get("error_code") \
+                or r.get("error_code")
+            if code in (401, 404):
+                print(f"\nnx telegram: token rejected ({code}) — "
+                      f"{r.get('description')}: stopping.")
+                return 2
             time.sleep(_poll_interval())
             continue
         for upd in r.get("result") or []:
@@ -532,23 +589,45 @@ def run_gateway() -> int:
 _CONVERSATION: list = []
 
 
-def _handle_update(upd: dict, allowed: set) -> None:
-    """Allowlist check, instruction translation, /new handling, one turn.
+def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) -> None:
+    """Allowlist checks, instruction translation, /new handling, one turn.
     Raises on bad updates; run_gateway catches per-update."""
     msg = upd.get("message") or {}
-    chat_id = (msg.get("chat") or {}).get("id")
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
     if chat_id not in allowed:
         return  # not even an error: an open reply is the vulnerability
+    if chat.get("type") not in ("private", None) and not _groups_allowed():
+        return
+    if allowed_users is None:
+        allowed_users = _allowed_users(allowed)
+    user_id = (msg.get("from") or {}).get("id")
+    if user_id is None:
+        user_id = chat_id   # no sender info: a private chat IS the user
+    if user_id not in allowed_users:
+        return
     text = (msg.get("text") or "").strip()
     if text == "/new":
         with _TURN_LOCK:
             _CONVERSATION.clear()
         _send(_api, chat_id, "✂ conversation cleared — fresh context.")
         return
-    instruction = _message_instruction(msg)
+    # Minimal replay/rate guard: a chat that just ran a turn must wait a beat
+    # before another (a crash-looping client or a flooded chat otherwise
+    # queues unbounded model-token spend). /new is exempt.
+    now = time.monotonic()
+    last = _LAST_TURN_AT.get(chat_id, 0.0)
+    if now - last < _TURN_COOLDOWN_SECS:
+        return
+    try:
+        instruction = _message_instruction(msg)
+    except ValueError as e:
+        _send(_api, chat_id, f"nx: {e}")
+        return
     if not instruction:
         return
     with _TURN_LOCK:
+        _LAST_TURN_AT[chat_id] = now
         _run_turn(_api, chat_id, instruction, _CONVERSATION)
 
 
