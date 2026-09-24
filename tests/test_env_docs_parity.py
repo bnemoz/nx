@@ -75,6 +75,10 @@ _ALLOWLIST = {
     # swarm-internal sweep knob (P1): restores the legacy eager tree walk in
     # drop_changed_entries; default fast-path needs no README entry:
     "NX_TOOL_CACHE_SWEEP_TREE_WALK": "internal: eager tree-walk in the cache sweep (default off)",
+    # swarm P3 knobs (per-process memory): undo stack byte cap and the
+    # retained async-answer body in a finished job record:
+    "NX_MAX_UNDO_BYTES": "internal: undo checkpoint stack byte cap (default 32MB)",
+    "NX_SUBAGENT_ANSWER_KEEP": "internal: retained async answer head+tail (default 4000)",
 }
 
 

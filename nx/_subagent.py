@@ -396,7 +396,7 @@ def list_async_agents() -> list[dict[str, Any]]:
     out = []
     for jid, rec in recs:
         status = rec.get("status", "running")
-        answer = rec.get("answer") or ""
+        answer = rec.get("answer") or rec.get("answer_tail") or ""
         out.append({
             "id": jid,
             "alive": status == "running",
@@ -498,6 +498,11 @@ def _stage_subagent_answer(job_id: str) -> None:
         rec["announced"] = True
         status, answer = rec.get("status", "done"), rec.get("answer") or ""
         report = rec.get("report")
+        # Swarm P3: once the note is built AND the full answer is on disk
+        # (`report`), the RAM copy is redundant — up to
+        # NX_SUBAGENT_MAX_FINISHED=20 whole answers held forever otherwise.
+        # A 160-char tail survives for /bg's preview. The body is dropped at
+        # the END of this function, after the note string is built below.
         prev = _notices.get(_PENDING_NOTICE_KEY)
         if status == "done":
             head = answer[:_ASYNC_REPORT_CHARS]
@@ -518,6 +523,16 @@ def _stage_subagent_answer(job_id: str) -> None:
                 " FAILED — " + answer[:600] + "\n" + \
                 "Retry the task inline (async=false) if it still matters.]"
         _notices.set_(_PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
+        # Swarm P3: the full answer is on disk (report), so retaining the
+        # whole body in the job record is pure RSS - up to
+        # NX_SUBAGENT_MAX_FINISHED=20 records x whole answers. Keep a bounded
+        # head+tail for /bg and post-hoc inspection; the report file holds
+        # the rest. NX_SUBAGENT_ANSWER_KEEP=0 keeps everything (legacy).
+        keep = _env_int("NX_SUBAGENT_ANSWER_KEEP", 4000)
+        if report and keep and len(answer) > keep:
+            half = keep // 2
+            marker = chr(10) + "...[spilled to report]..." + chr(10)
+            rec["answer"] = answer[:half] + marker + answer[-half:]
 
 
 def _spawn_async(instruction: str, max_turns: int, tier: str = "read",

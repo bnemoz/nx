@@ -34,6 +34,12 @@ from . import _state as st
 
 MAX_UNDO = _env_int("NX_MAX_UNDO", 20)
 
+# Swarm P3: the stack holds whole file contents, so MAX_UNDO entries against
+# big files is an unbounded RSS term ×N agents. A byte cap evicts oldest-first
+# (evicting the OLDEST checkpoint is the safe direction: /undo works from the
+# newest back). 0 disables the cap.
+MAX_UNDO_BYTES = _env_int("NX_MAX_UNDO_BYTES", 32 * 1024 * 1024)
+
 # PF-05 (0.61.0): persist_undo_stack() used to re-serialize the WHOLE stack —
 # up to MAX_UNDO entries holding whole file contents — on every single edit,
 # so twenty edits to a 200 KB file rewrote tens of MB of JSON. Persistence is
@@ -78,6 +84,16 @@ def snapshot(path: Optional[str]) -> Optional[FileSnapshot]:
 
 def _pending_paths() -> set[str]:
     return {snap["path"] for entry in st._UNDO_STACK for snap in entry["files"]}
+
+
+def _evict_over_bytes() -> None:
+    if MAX_UNDO_BYTES <= 0:
+        return
+    total = sum(len(s.get("content") or "")
+                for e in st._UNDO_STACK for s in e["files"])
+    while st._UNDO_STACK and total > MAX_UNDO_BYTES and len(st._UNDO_STACK) > 1:
+        dropped = st._UNDO_STACK.pop(0)  # oldest first — /undo consumes from the end
+        total -= sum(len(s.get("content") or "") for s in dropped["files"])
 
 
 def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
@@ -142,6 +158,7 @@ def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     st._UNDO_STACK.append({"tool": tool, "ts": time.time(), "files": fresh})
     if len(st._UNDO_STACK) > MAX_UNDO:
         del st._UNDO_STACK[:len(st._UNDO_STACK) - MAX_UNDO]
+    _evict_over_bytes()
     _mark_dirty()
 
 
