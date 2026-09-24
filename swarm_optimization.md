@@ -1,5 +1,12 @@
 # Swarm optimization audit — `nx`
 
+> **Implementation status (0.98.0):** P1–P8 below have landed as one focused
+> commit each (see git log: `fb34fc5` P1 … `1dd8191` P8). Each item's fix and
+> its knob are noted inline where it applies; the table is kept as written for
+> the original audit record. Remaining open items: per-process RSS floor
+> measurement, `NX_OCC` benchmarking, tier-2 tool-floor slimming, the
+> stdin-watcher/tty constraint, and the pymupdf4llm extra.
+
 **Scope:** memory/processor optimization of the `nx` harness for a move toward an
 agentic-swarm deployment (many concurrent sub-agents on one host).
 All findings verified against current source (v0.97.0). Baselines quoted from
@@ -198,6 +205,35 @@ threads per process.
   deadline (batch already has `_turn_retry._TASK_DEADLINE_TLS`).
 
 ---
+
+## Landed fixes, by phase (0.98.0)
+- **P1 `fb34fc5`** — `drop_changed_entries` fast-path (tree-stamped entries
+  evict on one root-mtime stat; honest full walk stays on hit;
+  `NX_TOOL_CACHE_SWEEP_TREE_WALK=1` restores legacy) + `pop(key, None)` race fix.
+- **P2 `dde3356`** — `nx/_notices.py`: per-turn-loop notice slots (contextvar);
+  per-thread prefix pin; `undo.json` namespaced per session under
+  `SESSION_HOME/undo/`. Fixes the `_batch.py` cross-talk failure.
+- **P3 `ab61a4d`** — `NX_MAX_UNDO_BYTES` (32 MB default) byte-caps the undo
+  stack; `NX_SUBAGENT_ANSWER_KEEP` (4000 default) bounds retained async answers.
+- **P4 `c8f78f4`** — `NX_LOG_REQUESTS=0` stub-logging gate; bounded (4096,
+  drop-oldest) log writer queue.
+- **P5 `d84da24`** — write-tier fan-out allowed under `--yolo` +
+  `NX_SUBAGENT_WORKTREE=1`; `NX_SUBAGENT_MAX_NESTED=1` enables two-level swarms.
+- **P6 `fe3015f`** — `prune_stale` + image GC amortized off the save path
+  (`NX_SESSION_SWEEP_INTERVAL`, default 300 s).
+- **P7 `d75ed08`** — `NX_CACHE_ROUTING_GROUP` shared prompt-cache routing key.
+- **P8 `1dd8191`** — PF-23: lazy fallback token estimate (no eager full-prompt
+  scan when the server reports usage).
+
+## Still open (ranked)
+1. Cross-process content-addressed tool-result store (promote `NX_OBS`) —
+   the biggest remaining memory×N term.
+2. In-process density hard limit: stdin-stealing interrupt watcher + tty-global
+   termios ⇒ headless only (`nx run --parallel`) or one-agent-per-tty.
+3. Tier-2 tool floor slimming (20 always-on schemas ×N agents of token rent).
+4. `NX_OCC=1` benchmarking for aggregate KV pressure.
+5. Per-process RSS floor measurement + cache soak (commands below).
+6. SQLite connect-per-call in the two stores; shared-`NX_HOME` 5 s busy waits.
 
 ## Not verified (audit budget)
 - No runtime measurements on this box; absolute numbers quoted from `PERF.md §1`.
