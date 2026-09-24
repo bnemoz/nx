@@ -51,7 +51,11 @@ WRITE_TIER_GUIDANCE = (
     "- Write/implement agents SHOULD carry scope (path globs like "
     "['nx/_turn*.py']); disjoint scopes are what makes parallel implementers "
     "safe. Background (async, the default) write agents work only in yolo "
-    "mode; without yolo pass async=false so approval prompts can show.]"
+    "mode; without yolo pass async=false so approval prompts can show.\n"
+    "- With NX_SUBAGENT_WORKTREE=1 each write-tier agent gets its own git "
+    "worktree (its paths, test runs and commits land there, never the shared "
+    "tree), so parallel write agents are safe even with overlapping scopes; "
+    "the finished report names the worktree — merge or cherry-pick from it.]"
 )
 
 # The marker _add_delegation_note_if_absent scans for (and _memory_note.py's
