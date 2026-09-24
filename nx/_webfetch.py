@@ -23,9 +23,11 @@ query, different URL) — never an exception into the turn loop.
 from __future__ import annotations
 
 import html as _html
+import ipaddress
 import json
 import os
 import re
+import socket
 import tempfile
 import time
 import urllib.parse
@@ -53,6 +55,57 @@ SEARCH_URL = "https://html.duckduckgo.com/html/"
 SEARX_URL = os.environ.get("NX_SEARX_URL", "").rstrip("/")
 TIMEOUT_SECS = 15
 MAX_SEARCH_RESULTS = 10
+# SSRF guard (0.92.1): web_fetch is an approval-free tool, so `url=` must never
+# become a pivot to internal services (loopback SearXNG, cloud metadata
+# 169.254.169.254, RFC1918). Set NX_WEBFETCH_ALLOW_PRIVATE=1 to lift this for
+# an explicitly trusted network. NX_SEARX_URL itself is the ONE sanctioned
+# loopback target and is always exempt (it is the user's own instance).
+ALLOW_PRIVATE = _env_int("NX_WEBFETCH_ALLOW_PRIVATE", 0)
+
+
+def _host_is_private(host: str) -> bool:
+    """True if `host` (IP literal or name) resolves to a private/loopback/
+    link-local/reserved address. Unresolvable names return False (the fetch
+    will simply fail); IP literals are checked without DNS."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return not addr.is_global
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    for fam, _, _, _, sockaddr in infos:
+        try:
+            if not ipaddress.ip_address(sockaddr[0]).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _url_is_private(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return True
+    if not host:
+        return True
+    return _host_is_private(host)
+
+
+class _SsrfRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects but re-validate each hop against the SSRF guard —
+    without this, a public page can bounce the GET at loopback/RFC1918."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        if not ALLOW_PRIVATE and _url_is_private(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect to a private/loopback address blocked",
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 # --- session state (module-level on purpose: conftest rewinds nx.* dicts) ---
 _CACHE: dict[str, tuple[float, str]] = {}  # key -> (monotonic ts, text)
@@ -100,7 +153,13 @@ def _save_cache() -> None:
     write failure must never fail the tool call."""
     try:
         d = _cache_dir()
-        os.makedirs(d, exist_ok=True)
+        # 0700: the cache holds full fetched-page text (potentially from
+        # internal hosts), so it must not be group/other-traversable.
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
         now = time.time()
         lines = [json.dumps({"k": k, "t": now - (time.monotonic() - v[0]), "v": v[1]})
                  for k, v in _CACHE.items()]
@@ -187,9 +246,14 @@ def _html_to_text(body: str) -> str:
 
 # --- HTTP (GET only, always) -------------------------------------------------
 
+# One opener shared by all fetches: GET-only by construction (every call site
+# passes method="GET"), with redirect hops re-validated against the SSRF guard.
+_OPENER = urllib.request.build_opener(_SsrfRedirectHandler())
+
+
 def _http_get(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
+    with _OPENER.open(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read(FETCH_MAX_BYTES * 4).decode(charset, errors="replace")
 
@@ -199,7 +263,7 @@ def _http_get_bytes(url: str) -> tuple[bytes, str]:
     routing: extracting a PDF as latin-1 text would yield garbage, so the
     caller must know the content type before decoding."""
     req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
+    with _OPENER.open(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
         ctype = (resp.headers.get_content_type() or "").lower()
         return resp.read(FETCH_MAX_BYTES * 4), ctype
 
@@ -267,7 +331,7 @@ def _searx_search(query: str) -> str | None:
     """SearXNG JSON-API search; None when unset/unreachable/broken (caller
     falls back to DDG lite). One GET to the user's own instance — the DDG
     throttle does not apply (it exists to spare a SHARED free endpoint)."""
-    if not SEARX_URL:
+    if not SEARX_URL or not _searx_usable():
         return None
     qs = urllib.parse.urlencode({"q": query, "format": "json"})
     try:
@@ -279,8 +343,10 @@ def _searx_search(query: str) -> str | None:
     out = []
     for r in results[:MAX_SEARCH_RESULTS]:
         url = str(r.get("url") or "")
-        if not url.startswith("http"):
+        if not url.startswith(("http://", "https://")):
             continue
+        if not ALLOW_PRIVATE and _url_is_private(url):
+            continue  # a compromised engine must not seed an SSRF pivot
         title = str(r.get("title") or "").strip()
         content = str(r.get("content") or "").strip()
         out.append(f"- {title} — {url}" + (f"\n  {content}" if content else ""))
@@ -342,9 +408,26 @@ def _web_search(query: str) -> str:
 
 # --- fetch -------------------------------------------------------------------
 
+def _searx_usable() -> bool:
+    """Guard the configured instance: a NON-loopback NX_SEARX_URL over plain
+    http leaks every query in cleartext and hands an arbitrary remote server
+    control of what enters model context — refuse it (fall back to DDG) unless
+    it is https or the private-address guard is lifted."""
+    if SEARX_URL.startswith("https://"):
+        return True
+    if ALLOW_PRIVATE:
+        return True
+    host = urllib.parse.urlsplit(SEARX_URL).hostname or ""
+    return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
 def _web_fetch_url(url: str) -> str:
     if not url.startswith(("http://", "https://")):
         return "ERROR: url must start with http:// or https://"
+    if not ALLOW_PRIVATE and _url_is_private(url):
+        return ("ERROR: refused to fetch a loopback/private-address URL "
+                "(SSRF guard; set NX_WEBFETCH_ALLOW_PRIVATE=1 if the URL is "
+                "deliberately internal).")
     cache_key = "u:" + url
     _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:

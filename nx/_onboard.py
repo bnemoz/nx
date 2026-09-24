@@ -78,6 +78,26 @@ def _pick_searx_port(candidates: tuple[int, ...] = (8888, 8090, 8080, 9090)) -> 
     return _pick_impl(candidates)
 
 
+def _assert_loopback_bind(settings: str) -> None:
+    """Refuse to wire nx to an instance whose settings.yml binds off-loopback:
+    with limiter:false and the JSON API enabled that is an open metasearch
+    proxy on the LAN. nx never edits the file (the user may have a reason),
+    it just declines to onboard against it."""
+    import re
+    try:
+        with open(settings, encoding="utf-8") as f:
+            cfg = f.read()
+        m = re.search(r"^\s*bind_address:\s*[\"']?([^\s\"'#]+)", cfg, re.M)
+        bind = (m.group(1) if m else "127.0.0.1").strip()
+    except OSError:
+        return
+    if bind not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  ✗ {settings} binds to {bind}, not loopback — with the JSON "
+              "API on and the limiter off that is an open metasearch proxy. "
+              "Set bind_address: \"127.0.0.1\" and re-run `nx setup`.")
+        raise SystemExit(1)
+
+
 def install_local_searx() -> str | None:
     """Automate the SEARXNG_SETUP.md steps for a fresh local instance: clone
     the source into ~/.local/share/searxng-src, build a uv venv (with the
@@ -162,7 +182,8 @@ def install_local_searx() -> str | None:
     # containers it is taken, and nx must never point at Jupyter by accident).
     import re as _re
     import secrets
-    os.makedirs(cfg_dir, exist_ok=True)
+    # 0700: the file below holds secret_key; keep the dir non-traversable too.
+    os.makedirs(cfg_dir, mode=0o700, exist_ok=True)
     settings = os.path.join(cfg_dir, "settings.yml")
     port = 0
     if os.path.exists(settings):
@@ -192,6 +213,20 @@ def install_local_searx() -> str | None:
                 "  formats:\n"
                 "    - html\n"
                 "    - json                    # required: nx queries ?format=json\n")
+        # 0600 (contains secret_key); makedirs 0700 covers the dir.
+        try:
+            os.chmod(settings, 0o600)
+        except OSError:
+            pass
+    else:
+        # Harden a pre-existing settings.yml left world/group-readable, and
+        # refuse a non-loopback bind: limiter:false + json + no auth is only
+        # safe on loopback.
+        try:
+            os.chmod(settings, 0o600)
+        except OSError:
+            pass
+        _assert_loopback_bind(settings)
 
     # 3. service manager: LaunchAgent on macOS, systemd user unit on Linux ----
     import subprocess
@@ -269,10 +304,14 @@ def install_local_searx() -> str | None:
             # restart; the printed hint says where to add the launch.
             log_path = os.path.join(cfg_dir, "searxng.log")
             with open(log_path, "ab") as log:
+                # Minimal env: os.environ carries ~/.env secrets (model API
+                # keys) that a third-party webapp has no business holding.
                 subprocess.Popen(
                     [py, "-m", "searx.webapp"],
                     cwd=src,
-                    env={**os.environ,
+                    env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+                         "HOME": home,
+                         "LANG": os.environ.get("LANG", "C.UTF-8"),
                          "SEARXNG_SETTINGS_PATH": os.path.join(cfg_dir, "settings.yml")},
                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                     start_new_session=True)

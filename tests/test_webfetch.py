@@ -165,12 +165,14 @@ def test_searx_bad_json_falls_back():
     _clean()
     saved = w.SEARX_URL
     w.SEARX_URL = "http://searx.invalid"
+    w.ALLOW_PRIVATE = 1  # _searx_usable would refuse a remote http instance
     try:
         with unittest.mock.patch.object(w, "_http_get",
                                         side_effect=['<html>not json</html>', DDG_PAGE]) as g:
             out = w.web_fetch(query="badjson")
     finally:
         w.SEARX_URL = saved
+        w.ALLOW_PRIVATE = 0
     assert g.call_count == 2 and "Example A" in out
 
 
@@ -178,11 +180,13 @@ def test_searx_empty_results():
     _clean()
     saved = w.SEARX_URL
     w.SEARX_URL = "http://searx.invalid"
+    w.ALLOW_PRIVATE = 1  # remote http instance refused by the guard otherwise
     try:
         with unittest.mock.patch.object(w, "_http_get", return_value='{"results": []}'):
             out = w.web_fetch(query="nothing")
     finally:
         w.SEARX_URL = saved
+        w.ALLOW_PRIVATE = 0
     assert "no results" in out
 
 
@@ -215,7 +219,7 @@ def test_search_sends_get_with_polite_ua():
         captured["method"] = req.get_method()
         captured["ua"] = req.headers.get("User-agent")
         return Resp()
-    with unittest.mock.patch.object(w.urllib.request, "urlopen", side_effect=fake_urlopen):
+    with unittest.mock.patch.object(w._OPENER, "open", side_effect=fake_urlopen):
         w.web_fetch(query="ua")
     assert captured["method"] == "GET"
     assert "nx-coding-agent" in captured["ua"]
@@ -299,6 +303,9 @@ class _GateServer(http.server.BaseHTTPRequestHandler):
 
 def test_fetch_against_local_server():
     _clean()
+    saved = w.ALLOW_PRIVATE
+    w.ALLOW_PRIVATE = 1  # loopback test server; the guard is tested separately
+    w.SEARX_URL = ""
     srv = http.server.HTTPServer(("127.0.0.1", 0), _GateServer)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -306,6 +313,7 @@ def test_fetch_against_local_server():
         out = w.web_fetch(url=f"http://127.0.0.1:{srv.server_port}/real")
     finally:
         srv.shutdown()
+        w.ALLOW_PRIVATE = saved
     assert "Heading" in out and "[link](https://x.example/1)" in out
 
 
@@ -390,3 +398,121 @@ def test_cache_save_failure_never_fails_the_call():
     finally:
         w.os.replace = real_replace
     assert "Example A" in out
+
+
+# --- SSRF guard (0.92.1) ------------------------------------------------------
+
+def _no_guards(monkeypatch_like=None):
+    return None
+
+
+def test_ssrf_blocks_private_url():
+    _clean()
+    saved = w.ALLOW_PRIVATE
+    w.ALLOW_PRIVATE = 0
+    try:
+        for u in ("http://127.0.0.1:8888/search", "http://169.254.169.254/latest/meta-data",
+                  "http://10.0.0.5/x", "http://[::1]:8080/"):
+            out = w.web_fetch(url=u)
+        assert "refused" in out and "SSRF" in out
+    finally:
+        w.ALLOW_PRIVATE = saved
+
+
+def test_ssrf_allow_private_opt_in():
+    _clean()
+    saved = w.ALLOW_PRIVATE
+    w.ALLOW_PRIVATE = 1
+    try:
+        with unittest.mock.patch.object(
+                w, "_http_get_bytes", return_value=(b"<html>internal</html>", "text/html")):
+            out = w.web_fetch(url="http://127.0.0.1:8888/x")
+    finally:
+        w.ALLOW_PRIVATE = saved
+    assert "internal" in out
+
+
+def test_ssrf_blocks_redirect_to_private():
+    _clean()
+    saved = w.ALLOW_PRIVATE
+    w.ALLOW_PRIVATE = 0
+    try:
+        import urllib.error
+        # a public page 302s at loopback: the redirect handler must refuse
+        class FakeResp:
+            headers = {"Location": "http://127.0.0.1:8888/search?q=x"}
+            def getcode(self): return 302
+            def info(self): return unittest.mock.Mock(get=lambda k, d=None: "http://127.0.0.1:8888/search?q=x")
+            def read(self, n=-1): return b""
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 302, "moved", {}, None)
+        # simpler: directly exercise the handler
+        h = w._SsrfRedirectHandler()
+        try:
+            h.redirect_request(unittest.mock.Mock(), None, 302, "moved",
+                               {"Location": "http://127.0.0.1:8888/x"},
+                               "http://127.0.0.1:8888/x")
+            assert False, "should have raised"
+        except urllib.error.HTTPError:
+            pass
+        # a public hop still passes (use a real Request for super())
+        req = urllib.request.Request("https://example.com/")
+        new = h.redirect_request(req, None, 302, "moved",
+                                 {"Location": "https://example.com/"},
+                                 "https://example.com/")
+        assert new is not None and new.full_url == "https://example.com/"
+    finally:
+        w.ALLOW_PRIVATE = saved
+
+
+def test_searx_nonloopback_http_refused():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://searx.example.com"  # plain http, remote host
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value=DDG_PAGE) as g:
+            out = w.web_fetch(query="no cleartext")
+    finally:
+        w.SEARX_URL = saved
+    # searx never tried; straight to DDG
+    assert g.call_count == 1 and "Example A" in out
+
+
+def test_searx_remote_https_ok():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "https://searx.example.com"
+    try:
+        with unittest.mock.patch.object(w, "_http_get",
+                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'):
+            out = w.web_fetch(query="https ok")
+    finally:
+        w.SEARX_URL = saved
+    assert "https://s.example/" in out
+
+
+def test_searx_results_private_urls_dropped():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:8888"
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value=(
+            '{"results": ['
+            '{"title": "public", "url": "https://ok.example/", "content": "c"},'
+            '{"title": "pivot", "url": "http://127.0.0.1:8080/admin", "content": "c"},'
+            '{"title": "metadata", "url": "http://169.254.169.254/", "content": "c"}]}')):
+            out = w.web_fetch(query="filter")
+    finally:
+        w.SEARX_URL = saved
+    assert "ok.example" in out and "127.0.0.1" not in out and "169.254" not in out
+
+
+def test_cache_dir_is_private():
+    _clean()
+    w._CACHE_LOADED[0] = True
+    w._save_cache()
+    d = w._cache_dir()
+    mode = os.stat(d).st_mode & 0o777
+    assert mode == 0o700, f"web-cache dir mode {oct(mode)} != 0700"
