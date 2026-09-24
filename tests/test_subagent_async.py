@@ -17,6 +17,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+# 0.96.0: foreground spawn results are head+report-path by default; these
+# tests assert on the full inline answer, so opt into the legacy inline mode.
+os.environ["NX_SUBAGENT_SYNC_INLINE"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _sync_inline(monkeypatch):
+    import nx as _nx
+    monkeypatch.setattr(_nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
+    yield
+
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
 # Clear ambient NX_* config so a developer's ~/.env / shell (real endpoints,
 # keys, NX_VERIFY_CMD, ...) can't affect results — per repo test guidelines.

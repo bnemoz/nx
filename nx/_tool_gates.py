@@ -94,6 +94,16 @@ def _active_tools() -> list[dict[str, Any]]:
     per turn instead of five full list copies (PERF §6 item 1)."""
     import nx as _m
     from ._breaker import _breaker_views
+    # A sub-agent loop gets ONLY its tier's schemas (0.96.0): before this
+    # branch the sub-loop was sent the parent's full active tool list while
+    # run_tool enforced the restriction at dispatch time — so the agent saw
+    # (and was tempted by) schemas for tools it could never call. Now the
+    # per-thread sub-agent context selects the schema set, matching the
+    # restricted dispatch table exactly. Memoization is bypassed on this path
+    # (per-thread, not per-process state).
+    from ._subagent_tiers import _subagent_ctx, _subagent_tools
+    if _subagent_ctx() is not None:
+        return _subagent_tools()
     key = _gate_vector()
     cached = _TOOL_LIST_CACHE.get(key)
     if cached is not None:

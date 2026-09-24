@@ -129,6 +129,12 @@ def test_property_shapes_are_the_flat_subset(tool):
             continue
         if schema.get("type") == "array":
             items = schema["items"]
+            if items.get("type") == "string":
+                # spawn_agent.scope (0.96.0): a flat list of path-glob
+                # strings — same scalar family, just repeated.
+                assert name == "spawn_agent" and prop == "scope", (
+                    f"{name}.{prop}: unexpected string-array item")
+                continue
             assert items["type"] == "object", f"{name}.{prop}: unexpected array item"
             assert items.get("required"), f"{name}.{prop}: item schema should require its keys"
             continue

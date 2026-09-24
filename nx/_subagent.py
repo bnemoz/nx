@@ -83,14 +83,16 @@ from ._subagent_tiers import (  # noqa: F401 (re-exports)
     _READ_ONLY_TOOL_NAMES, _SUBAGENT_TLS, _SubagentContext, _subagent_active,
     _subagent_ctx, _subagent_table, _subagent_tools, _write_tier_dispatch,
     _write_tier_enabled, _write_tier_wrapper, _WRITE_TIER_TOOL_NAMES,
-    _read_only_dispatch,
+    _read_only_dispatch, _scope_check, _normalize_tier,
 )
 from ._subagent_bash import (  # noqa: F401 (re-exports)
     _SUBAGENT_BASH_ALLOW, _subagent_bash, _subagent_bash_allowed,
 )
 
 
-from ._prompts import SUBAGENT_SYSTEM, SUBAGENT_WRITE_SYSTEM  # prompt registry (re-exported)
+from ._prompts import (  # prompt registry (re-exported)
+    SUBAGENT_SYSTEM, SUBAGENT_WRITE_SYSTEM, SUBAGENT_IMPLEMENT_SYSTEM,
+)
 
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
 # was the other half of the 0.19 cap-outs: real investigations (orient, read
@@ -130,6 +132,8 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. Both are refused in background mode (a detached thread cannot show approval prompts) — pass async:false."},
+        "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. Strongly recommended for write/implement tiers, and required for running more than one write-capable agent."},
     }, "required": ["instruction"]},
 }}
 
@@ -210,7 +214,7 @@ def _subagent_quiet() -> bool:
     ctx = _subagent_ctx()
     return bool(ctx is not None and getattr(ctx, "quiet", False))
 #
-# Thread hygiene: the worker runs _run_sync_agent, which installs its own TLS
+# Thread hygiene: the worker runs _run_sync_agent_body, which installs its own TLS
 # sub-agent context and restores it, so concurrent agents (sync fan-out or
 # async) each keep their own restricted dispatch table. Async is read-only
 # even when NX_SUBAGENT_WRITE=1 — a detached agent has nobody to show a Y/n
@@ -423,8 +427,11 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int) -> None:
     the parent gets exactly one note — never a dangling, silently-dead agent
     it waits on forever."""
     try:
-        answer = _run_sync_agent(instruction, max_turns)
-        # _run_sync_agent turns most failures into an "ERROR: sub-agent
+        answer = _run_sync_agent_body(instruction, max_turns)
+        # The unwrapped body: the worker does its OWN report write + [Runtime
+        # note] staging below; _run_sync_agent's head+path tool-result wrapper
+        # is for the parent's synchronous tool call only. The body turns most
+        # failures into an "ERROR: sub-agent
         # failed: ..." answer string rather than raising (a failed agent is a
         # tool error, not a crash) — surface those as FAILED to the parent.
         status = "error" if answer.startswith("ERROR: sub-agent failed") else "done"
@@ -548,9 +555,58 @@ def _spawn_async(instruction: str, max_turns: int) -> str:
             "markdown report) — do not declare the task done until then.")
 
 
-def _run_sync_agent(instruction: str, max_turns: int) -> str:
+def _run_sync_agent(instruction: str, max_turns: int, tier: str = "read",
+                    scope: "list[str] | None" = None) -> str:
     """The synchronous spawn_agent body, factored out so the sync tool call
-    and the async worker run identical machinery."""
+    and the async worker run identical machinery.
+
+    Since 0.96.0 BOTH paths apply the same head+path contract (see
+    _lean_result): the parent's tool result carries a short head plus the
+    report path, never the full text. NX_SUBAGENT_SYNC_INLINE=1 restores the
+    old full-text-inline foreground result (handy for tests)."""
+    job_id = _new_job_id()
+    answer = _run_sync_agent_body(instruction, max_turns, tier=tier, scope=scope)
+    if _sync_inline():
+        return answer
+    return _lean_result(answer, job_id, instruction)
+
+
+def _sync_inline() -> bool:
+    """NX_SUBAGENT_SYNC_INLINE=1 restores the pre-0.96 foreground behavior:
+    the full answer inline as the tool result, no report file."""
+    import nx as _m
+    try:
+        return bool(int(_m.NX_SUBAGENT_SYNC_INLINE))
+    except (AttributeError, TypeError, ValueError):
+        return bool(_env_int("NX_SUBAGENT_SYNC_INLINE", 0))
+
+
+def _lean_result(answer, job_id, instruction):
+    """The head+path tool result shared by both delivery paths (0.96.0): the
+    full answer goes to SESSION_HOME/agents/<job>.md and the parent sees a
+    short head plus the report path, so a foreground agent's whole
+    exploration costs ~600 chars of parent context, not its entire report.
+    The model read_file's the report only when the head isn't enough."""
+    failed = answer.startswith("ERROR:")
+    try:
+        path = _write_agent_report(job_id, instruction,
+                                   "error" if failed else "done", answer)
+    except Exception:  # noqa: BLE001 - the report is best-effort
+        path = None
+    limit = _ASYNC_REPORT_CHARS
+    head = answer[:limit]
+    if len(answer) > limit:
+        head = head + " ...[truncated]"
+    if path:
+        head = head + "\nFull report: " + path + " — read_file it for the rest."
+    tag = "failed" if failed else "finished"
+    return "[sub-agent " + tag + "]\n" + head
+
+
+def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
+                         scope: "list[str] | None" = None) -> str:
+    """The actual foreground sub-loop (wrapped by _run_sync_agent, which adds
+    the report-file + head/path staging shared with the async path)."""
     if st.client is None or st.MODEL is None:
         return "ERROR: no active model source"
     if st.YOLO is None:  # pragma: no cover — defensive; YOLO is always a bool
@@ -558,16 +614,22 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
 
     from ._turn import _run_model_turn_loop  # import-check only (circular-import canary)
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
-    # Write tier: opt-in (NX_SUBAGENT_WRITE=1) and refused from inside another
-    # sub-agent (only the parent ever holds the approval gate).
-    write = _write_tier_enabled()
+    # Write tiers (write/implement): opt-in (NX_SUBAGENT_WRITE=1) and refused
+    # from inside another sub-agent (only the parent holds the approval gate).
+    write = tier in ("write", "implement")
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
+    if write and _subagent_quiet():
+        return ("ERROR: write-tier spawn_agent refused — a quiet (background/"
+                "headless) thread cannot show the approval prompt an edit "
+                "raises; spawn it foreground (async:false) instead")
     # A sub-loop inherits this thread's quiet mode (an async agent's own
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
-    messages = [{"role": "system", "content": SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM},
+    system = (SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
+              else SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM)
+    messages = [{"role": "system", "content": system},
                 {"role": "user", "content":
                  f"{instruction.strip()}\n\n[Budget: at most {max_turns} tool turns. "
                  "Spend them answering, not exploring: batch independent lookups "
@@ -584,7 +646,7 @@ def _run_sync_agent(instruction: str, max_turns: int) -> str:
     # manual, serial-only fallback for tests.
     table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
-    ctx = _SubagentContext(table, write=write, quiet=quiet)
+    ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope)
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
     _SUBAGENT_TLS.ctx = ctx
@@ -684,7 +746,7 @@ def _async_default() -> bool:
 
 
 def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
-                **extra: Any) -> str:
+                tier: Any = None, scope: Any = None, **extra: Any) -> str:
     """Run a sub-agent on `instruction`; return its final answer. Read-only by
     default; NX_SUBAGENT_WRITE=1 upgrades the agent to the write tier (the
     four file-mutation tools, each still gated by the parent's _confirm()).
@@ -721,6 +783,23 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     raw_async = extra.pop("async", None)
     if raw_async is not None:
         async_ = raw_async
+    t = _normalize_tier(extra.pop("tier", tier))
+    if not t:
+        return ("ERROR: tier must be one of read/write/implement "
+                "(or omit it — NX_SUBAGENT_WRITE=1 defaults to write)")
+    # Explicit read-tier request wins over the env default even when
+    # NX_SUBAGENT_WRITE=1; write/implement tiers require the env opt-in.
+    if t in ("write", "implement") and not _write_tier_enabled():
+        return ("ERROR: write/implement tier requires NX_SUBAGENT_WRITE=1 "
+                "(set it in the environment or config, then re-spawn)")
+    scope = extra.pop("scope", scope)
+    if scope is not None:
+        if not (isinstance(scope, list) and scope
+                and all(isinstance(x, str) and x.strip() for x in scope)):
+            return ("ERROR: scope must be a non-empty list of path glob "
+                    "strings (relative to the project root), e.g. "
+                    "['nx/_turn*.py']")
+        scope = [x.strip() for x in scope if x.strip()]
     # None = the model (or a direct caller) omitted `async` - fall to
     # NX_SUBAGENT_ASYNC (background by default since 0.18.8). An explicit
     # false - bool or "false"/"0" string - must WIN over the knob: it is the
@@ -730,6 +809,14 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     want_async = async_ is True or (
         isinstance(async_, str) and async_.strip().lower() in ("1", "true", "yes", "on"))
     if want_async:
+        # EXPLICIT refusal, never a silent downgrade or silent auto-denial:
+        # a detached thread cannot show the approval prompt a write-tier
+        # agent's edits would raise, so async + write tier is refused with
+        # the fix spelled out.
+        if t in ("write", "implement"):
+            return ("ERROR: tier='" + t + "' cannot run in the background — "
+                    "a detached thread has nobody to approve its edits. "
+                    "Re-spawn with async:false (foreground).")
         if st.client is None or st.MODEL is None:
             return "ERROR: no active model source"
         if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent
@@ -739,7 +826,7 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
             return (f"ERROR: an identical async agent is already running as job {dup} "
                     "— its answer will arrive as a [Runtime note]; do not re-spawn it")
         return _spawn_async(instruction, max_turns)
-    return _run_sync_agent(instruction, max_turns)
+    return _run_sync_agent(instruction, max_turns, tier=t, scope=scope)
 
 
 # --- parent-side completion sweep --------------------------------------------

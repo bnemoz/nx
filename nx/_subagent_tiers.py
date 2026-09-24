@@ -10,6 +10,8 @@ context around the parent's real body, so every write crosses the same
 risk-classified Y/n gate the parent shows."""
 from __future__ import annotations
 
+import fnmatch
+import os
 import threading
 from typing import Any
 
@@ -55,14 +57,19 @@ _SUBAGENT_TLS = threading.local()
 class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
-    __slots__ = ("table", "active", "write", "quiet", "model_target")
+    __slots__ = ("table", "active", "write", "quiet", "model_target", "scope")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
-                 quiet: bool = False) -> None:
+                 quiet: bool = False, scope: "list[str] | None" = None) -> None:
         self.table = table
         self.active = True
         self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
         self.quiet = quiet  # no terminal writes (async worker threads)
+        # Optional path scope (spawn_agent(scope=[...])): gitignore-style globs
+        # relative to the project root. When set, every file-mutation tool call
+        # whose target falls OUTSIDE the scope is refused with an explicit
+        # error naming the scope — never a silent denial. None = unrestricted.
+        self.scope = list(scope) if scope else None
         # (client, model, extra_request_kwargs) this agent's model calls use,
         # or None to inherit the parent's active source/model. Pinned by
         # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
@@ -105,12 +112,18 @@ def _write_tier_enabled() -> bool:
 
 
 def _subagent_tools() -> list[dict[str, Any]]:
-    """Tool schemas for the sub-loop: read-only entries, plus the write tier
-    when NX_SUBAGENT_WRITE=1 (only when a write-capable sub-agent is actually
-    being spawned — see spawn_agent)."""
+    """Tool schemas for the CURRENT thread's sub-loop (read via the TLS
+    context, so concurrent agents each get their own tier's set): read-only
+    entries, plus the write-tier tools when the agent was spawned with a
+    write/implement tier. Matches the restricted dispatch table exactly —
+    the agent is never shown a schema its dispatch would refuse."""
     import nx as _m
     wanted = set(_READ_ONLY_TOOL_NAMES)
-    if _write_tier_enabled():
+    ctx = _subagent_ctx()
+    if ctx is not None and ctx.write:
+        wanted.update(_WRITE_TIER_TOOL_NAMES)
+    elif ctx is None and _write_tier_enabled():
+        # legacy global-table fallback (serial tests/REPL)
         wanted.update(_WRITE_TIER_TOOL_NAMES)
     return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
 
@@ -138,6 +151,33 @@ def _write_tier_dispatch() -> dict[str, Any]:
     return table
 
 
+def _scope_check(path: str) -> str | None:
+    """Refusal message when `path` falls outside the CURRENT thread's sub-agent
+    scope, or None when allowed (no scope set, or any glob matches). Matched
+    against the path relative to PROJECT_ROOT, and also against its basename
+    as a fallback so scope=["*.md"] works."""
+    ctx = _subagent_ctx()
+    if ctx is None or not ctx.scope:
+        return None
+    rel = os.path.relpath(os.path.abspath(path), st.PROJECT_ROOT)
+    for pat in ctx.scope:
+        if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(os.path.basename(rel), pat):
+            return None
+    return (f"ERROR: {os.path.basename(rel)!r} is outside this sub-agent's "
+            f"scope {ctx.scope} — write only inside the scoped paths, or "
+            "report back that the change needs a wider scope")
+
+
+def _normalize_tier(tier: Any) -> str:
+    """Map the `tier` argument (and the legacy NX_SUBAGENT_WRITE flag) to one
+    of read/write/implement. Empty string = invalid (caller refuses); None
+    falls back to the env-derived default."""
+    if tier is None:
+        return "write" if _write_tier_enabled() else "read"
+    v = str(tier).strip().lower()
+    return v if v in ("read", "write", "implement") else ""
+
+
 def _write_tier_wrapper(name: str):
     """Build the confirm-through binding for one write-tier tool.
 
@@ -155,6 +195,13 @@ def _write_tier_wrapper(name: str):
         ctx = _subagent_ctx()
         if ctx is None:  # defensive: a wrapper escaped its sub-agent context
             return f"ERROR: {name} write-tier wrapper used outside a sub-agent"
+        # Path scope gate BEFORE the body/approval: an out-of-scope write is
+        # an explicit refusal, never a prompt and never a silent denial.
+        target = _scope_target(name, args)
+        if target is not None:
+            refusal = _scope_check(target)
+            if refusal is not None:
+                return refusal
         prev_ctx = _SUBAGENT_TLS.ctx
         _SUBAGENT_TLS.ctx = None  # body + _confirm() run as the parent
         try:
@@ -164,3 +211,17 @@ def _write_tier_wrapper(name: str):
 
     _run.__name__ = f"_subagent_write_{name}"
     return _run
+
+
+def _scope_target(name: str, args: dict[str, Any]) -> str | None:
+    """The primary filesystem target of a write-tier tool call, for the scope
+    gate (None when the tool has no single target, e.g. run_tests)."""
+    for key in ("path", "file"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            return v
+    if name == "multi_edit":
+        files = args.get("path") or args.get("files")
+        if isinstance(files, str):
+            return files
+    return None
