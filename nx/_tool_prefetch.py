@@ -143,10 +143,19 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
         so overlapping them is the whole point of delegating. Reads may ride
         along in the same turn (all read-only, no ordering requirements).
 
-    Single calls, mutating/prompting tools, any turn while already inside
-    a sub-agent (no nested fan-out), and WRITE-TIER fan-outs stay sequential:
-    a write-capable sub-agent's bodies run the parent's real _confirm(), so
-    two of them in flight would interleave approval prompts.
+    Single calls and mutating/prompting tools stay sequential. A turn while
+    already inside a sub-agent stays sequential too (no nested fan-out) -
+    unless NX_SUBAGENT_MAX_NESTED=1 opts in (P5: two-level swarms multiply
+    threads/streams; default off).
+
+    WRITE-TIER fan-outs stay sequential when an approval prompt could appear:
+    a write-capable sub-agent's bodies run the parent's real _confirm(), and
+    two of them in flight would interleave approval prompts. Two conditions
+    relax this (both must hold - P5):
+      - the session is YOLO (st.YOLO) - nothing can prompt, so there is
+        nothing to serialize; and
+      - NX_SUBAGENT_WORKTREE=1 - each write agent edits in its own git
+        worktree, so siblings cannot trample the shared tree.
 
     Since 0.31.0 this gate carries a second load-bearing meaning: a fan-out
     worker runs quiet (it must not own the terminal), and _confirm() auto-DENIES
@@ -157,12 +166,16 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
         return False
     import nx as _m
     from ._subagent import _subagent_active
-    if _subagent_active():
-        return False  # a sub-agent never fans out further
+    from ._env import _env_int
+    if _subagent_active() and not _env_int("NX_SUBAGENT_MAX_NESTED", 0):
+        return False  # a sub-agent never fans out further (default)
     spawn = sum(1 for n, _ in calls if n == "spawn_agent")
     if spawn:
         if _write_capable_agent(calls):
-            return False  # write-tier agents prompt — never overlap them
+            from ._worktree import _worktree_enabled
+            from . import _state as _st
+            if not (_st.YOLO and _worktree_enabled()):
+                return False  # prompts could interleave / trees would trample
         return all(n in _m._CACHEABLE_READ_TOOLS or n == "spawn_agent" for n, _ in calls)
     return _all_read_only(calls)
 
