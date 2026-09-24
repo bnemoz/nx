@@ -88,6 +88,9 @@ _ALLOWLIST = {
     # retained async-answer body in a finished job record:
     "NX_MAX_UNDO_BYTES": "internal: undo checkpoint stack byte cap (default 32MB)",
     "NX_SUBAGENT_ANSWER_KEEP": "internal: retained async answer head+tail (default 4000)",
+    # swarm P11: per-call SQLite busy wait on the two stores (was a hardcoded
+    # 5 s block per contending save/search under a shared NX_HOME):
+    "NX_STORE_BUSY_TIMEOUT_MS": "internal: store busy_timeout ms (default 750)",
 }
 
 

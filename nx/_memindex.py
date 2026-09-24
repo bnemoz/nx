@@ -33,7 +33,9 @@ every reconcile, because a VACUUM rewrites the whole file.
 from __future__ import annotations
 
 import os
+import random
 import sqlite3
+import time
 from typing import Optional
 
 from ._logging import _log_event
@@ -115,10 +117,19 @@ def _connect(memories_dir: str) -> Optional[sqlite3.Connection]:
             os.close(fd)
     except OSError:
         pass  # a read-only dir still serves an existing index
-    conn = sqlite3.connect(path, timeout=5.0)
+    # Swarm P11: same contention posture as _storeindex — a shorter busy
+    # wait (everything here degrades to a plain scan) instead of a 5 s block
+    # per memory_search under a shared NX_HOME.
+    ms = _busy_timeout_ms()
+    conn = sqlite3.connect(path, timeout=ms / 1000.0)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={ms}")
     return conn
+
+
+def _busy_timeout_ms() -> int:
+    from ._env import _env_int
+    return max(1, _env_int("NX_STORE_BUSY_TIMEOUT_MS", 750))
 
 
 def _open(memories_dir: str) -> Optional[sqlite3.Connection]:
@@ -128,18 +139,27 @@ def _open(memories_dir: str) -> Optional[sqlite3.Connection]:
         return None
     path = _db_path(memories_dir)
     conn = None
-    for attempt in (1, 2):
+    last_err: Optional[Exception] = None
+    # Swarm P11: busy-lock contention retries with jittered backoff (never a
+    # set-aside); corrupt files keep the set-aside + retry path.
+    for attempt in range(3):
+        if attempt:
+            time.sleep(0.02 * (2 ** (attempt - 1)) + random.random() * 0.01)
         try:
             conn = _connect(memories_dir)
             _ensure_schema(conn)
             return conn
         except sqlite3.OperationalError as e:
+            last_err = e
             try:
                 conn.close()
             except Exception:
                 pass
-            if attempt == 2 or "not a database" not in str(e):
-                _log_event("error", {"where": "memindex", "error": str(e)})
+            msg = str(e)
+            if "locked" in msg or "busy" in msg:
+                continue  # contention: bounded retry, never a set-aside
+            if attempt >= 1 or "not a database" not in msg:
+                _log_event("error", {"where": "memindex", "error": msg})
                 return None
             _set_aside_corrupt(path)
         except sqlite3.DatabaseError:
@@ -148,6 +168,7 @@ def _open(memories_dir: str) -> Optional[sqlite3.Connection]:
             except Exception:
                 pass
             _set_aside_corrupt(path)
+    _log_event("error", {"where": "memindex", "error": str(last_err)})
     return None
 
 

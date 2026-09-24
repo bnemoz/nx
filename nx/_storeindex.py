@@ -31,9 +31,12 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sqlite3
+import time
 from typing import Any, Optional
 
+from ._env import _env_int
 from ._logging import _log_event
 from ._private import open_private, private_dir
 
@@ -76,6 +79,15 @@ def _set_aside_corrupt() -> None:
             pass
 
 
+# Swarm P11: busy_timeout is a 5 s BLOCK per contending call under a shared
+# NX_HOME (every agent's per-turn indexed save takes the one WAL write lock).
+# Everything in this store is a cache that degrades to a full JSON parse on
+# any sqlite3.Error, so a shorter wait + one bounded retry beats a 5 s stall
+# on the hot save path. Env-tunable (tests shrink it).
+def _busy_timeout_ms() -> int:
+    return max(1, _env_int("NX_STORE_BUSY_TIMEOUT_MS", 750))
+
+
 def _connect() -> sqlite3.Connection:
     d = _sessions_dir()
     try:
@@ -88,9 +100,10 @@ def _connect() -> sqlite3.Connection:
             _open_file_private(path)
         except OSError:
             pass
-    conn = sqlite3.connect(path, timeout=5.0)
+    timeout = _busy_timeout_ms() / 1000.0
+    conn = sqlite3.connect(path, timeout=timeout)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={_busy_timeout_ms()}")
     return conn
 
 
@@ -117,21 +130,36 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 def _open() -> Optional[sqlite3.Connection]:
     """An open, schema-correct connection — or None when the store can't
     serve this call (unreadable dir, locked/lost file, no FTS5). Every
-    caller treats None as "fall back to a full parse"."""
-    for attempt in (1, 2):
+    caller treats None as "fall back to a full parse".
+
+    Swarm P11: a *busy* lock ("database is locked") is contention, not
+    corruption — retry it with a small jittered backoff instead of treating
+    it like the corrupt-file path (one attempt + set-aside) or waiting out
+    the full busy_timeout twice. The corrupt-vs-busy distinction is the
+    whole point: a corrupt file is retried after being set aside; a busy
+    file must never be set aside."""
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(0.02 * (2 ** (attempt - 1)) + random.random() * 0.01)
         try:
             conn = _connect()
             _ensure_schema(conn)
             return conn
         except sqlite3.OperationalError as e:
-            # locked / disk error / no such dir — one retry after setting a
-            # corrupt file aside (a message like "file is not a database")
-            if attempt == 2 or "not a database" not in str(e):
-                _log_event("error", {"where": "storeindex", "error": str(e)})
+            last_err = e
+            msg = str(e)
+            if "locked" in msg or "busy" in msg:
+                continue  # contention: bounded retry, never a set-aside
+            # disk error / no such dir — one retry after setting a corrupt
+            # file aside (a message like "file is not a database")
+            if attempt >= 1 or "not a database" not in msg:
+                _log_event("error", {"where": "storeindex", "error": msg})
                 return None
             _set_aside_corrupt()
         except sqlite3.DatabaseError:
             _set_aside_corrupt()
+    _log_event("error", {"where": "storeindex", "error": str(last_err)})
     return None
 
 
@@ -313,26 +341,20 @@ def prune_stale() -> int:
     """Delete rows whose session JSON is gone (crash / manual rm — /delete
     already removes its own row). Returns rows pruned. O(#rows) os.stat
     calls, so it runs on indexed saves and from --prune."""
+    # Swarm P11: one connection spans the read AND the delete (was two —
+    # a fresh connect + 2 PRAGMAs per save-sweep on the shared store).
     conn = _open()
     if conn is None:
         return 0
     doomed: list[str] = []
     try:
         rows = conn.execute("SELECT session_id FROM sessions").fetchall()
-    except sqlite3.Error:
-        return 0
-    finally:
-        conn.close()
-    d = _sessions_dir()
-    for (sid,) in rows:
-        if not os.path.exists(os.path.join(d, f"{sid}.json")):
-            doomed.append(sid)
-    if not doomed:
-        return 0
-    conn = _open()
-    if conn is None:
-        return 0
-    try:
+        d = _sessions_dir()
+        for (sid,) in rows:
+            if not os.path.exists(os.path.join(d, f"{sid}.json")):
+                doomed.append(sid)
+        if not doomed:
+            return 0
         with conn:
             for sid in doomed:
                 conn.execute("DELETE FROM sessions WHERE session_id = ?",

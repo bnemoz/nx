@@ -124,16 +124,23 @@ def _indexed_mtime(conn: sqlite3.Connection, session_id: str) -> Optional[float]
     return row[0] if row else None
 
 
-def _refresh_index(force: bool = False) -> int:
+def _refresh_index(force: bool = False,
+                   conn: Optional[sqlite3.Connection] = None) -> int:
     """Re-index session files that are newer than their indexed row, and
     drop FTS rows whose session JSON is gone (the 2.3b stale-row prune the
     old .search.sqlite never did — /sessions <query> could offer a deleted
     id). Returns the number of sessions (re)indexed. Cheap: untouched
-    sessions are skipped after a single mtime comparison."""
+    sessions are skipped after a single mtime comparison.
+
+    Swarm P11: accepts a caller-owned connection so search_sessions' old
+    open-refresh-close + open-again shape (two fresh connects + 2 PRAGMAs
+    + two schema-ensures per content search) becomes one."""
     from ._sessions_fs import _load_session, _sessions_dir
-    conn = _open_store()
-    if conn is None:
-        return 0
+    own = conn is None
+    if own:
+        conn = _open_store()
+        if conn is None:
+            return 0
     n = 0
     try:
         d = _sessions_dir()
@@ -157,7 +164,8 @@ def _refresh_index(force: bool = False) -> int:
             index_session(sid, data, mtime, conn)
             n += 1
     finally:
-        conn.close()
+        if own:
+            conn.close()
     return n
 
 
@@ -169,14 +177,15 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
     query = (query or "").strip()
     if not query:
         return []
-    try:
-        n = _refresh_index()
-    except sqlite3.OperationalError:
-        return []
+    # Swarm P11: one connection serves the refresh AND the query.
     conn = _open_store()
     if conn is None:
         return []
     try:
+        try:
+            _refresh_index(conn=conn)
+        except sqlite3.OperationalError:
+            return []
         try:
             rows = conn.execute(
                 "SELECT session_id, title, description, body, "
