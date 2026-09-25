@@ -128,7 +128,7 @@ def _subagent_max_turns() -> int:
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Hand one investigation to a read-only sub-agent (changes no files) that returns only its findings. PROACTIVELY spawn one per independent area for multi-file work you haven't read -- callers/uses of a symbol, cross-module traces, unfamiliar code. ONE CALL PER QUESTION, all in one turn; they run concurrently. Not for: one known file, one targeted search, edits in progress.",
+    "description": "Hand one task or investigation to a sub-agent that returns only its findings. Read-tier agents (default) change no files; write/implement tiers can edit files when NX_SUBAGENT_WRITE=1. PROACTIVELY spawn one per independent area for multi-file work you haven't read -- callers/uses of a symbol, cross-module traces, unfamiliar code, and independent multi-file edits (tier='write'/'implement'). ONE CALL PER QUESTION, all in one turn; they run concurrently. Not for: one known file, one targeted search, or edits already in progress.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
@@ -869,11 +869,10 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         # honestly — the user opted out of approval entirely. Refuse only when
         # the posture could not approve a quiet write.
         if t in ("write", "implement") and not st.YOLO:
-            return ("ERROR: tier='" + t + "' cannot run in the background — "
-                    "a detached thread has nobody to approve its edits (and "
-                    "this session is not in yolo mode, so they would be "
-                    "silently auto-denied). Re-spawn with async:false, or run "
-                    "with --yolo to authorize unattended background writers.")
+            # Don't burn a turn on a refusal when a foreground spawn works:
+            # downgrade to foreground (same contract the error message told
+            # the model to use) instead of erroring out.
+            return _run_sync_agent(instruction, max_turns, tier=t, scope=scope)
         if st.client is None or st.MODEL is None:
             return "ERROR: no active model source"
         if _subagent_ctx() is not None:  # no recursive fan-out from inside a sub-agent

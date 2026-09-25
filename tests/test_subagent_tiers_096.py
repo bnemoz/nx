@@ -43,10 +43,20 @@ def test_write_tier_requires_env(tmp_path, monkeypatch):
     assert "NX_SUBAGENT_WRITE=1" in out and out.startswith("ERROR:")
 
 
-def test_write_tier_refused_async_explicitly(tmp_path, monkeypatch):
+def test_write_tier_async_downgrades_to_foreground_without_yolo(tmp_path, monkeypatch):
+    # 0.99.1: instead of burning a turn on a refusal, a background write-tier
+    # spawn in a non-yolo session silently DOWNGRADES to foreground (the same
+    # contract the old error message told the model to apply manually).
     _setup(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_sync(instruction, max_turns, tier="read", scope=None):
+        captured["tier"] = tier
+        return "fg ok"
+
+    monkeypatch.setattr(S, "_run_sync_agent", fake_sync)
     out = S.spawn_agent("x", tier="implement", **{"async": "true"})
-    assert out.startswith("ERROR:") and "async:false" in out
+    assert out == "fg ok" and captured["tier"] == "implement"
 
 
 def test_write_tier_async_allowed_under_yolo(tmp_path, monkeypatch):
@@ -60,9 +70,6 @@ def test_write_tier_async_allowed_under_yolo(tmp_path, monkeypatch):
         assert not out.startswith("ERROR:"), out
     finally:
         nx._state.YOLO = False
-    # and without yolo the refusal names both fixes (async:false / --yolo)
-    out = S.spawn_agent("x", tier="write", **{"async": "true"})
-    assert "async:false" in out and "--yolo" in out
 
 
 def test_bad_tier_and_scope_refused(tmp_path, monkeypatch):

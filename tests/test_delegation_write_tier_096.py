@@ -17,6 +17,7 @@ def test_write_guidance_absent_without_authorization(monkeypatch):
     content = d._load_delegation_note()["content"]
     assert "tier=" not in content
     assert content.endswith("instead.]")
+    assert "every edit" not in content
 
 
 def test_write_guidance_present_when_authorized(monkeypatch):
@@ -26,7 +27,7 @@ def test_write_guidance_present_when_authorized(monkeypatch):
     assert "tier='write'" in content and "'implement'" in content
     assert "async=false" in content and "scope" in content
     assert "worktree" in content
-    assert content.endswith("merge or cherry-pick from it.]")
+    assert content.endswith("review/merge of what agents produced.]")
 
 
 def test_marker_contract_kept(monkeypatch):

@@ -31,8 +31,10 @@ DELEGATION_GUIDANCE = (
     "enter your context (that's the whole point: delegation without bloat).\n"
     "- Map an unfamiliar repo, trace a behavior across modules, or enumerate a "
     "symbol's callers: delegate the sweep, keep the answer.\n"
-    "- Do it yourself for a file you've already read, one targeted "
-    "search_files/read_file, and every edit you're making.\n"
+    "- Do it yourself for a file you've already read or one targeted "
+    "search_files/read_file. Multi-file edits you haven't started yet are a "
+    "prime write-delegation candidate: hand each one to an agent (see below) "
+    "instead of editing serially yourself.\n"
     "- spawn_agent is backgrounded by default: you get a job id now and the "
     "answer arrives as a [Runtime note] plus report path on a later turn; "
     "async=false runs it in the foreground instead.]"
@@ -55,7 +57,12 @@ WRITE_TIER_GUIDANCE = (
     "- With NX_SUBAGENT_WORKTREE=1 each write-tier agent gets its own git "
     "worktree (its paths, test runs and commits land there, never the shared "
     "tree), so parallel write agents are safe even with overlapping scopes; "
-    "the finished report names the worktree — merge or cherry-pick from it.]"
+    "the finished report names the worktree — merge or cherry-pick from it.\n"
+    "- Delegating implementation is the expectation, not a fallback: for any "
+    "3-4+ step coding task, prefer spawning a tier='write' (or 'implement') "
+    "agent per independent concern over grinding through the edits yourself. "
+    "Keep for yourself: edits to a file already fully in hand, single-line "
+    "fixes, and the final review/merge of what agents produced.]"
 )
 
 # The marker _add_delegation_note_if_absent scans for (and _memory_note.py's
