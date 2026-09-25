@@ -25,6 +25,11 @@ _SUBAGENT_BASH_ALLOW = frozenset((
     "grep", "egrep", "fgrep", "rg", "ls", "pwd", "cat", "head", "tail", "wc",
     "find", "du", "df", "stat", "file", "diff", "tree", "realpath", "basename",
     "dirname", "which", "type", "ps", "pgrep", "md5sum", "sha256sum",
+    # harmless text utilities: each reads stdin/files and only prints, so they
+    # can't mutate anything even chained conceptually (pipes are still refused
+    # by the no-metacharacters rule; these run as single commands only).
+    "sort", "uniq", "cut", "paste", "join", "column", "comm", "fold",
+    "nl", "rev", "tac", "expand", "unexpand", "seq", "date",
 ))
 
 

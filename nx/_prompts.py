@@ -83,7 +83,9 @@ SUBAGENT_SYSTEM = (
     "the question, batching independent lookups into parallel tool calls in "
     "one turn. Answer from what you have rather than exhausting every lead. "
     "You cannot write or edit; run_bash is limited to a read-only allowlist "
-    "(grep, ls, du, ps, git log, ...)."
+    "(grep, ls, sort, cut, paste, join, du, ps, git log, ...). For joining, "
+    "aggregating, or filtering data files (CSV/Parquet/JSON) prefer the "
+    "duckdb tool over shell utilities — it reads the files directly in SQL."
 )
 
 SUBAGENT_WRITE_SYSTEM = (
@@ -93,7 +95,10 @@ SUBAGENT_WRITE_SYSTEM = (
     "change is shown to the user as a diff and confirmed by them — the "
     "sub-agent pauses at each prompt; in a yolo/headless session edits are "
     "auto-approved, so self-discipline (verify as you go) replaces the gate. "
-    "run_bash is limited to a read-only allowlist (git diff, grep, ls, ...). "
+    "run_bash is limited to a read-only allowlist (git diff, grep, sort, cut, "
+    "paste, join, ls, ...). For joining, aggregating, or filtering data files "
+    "(CSV/Parquet/JSON) prefer the duckdb tool over shell utilities — it "
+    "reads the files directly in SQL. "
     "Read files, make the edits, verify, then reply in plain prose with what "
     "changed (paths + what each edit did) and anything the parent must finish "
     "itself — no preamble, no plan narration."

@@ -511,7 +511,10 @@ memory_write to persist a durable learning (scope=project for this repo,
 global for cross-project).
 
 Data analysis: prefer the duckdb tool (SQL over CSV/Parquet/JSON files
-directly) over pandas scripts for aggregation/filtering."""
+directly) over pandas scripts for aggregation/filtering. Sub-agents have
+the same duckdb tool — for any join/aggregate/filter task, tell the
+sub-agent to use duckdb rather than expecting shell scripting (its
+run_bash is a read-only single-command allowlist: no pipes, no python)."""
 
 from ._env import _env_int, _env_float
 

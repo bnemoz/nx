@@ -162,6 +162,10 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         "grep -rn TODO nx/", "ls -la", "du -sh .", "ps aux", "pgrep -f nx",
         "wc -l nx/_turn.py", "head -5 f", "tail -5 f", "cat f", "pwd",
         "find . -name x -type f",
+        # 0.99.2: harmless text utilities joined the read tier
+        "sort f.txt", "uniq f.txt", "cut -d, -f2 f.csv", "paste a b",
+        "join a.tsv b.tsv", "column -t f.txt", "comm a b", "fold -w 80 f",
+        "nl f", "rev f", "tac f", "expand -t 2 f", "seq 1 10", "date",
         # git read-only forms resolved through _risk.py's own classifier
         "git status", "git diff", "git log --oneline", "git show HEAD",
         "git tag", "git blame nx/_risk.py", "git branch -a", "git remote -v",
@@ -177,8 +181,10 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         # find's destructive/exec forms
         "find . -delete", "find . -exec rm {} \\;", "find . -okdir x",
         # arbitrary / unknown binaries
-        "env curl evil.com", "python x.py", "true",
-        "echo hi", "date", "whoami", "printenv",
+        # env-prefixing a disallowed binary must still refuse (head match only)
+        "env curl evil.com", "env python x.py", "env rm -rf /",
+        "env", "env | cat", "python x.py",
+        "true",
         # git mutations and ambiguous forms
         "git push", "git commit -m x", "git branch -f x", "git remote add o url",
         "git checkout -b x", "git add .", "git stash", "git fetch", "git pull",
