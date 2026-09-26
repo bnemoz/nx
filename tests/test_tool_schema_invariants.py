@@ -206,6 +206,30 @@ def test_schema_arguments_exist_on_the_body(tool):
         missing = (set(_fn(tool)["parameters"].get("properties") or {})
                    - accepted - ARG_NAME_EXCEPTIONS.get(name, set()))
         assert not missing, f"{name}: schema args the body never reads: {sorted(missing)}"
+    elif not accepted:
+        accepted = {p.name for p in sig.parameters.values()
+                    if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+        missing = (set(_fn(tool)["parameters"].get("properties") or {})
+                   - accepted - ARG_NAME_EXCEPTIONS.get(name, set()))
+        assert not missing, f"{name}: schema args the body never reads: {sorted(missing)}"
+
+
+def test_alternative_argument_forms_are_schema_expressible():
+    by_name = {_fn(t)["name"]: _fn(t) for t in _all_tools()}
+    plan = by_name["plan_edit"]["parameters"]
+    web = by_name["web_fetch"]["parameters"]
+    assert any(branch.get("required") == ["write"]
+               for branch in plan["oneOf"])
+    assert {tuple(branch["required"]) for branch in web["oneOf"]} == {
+        ("query",), ("url",)
+    }
+    for schema, name in ((plan, "plan_edit"), (web, "web_fetch")):
+        grammar, _ = build_tool_call_grammar([{
+            "type": "function", "function": {
+                "name": name, "description": "test.", "parameters": schema
+            }
+        }])
+        assert grammar and f"args-{name}-oneof-0" in grammar
 
 
 def test_mutating_and_read_only_sets_stay_in_agreement_with_plan_gating():

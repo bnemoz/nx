@@ -166,7 +166,18 @@ PLAN_EDIT_TOOL = {"type": "function", "function": {
         "old": {"type": "string", "description": "Literal passage to replace, matching exactly once"},
         "old_lines": {"type": "string", "description": "Line range to replace, 'N' or 'N-M', as numbered by read_file"},
         "write": {"type": "string", "description": "Full replacement plan body; omit `old`/`old_lines`"},
-    }, "required": ["new"]},
+    }, "oneOf": [
+        # A full rewrite is the documented alternative to a splice.  Keep
+        # this at the schema level so native callers may send {"write": ...}
+        # without inventing a meaningless `new` value.
+        {"required": ["write"], "not": {"anyOf": [
+            {"required": ["new"]},
+            {"required": ["old"]},
+            {"required": ["old_lines"]},
+        ]}},
+        {"required": ["new", "old"]},
+        {"required": ["new", "old_lines"]},
+    ]},
 }}
 
 

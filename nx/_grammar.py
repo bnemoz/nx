@@ -118,6 +118,9 @@ def _assert_required_before_optional(schema: dict[str, Any], owner: str) -> None
             item = pschema.get("items")
             if isinstance(item, dict) and item.get("type") == "object":
                 _assert_required_before_optional(item, f"{owner}.{pname}")
+    for i, branch in enumerate(schema.get("oneOf") or ()):
+        if isinstance(branch, dict):
+            _assert_required_before_optional(branch, f"{owner}.oneOf[{i}]")
 
 
 def _json_value_ref(schema: Any, rule_name: str, rules: dict[str, str]) -> str:
@@ -238,6 +241,18 @@ def _args_region_rule(params: dict[str, Any], rule_name: str,
     the grammar steers to schema order). Returns the rule NAME, which is always
     defined (empty schemas get an empty region) so the per-tool args-<name>
     rule exists for every tool."""
+    branches = params.get("oneOf")
+    if isinstance(branches, list) and branches:
+        refs = []
+        for i, branch in enumerate(branches):
+            if not isinstance(branch, dict):
+                continue
+            branch_name = f"{rule_name}-oneof-{i}"
+            refs.append(_args_region_rule(branch, branch_name, rules))
+        if refs:
+            rules[rule_name] = " | ".join(refs)
+            return rule_name
+
     parts: list[str] = []
     required = set(params.get("required") or [])
     for pname, pschema in (params.get("properties") or {}).items():

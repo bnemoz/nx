@@ -481,7 +481,13 @@ WEB_FETCH_TOOL = {
                 "query": {"type": "string", "description": "Web search string (DuckDuckGo lite); returns up to 10 title/URL/snippet results to follow up with a url fetch"},
                 "url": {"type": "string", "description": "Absolute http(s) URL to fetch and convert to readable text; truncated at NX_WEBFETCH_MAX_BYTES"},
             },
-            "required": [],
+            # The body has always required exactly one operation.  Encode the
+            # same contract for native/schema-aware callers; the text grammar
+            # expands these branches into equivalent argument alternatives.
+            "oneOf": [
+                {"required": ["query"], "not": {"required": ["url"]}},
+                {"required": ["url"], "not": {"required": ["query"]}},
+            ],
         },
     },
 }
