@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.99.5"
+version = "0.100.0"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -15,8 +15,13 @@ classifiers = [
 dependencies = [
     "httpx",
     "rich",
-    "pymupdf4llm",
 ]
+
+[project.optional-dependencies]
+# PDF mentions work out of the box via mupdf-tools/poppler-utils/tesseract on
+# PATH (see nx/_pdf_cli.py); pymupdf4llm remains a pip-only in-process
+# fallback for environments with none of those binaries.
+pdf = ["pymupdf4llm"]
 
 [project.scripts]
 nx = "nx:main"

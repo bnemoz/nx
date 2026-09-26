@@ -1,9 +1,10 @@
-"""0.65.0: @pdf mentions — an @doc.pdf token is extracted to markdown text via
-pymupdf4llm and inlined like any other mention. pymupdf4llm is a HARD
-dependency since 0.75.0 (lazily imported); these tests drive the extractor
-through a fake module injected
-on sys.modules (offline, no PyMuPDF needed) and cover the missing-dependency
-note, the page cap, and the two failure modes.
+"""0.65.0: @pdf mentions — an @doc.pdf token is extracted to markdown text
+via the extraction chain and inlined like any other mention. Since 0.100.0
+the primary path is CLI binaries (mutool convert -F markdown → pdftotext →
+tesseract OCR, see nx/_pdf_cli.py); pymupdf4llm is a lazily-imported fallback
+(demoted from a hard dependency in 0.100.0). The fallback tests drive the
+in-process path through fake modules injected on sys.modules (offline, no
+PyMuPDF needed); CLI-path tests fake the binaries with stub scripts.
 """
 import importlib
 import os
@@ -17,6 +18,18 @@ for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR",
     os.environ.pop(k, None)
 
 import pytest
+
+
+def _no_toolchain(monkeypatch):
+    """Force the in-process fallback path: hide the CLI binaries the CLI
+    extractor looks for (a bare test env usually has none of them anyway,
+    but poppler-utils is common on CI images)."""
+    import shutil
+    orig_which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda n: None if n in ("mutool", "pdftotext",
+                                                "pdfinfo", "pdftoppm",
+                                                "tesseract") else orig_which(n))
 
 
 @pytest.fixture()
@@ -80,6 +93,7 @@ def _install_fake(monkeypatch, *, pages=3, markdown="# Title\n\nBody text.\n",
 def test_pdf_mention_inlines_markdown(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
+    _no_toolchain(monkeypatch)
     seen = _install_fake(monkeypatch, markdown="# Heading\n\nparagraph\n")
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("summarize @doc.pdf")
@@ -93,19 +107,43 @@ def test_pdf_mention_inlines_markdown(nx_fresh, monkeypatch):
 def test_pdf_mention_missing_dependency_is_soft_note(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
-    # pymupdf4llm is a hard core dependency since 0.91.5, but the import stays
-    # lazy: a broken install still degrades to a one-line note naming the fix,
-    # never an aborted turn.
+    _no_toolchain(monkeypatch)
+    # pymupdf4llm was demoted from a hard dependency in 0.100.0 (CLI binaries
+    # are the primary path), but the in-process fallback import stays lazy: a
+    # missing toolchain AND missing pymupdf4llm still degrade to a one-line
+    # note naming the fix, never an aborted turn.
     monkeypatch.setitem(sys.modules, "pymupdf4llm", None)
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("read @doc.pdf")
     assert isinstance(out, str)
-    assert "not inlined" in out and "pymupdf4llm" in out and "uv pip install" in out
+    assert "not inlined" in out and "pymupdf4llm" in out
+
+
+def test_pdf_mention_cli_toolchain_used(nx_fresh, monkeypatch, tmp_path):
+    """0.100.0: when mutool/pdftotext are on PATH the CLI chain runs and the
+    in-process pymupdf import is never touched."""
+    nx, tmp = nx_fresh
+    _pdf(tmp)
+    # Fake binaries: a stub 'pdftotext' and 'pdfinfo' on a temp PATH.
+    bindir = tmp / "bin"
+    bindir.mkdir()
+    (bindir / "pdfinfo").write_text(
+        "#!/bin/sh\necho 'Pages:          3'\n")
+    (bindir / "pdftotext").write_text(
+        "#!/bin/sh\n# -layout -f N -l N file.pdf -\necho 'Layouted text from CLI'\n")
+    for p in (bindir / "pdfinfo", bindir / "pdftotext"):
+        p.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    import nx._pdf as pdf_mod
+    assert pdf_mod.extract_pdf(str(tmp / "doc.pdf")) \
+        .endswith("(PDF, 3 pages)\nLayouted text from CLI\n") or \
+        "Layouted text from CLI" in pdf_mod.extract_pdf(str(tmp / "doc.pdf"))
 
 
 def test_pdf_page_cap_truncates_and_names_range(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
+    _no_toolchain(monkeypatch)
     seen = _install_fake(monkeypatch, n_pages=120)
     os.environ["NX_PDF_MAX_PAGES"] = "10"
     from nx._mentions import expand_at_mentions
@@ -117,6 +155,7 @@ def test_pdf_page_cap_truncates_and_names_range(nx_fresh, monkeypatch):
 def test_pdf_cap_zero_means_no_cap(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
+    _no_toolchain(monkeypatch)
     seen = _install_fake(monkeypatch, n_pages=120)
     os.environ["NX_PDF_MAX_PAGES"] = "0"
     from nx._mentions import expand_at_mentions
@@ -128,6 +167,7 @@ def test_pdf_cap_zero_means_no_cap(nx_fresh, monkeypatch):
 def test_open_failure_degrades_to_error(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
+    _no_toolchain(monkeypatch)
     _install_fake(monkeypatch, open_raises=RuntimeError("corrupt"))
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("@doc.pdf")
@@ -137,6 +177,7 @@ def test_open_failure_degrades_to_error(nx_fresh, monkeypatch):
 def test_empty_extraction_note(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     _pdf(tmp)
+    _no_toolchain(monkeypatch)
     _install_fake(monkeypatch, markdown="   \n")
     from nx._mentions import expand_at_mentions
     out = expand_at_mentions("@doc.pdf")
