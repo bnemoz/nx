@@ -107,7 +107,11 @@ import nx as m  # noqa: E402
 # "under ~5K" (README updated to match). No tier-2 displacement was chosen
 # deliberately: search_tools-discovery costs a round-trip exactly when a data
 # question is already on the table.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 4800)  # hard: recorded, justified
+# 0.99.4: the SYSTEM prompt now carries the exact 12-line Minimalism policy,
+# replacing the shorter prose block. The measured floor is 4740 tokens with
+# chars/3.5; BUDGET_TOKENS rises 4800→5200 to record deliberate headroom for
+# this load-bearing policy and keep the prompt budget from landing on the cap.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5200)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 
