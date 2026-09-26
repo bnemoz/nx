@@ -533,6 +533,8 @@ output, a slow one backgrounds (result gives PID + log path -- read_file it).
 in_progress at a time). Re-issue todo_write as the work or its scope grows.
 
 Memory: memory_search before re-deriving something already learned;
+recall_lessons searches full PAST SESSION transcripts when memory_search
+misses — worth a call before re-deriving a nontrivial recipe or gotcha.
 memory_write to persist a durable learning (scope=project for this repo,
 global for cross-project).
 
