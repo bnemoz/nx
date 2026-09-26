@@ -213,6 +213,56 @@ def test_run_bash_refuses_trapped_command_without_launching(nx_fresh, monkeypatc
     assert not launched
 
 
+# --- suffixed terminator trap (pre-flight diagnosis) --------------------------
+
+from nx._bash_jobs import _heredoc_terminator_suffix_trap
+
+
+def test_suffix_trap_fires_on_reported_shape():
+    """The exact field failure: '2>&1' glued onto the terminator line."""
+    cmd = "cat > /tmp/x <<EOF\nbody\nEOF 2>&1"
+    msg = _heredoc_terminator_suffix_trap(cmd)
+    assert msg is not None
+    assert "2>&1" in msg
+    assert "nothing was garbled" in msg  # names the misdiagnosis
+    assert "EOF 2>&1" in repr(msg) or "EOF 2>&1" in msg
+
+
+def test_suffix_trap_fires_for_chain_and_redirection():
+    for tail in ("EOF && echo done", "EOF > /tmp/out"):
+        cmd = "cat <<EOF\nbody\n" + tail
+        assert _heredoc_terminator_suffix_trap(cmd) is not None, tail
+
+
+def test_wellformed_heredocs_not_flagged():
+    ok = [
+        "cat <<EOF\nbody\nEOF",
+        "cat <<EOF\nbody\nEOF\n",
+        "cat <<EOF 2>&1\nbody\nEOF",        # redirection on the OPERATOR line: legal
+        "cat <<-'EOF'\n\tbody\n\tEOF",
+        "cat <<EOF\nbody\nEOF\necho next",  # bare terminator present somewhere
+        "cat <<EOF\nEOF is a word in the body\nx\nEOF",  # legal body line w/ delim
+    ]
+    for cmd in ok:
+        assert _heredoc_terminator_suffix_trap(cmd) is None, cmd
+
+
+def test_quoted_delimiter_suffix_trap():
+    """Quoted delimiter decodes; trap fires on the decoded terminator."""
+    cmd = "cat <<'EOF'\nbody\nEOF 2>&1"
+    assert _heredoc_terminator_suffix_trap(cmd) is not None
+
+
+def test_run_bash_refuses_suffixed_terminator(nx_fresh, monkeypatch):
+    from nx import _bash_jobs
+    launched: list[str] = []
+    monkeypatch.setattr(_bash_jobs, "_run_bash",
+                        lambda c: launched.append(c) or ("0", "/dev/null"))
+    msg = _bash_jobs.run_bash("cat <<EOF\nbody\nEOF 2>&1")
+    assert "nothing was garbled" in msg
+    assert not launched
+
+
 def test_run_bash_still_runs_good_heredoc(nx_fresh, monkeypatch):
     """The pre-flight check must not scare off legitimate heredocs."""
     nx, _ = nx_fresh

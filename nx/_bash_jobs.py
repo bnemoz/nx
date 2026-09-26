@@ -127,6 +127,36 @@ def _heredoc_quote_trap(command: str) -> str | None:
     return None
 
 
+def _heredoc_terminator_suffix_trap(command: str) -> str | None:
+    """Detect a heredoc whose terminator line carries trailing text.
+
+    The other half of the fused-quote trap: a model appends a redirection or
+    chain onto the terminator line (a trailing "2>&1", "EOF > /tmp/x", or an
+    "&&" chain). The shell matches the terminator against the WHOLE line, so
+    that line is no longer the delimiter, the heredoc swallows everything
+    after it (including the exit-trailer wrapper's closing paren) and sh dies
+    at parse time. The model sees a nonsense parse error plus its own stray
+    redirection echoed back and misdiagnoses "the shell is garbling my
+    commands" — a belief it then carries for the whole session. This check
+    names the real culprit and states that the shell ran the command verbatim.
+
+    Fires only when no bare-terminator line exists after the operator AND a
+    line that starts with the delimiter carries trailing content — the
+    intended terminator with junk glued on. A delimiter line with trailing
+    text elsewhere in a well-formed heredoc (an unlikely but legal body line)
+    stays silent, as does a redirection on the OPERATOR line (a "<<EOF 2>&1"
+    operator), which is legal shell.
+
+    Returns a human-readable explanation, or None when no trap is present.
+    Diagnosis only — never rewrites the command.
+    """
+    for m in re.finditer(r"<<(-?)([ \t]*)(\S+)", command):
+        _t = _heredoc_terminator_scan(m, command)
+        if _t:
+            return _t
+    return None
+
+
 def _run_bash(command: str) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
@@ -200,6 +230,57 @@ def _run_bash(command: str) -> tuple[str, str]:
         except OSError:
             pass
     return pid, log_path
+
+
+def _suffix_trap_msg(term_line: str, core: str) -> str:
+    """The diagnosis for a terminator line that carries trailing text."""
+    fix = "cmd <<'{}' ... {} 2>&1".format(core, core)
+    tail = ("Put the terminator {!r} alone on its line and put the "
+            "redirection on the command line: {}").format(core, fix)
+    mid = ("The terminator line reads {!r}: the shell matches the delimiter "
+           "against the WHOLE line, so any trailing text (a redirection such "
+           "as 2>&1, a && chain) glued onto {!r} makes that line part of the "
+           "heredoc body.").format(term_line, core)
+    return ("ERROR: this heredoc never terminated, so the command died at "
+            "parse time — the shell ran it verbatim, nothing was garbled. "
+            + mid + " " + tail)
+
+
+def _heredoc_terminator_scan(m, command: str) -> str | None:
+    """Per-operator scan behind _heredoc_terminator_suffix_trap."""
+    delim = m.group(3)
+    in_sq = in_dq = False
+    if "'" in delim or '"' in delim or "\\" in delim:
+        # Decode a quoted delimiter the way the shell would: the closing
+        # terminator is spelled with the decoded word, quotes stripped.
+        decoded_chars: list[str] = []
+        for ch in delim:
+            if ch == "'" and not in_dq:
+                in_sq = not in_sq
+            elif ch == '"' and not in_sq:
+                in_dq = not in_dq
+            elif ch == "\\" and not in_sq and not in_dq:
+                continue
+            else:
+                decoded_chars.append(ch)
+        core = "".join(decoded_chars).strip("'\"\\")
+    else:
+        core = delim
+    if not core or in_sq or in_dq:
+        return None
+    rest = command[m.end():]
+    # <<-'EOF' allows leading TABS on the terminator; without the dash no
+    # leading whitespace ever matches, so require the line to start with the
+    # delimiter itself (tabs allowed only when the operator was <<-).
+    lead = r"[ \t]*" if m.group(1) else ""
+    bare = re.compile(r"(?m)^" + lead + re.escape(core) + r"[ \t]*$")
+    if bare.search(rest):
+        return None  # the heredoc closes properly somewhere — not this trap
+    suffixed = re.search(r"(?m)^" + lead + re.escape(core) + r"[ \t]+(\S.*)$",
+                         rest)
+    if not suffixed:
+        return None
+    return _suffix_trap_msg(suffixed.group(0), core)
 
 
 def _pid_start_time(pid: int | str) -> str | None:
@@ -577,7 +658,7 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     NX_BASH_SLEEP_CAP (default 3600) bounds the sleep-inferred poll window so
     "sleep 1d && cmd" cannot block the turn for a day; 0 disables the cap.
     """
-    trap = _heredoc_quote_trap(command)
+    trap = _heredoc_quote_trap(command) or _heredoc_terminator_suffix_trap(command)
     if trap:
         return trap
     # Harness-side upgrade (0.64.2): the model sometimes writes a grep-family
