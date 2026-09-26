@@ -125,6 +125,14 @@ CLAUDE.md. Beyond the schema itself:
 
 ## SoL-Pi mechanism ports (0.67.0)
 
+Cross-session learning recall (`nx/_lessons.py`, `recall_lessons`, 0.102.0)
+is the other read-only retrieval tool next to `memory_search`: BM25 over the
+session store's FTS index. Its touch points when editing it: the schema in
+`nx/__init__.py` TOOLS, one `DISPATCH` entry, the `_CACHEABLE_READ_TOOLS`
+read-only cache tuple, `PLAN_READONLY_TOOLS` (nx/_plan.py), and
+`_READ_ONLY_TOOL_NAMES` (nx/_subagent_tiers.py). It has no `_TOOL_GATES`
+entry (always-on, like memory_search) and is capped by `NX_LESSONS_LIMIT`.
+
 Four opt-in mechanisms ported from the SoL-Pi (pi harness) extension, each a
 focused module with an env gate (fusion default ON since 0.67.1; the other
 three default OFF; see README's env table):

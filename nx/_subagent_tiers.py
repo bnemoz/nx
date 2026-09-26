@@ -25,7 +25,7 @@ from ._subagent_tls import _SUBAGENT_TLS, _subagent_ctx  # noqa: F401 (re-export
 # never wait_background.
 _READ_ONLY_TOOL_NAMES = (
     "read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log",
-    "memory_search", "run_bash",
+    "memory_search", "recall_lessons", "run_bash",
 )
 
 # Tools offered only when the write tier is on (NX_SUBAGENT_WRITE=1): the

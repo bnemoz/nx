@@ -371,6 +371,9 @@ TOOLS: list[dict[str, Any]] = [
     # keeps every FUTURE always-on tool free — a model that needs a withheld
     # tool asks for its schema here instead of it riding every request.
     {"type": "function", "function": {"name": "search_tools", "description": "List tools not offered this turn (tier-2/withheld), with their full schemas so one can be used on the next turn. Returns name + schema JSON per tool.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string", "description": "Regex (ignored case) matched against tool names and descriptions; empty lists everything withheld"}}}}},
+    # recall_lessons (schema here, body in nx/_lessons.py, 0.102.0): BM25 over
+    # the session store's FTS index — read-only, always-on (like memory_search).
+    {"type": "function", "function": {"name": "recall_lessons", "description": "BM25-ranked search over PAST SESSION transcripts (cross-session learning): has a previous chat already solved/learned this? Returns session ids + snippets, best first. Unlike memory_search (curated saved notes) this searches full transcripts. Read-only, no approval.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "FTS5 match text: terms are ANDed; OR / \"quoted phrases\" / NEAR allowed. A syntax error returns no hits, so prefer plain words"}, "scope": {"enum": ["all", "project", "global"], "description": "all (default) = every session in the store; project = only sessions whose cwd matches this project root; global = alias of all"}}, "required": ["query"]}}},
 ]
 
 # Only offered once a run_bash call has actually backgrounded this session
@@ -853,6 +856,9 @@ NX_WEBFETCH = WEBFETCH_ENABLED
 # tool (default off — most sessions lint via CI or verify hooks instead).
 # NX_LINT_CMD overrides the fixed command shape; NX_LINT_TIMEOUT caps the call.
 NX_LINT = LINT_ENABLED
+# recall_lessons (nx/_lessons.py, 0.102.0): result cap for the BM25
+# cross-session recall tool (default 5; 0 = unbounded). Read at call time.
+NX_LESSONS_LIMIT = _env_int("NX_LESSONS_LIMIT", 5)
 
 
 from ._compress import (
@@ -927,6 +933,9 @@ from ._repl import (
     _render_transcript_for_memory, memory_write, memory_search, memory_delete,
     _load_memory_note, _write_memory_file,
 )
+# Cross-session learning recall (nx/_lessons.py, 0.102.0): BM25 over the
+# session store's FTS index — read-only, always-on alongside memory_search.
+from ._lessons import recall_lessons, search_lessons  # noqa: F401 (re-export)
 
 # --- resume (one path for --resume and /resume — see nx/_resume.py) ---------
 from ._resume import resume_session, resumed_messages, restore_endpoint, restore_cwd

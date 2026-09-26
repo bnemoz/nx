@@ -47,8 +47,8 @@ PLAN_GATE_TOOLS = frozenset((
 # else") so a future state-touching tool can't silently slip past the gate.
 PLAN_READONLY_TOOLS = frozenset((
     "read_file", "list_dir", "search_files", "git_status", "git_diff",
-    "git_log", "memory_search", "read_image", "plan_edit", "todo_write",
-    "spawn_agent", "wait_background",
+    "git_log", "memory_search", "recall_lessons", "read_image", "plan_edit",
+    "todo_write", "spawn_agent", "wait_background",
 ))
 
 

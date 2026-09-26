@@ -56,7 +56,8 @@ def test_active_tools_excludes_wait_background_by_default():
                           "list_dir", "run_bash", "search_files", "git_status",
                           "git_diff", "git_log", "sed_edit", "multi_edit",
                           "apply_patch", "todo_write", "memory_write",
-                          "memory_search", "memory_delete", "run_tests",
+                          "memory_search", "memory_delete", "recall_lessons",
+                          "run_tests",
                           "git_commit", "search_tools", "web_fetch", "duckdb"}
 
 
@@ -71,8 +72,9 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # e.g. --tokens's "full schema" framing and DISPATCH both rely on it.
     names = [t["function"]["name"] for t in m.TOOLS]
     assert names.count("wait_background") == 1
-    # ...+ obs_recall + web_fetch (0.70.0, tier-2) + duckdb (0.87.0) + lint_check (0.94.0)
-    assert len(m.TOOLS) == 28
+    # ...+ obs_recall + web_fetch (0.70.0, tier-2) + duckdb (0.87.0)
+    # + lint_check (0.94.0) + recall_lessons (0.102.0)
+    assert len(m.TOOLS) == 29
 
 
 # ---------------------------------------------------------------------------

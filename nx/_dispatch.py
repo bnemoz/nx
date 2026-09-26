@@ -44,6 +44,7 @@ from ._delegation_note import _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
 from ._duckdb import duckdb_query
+from ._lessons import recall_lessons
 from ._testrunner import run_tests
 from ._gitcommit import git_commit
 from ._obs import obs_recall
@@ -78,7 +79,7 @@ DISPATCH = {
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
     "todo_write": todo_write, "apply_patch": apply_patch, "delete_file": delete_file,
     "memory_write": memory_write, "memory_search": memory_search,
-    "memory_delete": memory_delete,
+    "memory_delete": memory_delete, "recall_lessons": recall_lessons,
     "spawn_agent": spawn_agent, "read_image": read_image,
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
     "duckdb": duckdb_query,
@@ -127,7 +128,7 @@ st._DELEGATION_NUDGED = False  # flips True once the delegation nudge has fired 
 # (Thresholds, guidance strings, _BG_SCAN_LOCK and the fresh-session preamble
 # live in _session_preamble / _bg_completions — re-exported above.)
 
-_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search")
+_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log", "memory_search", "recall_lessons")
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:

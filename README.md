@@ -326,6 +326,7 @@ line per action.
 | `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_FTS` | `1` (default) keeps a trigram FTS5 index per memories dir (`.memindex.sqlite`, a self-healing cache reconciled by mtime on every search) so `memory_search` answers from the index instead of reading every note; `0` always runs the plain substring scan. The index only widens recall a little (whitespace folding between query characters) and never changes ranking or the result cap; a sqlite build without FTS5 falls back silently |
+| `NX_LESSONS_LIMIT` | max `recall_lessons` results per call (default `5`; `0` unbounded) — the BM25 cross-session recall over past session transcripts shares memory_search's bounded-results contract |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
 | `NX_MEMORY_OPTIMIZE_MAX_NOTES` | most notes one `/memory optimize` run reviews — the **oldest** first, so the best retirement candidates are always in view while the newest notes (the ones the session-start note shows) stay visible (default 120; `0` = all); the unreviewed remainder is reported, never silently skipped |
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer; an answer that *was* cut off (`finish_reason=length`) is retried once at 3× this budget |
@@ -1033,15 +1034,30 @@ already-saved titles is appended to context so the model knows what's
 remembered. A resumed session's note (`--resume` and `/resume`) is rebuilt
 from the live store when the store changed since that transcript was saved —
 notes that `/memory optimize` has since archived or merged don't linger as
-phantom titles for the model to chase. Searches require every query term to
-match, rank title hits above body
-hits, and cap results at `NX_MEMORY_SEARCH_LIMIT` (default 8) so a large
-store can't flood a turn with snippets. Search is served from a trigram FTS5
-index per memories dir (`.memindex.sqlite`, cache-only — NX_MEMORY_FTS=0 or a
-sqlite build without FTS5 falls back to reading every note) reconciled by
-mtime on every search, so a growing store keeps answering without a
-full-store read per query. `/memory list` shows both scopes, each row
-labelled `[global]`/`[project]`.
+phantom titles for the model to chase. `memory_search` requires every query
+term to match, ranks title hits above body hits, and caps results at
+`NX_MEMORY_SEARCH_LIMIT` (default 8) so a large store can't flood a turn
+with snippets. Search is served from a trigram FTS5 index per memories dir
+(`.memindex.sqlite`, cache-only — NX_MEMORY_FTS=0 or a sqlite build without
+FTS5 falls back to reading every note) reconciled by mtime on every search,
+so a growing store keeps answering without a full-store read per query.
+`/memory list` shows both scopes, each row labelled `[global]`/`[project]`.
+
+### Cross-session recall: `recall_lessons` (0.102.0)
+
+Saved notes are curated; the raw material is every past session transcript.
+`recall_lessons` queries the session store's FTS index (see Sessions) with an
+FTS5 MATCH and ranks the hits with FTS5's built-in **bm25()** — relevance
+over whole transcripts, not title substring: "which earlier session figured
+out how to make this test suite pass?" answers in one call. It is read-only
+(no approval, cacheable like `memory_search`), always-on, and open to
+sub-agents' read tier and plan mode's read-only set. Results are capped at
+`NX_LESSONS_LIMIT` (default 5); each hit carries its id, title, a
+BM25 score, and a bounded snippet. `scope="project"` narrows hits to
+sessions whose recorded `cwd` matches the current project root. Every
+failure shape (locked or corrupt store, no FTS5, bad query syntax) degrades
+to "no hits" instead of raising into the turn, and the same lazy FTS backfill
+the `/sessions <query>` search uses keeps store-only sessions recallable.
 
 Memories live in two scopes:
 
