@@ -28,7 +28,6 @@ os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
 for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SOURCES", "NX_ACTIVE"):
     os.environ.pop(k, None)
 
-import nx
 from nx import _eval_cmd as ec
 
 
@@ -149,7 +148,6 @@ def test_timeout_scenario_uses_vendored_client_timeout():
     machinery, so it cannot catch this)."""
     import threading
     import time
-    import httpx
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from nx._openai_client import OpenAI
 

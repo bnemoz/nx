@@ -14,7 +14,7 @@ import subprocess
 from typing import Any
 
 from ._env import _env_int
-from ._overflow import OVERFLOW_READ_MARKER, is_overflow_path
+from ._overflow import OVERFLOW_READ_MARKER as _OVERFLOW_READ_MARKER, is_overflow_path
 
 
 def _count_tail_lines(path: str, skip: int, cap: int) -> tuple[int, bool]:

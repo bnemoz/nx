@@ -7,7 +7,6 @@ applied fix is reported in the note list (and, through run_tool, in the tool
 result), and a disabled gate / unknown tool / non-dict args passes through
 untouched. No model or network round-trip.
 """
-import importlib
 import json
 import os
 import sys

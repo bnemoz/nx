@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Smoke test for nx's multi-source system. No live server needed."""
-import os, sys, importlib
+import os
+import sys
+import importlib
 
 # Add project root (parent of this tests/ dir) to the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

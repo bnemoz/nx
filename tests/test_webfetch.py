@@ -9,7 +9,6 @@ import os
 import sys
 import tempfile
 import threading
-import urllib.parse
 import unittest.mock
 import http.server
 

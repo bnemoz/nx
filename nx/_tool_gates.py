@@ -120,7 +120,6 @@ def _active_tools() -> list[dict[str, Any]]:
     see _plan.py). Memoized on the gate-vector: one tuple rebuild + dict hit
     per turn instead of five full list copies (PERF §6 item 1)."""
     import nx as _m
-    from ._breaker import _breaker_views
     # A sub-agent loop gets ONLY its tier's schemas (0.96.0): before this
     # branch the sub-loop was sent the parent's full active tool list while
     # run_tool enforced the restriction at dispatch time — so the agent saw

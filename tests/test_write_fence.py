@@ -6,7 +6,6 @@ rewinds both anyway).
 """
 import os
 import sys
-import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

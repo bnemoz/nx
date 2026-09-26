@@ -16,13 +16,11 @@ Three behaviors pinned here that 0.40 and earlier got wrong:
    triggers the very 400 the fold machinery recovers from.
 """
 import io
-import json
 import os
 import sys
 import tempfile
 import urllib.error  # noqa: F401  (import guard parity with sibling tests)
 
-import pytest
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
 os.environ["NX_SESSIONS_DIR"] = _tmp

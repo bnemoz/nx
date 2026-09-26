@@ -433,7 +433,6 @@ def _check_workspace(ws: Path, spec: dict[str, Any]) -> list[dict[str, Any]]:
 def _eval_run(argv: list[str]) -> int:
     from ._cli import _cli_version
 
-    source_name: str | None = None
     out_dir: str | None = None
     parallel = 1
     as_json = False
@@ -442,11 +441,15 @@ def _eval_run(argv: list[str]) -> int:
     while i < len(argv):
         a = argv[i]
         if a in ("--source",) and i + 1 < len(argv):
-            source_name = argv[i + 1]; i += 2
+            # --source is accepted (and documented) but the stub run always
+            # shadows the active source; the flag is parsed for compatibility.
+            i += 2
         elif a in ("--out",) and i + 1 < len(argv):
-            out_dir = argv[i + 1]; i += 2
+            out_dir = argv[i + 1]
+            i += 2
         elif a in ("--filter",) and i + 1 < len(argv):
-            only = argv[i + 1]; i += 2
+            only = argv[i + 1]
+            i += 2
         elif a == "--parallel" and i + 1 < len(argv):
             try:
                 parallel = max(1, int(argv[i + 1]))
@@ -455,7 +458,8 @@ def _eval_run(argv: list[str]) -> int:
                 return 2
             i += 2
         elif a == "--json":
-            as_json = True; i += 1
+            as_json = True
+            i += 1
         else:
             sys.stderr.write(f"nx eval: unknown flag {a!r}\n")
             sys.stderr.write(_USAGE_TEXT)
@@ -569,7 +573,8 @@ def _eval_run(argv: list[str]) -> int:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        st.SOURCES.clear(); st.SOURCES.update(saved_sources)
+        st.SOURCES.clear()
+        st.SOURCES.update(saved_sources)
         st.SOURCE_ORDER[:] = saved_order
         st.ACTIVE, st.client, st.MODEL = saved_active, saved_client, saved_model
         st.YOLO = saved_yolo

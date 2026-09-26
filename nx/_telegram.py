@@ -560,7 +560,7 @@ def run_gateway() -> int:
         except KeyboardInterrupt:
             print("\nnx telegram: stopped.")
             return 0
-        except Exception as e:
+        except Exception:
             # Network hiccup / timeout: back off briefly and keep polling.
             time.sleep(_poll_interval())
             continue

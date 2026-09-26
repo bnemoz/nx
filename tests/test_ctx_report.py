@@ -59,7 +59,7 @@ def test_total_includes_per_turn_tools_overhead(nx_fresh):
     the report undercounts the real per-turn floor (the bug where a fresh
     session showed ~1331 est while --tokens said ~3x that)."""
     import json as _json
-    from nx._ctxreport import _messages_token_report, _turn_overhead_est, _overhead_lines
+    from nx._ctxreport import _messages_token_report, _overhead_lines
     from nx._dispatch import _active_tools
     msgs = _msgs(4)
     rep = _messages_token_report(msgs)

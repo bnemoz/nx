@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 from typing import Any, NamedTuple
 
-from . import _state as st
 from ._memory_store import (
     _iter_memory_dirs, _iter_notes, _memory_confirm_preview, _read_note_preview,
 )

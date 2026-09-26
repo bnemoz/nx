@@ -15,7 +15,6 @@ import stat
 import sys
 import tempfile
 
-import pytest
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
 os.environ["NX_SESSIONS_DIR"] = _tmp

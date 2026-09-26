@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import threading
 from typing import Any
 
 from . import _state as st
 from ._env import _env_int
 from ._subagent_tls import _SUBAGENT_TLS, _subagent_ctx  # noqa: F401 (re-exports)
-
 # Tools the sub-agent may call: the read-only dispatch entries (derived from
 # the same tuple run_tool() result-caches, plus list_dir) + run_bash, which is
 # gated to the read-only allowlist by _subagent_bash(). Never mutating tools,
@@ -48,10 +46,9 @@ _WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit",
 
 # Per-agent sub-loop context. A global flag/table can't express two agents
 # running at once (the second's finally would clear the first's table), so
-# spawn_agent() installs its restricted table on a threading.local slot and
-# run_tool() resolves tool calls through it. Falls back to the plain globals
-# for code (tests, REPL) that sets them directly.
-_SUBAGENT_TLS = threading.local()
+# spawn_agent() installs its restricted table on the shared thread-local slot
+# from _subagent_tls and run_tool() resolves tool calls through it. Falls back
+# to the plain globals for code (tests, REPL) that sets them directly.
 
 
 class _SubagentContext:
@@ -81,10 +78,6 @@ class _SubagentContext:
         # or None to inherit the parent's active source/model. Pinned by
         # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
         self.model_target = None
-
-
-def _subagent_ctx() -> "_SubagentContext | None":
-    return getattr(_SUBAGENT_TLS, "ctx", None)
 
 
 def _subagent_table() -> dict[str, Any] | None:

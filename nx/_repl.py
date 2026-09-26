@@ -36,30 +36,22 @@ from . import (
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
 from ._resume import resume_session
 from ._sessions_cmd import (
-    _fmt_when, _print_transcript, _session_list_page_options,
-    _print_session_list, _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
-    _cli_prune_sessions,
-    _cmd_sessions, _cmd_resume, _cmd_delete,
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
     _cmd_export, _cmd_fork,
 )
 from ._memory_cmd import (
-    _cmd_memory, _cmd_memory_handler, _slugify, _cmd_memory_save,
-    _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
-    _render_transcript_for_memory, memory_write, memory_search, memory_delete,
-    _load_memory_note, _write_memory_file, _note_kind, MEMORY_KINDS,
+    _cmd_memory_handler,
 )
 from ._todo import load_persisted_todos
 from ._wip import _cmd_wip
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
 from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for tests)
 from ._repl_settings_cmds import (
-    _HELP_COMMANDS, _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
+    _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
     _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status,
 )
-from ._config_cmd import render_status
 from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
 

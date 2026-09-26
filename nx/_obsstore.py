@@ -44,7 +44,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from . import _state as st
 from ._env import _env_int

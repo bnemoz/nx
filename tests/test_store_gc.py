@@ -14,12 +14,10 @@ The invariants that matter (per the 0.39.0 sidecar memory note):
   save-time GC; --prune is explicit, so it gets no grace;
 - NX_SESSION_IMAGES=0 (inline rollback) must not orphan stored payloads.
 """
-import json
 import os
 import shutil
 import sys
 import tempfile
-import time
 
 _tmp = tempfile.mkdtemp(prefix="nx-store-gc-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
@@ -247,7 +245,6 @@ def test_delete_keeps_images_shared_with_other_sessions():
 def test_quota_evicts_orphan_keeps_referenced(monkeypatch):
     """8 x 200 KB payloads against a 1 MB quota: unreferenced ones go first,
     the referenced payload survives the orphan-first pass."""
-    from nx._images import _images_dir
     _clear()
     sid = "20250101-120000-gcabe"
     _write_session_with_refs(sid, ["a" * 60 + "1"])
@@ -274,7 +271,6 @@ def test_quota_disabled_by_default(monkeypatch):
 def test_quota_second_pass_reaches_referenced_when_tiny(monkeypatch):
     """A quota smaller than the live set must evict oldest referenced
     payloads last — storage bound wins over liveness at the margin."""
-    from nx._images import _images_dir
     _clear()
     sid = "20250101-120000-gcabf"
     _write_session_with_refs(sid, ["c" * 60 + "1"])

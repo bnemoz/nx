@@ -33,7 +33,7 @@ import time
 from typing import Any
 
 from ._env import _env_int
-from ._private import open_private, private_dir
+from ._private import private_dir
 
 # Formats browsers/servers accept in data: URLs; anything else is refused
 # with a message naming the supported set (prevents "it read a .exe").

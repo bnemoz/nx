@@ -2,8 +2,8 @@
 """Smoke tests for the GBNF grammar builder (nx/_grammar.py). No live server
 or llama.cpp binary needed — checks structural properties of the generated
 grammar text and the open_stream() opt-in wiring."""
-import json
-import os, sys
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NX_ENV_FILE"] = "/dev/null"

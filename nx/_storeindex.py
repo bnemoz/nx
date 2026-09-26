@@ -38,7 +38,7 @@ from typing import Any, Optional
 
 from ._env import _env_int
 from ._logging import _log_event
-from ._private import open_private, private_dir
+from ._private import private_dir
 
 STORE_FILENAME = ".store.sqlite"
 

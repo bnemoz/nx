@@ -23,7 +23,6 @@ import nx  # noqa: E402
 import nx._telegram as tg  # noqa: E402
 
 
-import pytest
 
 _ELLIPSIS = "\u2026"
 
@@ -253,7 +252,6 @@ def test_loop_drops_disallowed_chat():
 # --- fixes: quiet-slot auto-deny, ×N counter, repair, /new exactness -------
 
 def test_run_turn_sets_quiet_slot_during_loop():
-    import threading
     seen = {}
     conv = []
 
@@ -363,7 +361,6 @@ def test_slash_new_requires_exact_match():
     with unittest.mock.patch.object(tg, "_api", side_effect=fake_api), \
          unittest.mock.patch.object(tg, "_run_turn", side_effect=fake_turn), \
          unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()):
-        import pytest
         try:
             tg.run_gateway()
         except KeyboardInterrupt:

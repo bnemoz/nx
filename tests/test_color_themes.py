@@ -235,7 +235,7 @@ def test_rich_console_styles_markdown_with_theme_palette():
     """End-to-end: the themed say-console must emit ANSI in the theme's hue
     for a markdown element rich would otherwise paint its own color."""
     from rich.markdown import Markdown
-    from nx import _rich, _turn
+    from nx import _turn
     console = _turn._say_console
     orig = _ansi.C.name
     try:

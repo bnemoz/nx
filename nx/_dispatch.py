@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from typing import Any
 
 from . import _state as st
@@ -38,7 +37,7 @@ from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
-from ._plan import plan_edit, plan_active, check_gate
+from ._plan import plan_edit, check_gate
 from ._subagent import spawn_agent
 from ._delegation_note import _delegation_enabled
 from ._images import read_image
@@ -182,7 +181,6 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # the gate message the model needs to act on (plan_edit, or ask for
     # /plan done). Checked before every other gate so a gated call costs no
     # classifier round-trip, no approval prompt, and no sub-agent dispatch.
-    import nx as _m
     gated = check_gate(name)
     if gated:
         return gated

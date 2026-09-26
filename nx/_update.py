@@ -34,8 +34,6 @@ def _install_method() -> tuple[str, str]:
     "editable", "pip" — the order matters: uv-tool/pipx installs also look
     like pip installs from site-packages, so the tool-specific markers are
     checked first."""
-    from ._cli import _cli_version
-    ver = _cli_version()
     try:
         import nx  # noqa: F401 — resolve the real install path
         root = os.path.dirname(os.path.dirname(os.path.abspath(nx.__file__)))

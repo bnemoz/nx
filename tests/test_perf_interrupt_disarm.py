@@ -25,7 +25,6 @@ os.environ["NX_SESSIONS_DIR"] = _tmp
 os.environ["NX_HOME"] = _tmp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nx  # noqa: E402
 
 
 def _arming_thread_interrupt(monkeypatch):

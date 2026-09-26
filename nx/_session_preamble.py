@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _state as st
 from ._env import _env_int
 
 _MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires

@@ -25,7 +25,6 @@ os.environ["NX_HOME"] = _tmp
 os.environ["NX_ENV_FILE"] = "/dev/null"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nx  # noqa: E402
 
 
 # --------------------------------------------------------------- PF-07 -------

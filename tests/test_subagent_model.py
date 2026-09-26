@@ -115,7 +115,6 @@ def test_open_stream_uses_thread_local_target(nx_env):
     nx, tmp = nx_env
     from nx import _compress as cp
     from nx._subagent import _SubagentContext, _SUBAGENT_TLS
-    from nx._subagent_model import install
 
     parent_client = _FakeClient()
     cheap_client = _FakeClient()

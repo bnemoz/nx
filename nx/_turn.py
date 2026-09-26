@@ -9,17 +9,14 @@ guards live.
 from __future__ import annotations
 
 import json
-import threading
 import time
 from typing import Any, Callable, Optional
 
-from ._openai_client import APIConnectionError, APIError, probe_scope
+from ._openai_client import APIConnectionError, APIError
 import httpx
 from ._ansi import (
-    DIM, RESET, LifeSpinner, C, strip_ansi_for_display,
+    DIM, RESET, LifeSpinner, C,
 )
-from ._rich import themed_console, retheme_console
-from ._approval import _EscToChat
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
     _disarm_interrupt_armed, _ensure_interrupt_watcher,
@@ -30,23 +27,22 @@ from ._special_tokens import (
 )
 from ._stream_parse import StreamParser
 from ._text_fallback import (
-    parse_text_calls_with_errors, repair_json_candidates, normalize_tool_args,
+    parse_text_calls_with_errors,
 )
 from ._compress import (
     _nudge_current_user_turn,
-    _flush_pending_background_notice, _last_is_dangling_tool,
+    _last_is_dangling_tool,
 )
 from ._env import _env_float, _env_int
 from ._verify import _launch_verify_if_settled
 from . import _prefix
 from ._images import _strip_consumed_images
 from . import _state as st
-from . import (
+from . import (  # noqa: F401  (run_tool re-exported; tests patch _turn.run_tool)
     FINAL_ANSWER_TOOL, FINAL_ANSWER_TOOL_CHOICE, run_tool, _active_tools,
     REASONING_STALL_NUDGE, FORCED_FINAL_NUDGE, EMPTY_TURN_NUDGE,
     STALL_WRAPUP_NUDGE,
-    REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS, _tool_args_parse_error,
-    _CACHEABLE_READ_TOOLS, _tool_cache_key,
+    REASONING_ONLY_TIME_LIMIT, REASONING_CAPTURE_CHARS,
 )
 from ._subagent import (_subagent_active, _subagent_quiet, _subagent_scoped_retry,
                         _subagent_stream_cut_limit)
@@ -70,11 +66,17 @@ from ._turn_retry import (  # noqa: F401 (re-exports)
     _task_deadline, _task_deadline_at, _task_deadline_exceeded,
     _task_timeout_summary,
 )
-
-# renders the assistant's final-answer markdown live — themed like the rest
-# of the terminal (raw-ANSI `C` roles elsewhere) instead of rich's default
-# palette; retheme_console() restyles it on a live /theme switch.
-_say_console = themed_console()
+from ._turn_status import (  # noqa: F401 (re-exports)
+    TURN_DONE, TURN_TOOL, TURN_STREAM_CUT, TURN_FORCE_FINAL, TURN_STALL,
+    TURN_EMPTY, TURN_ESC, TURN_REDIRECT, TURN_MALFORMED_CALL, TURN_API_ERROR,
+    TURN_CONTEXT_OVERRUN, TURN_LENGTH_CUT, TURN_TIMED_OUT, TURN_TIMED_OUT_RETRY,
+    TRUNCATION_MARKER,
+)
+from ._turn_toolcalls import (  # noqa: F401 (re-exports)
+    _close_out_partial, CONTINUATION_NUDGE, _handle_forced_final_tool_call,
+    _handle_forced_final_text_calls, _handle_native_tool_calls,
+    _handle_text_tool_calls, _strip_unterminated_tool_call,
+)
 
 Message = dict[str, Any]  # one entry in the OpenAI-style `messages` array
 
@@ -114,18 +116,8 @@ class _LoggingStream:
 
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
-from ._turn_status import (  # noqa: F401 (re-exports)
-    TURN_DONE, TURN_TOOL, TURN_STREAM_CUT, TURN_FORCE_FINAL, TURN_STALL,
-    TURN_EMPTY, TURN_ESC, TURN_REDIRECT, TURN_MALFORMED_CALL, TURN_API_ERROR,
-    TURN_CONTEXT_OVERRUN, TURN_LENGTH_CUT, TURN_TIMED_OUT, TURN_TIMED_OUT_RETRY,
-    TRUNCATION_MARKER,
-)
-from ._turn_toolcalls import (  # noqa: F401 (re-exports)
-    _close_out_partial, CONTINUATION_NUDGE, _handle_forced_final_tool_call,
-    _handle_forced_final_text_calls, _handle_native_tool_calls,
-    _handle_text_tool_calls, _strip_unterminated_tool_call,
-)
-
+# (the _turn_status / _turn_toolcalls re-exports sit with the other split-layer
+# imports at the top of the file)
 
 
 def _maybe_arm_native_escalation() -> None:

@@ -1,7 +1,6 @@
 """0.96.0: the session-start delegation note names the write tiers ONLY when
 this session authorizes write-capable sub-agents (NX_SUBAGENT_WRITE=1). A
 read-only session must not invite the model to try tier='write'."""
-import os
 import sys
 from pathlib import Path
 

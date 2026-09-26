@@ -208,7 +208,6 @@ def test_duckdb_is_always_on_and_in_dispatch():
     # opt-in gate entry (NX_TOOL_FLOOR_SLIM=1 demotes it to tier-2 for
     # swarms); the DEFAULT (env unset) keeps it always-on.
     assert "duckdb" in m._dispatch._TOOL_GATES
-    from nx._tool_gates import _floor_slimmed
     import os as _os
     saved = _os.environ.pop("NX_TOOL_FLOOR_SLIM", None)
     try:

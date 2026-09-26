@@ -7,7 +7,6 @@ from the completion dropdown and the README, a `/ctx all` hint with no
 implementing branch). These tests fail on the drift instead of grepping for
 it by hand.
 """
-import json
 import os
 import re
 import sys

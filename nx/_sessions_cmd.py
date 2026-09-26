@@ -298,9 +298,9 @@ def _cli_migrate_sessions(args: list[str]) -> bool:
     if n:
         print(f"  imported {n} legacy session file(s) into the store")
     else:
-        print(f"  nothing to import: every legacy JSON file in the sessions"
-              f" dir is already in the store (idempotent; files are kept as"
-              f" backups and rescanned each run)")
+        print("  nothing to import: every legacy JSON file in the sessions"
+              " dir is already in the store (idempotent; files are kept as"
+              " backups and rescanned each run)")
     print(f"  {DIM}{stats['sessions_indexed']} session(s) now in "
           f"{_sessiondb_store_path()}{RESET}")
     return True
@@ -509,7 +509,6 @@ def _cmd_sessions_handler(user: str, state: _ReplState) -> None:
 def _cmd_export(user: str, state: _ReplState) -> None:
     """/export [md] [path] — write the current session to a markdown file.
     Default path: nx-export-<session-id>.md in the project root."""
-    import nx as _m
     from ._sessions_search import export_markdown
     parts = user.split()
     args = [a for a in parts[1:] if a != "md"]  # 'md' is the (only) format today

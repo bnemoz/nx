@@ -45,7 +45,6 @@ writes nothing.
 """
 from __future__ import annotations
 
-import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -302,7 +301,6 @@ def _cmd_memory_reflect(arg: str = "") -> None:
         print(f"{DIM}  nothing to reflect on ({len(notes)} note"
               f"{'s' if len(notes) != 1 else ''} saved — reflect needs at least 2){RESET}")
         return
-    unindexed = ""
     print(f"{DIM}  reflecting over {len(notes)} memories…{RESET}")
     text = _reflect_chat(_reflection_prompt(notes, focus), "memory_reflect_plan")
     if not text:

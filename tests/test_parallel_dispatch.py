@@ -7,7 +7,6 @@ strict sequential contract. Results appear in the model's original order.
 import importlib
 import os
 import sys
-import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

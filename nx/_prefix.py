@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import threading
+
 from . import _state as st
 
 # The headers every prefix note opens with. Used to recognise the block inside a
@@ -50,7 +52,6 @@ PREFIX_MARKERS = (
 # P2). Now: a per-thread pin lives on _PREFIX_TLS while a loop holds it (see
 # _prefix_pin_ctx); the module global remains the default store outside that —
 # tests, import time, and every existing read keep working.
-import threading
 _PREFIX_TLS = threading.local()
 pinned: Optional[list[str]] = None
 

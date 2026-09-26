@@ -15,7 +15,6 @@ Invariants:
 import os
 import sys
 import tempfile
-import threading
 
 _tmp = tempfile.mkdtemp(prefix="nx-p12-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
@@ -24,7 +23,6 @@ os.environ["NX_ENV_FILE"] = "/dev/null"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
-import nx as m  # noqa: E402
 import nx._interrupt as I  # noqa: E402
 import nx._state as st  # noqa: E402
 from nx._subagent_tls import _SUBAGENT_TLS  # noqa: E402

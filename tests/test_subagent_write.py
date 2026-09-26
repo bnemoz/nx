@@ -96,8 +96,7 @@ def test_write_tier_on_offers_and_wraps(nx_fresh, monkeypatch, tmp_path):
     parent's approval posture, not the sub-loop's)."""
     from nx import _dispatch
     from nx._subagent import (_subagent_tools, _write_tier_dispatch,
-                              _write_tier_enabled, spawn_agent, _SubagentContext,
-                              _SUBAGENT_TLS)
+                              _write_tier_enabled, spawn_agent, _SUBAGENT_TLS)
     nx_fresh.NX_SUBAGENT_WRITE = 1
     assert _write_tier_enabled() is True
     names = {t["function"]["name"] for t in _subagent_tools()}

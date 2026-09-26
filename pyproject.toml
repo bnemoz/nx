@@ -38,6 +38,13 @@ dev = ["pytest", "pytest-xdist>=3.8"]
 # code that uses it, rather than all at the top — both intentional.
 "nx/__init__.py" = ["F401", "E402"]
 
+# Test files insert the repo root on sys.path before importing nx (E402 is
+# the setup preamble), use terse loop vars (`l` over lines), lambda stubs for
+# monkeypatching, and a few keep-someone-honest assignments — all deliberate
+# test ergonomics, not lint targets. Style rules are relaxed for tests/** only;
+# F811/F821/F541 stay on so real shadowing/undefined-name bugs still surface.
+"tests/**" = ["E402", "E702", "E731", "E741", "F841"]
+
 [[tool.ty.overrides]]
 # The test suite drives nx through its deliberately dynamic seams:
 # `nx.<STATE_NAME>` reads/writes go through _StateProxyModule.__getattr__,

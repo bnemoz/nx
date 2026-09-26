@@ -19,7 +19,6 @@ for _k in [k for k in os.environ if k.startswith("NX_")]:
 os.environ["NX_ENV_FILE"] = "/dev/null"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import nx as m  # noqa: E402
 from nx import _state as st  # noqa: E402
 from nx._ansi import C, RESET  # noqa: E402
 from nx._todo import render_todos, render_todos_display  # noqa: E402

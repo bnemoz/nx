@@ -113,7 +113,6 @@ def _turn_overhead_est() -> int:
     chars/4 over the JSON serialization, exactly how `nx --tokens` counts its
     TOOLS line. Never raises: /ctx is a UX nicety, not a correctness path."""
     try:
-        import nx as _m
         from ._dispatch import _active_tools
         import json as _json
         return _estimate_tokens(_json.dumps(_active_tools()))

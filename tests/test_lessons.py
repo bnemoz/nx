@@ -8,7 +8,6 @@ NX_LESSONS_LIMIT cap, scope=project cwd filtering, the degradation contract
 the read-only posture (no gate entry, in the plan read-only set, cacheable).
 """
 import os
-import sqlite3
 import sys
 import tempfile
 

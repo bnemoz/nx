@@ -30,7 +30,6 @@ from ._sources import switch_source, _set_provider_order, _provider_order
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
-from ._bash_jobs import _read_bg_exit_status
 from ._subagent import list_async_agents
 from ._repl_state import _ReplState, _save_current, _fresh_metrics
 from ._todo import render_todos_display
@@ -293,7 +292,6 @@ def _cmd_resources(user: str, state: _ReplState) -> None:
 def _cmd_ctx(user: str, state: _ReplState) -> None:
     """/ctx — per-message token report; /ctx pin|unpin <spec> — pin turns so
     compress() keeps them verbatim; /ctx clear — drop all pins."""
-    import nx as _m
     from ._ctxreport import (_messages_token_report, _ctx_pin, _ctx_unpin,
                              _overhead_lines)
     from ._metrics import _abbr
@@ -382,6 +380,7 @@ def _cmd_status(user: str, state: _ReplState) -> None:
     """/status — P3-9 snapshot of the session posture a doctor would check:
     source, model, caps, budgets, fence, approval. No args, no state change
     (rendered by nx/_config_cmd.render_status)."""
+    from ._config_cmd import render_status
     print(render_status())
 
 
@@ -575,7 +574,6 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
     hatch for a flaky local endpoint whose truncations were transient, or for
     handing the tool back to the model after fixing the cause. (The new
     decay-on-success usually re-arms on its own; this forces it.)"""
-    import nx as _m
     from ._compress import set_toolcalls_mode, toolcalls_mode
     from ._dispatch import _breaker_views
     arg = user.strip()

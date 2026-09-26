@@ -245,7 +245,8 @@ def set_theme(name: str) -> bool:
     # Keep the one rich-rendered surface (the say-panel's markdown, see
     # _rich.py) on the same palette — cheap no-op when rich isn't in play.
     try:
-        from ._turn import _say_console, retheme_console
+        from ._rich import retheme_console
+        from ._turn import _say_console
         retheme_console(_say_console)
     except Exception:
         pass  # never let a theme switch break the ANSI path

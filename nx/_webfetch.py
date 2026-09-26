@@ -33,7 +33,6 @@ import time
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
-from typing import Any
 
 from ._env import _env_int
 

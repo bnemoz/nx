@@ -6,7 +6,6 @@ commands produce identical output (modulo the command string itself).
 """
 import io
 import sys
-import importlib
 import os
 import tempfile
 

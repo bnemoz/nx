@@ -169,10 +169,8 @@ def test_n_key_denies_and_saves_nothing(nx_fresh, monkeypatch, tmp_path):
 
 
 def test_prompt_hints_change_with_allow_support(nx_fresh):
-    from nx._approval import _ask_approval
     # non-TTY path (tests) — verify via the hint text contract instead of raw I/O
     import nx._approval as ap
-    src_keys = "[Y/n/a/esc]" if True else ""
     # direct check of the hint-building logic used by the raw-mode prompt
     assert ap._ask_approval.__doc__ and "allow_hint" in ap._ask_approval.__doc__
 

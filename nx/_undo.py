@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Optional, TypedDict
+from typing import Optional, TypedDict
 
 from ._env import _env_int
 from ._private import atomic_write_private

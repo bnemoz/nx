@@ -693,6 +693,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         frame into scrollback. Resetting the bookkeeping to 'nothing rendered,
         cursor at column 0 of a fresh line' makes the next render a plain
         first-frame paint from wherever the cursor physically is."""
+        nonlocal rendered_lines, cursor_line
         sys.stdout.write("\n")
         sys.stdout.flush()
         rendered_lines = 0

@@ -5,10 +5,8 @@ nohup one), sleep-duration inference must cover fractional/suffixed sleeps,
 wait_background's schema must not advertise the ignored log_path arg.
 """
 import importlib
-import json
 import os
 import sys
-import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
@@ -61,7 +59,7 @@ def test_background_guidance_says_detached(nx_fresh):
 # --- sleep inference covers fractional + suffixed durations ------------------
 
 def test_sleep_inference_fractional_and_suffixed(nx_fresh):
-    from nx._bash_jobs import _infer_timeout_from_sleep, _sleep_seconds
+    from nx._bash_jobs import _infer_timeout_from_sleep
     f = _infer_timeout_from_sleep
     assert f("sleep 30 && cat x", 3) == 40
     # fractional sleeps used to fall through to the 3 s default and background

@@ -19,8 +19,8 @@ import time
 from typing import Any
 
 from ._openai_client import APIConnectionError
-
 from ._logging import _log_event
+from ._prompts import RISK_SYSTEM  # the risk-classifier prompt lives in the prompt registry
 from . import _state as st
 
 
@@ -77,9 +77,6 @@ def _extract_action_path(action: str) -> str | None:
     if m := re.match(r"^write\s+(.+)\s+\(\d+\s+bytes\)$", action):
         return m.group(1).strip() or None
     return None
-
-
-from ._prompts import RISK_SYSTEM  # the risk-classifier prompt lives in the prompt registry
 
 
 # A regex-based fast path: commands built only from a short allowlist of

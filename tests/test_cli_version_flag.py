@@ -11,7 +11,6 @@ os.environ.setdefault("NX_ENV_FILE", "/dev/null")
 for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SOURCES", "NX_ACTIVE"):
     os.environ.pop(k, None)
 
-import pytest
 
 
 # --- _cli_help_or_version recognizes -v --------------------------------------

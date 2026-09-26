@@ -20,7 +20,8 @@ from typing import Any
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
-from ._repl import _repl, _cli_sessions, _cli_prune_sessions, _cli_tokens
+from ._repl import _repl
+from ._sessions_cmd import _cli_sessions, _cli_prune_sessions, _cli_tokens
 from ._sessions_cmd import _cli_migrate_sessions
 from ._repl_state import _fresh_metrics
 from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors

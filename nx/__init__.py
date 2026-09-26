@@ -925,12 +925,20 @@ from ._config_cmd import _cli_config, render_status
 
 # --- repl -------------------------------------------------------------------
 from ._repl import (
-    _banner, _repl, _session_id_from_args, _fmt_when,
-    _print_transcript, _session_list_page_options, _print_session_list,
+    _banner, _repl, _session_id_from_args,
+    _cmd_memory_optimize, _cmd_memory_reflect,
+)
+# session/memory slash-command surface (used to re-export via _repl; the
+# handlers live in _sessions_cmd / _memory_cmd / _repl_settings_cmds)
+from ._sessions_cmd import (
+    _fmt_when, _print_transcript, _session_list_page_options, _print_session_list,
     _session_next_hint, _display_path, _cli_sessions, _cli_tokens,
-    _cmd_sessions, _cmd_resume, _cmd_delete, _cmd_memory, _slugify,
-    _cmd_memory_save, _cmd_memory_remember, _cmd_memory_delete, _cmd_memory_list,
-    _render_transcript_for_memory, memory_write, memory_search, memory_delete,
+    _cmd_sessions, _cmd_resume, _cmd_delete, _cmd_save,
+)
+from ._memory_cmd import (
+    _cmd_memory, _slugify, _cmd_memory_save, _cmd_memory_remember,
+    _cmd_memory_delete, _cmd_memory_list, _render_transcript_for_memory,
+    memory_write, memory_search, memory_delete,
     _load_memory_note, _write_memory_file,
 )
 # Cross-session learning recall (nx/_lessons.py, 0.102.0): BM25 over the

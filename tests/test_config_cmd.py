@@ -6,7 +6,6 @@ _load_env_file, the doctor's findings (hyphenated source name, /dev/null
 note, legacy-var shadowing, NX_VISION without native tools), the /status
 render, and the `nx config` startup-probe skip in nx/__init__.py.
 """
-import importlib
 import os
 import sys
 import tempfile

@@ -9,10 +9,9 @@ tool_choice posture (NX_NATIVE_TOOLS, /toolcalls), and the context-window
 aware max_tokens clamp (NX_MAX_TOKENS)."""
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from ._env import _env_int, _env_float
+from ._env import _env_int
 from ._grammar import build_tool_call_grammar
 from . import _state as st
 

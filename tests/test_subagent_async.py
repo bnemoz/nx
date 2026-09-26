@@ -435,7 +435,6 @@ def test_finished_agent_writes_report_and_note_carries_path(nx_fresh, monkeypatc
     """The worker writes SESSION_HOME/agents/<job>.md (full answer) and the
     runtime note carries a short head + the report path instead of the whole
     answer."""
-    from nx import _state as st
     from nx._subagent import _agents_report_dir, spawn_agent
     long_answer = "HEAD-PART. " + ("detail " * 400)  # > _ASYNC_REPORT_CHARS
 

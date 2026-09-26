@@ -21,7 +21,7 @@ import sys
 import urllib.request
 from typing import Any
 
-from ._env import _env_float, _env_int
+from ._env import _env_int
 from ._manifest import routing_kwargs
 from ._openai_client import OpenAI
 

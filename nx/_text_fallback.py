@@ -10,7 +10,6 @@ from ._overflow import (
     OVERFLOW_READ_MARKER as _OVERFLOW_READ_MARKER,
     build_overflow_result,
     cap_overflow_read as _cap_overflow_read,
-    is_overflow_path as _is_overflow_path,
     spill_to_disk,
 )
 

@@ -277,7 +277,6 @@ def test_pick_searx_port_skips_taken(tmp_path, monkeypatch):
     # Occupy two REAL ports (not the fixed candidates, which another test
     # run / the dev box's live searxng may already hold) and point the
     # candidate list at them: first taken, second free.
-    import socket
     s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s1.bind(("127.0.0.1", 0))
     s1.listen(1)

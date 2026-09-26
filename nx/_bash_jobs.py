@@ -677,7 +677,6 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
                     "refused in a background sub-agent — let the parent run it")
         # force the prompt even under YOLO: bypass the level/YOLO short-circuit
         # with a direct ask (Esc still drops to chat)
-        from ._approval import _ask_approval
         import nx as _m
         choice = _m._ask_approval(
             f"  run (contains possible secret {secret!r}): {command[:120]}? "

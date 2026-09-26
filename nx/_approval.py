@@ -173,9 +173,9 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
     inherit the default approval, especially for high-risk actions.
     `allow_hint` (the action string) enables the `a` key: "always allow
     actions matching this shape" — the prompt advertises [Y/n/a/esc] and the
-    saved rule auto-allows future matches via nx/_allowed.py.
+    saved rule auto-allows future matches via nx/_allowed.py. (The prompt text
+    itself, including the [Y/n/a/esc] hint, is built by the callers.)
     """
-    keys_hint = "[Y/n/a/esc]" if allow_hint else "[Y/n/esc]"
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         ans = input(prompt).strip().lower()
         if ans in ("", "y", "yes"):

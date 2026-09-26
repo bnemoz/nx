@@ -57,7 +57,6 @@ def test_normal_result_still_spills(monkeypatch):
 
 
 def test_repeat_cache_hit_returns_stub():
-    import nx._dispatch as d
     import nx._state as st
     import nx._tool_cache as tc
 

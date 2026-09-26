@@ -64,7 +64,6 @@ result the sub-loop continues from.
 from __future__ import annotations
 
 import os
-import shlex
 import threading
 import time
 from typing import Any
@@ -660,7 +659,6 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     if st.YOLO is None:  # pragma: no cover — defensive; YOLO is always a bool
         return "ERROR: approval state unavailable"
 
-    from ._turn import _run_model_turn_loop  # import-check only (circular-import canary)
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
     # Write tiers (write/implement): opt-in (NX_SUBAGENT_WRITE=1) and refused
     # from inside another sub-agent (only the parent holds the approval gate).

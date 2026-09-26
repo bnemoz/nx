@@ -4,7 +4,6 @@
 No live model or terminal needed — exercises the pure file-IO helpers:
 write → load → list → resolve → delete, in a throwaway temp dir.
 """
-import json
 import os
 import sys
 import shutil
@@ -239,7 +238,8 @@ def test_resume_flag_without_target_ignores_following_dash_flags():
 
 def test_cli_sessions_list_and_filter():
     """`nx sessions` pages recent sessions; filters can search older ones."""
-    import io, contextlib
+    import io
+    import contextlib
     # seed a known set
     _clear_test_sessions_dir()
     for i in range(12):
