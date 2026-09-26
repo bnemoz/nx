@@ -279,6 +279,33 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     return True
 
 
+def _cli_migrate_sessions(args: list[str]) -> bool:
+    """`nx sessions --migrate` — fold any legacy per-session JSON files
+    into the session store by hand and exit.
+
+    0.101.0 migration normally runs lazily (the first listing/load after an
+    upgrade imports whatever mirror files exist); this runs it eagerly so
+    an upgrade can be verified ("imported 47 sessions") before the next
+    REPL start. Idempotent — already-imported files are skipped, and the
+    files are left in place as a backup. Returns True if it handled the
+    invocation (caller exits)."""
+    if args[:2] not in (["--migrate"], ["migrate"], ["sessions", "--migrate"],
+                        ["sessions", "migrate"]):
+        return False
+    from ._sessiondb import migrate_files, store_stats
+    n = migrate_files(force=True)
+    stats = store_stats()
+    print(f"  imported {n} legacy session file(s) into the store")
+    print(f"  {DIM}{stats['sessions_indexed']} session(s) now in "
+          f"{_sessiondb_store_path()}{RESET}")
+    return True
+
+
+def _sessiondb_store_path() -> str:
+    from ._sessiondb import _store_path
+    return _store_path()
+
+
 def _cli_tokens(args: list[str]) -> bool:
     """`nx --tokens` / `nx --bench` — print the exact prompt-token
     floor (SYSTEM + the active TOOLS schema + a 1-token "hey") for the active

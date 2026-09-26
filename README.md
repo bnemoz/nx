@@ -205,10 +205,12 @@ and prints its own usage, flags, and exit codes: `nx run --help`,
 `nx sessions --help`, `nx config --help`, `nx eval --help`.
 
 `nx sessions [query]` is a shell subcommand (not a flag): it lists/filters saved
-sessions and exits without entering the REPL. `nx sessions --prune` reconciles
-the store by hand: drops index rows (and any pre-0.46 legacy index shards)
-whose session file vanished, collects unreferenced image payloads immediately
-(no age grace), and enforces the `NX_IMAGES_QUOTA_MB` cap — one line per action.
+sessions and exits without entering the REPL. `nx sessions --migrate` folds any
+legacy per-session JSON files into the store by hand (idempotent; the files are
+kept as a backup). `nx sessions --prune` reconciles the store by hand: drops
+search rows whose transcript row vanished, collects unreferenced image payloads
+immediately (no age grace), and enforces the `NX_IMAGES_QUOTA_MB` cap — one
+line per action.
 
 ### Key environment variables
 
@@ -236,7 +238,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_ARG_REPAIR` | schema-level argument and tool-name repair before a tool body runs (default `1`; `0` = strict pass-through). Coerces wrong-typed args against the tool's declared schema (`"5"` to `5`, `"true"` to `true`, `42` to `"42"`), case-folds a unique enum match (`"In_Progress"` to `"in_progress"`), renames a near-miss key (`maxresults` to `max_results`; difflib similarity 0.8+ and unambiguous only) plus curated per-tool aliases similarity can't reach (`cmd` to `command`, `old_str` to `old`, `file_path` to `path`) — and repairs the tool NAME itself: one alias (`bash` to `run_bash`, `grep` to `search_files`, `str_replace_editor` to `edit_file`) or one unambiguous close match executes under the real name. A missing required argument is refused up front with the declared schema (`ERROR: read_file missing required "path" — schema: …`) instead of a TypeError from the body; values are never fabricated. Every fix is reported in the tool result as an `[arg repair: <note>]` prefix, never applied silently |
 | `NX_OVERFLOW_TTL_DAYS` | purge spill files older than N days (default 7, like bg-logs) |
 | `NX_OVERFLOW_ECHO_CHARS` | max chars of head/tail content echoed back alongside the spill path (default 2000; `0` = path note only) |
-| `NX_HOME` / `NX_SESSIONS_DIR` | where session JSON files are stored |
+| `NX_HOME` / `NX_SESSIONS_DIR` | where the session store (`sessions.sqlite` and, until imported, the legacy per-session JSON files) lives |
 | `NX_READ_FILE_LINES` | default `read_file` window size in lines (default 400; `limit<=0` reads to end) |
 | `NX_READ_FILE_MAX_LINES` | ceiling on the `read_file` window in lines (default 25000; `0` disables). A larger `limit` is refused with steering toward `search_files`, so a model cannot fill its context by paging a huge file with ever-bigger windows. `.pdf` paths bypass paging entirely and route to the markdown extractor (`NX_PDF_MAX_PAGES`) |
 | `NX_MENTION_INLINE_LIMIT` | max size in bytes for a file `@mention` to inline whole (default 4096). Bigger files get a stub naming the size and pointing at `read_file`/`search_files`. CSV/TSV/`.tab` over 1 KB always take the preview path instead: header + first 10 data rows + row count, since the columns are nearly all a data-file mention is about |
@@ -289,7 +291,7 @@ whose session file vanished, collects unreferenced image payloads immediately
 | `NX_OBS_MAX_TRACKED` | bound on the in-process pack-send counters (default `4096`, drop-oldest) |
 | `NX_INTERRUPT_WATCHER` | `0` disables the stdin Esc-interrupt watcher for the whole process (default `1`). For headless runs (`nx run -f`, `--prompt-file`, `--parallel`) there is no tty to watch: this removes the watcher thread and its termios snapshot from every agent in a swarm. A quiet (background sub-agent / batch worker) loop never starts or arms the watcher regardless of this setting |
 | `NX_TOOL_FLOOR_SLIM` | `1` withholds the `duckdb` and `read_image` schemas behind `search_tools` (default off). For swarms: every agent pays the always-on tool floor, so demoting rarely-first-turn tools to tier-2 shrinks each agent's prompt by ~400 tokens with `search_tools` as the on-demand lifter |
-| `NX_STORE_BUSY_TIMEOUT_MS` | SQLite busy timeout for the session store and memory index (default `750` ms, was a hardcoded 5 s block). Under a shared `NX_HOME` a swarm's per-turn indexed saves contend on one WAL write lock; a shorter wait plus bounded retry beats a 5 s stall, and every consumer degrades to a full JSON parse on timeout |
+| `NX_STORE_BUSY_TIMEOUT_MS` | SQLite busy timeout for the session store and memory index (default `750` ms, was a hardcoded 5 s block). Under a shared `NX_HOME` a swarm's per-turn saves contend on one WAL write lock; a shorter wait plus bounded retry beats a 5 s stall, and every consumer degrades instead of raising on timeout |
 | `NX_REDUCER` | evidence-preserving reducer (default off; `1` enables): a large diagnostic output (build/test command) may be replaced by a compact receipt produced by a second model call, accepted only if EVERY quoted line verifies byte-for-byte against the on-disk archive (`~/.nx/evidence-preserving-reducer/`); any mismatch, schema miss, or missing failure evidence fails OPEN with the original output |
 | `NX_REDUCER_SOURCE` / `NX_REDUCER_MODEL` | route the reducer summary call to a cheaper endpoint (default: the active source/model) |
 | `NX_REDUCER_MIN_BYTES` | diagnostic output below this size is never reduced (default `4096`) |
@@ -772,16 +774,22 @@ call.
 
 ## Sessions
 
-Every chat auto-saves to `~/.nx/sessions/` as one human-readable JSON file per
-session (message array + id/title/description/source/timestamps + cumulative
-token usage). Auto-save happens after every turn, so a crash never loses work.
-Listings, body search and image GC read a consolidated SQLite index next to
-the transcripts (`~/.nx/sessions/.store.sqlite` — 0600, rebuilt from the
-transcripts if deleted) that every indexed save updates; rows for sessions
-deleted out-of-band are pruned on the next save, so a deleted id can't
-resurface in a listing or a body search. Sessions dirs written by nx ≤ 0.45
-(per-session `.index/` shards + `.search.sqlite`) are migrated into the store
-on first use and the legacy files retired.
+Every chat auto-saves to a single SQLite store, `~/.nx/sessions/sessions.sqlite`
+(0600 file in a 0700 dir; 0.101.0 — was one JSON file per session). Each row
+holds the full transcript JSON (message array + id/title/description/source/
+timestamps + cumulative token usage); listings read the `updated_at` column and
+body search uses an FTS5 table in the same database. Auto-save happens after
+every turn, so a crash never loses work. Saves are transactional (BEGIN
+IMMEDIATE + a per-session `revision` counter), so two nx processes saving the
+same session merge instead of losing turns.
+
+Sessions dirs written by older nx versions are migrated automatically: per-
+session JSON files are imported (lazily, the first time a listing/load finds
+the store empty — or eagerly with `nx sessions --migrate`) and left in place as
+a backup; pre-0.46 `.index/` shards fold in too, and rows whose transcript row
+is gone are pruned on the next save, so a deleted id can't resurface in a
+listing or a body search. Deleting `sessions.sqlite` is always safe — the next
+start re-imports the backup files.
 
 `nx --resume <target>` (short id, prefix, title, or bare for most recent)
 restores it, reselects the original source, and replays a recap of the

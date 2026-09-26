@@ -148,11 +148,20 @@ from ._sessions_fs import (
     _delete_session, _maybe_refresh_description, _resolve_session,
     _merge_session_messages, _is_compaction_rewrite,
 )
-from ._storeindex import (  # noqa: F401  (public store surface, 2.3b)
+from ._storeindex import (  # noqa: F401  (legacy consolidated store index,
+    # retired 0.101.0 — the transcripts moved into _sessiondb's
+    # sessions.sqlite; kept importable for old tools)
     STORE_FILENAME, update_session as _store_update_session,
     load_index as _store_load_index, delete_session_row as _store_delete_row,
     prune_stale as _store_prune_stale, store_stats as _store_stats,
     migrate_legacy as _store_migrate_legacy,
+)
+from ._sessiondb import (  # noqa: F401  (the 0.101.0 session store)
+    STORE_FILENAME as _SESSION_STORE_FILENAME,
+    migrate_files as _migrate_session_files,
+    load_session as _store_load_session, store_session as _store_store_session,
+    delete_session_row as _sessiondb_delete_row, prune_stale as _sessiondb_prune_stale,
+    store_stats as _sessiondb_stats, refresh_fts as _sessiondb_refresh_fts,
 )
 from ._input_history import (
     _load_input_history, _record_input, INPUT_HISTORY_LINES_DEFAULT,

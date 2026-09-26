@@ -88,12 +88,13 @@ def test_write_then_load_roundtrip(nx_fresh):
     import nx._sessions_fs as fs
     msgs = _msgs()
     fs._write_session("sess-imgs", msgs, {"title": "t"})
-    # the session file carries refs, not payloads
-    with open(fs._session_path("sess-imgs")) as f:
-        raw = f.read()
-    assert PNG_B64 not in raw and "image_ref" in raw
+    # the stored transcript carries refs, not payloads (read via the store)
+    raw = fs._load_session("sess-imgs")
+    import json as _json
+    stored_blob = _json.dumps(raw)
+    assert PNG_B64 not in stored_blob and "image_ref" in stored_blob
     # load returns the store form untouched (expansion is resume-only)
-    data = fs._load_session("sess-imgs")
+    data = raw
     assert data["messages"][2]["content"][1]["type"] == "image_ref"
     # resume-path expansion restores the live form
     assert fs._deserialize_image_parts(data["messages"]) == 1
@@ -102,8 +103,8 @@ def test_write_then_load_roundtrip(nx_fresh):
     assert base64.b64decode(live["image_url"]["url"].split(",", 1)[1]) == PNG_BYTES
     # ...and the next save round-trips through store form again (idempotent)
     fs._write_session("sess-imgs", data["messages"])
-    with open(fs._session_path("sess-imgs")) as f:
-        assert "image_ref" in f.read()
+    reloaded = _json.dumps(fs._load_session("sess-imgs"))
+    assert "image_ref" in reloaded
 
 
 def test_missing_sidecar_degrades_to_note(nx_fresh):

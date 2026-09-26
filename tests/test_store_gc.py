@@ -123,17 +123,24 @@ def test_scan_reads_rows_not_transcripts():
 
 
 def test_scan_falls_back_for_missing_row():
-    """A session with no store row (e.g. written by an older nx, or the row
-    was lost) must not blind the GC to its refs — its transcript is
-    parsed instead."""
+    """A session whose store row is missing/corrupt must not blind the GC
+    to its refs — the legacy mirror file (still on disk) is parsed instead."""
     _clear()
     sid = "20250101-120000-gcaaa5"
     _write_session_with_refs(sid, ["e" * 64])
-    from nx import _storeindex
-    conn = _storeindex._connect()
+    from nx import _sessiondb
+    conn = _sessiondb._connect()
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
     conn.commit()
     conn.close()
+    # the fallback source is the legacy mirror file — write one by hand
+    # (as an older nx would have left behind)
+    import json as _json
+    with open(m._session_path(sid), "w") as f:
+        _json.dump({"id": sid, "updated_at": 1.0, "revision": 1,
+                    "messages": [{"role": "user",
+                                  "content": [{"type": "image_ref",
+                                               "sha256": "e" * 64}]}]}, f)
     live = fs._scan_session_image_refs()
     assert "e" * 64 in live
 
@@ -169,25 +176,36 @@ def test_prune_removes_orphans_no_grace(monkeypatch):
 
 
 def test_prune_drops_rows_without_session_file():
+    """0.101.0 the transcript IS the row, so there is no mirror file to
+    hand-delete — staleness inside the store is an FTS row whose transcript
+    row is gone. --prune sweeps those."""
     _clear()
     sid = "20250101-120000-gcaaa7"
     m._write_session(sid, [{"role": "user", "content": "bye"}], {})
-    # simulate a crash/manual rm of the transcript, store row left behind
-    os.remove(m._session_path(sid))
+    # simulate a crash between the two deletes: transcript row gone, FTS row left
+    import sqlite3 as _sq
+    conn = _sq.connect(m._sessiondb._store_path())
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+    conn.commit()
+    conn.close()
     stats = fs._prune_sessions_store()
     assert stats["rows_pruned"] == 1
     assert sid not in m._load_index()
 
 
 def test_indexed_save_sweeps_stale_rows():
-    """The opportunistic half of the prune: the next indexed save after a
-    crash/manual rm drops the dead session's row without waiting for
+    """The opportunistic half of the prune: the next indexed save after an
+    FTS row loses its transcript row drops the orphan without waiting for
     --prune."""
     _clear()
     dead = "20250101-120000-gcaac"
     live = "20250101-120000-gcaad"
     m._write_session(dead, [{"role": "user", "content": "doomed"}], {})
-    os.remove(m._session_path(dead))
+    import sqlite3 as _sq
+    conn = _sq.connect(m._sessiondb._store_path())
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (dead,))
+    conn.commit()
+    conn.close()
     # Swarm P6: the prune is amortized (NX_SESSION_SWEEP_INTERVAL); reset the
     # clock so this save performs the sweep the test asserts on.
     fs._SWEEP_LAST.clear()

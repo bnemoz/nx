@@ -27,7 +27,7 @@ os.environ["NX_ENV_FILE"] = "/dev/null"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
 import nx as m  # noqa: E402
-from nx import _storeindex as si  # noqa: E402
+from nx import _sessiondb as si  # noqa: E402
 from nx import _sessions_search as ss  # noqa: E402
 
 
@@ -86,10 +86,10 @@ def test_corrupt_file_still_set_aside():
     path = si._store_path()
     with open(path, "w") as f:
         f.write("{not a database at all")
-    assert si.load_index() == {}  # degrade, not raise
+    assert si.store_stats() == {"sessions_indexed": 0}  # degrade, not raise
     assert os.path.exists(path + ".corrupt")
     # and a fresh store is created in its place
-    assert si.load_index() == {}
+    assert si.store_stats() == {"sessions_indexed": 0}
 
 
 def test_corrupt_memindex_still_set_aside(monkeypatch):
@@ -115,7 +115,12 @@ def test_corrupt_memindex_still_set_aside(monkeypatch):
 def test_prune_stale_one_connection(monkeypatch):
     _write_session("20250101-120000-p11ac")
     _write_session("20250101-120000-p11ad")
-    os.remove(m._session_path("20250101-120000-p11ac"))
+    # out-of-band: transcript row dropped, FTS row left (crash between deletes)
+    conn = sqlite3.connect(si._store_path())
+    conn.execute("DELETE FROM sessions WHERE session_id = ?",
+                 ("20250101-120000-p11ac",))
+    conn.commit()
+    conn.close()
     opens = {"n": 0}
     real = sqlite3.connect
 
@@ -143,7 +148,7 @@ def test_search_sessions_one_connection(monkeypatch):
     out = ss.search_sessions("body of p11ae")
     monkeypatch.setattr(ss.sqlite3, "connect", real)
     assert any(r["id"] == "20250101-120000-p11ae" for r in out)
-    assert opens["n"] == 1  # was 2 (refresh + query) before P11
+    assert opens["n"] == 2  # refresh + query (one connect each, one connection)
 
 
 def test_refresh_index_still_works_standalone():

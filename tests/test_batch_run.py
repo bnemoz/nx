@@ -251,10 +251,13 @@ def test_batch_runs_each_task_and_emits_jsonl(fake_loop, tmp_path, monkeypatch):
     # summary goes to stderr, never stdout
     assert "2 done" in err.getvalue()
     assert "nx run:" not in out
-    # a real, resumable session file was written per task
+    # a real, resumable session was written per task (0.101.0: in the store;
+    # the legacy mirror files are no longer produced)
     sessions_dir = tmp_path / "nxhome" / "sessions"
-    saved = list(sessions_dir.glob("*.json"))
-    assert len(saved) == 2
+    ids = [lines[0]["session"], lines[1]["session"]]
+    loaded = [nx._load_session(sid) for sid in ids]
+    assert all(s is not None for s in loaded)
+    assert all(isinstance(s.get("messages"), list) for s in loaded)
 
 
 def test_turn_cap_plumbing(fake_loop, tmp_path, monkeypatch):
@@ -535,12 +538,13 @@ def test_parallel_task_sessions_carry_own_totals(fake_loop, tmp_path, monkeypatc
     code = _run(nx, ["-f", f, "--parallel", str(n), "--continue-on-error"])
     assert code == 0, f"exit={code}, stderr={err.getvalue()!r}"
     # one saved session per task; each carries its own totals — match the
-    # sessions back to tasks by their distinct output-token value
+    # sessions back to tasks by their distinct output-token value (0.101.0:
+    # sessions live in the store, read via _load_session)
     sessions_dir = tmp_path / "nxhome" / "sessions"
-    files = list(sessions_dir.glob("*.json"))
-    assert len(files) == n
-    totals = sorted(json.loads(p.read_text(encoding="utf-8"))["output_tokens"]
-                    for p in files)
+
+    sids = sorted(nx._sessiondb.all_ids())
+    assert len(sids) == n
+    totals = sorted(nx._load_session(sid)["output_tokens"] for sid in sids)
     assert totals == [0, 1, 2, 3]
 
 

@@ -21,6 +21,7 @@ from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl, _cli_sessions, _cli_prune_sessions, _cli_tokens
+from ._sessions_cmd import _cli_migrate_sessions
 from ._repl_state import _fresh_metrics
 from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
 from ._images import _parts_preview
@@ -383,6 +384,8 @@ def main() -> None:
     # the listing verb: _cli_sessions treats "--prune" as a search query and
     # would otherwise swallow the flag (it printed "no sessions matching
     # '--prune'" instead of ever pruning).
+    if _cli_migrate_sessions(sys.argv[1:]):
+        return
     if _cli_prune_sessions(sys.argv[1:]):
         return
     # `nx sessions [query]` — discover + exit, no REPL. Checked first so

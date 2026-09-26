@@ -7,6 +7,7 @@ write → load → list → resolve → delete, in a throwaway temp dir.
 import json
 import os
 import sys
+import shutil
 import tempfile
 
 # Point NX_SESSIONS_DIR at a temp dir so we never touch ~/.nx.
@@ -36,8 +37,12 @@ def _clear_test_sessions_dir():
     d = _use_test_sessions_dir()
     assert os.path.basename(d).startswith("nx-test-"), d
     for f in os.listdir(d):
-        if f.endswith(".json"):
-            os.remove(os.path.join(d, f))
+        p = os.path.join(d, f)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+        else:
+            os.remove(p)
+    m._sessiondb._MIGRATED.clear()
     return d
 
 

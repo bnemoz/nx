@@ -2,15 +2,17 @@
 
 `nx sessions <query>` and `/sessions <query>` have always filtered by title/
 description substring only — the answer to "which session touched _turn.py?"
-was scrolling. `search_sessions()` queries the FTS5 table of the consolidated
-session store (`<sessions_dir>/.store.sqlite`, see _storeindex — 2.3b folded
-the old .search.sqlite into it), so a content query scans every saved chat in
-milliseconds. Pure stdlib (sqlite3 ships FTS5 in every CPython ≥3.7 build nx
-supports).
+was scrolling. `search_sessions()` queries the FTS5 table of the session
+store (`<sessions_dir>/sessions.sqlite`, see _sessiondb — 0.101.0 the
+transcripts and their search index share one database), so a content query
+scans every saved chat in milliseconds. Pure stdlib (sqlite3 ships FTS5 in
+every CPython ≥3.7 build nx supports).
 
-The index is a cache, never the source of truth: any session file newer than
-its indexed row is re-indexed on the next search, a missing row is backfilled
-on demand, and deleting the .store.sqlite file is always safe.
+The FTS body is written by the indexed save path (`_write_session` →
+`refresh_fts`) and lazily backfilled for sessions that predate it, so a
+fresh store still answers content queries. Deleting the sessions.sqlite
+file is always safe (the next save/list re-imports any legacy mirror
+files, and search rebuilds from there).
 
 `export_markdown()` renders a session JSON as a readable markdown transcript
 for /export md.
@@ -25,7 +27,7 @@ from typing import Any, Optional
 
 from . import _state as st
 
-_INDEX_FILENAME = ".store.sqlite"
+_INDEX_FILENAME = "sessions.sqlite"
 
 
 def _index_path() -> str:
@@ -34,10 +36,10 @@ def _index_path() -> str:
 
 
 def _connect() -> sqlite3.Connection:
-    # The FTS table lives in the consolidated store (2.3b) — nx._storeindex
-    # owns the connection/schema so both indexes cannot drift apart.
-    from . import _storeindex
-    return _storeindex._connect()
+    # The FTS table lives in the session store — nx._sessiondb owns the
+    # connection/schema so transcript and search index cannot drift apart.
+    from . import _sessiondb
+    return _sessiondb._connect()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -126,16 +128,17 @@ def _indexed_mtime(conn: sqlite3.Connection, session_id: str) -> Optional[float]
 
 def _refresh_index(force: bool = False,
                    conn: Optional[sqlite3.Connection] = None) -> int:
-    """Re-index session files that are newer than their indexed row, and
-    drop FTS rows whose session JSON is gone (the 2.3b stale-row prune the
-    old .search.sqlite never did — /sessions <query> could offer a deleted
-    id). Returns the number of sessions (re)indexed. Cheap: untouched
-    sessions are skipped after a single mtime comparison.
+    """Backfill FTS rows for sessions that have a transcript row but no
+    body yet (indexed saves write the body themselves; legacy imports and
+    autosave-only writes do not). Also drops FTS rows whose transcript row
+    is gone — /sessions <query> must never offer a deleted id.
+
+    0.101.0: no per-file mtimes to compare — freshness is simply "does an
+    FTS row exist for this transcript row". Returns sessions indexed.
 
     Swarm P11: accepts a caller-owned connection so search_sessions' old
-    open-refresh-close + open-again shape (two fresh connects + 2 PRAGMAs
-    + two schema-ensures per content search) becomes one."""
-    from ._sessions_fs import _load_session, _sessions_dir
+    open-refresh-close + open-again shape becomes one."""
+    from . import _sessiondb
     own = conn is None
     if own:
         conn = _open_store()
@@ -143,25 +146,27 @@ def _refresh_index(force: bool = False,
             return 0
     n = 0
     try:
-        d = _sessions_dir()
-        # prune FTS rows for deleted sessions (keep listing rows authoritative
-        # to _storeindex.prune_stale — this only mirrors the deletion into FTS)
-        stale = [r[0] for r in conn.execute(
-            "SELECT session_id FROM sessions_fts").fetchall()
-            if not os.path.exists(os.path.join(d, f"{r[0]}.json"))]
+        try:
+            fts_ids = {r[0] for r in conn.execute(
+                "SELECT session_id FROM sessions_fts").fetchall()}
+        except sqlite3.OperationalError:
+            return 0  # no FTS5 here
+        # prune FTS rows whose transcript row is gone
+        have = {r[0] for r in conn.execute(
+            "SELECT session_id FROM sessions").fetchall()}
+        stale = fts_ids - have
         for sid in stale:
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (sid,))
         if stale:
             conn.commit()
-        for sid, mtime in _iter_session_files():
-            if not force:
-                seen = _indexed_mtime(conn, sid)
-                if seen is not None and seen >= mtime:
-                    continue
-            data = _load_session(sid)
-            if not data or not isinstance(data.get("messages"), list):
+        # backfill missing bodies from the store itself
+        for sid, data in _sessiondb.iter_rows():
+            if not data or sid in fts_ids:
                 continue
-            index_session(sid, data, mtime, conn)
+            _sessiondb.refresh_fts(
+                sid, data.get("messages") or [],
+                title=data.get("title"), description=data.get("description"),
+                conn=conn)
             n += 1
     finally:
         if own:
@@ -173,7 +178,9 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
     """Full-text search over saved session bodies. Returns matches shaped like
     _list_sessions() rows plus `snippet` (an FTS5 highlight around the first
     body hit). Falls back to an empty list (never raises) when FTS5 is missing
-    or the query is invalid FTS syntax — callers degrade to substring search."""
+    or the query is invalid FTS syntax — callers degrade to substring search.
+    A lazy FTS backfill for store-only sessions runs on the same connection
+    first (see _refresh_index)."""
     query = (query or "").strip()
     if not query:
         return []

@@ -194,22 +194,28 @@ capability/thinking/context probes cache on `Source` attributes
 
 ## Adding a new persistent store / index file
 
-Anything that caches state derived from the session transcripts (the
-consolidated SQLite store `nx/_storeindex.py`, the image sidecar dir) must
-behave as a **cache, never the source of truth**:
+Anything that persists state derived from the session transcripts (the
+session store `nx/_sessiondb.py` — 0.101.0's SQLite source of truth — or
+the image sidecar dir) must follow these rules:
 
-- A missing, corrupt, or locked store degrades to the pre-index behavior
-  (full transcript parse) — helpers return empty/None, they never raise into
-  listing/GC paths. A corrupt SQLite file is set aside (`*.corrupt`), not
-  left in the way.
-- Rows/files for deleted sessions are pruned opportunistically (indexed
-  saves, search refresh) and by `nx sessions --prune` — a stale row must
-  never resurface a deleted session id in a listing or a body search.
+- A missing or locked store degrades instead of raising into listing/GC
+  paths — helpers return empty/None, they never raise. A corrupt SQLite
+  file is set aside (`*.corrupt`), not left in the way; because the
+  transcripts live in the session store, corrupt-store recovery re-imports
+  the legacy per-session JSON mirror files (kept on disk after migration
+  for exactly this).
+- Stale rows (an FTS row whose transcript row is gone) are pruned
+  opportunistically (indexed saves, search refresh) and by
+  `nx sessions --prune` — a stale row must never resurface a deleted
+  session id in a listing or a body search.
 - Created 0600 in a 0700 dir via `open_private`/`private_dir`
   (`tests/test_private_sinks.py` checks).
+- No module-level `sqlite3.Connection`: connections are per-call (conftest
+  rewinds module state between tests; a closed cached connection would
+  leak), paths resolve from `NX_SESSIONS_DIR`/`NX_HOME` at call time.
 - Tests write it through the public helpers (`m._write_session`,
   `m._delete_session`) rather than hand-crafting internals, and each test
-  file pins its own `NX_SESSIONS_DIR` (see `tests/test_session_index.py`).
+  file pins its own `NX_SESSIONS_DIR` (see `tests/test_sessiondb.py`).
 
 ## Keeping the suite fast and offline
 

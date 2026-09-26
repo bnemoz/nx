@@ -76,6 +76,12 @@ def _project_memories_dir(project_root: str | os.PathLike[str] | None) -> str | 
 
 
 def _session_path(session_id: str) -> str:
+    """The legacy mirror-file path for a session id.
+
+    0.101.0 stores transcripts in sessions.sqlite; per-session JSON files
+    are no longer written. The path helper stays because it is the
+    migration source scanner's naming rule and a handful of tests/tools
+    still reason in terms of the old file layout."""
     safe = os.path.basename(session_id)
     if not safe or safe in (".", "..") or safe != session_id:
         raise ValueError(f"invalid session id: {session_id!r}")
@@ -128,15 +134,16 @@ def _exclusive_file_lock(path: str):
 
 
 def _load_index() -> dict[str, Any]:
-    """The listing index: {session_id: summary dict}, now read from the
-    consolidated SQLite store (2.3b — was one JSON shard per session under
-    _index_dir()). An unavailable store degrades to an empty dict, which
-    makes every listing fall back to a full per-file parse — same as a
-    missing index always has."""
-    from . import _storeindex
+    """The listing index: {session_id: summary dict}, derived from the
+    session store (0.101.0: the transcripts ARE the rows, so each summary
+    is computed from its `data` blob — one query, no per-file parse). An
+    unavailable store degrades to an empty dict."""
+    from . import _sessiondb
     try:
-        _storeindex.migrate_legacy()
-        return _storeindex.load_index()
+        return {
+            sid: _summarize_session_data(sid, data)
+            for sid, data in _sessiondb.iter_rows() if data is not None
+        }
     except Exception:
         return {}
 
@@ -144,35 +151,26 @@ def _load_index() -> dict[str, Any]:
 def _write_index(idx: dict[str, Any]) -> None:
     """Rebuild the whole listing table from a full {id: summary} dict.
 
-    Only used where callers still think in terms of one big index (tests,
-    reconstruction after loss); normal per-save updates go through
-    _update_index, which touches just the one row that changed."""
-    from . import _storeindex
+    0.101.0: the listing IS the transcript table, so a "rebuild" here can
+    only drop rows whose id the caller omitted — used by tests and
+    reconstruction paths. Summaries are not stored, so this cannot
+    resurrect content a summary no longer describes."""
+    from . import _sessiondb
     try:
-        _storeindex.write_full_index(idx)
+        keep = set(idx)
+        for sid in _sessiondb.all_ids():
+            if sid not in keep:
+                _sessiondb.delete_session_row(sid)
     except Exception:
-        pass  # best-effort — a stale/missing store just falls back to full parses
+        pass  # best-effort
 
 
 def _update_index(session_id: str, data: dict[str, Any]) -> None:
-    """Refresh this session's entry in the consolidated store index so
-    `nx sessions [query]` can list/search without json.load-ing every
-    full transcript on disk (some can be large — tool outputs, diffs, …).
-    Called from _write_session on every save, so the index stays at least
-    as fresh as the file it mirrors. 2.3b: one upsert updates BOTH the
-    listing row and the FTS body row — the two indexes cannot drift.
-
-    Safe without an extra lock because _write_session already holds this
-    session_id's own file lock for the duration of this call, and no other
-    session_id can write this row; SQLite's busy_timeout absorbs
-    cross-session contention on the one database file."""
-    from . import _storeindex
-    try:
-        _storeindex.migrate_legacy()
-        _storeindex.update_session(
-            session_id, data, float(data.get("updated_at") or time.time()))
-    except Exception:
-        pass  # best-effort — a stale/missing store just falls back to a full parse
+    """Legacy seam: the per-save index refresh. 0.101.0 the transcript row
+    is written by _write_session itself (one INSERT OR REPLACE also serves
+    the listing), so there is nothing separate to refresh. Kept as a
+    no-op so the exported name and its call sites stay stable."""
+    return None
 
 
 _SUMMARY_HEADER_RE = re.compile(
@@ -267,87 +265,71 @@ def _write_session(
     session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None,
     update_index: bool = True,
 ) -> None:
-    """Persist `messages` to the session file. Creates the dir if needed.
+    """Persist `messages` to the session store. Creates the dir if needed.
 
-    Writes atomically (temp file + rename) so a crash mid-write can't
-    corrupt the existing session. `meta` (title, source, cwd, …) is
-    merged into the stored metadata.
+    0.101.0: the store is sessions.sqlite (nx/_sessiondb.py) -- one row per
+    session, the transcript JSON as the `data` blob. The old per-session
+    JSON file + flock is gone: store_session() does the whole
+    read-merge-write inside one BEGIN IMMEDIATE transaction, and the
+    `revision` counter in the blob keeps its role as the concurrency
+    marker tests pin.
 
-    `update_index=False` skips the sidecar-index refresh: that's a
-    read-modify-write of every session's summary behind one lock shared
-    with every other nx process, so mid-turn autosaves (one per tool-call
-    step, purely for crash recovery) should skip it and let the one
-    per-turn save that follows refresh the index instead.
+    `meta` (title, source, cwd, etc.) is merged into the stored metadata.
+    `update_index=False` skips the FTS refresh: building the FTS body
+    scales with the transcript, so mid-turn autosaves skip it and the
+    per-turn save that follows refreshes search instead.
     """
     d = _sessions_dir()
     private_dir(d)
     _prune_empty_assistant_messages(messages)
-    path = _session_path(session_id)
-    # The lock spans reading the current revision through replacing it. A
-    # rename alone prevents corruption, but does not prevent lost updates.
-    with _exclusive_file_lock(path):
-        now = time.time()
-        existing = {}
+    # Store form (0.39.0) is what is persisted: image payloads move to the
+    # sidecar dir and messages carry image_ref parts. The COPY is compared
+    # and written -- the caller's live history keeps its inline parts, so
+    # live (request) form and store form never mix in one comparison and a
+    # prefix merge stays exact.
+    store_messages = _store_form_messages(messages)
+    try:
+        from . import _sessiondb
+        ok = _sessiondb.store_session(session_id, store_messages, meta)
+    except Exception:
+        ok = False
+    if not ok:
+        return
+    # Post-write re-read: the stored transcript is what load returns, and
+    # the merged result covers another writer's turns the merge preserved
+    # (so the image-GC live-set protects their payloads too).
+    stored: dict[str, Any] = {}
+    try:
+        from . import _sessiondb
+        stored = _sessiondb.load_session(session_id) or {}
+    except Exception:
+        stored = {}
+    merged = stored.get("messages")
+    if not isinstance(merged, list):
+        merged = store_messages
+    if update_index:
         try:
-            with open(path, encoding="utf-8") as f:
-                existing = json.load(f)
-            if not isinstance(existing, dict):
-                existing = {}
-        except (OSError, IOError, json.JSONDecodeError):
+            from . import _sessiondb
+            _sessiondb.refresh_fts(session_id, merged,
+                                   title=stored.get("title"),
+                                   description=stored.get("description"))
+        except Exception:
             pass
-        existing_messages = existing.get("messages")
-        if not isinstance(existing_messages, list):
-            existing_messages = []
-        # Store form (0.39.0) is what hits the disk: image payloads move to
-        # the sidecar dir and messages carry image_ref parts. The COPY is
-        # compared and written — the caller's live history keeps its inline
-        # parts, so live (request) form and store (file) form never mix in
-        # one comparison and a prefix merge stays exact.
-        incoming_store = _store_form_messages(messages)
-        # Re-read under the lock and compare with the caller's snapshot. On
-        # a stale save, preserve the committed suffix instead of silently
-        # letting the last writer replace it.
-        merged_messages = _merge_session_messages(existing_messages, incoming_store)
-        data = dict(existing)
-        data["id"] = session_id
-        data["messages"] = merged_messages
-        data["created_at"] = existing.get("created_at", now)
-        data["updated_at"] = now
-        data["revision"] = int(existing.get("revision", 0) or 0) + 1
-        if meta:
-            for k, v in meta.items():
-                if v is not None:
-                    data[k] = v
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with _open_private(tmp) as f:
-            f.write(json.dumps(data, ensure_ascii=False))
-        os.replace(tmp, path)
+        # Stale FTS rows are swept here too -- amortized once per
+        # NX_SESSION_SWEEP_INTERVAL seconds (default 300), process-wide.
+        # Same P6 gate as before.
         try:
-            os.utime(path, (data["updated_at"], data["updated_at"]))
-        except (OSError, TypeError, ValueError):
+            from . import _sessiondb
+            if _sweep_due("prune"):
+                _sessiondb.prune_stale()
+        except Exception:
             pass
-        if update_index:
-            _update_index(session_id, data)
-            # 2.3b: rows whose session JSON vanished (crash, manual rm) are
-            # swept, so listings and the GC live-set stop counting dead
-            # sessions without waiting for `nx sessions --prune`. Swarm P6:
-            # prune_stale is O(#sessions) os.stat — per indexed save that is
-            # a linear tax ×N agents on a shared store. Amortized: at most
-            # once per NX_SESSION_SWEEP_INTERVAL seconds (default 300)
-            # process-wide, so correctness (eventual prune) is unchanged and
-            # the per-save cost becomes once-per-interval.
-            try:
-                from . import _storeindex
-                if _sweep_due("prune"):
-                    _storeindex.prune_stale()
-            except Exception:
-                pass
-            _maybe_gc_image_sidecars(merged_messages)
-        else:
-            _maybe_gc_image_sidecars(merged_messages)
-        # Swarm P10: obsstore TTL/quota, amortized (own gate) — a packed-
-        # result store must not grow forever now that it is shared.
-        _maybe_gc_obsstore()
+        _maybe_gc_image_sidecars(merged)
+    else:
+        _maybe_gc_image_sidecars(merged)
+    # Swarm P10: obsstore TTL/quota, amortized (own gate) -- a packed-
+    # result store must not grow forever now that it is shared.
+    _maybe_gc_obsstore()
 
 
 # --- amortized maintenance sweeps (swarm P6) -----------------------------------
@@ -494,12 +476,16 @@ def _scan_session_image_refs() -> set[str]:
     live: set[str] = set()
     covered: set[str] = set()  # ids whose row gave us a trustworthy sha256s
     try:
-        from . import _storeindex
-        live, covered = _storeindex.image_live_set()
+        from . import _sessiondb
+        for sid, data in _sessiondb.iter_rows():
+            covered.add(sid)
+            if not data:
+                continue  # corrupt blob: fall back to the mirror file below
+            live |= _collect_message_image_refs(data.get("messages") or [])
     except Exception:
         covered = set()
-    # Anything the store could not answer (missing row, corrupt row, a
-    # session written by an older nx) falls back to parsing that transcript.
+    # Anything the store could not answer (corrupt blob) falls back to
+    # parsing the legacy mirror file, when one still exists.
     try:
         names = [n for n in os.listdir(_sessions_dir()) if n.endswith(".json")]
     except OSError:
@@ -591,68 +577,42 @@ def _deserialize_image_parts(messages: list[dict[str, Any]]) -> int:
 
 
 def _load_session(session_id: str) -> dict[str, Any] | None:
-    """Read a session file. Returns the dict (id, messages, meta…) or None."""
-    path = _session_path(session_id)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("messages"), list):
-            if not all(isinstance(m, dict) for m in data["messages"]):
-                return None
-            _prune_empty_assistant_messages(data["messages"])
-            return data
-    except (OSError, IOError, json.JSONDecodeError):
-        pass
-    return None
+    """Read a session from the store. Returns the dict (id, messages,
+    meta...) or None. A legacy mirror file that predates the store is
+    imported first (lazy migration, idempotent)."""
+    from . import _sessiondb
+    data = _sessiondb.load_session(session_id)
+    if data is None:
+        return None
+    _prune_empty_assistant_messages(data["messages"])
+    return data
 
 
 def _session_files_newest() -> list[str]:
-    """Return session JSON filenames newest-first using filesystem mtimes.
+    """Session ids newest-first, as legacy-style `<id>.json` names.
 
-    Listing many sessions should not require parsing every old transcript.
-    The session writer keeps mtime aligned with updated_at, so this is a
-    cheap index for recent-session browsing.
-    """
-    d = _sessions_dir()
-    files = []
-    try:
-        with os.scandir(d) as entries:
-            for entry in entries:
-                # ".json" but excludes the sidecar index dir (dotfile, .index/)
-                if not entry.name.endswith(".json") or entry.name.startswith("."):
-                    continue
-                try:
-                    if not entry.is_file():
-                        continue
-                    files.append((entry.stat().st_mtime, entry.name))
-                except OSError:
-                    continue
-    except OSError:
-        return []
-    files.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [name for _, name in files]
+    0.101.0 the order comes from the store's `updated_at` column (one
+    indexed query); the .json suffix is kept only so callers that slice
+    ids out of these names (and tests that spy on
+    _session_summary_from_file) keep working unchanged."""
+    from . import _sessiondb
+    rows = _sessiondb.list_ids_newest()
+    return [f"{sid}.json" for sid, _ in rows]
 
 
 def _session_summary_from_file(fname: str, idx: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Return the listing summary for one session file. When `idx` (the
-    sidecar index — see _load_index) already has an entry for this session,
-    return that directly instead of json.load-ing the full transcript;
-    `idx=None` or a cache miss falls back to a full parse exactly as before
-    the index existed (e.g. a session written by an older nx, or a
-    missing/corrupt index file)."""
+    """Return the listing summary for one session id (given in the legacy
+    `<id>.json` filename form). 0.101.0 the summary is derived from the
+    transcript row in the store; `idx` (a precomputed _load_index dict) is
+    still honored as a cache, and a session with no row returns None."""
     sid = fname[:-5] if fname.endswith(".json") else fname
     if idx is not None:
         cached = idx.get(sid)
         if cached is not None:
             return cached
-    d = _sessions_dir()
-    path = os.path.join(d, fname)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or "messages" not in data:
-            return None
-    except (OSError, IOError, json.JSONDecodeError):
+    from . import _sessiondb
+    data = _sessiondb.load_session(sid)
+    if not data:
         return None
     return _summarize_session_data(data.get("id") or sid, data)
 
@@ -696,11 +656,12 @@ def _prune_sessions_store() -> dict[str, int]:
        2. Unreferenced image payloads are collected immediately, no age
        grace. 3. The size quota runs last. Returns a small stats dict for
        the CLI to print."""
-    from . import _storeindex
-    # 0. consolidated store: stale listing rows + their FTS bodies
+    from . import _sessiondb
+    # 0. consolidated store: stale FTS rows (transcript row gone — a crash
+    # between the two deletes is the only way now)
     try:
-        _storeindex.migrate_legacy()
-        rows_pruned = _storeindex.prune_stale()
+        _sessiondb._ensure_migrated()
+        rows_pruned = _sessiondb.prune_stale()
     except Exception:
         rows_pruned = 0
     # 1. orphaned legacy shards (pre-2.3b store)
@@ -740,23 +701,27 @@ def _prune_sessions_store() -> dict[str, int]:
 
 
 def _delete_session(session_id: str) -> bool:
-    """Remove a session file. Returns True if something was deleted.
+    """Remove a session from the store. Returns True if something was
+    deleted.
 
-    2.3a removed the index shard; 2.3b removes the session's consolidated-
-    store rows (listing + FTS) — a deleted id can no longer surface in
-    `/sessions <query>` via a stale FTS row — then runs the sidecar GC
-    immediately: a deleted session's images used to linger until some
-    *other* session happened to save. The row removal MUST precede the GC
-    (it is the ref list being dropped); the scan covers every other
-    session, and the 60s grace protects concurrent writers."""
+    0.101.0: drops the transcript row + its FTS row (a deleted id can no
+    longer surface in `/sessions <query>` via a stale FTS row), then runs
+    the sidecar GC immediately: a deleted session's images used to linger
+    until some *other* session happened to save. The row removal MUST
+    precede the GC (it is the ref list being dropped); the scan covers
+    every other session, and the 60s grace protects concurrent writers.
+    A legacy mirror file, if one still exists, is removed too."""
+    from . import _sessiondb
+    existed = _sessiondb.load_session(session_id) is not None
     path = _session_path(session_id)
     try:
         os.remove(path)
     except OSError:
+        pass
+    if not existed:
         return False
     try:
-        from . import _storeindex
-        _storeindex.delete_session_row(session_id)
+        _sessiondb.delete_session_row(session_id)
     except Exception:
         pass
     # GC-on-delete: with the rows gone, nothing (else) references the

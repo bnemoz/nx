@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for the consolidated session store index (`.store.sqlite`, 2.3b)
-that lets `_list_sessions()` / `nx sessions [query]` list and search saved
-sessions without json.load-ing every full transcript on disk.
+"""Tests for the session store (`sessions.sqlite`, 0.101.0) that lets
+`_list_sessions()` / `nx sessions [query]` list and search saved sessions
+without parsing every full transcript. The transcripts live in the DB; the
+per-session JSON files are a legacy mirror kept only as backup.
 
-2.3b folded the per-session `.index/<sid>.json` shards and the lazy
-`.search.sqlite` FTS cache into one SQLite db written by every indexed
-save — these tests pin the surface `_load_index`/`_write_index` kept and
-the degradation paths (corrupt store, missing rows) that fall back to a
-full transcript parse.
+These pin the degradation paths (corrupt store, self-healing re-import)
+that fall back gracefully.
 """
 import os
 import shutil
@@ -89,21 +87,22 @@ def test_list_sessions_uses_index_even_if_file_is_corrupted():
 
 
 def test_missing_index_entry_falls_back_to_full_parse():
+    """0.101.0: the listing IS the transcript table, so dropping a summary
+    entry cannot lose the session — _write_index only drops ids the caller
+    omitted, and this test pins that a reconstruction pass that omits one
+    id removes exactly that row (the old 'fall back to a full parse' path
+    has no file to fall back to)."""
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx004"
+    other = "20250101-120000-idx040"
     m._write_session(sid, [_msg("user", "fallback preview")],
                       {"title": "fallback-title"})
-    # Simulate an index written by an older nx (or lost/corrupted) by
-    # dropping this session's entry.
+    m._write_session(other, [_msg("user", "kept")], {"title": "kept-title"})
     idx = m._load_index()
     idx.pop(sid, None)
     m._write_index(idx)
-
-    sessions = m._list_sessions()
-    match = [s for s in sessions if s["id"] == sid]
-    assert len(match) == 1
-    assert match[0]["title"] == "fallback-title"
-    assert match[0]["preview"] == "fallback preview"
+    assert sid not in m._load_index()
+    assert other in m._load_index()  # only the omitted id is dropped
 
 
 def test_delete_session_removes_index_entry():
@@ -115,11 +114,22 @@ def test_delete_session_removes_index_entry():
     assert sid not in m._load_index()
 
 
-def test_missing_index_dir_degrades_gracefully():
+def test_missing_store_self_heals_from_mirror_files():
+    """A deleted store is rebuilt: the legacy mirror files (written by an
+    older nx, or kept as a backup) are re-imported by the lazy migration
+    on the next listing/load."""
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx006"
     m._write_session(sid, [_msg("user", "still works")], {"title": "no-index"})
-    os.remove(m._storeindex._store_path())
+    # out-of-band: keep the legacy mirror file, drop the store
+    import json as _json
+    d = m._sessions_dir()
+    with open(m._session_path(sid), "w", encoding="utf-8") as f:
+        _json.dump({"id": sid, "title": "no-index", "description": None,
+                    "created_at": 1.0, "updated_at": 2.0, "revision": 3,
+                    "messages": [{"role": "user", "content": "still works"}]}, f)
+    os.remove(m._sessiondb._store_path())
+    m._sessiondb._MIGRATED.clear()
 
     sessions = m._list_sessions()
     match = [s for s in sessions if s["id"] == sid]
@@ -127,29 +137,29 @@ def test_missing_index_dir_degrades_gracefully():
     assert match[0]["title"] == "no-index"
     # a fresh store should now exist again after the next write
     m._write_session(sid, [_msg("user", "still works")], {"title": "no-index"})
-    assert os.path.exists(m._storeindex._store_path())
+    assert os.path.exists(m._sessiondb._store_path())
 
 
 def test_corrupt_store_degrades_gracefully():
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx007"
     m._write_session(sid, [_msg("user", "resilient")], {"title": "resilient-title"})
-    with open(m._storeindex._store_path(), "w", encoding="utf-8") as f:
+    with open(m._sessiondb._store_path(), "w", encoding="utf-8") as f:
         f.write("not a sqlite database at all")
 
-    sessions = m._list_sessions()
-    match = [s for s in sessions if s["id"] == sid]
-    assert len(match) == 1
-    assert match[0]["title"] == "resilient-title"
+    sessions = m._list_sessions()  # degrades to empty, never raises
+    assert isinstance(sessions, list)
     # the unusable file was set aside, not left in the way
-    assert os.path.exists(m._storeindex._store_path() + ".corrupt")
+    assert os.path.exists(m._sessiondb._store_path() + ".corrupt")
+    # and the next write works on a fresh store
+    m._write_session(sid, [_msg("user", "resilient")], {"title": "resilient-title"})
+    assert m._load_session(sid) is not None
 
 
 def test_legacy_shard_store_migrates_into_consolidated_db():
-    """An upgraded ≤0.45 sessions dir (`.index/` shards, `.search.sqlite`)
-    is folded into .store.sqlite on the first indexed save/list, the stale
-    shard whose transcript is gone is NOT imported, and both legacy files
-    are retired."""
+    """An upgraded ≤0.45 sessions dir (.index/ shards) still folds into the
+    current store via the shard-migration path, and the shard whose
+    transcript is gone is NOT imported as a live session."""
     _clear_test_sessions_dir()
     d = m._sessions_dir()
     live_sid = "20250101-120000-idx008"
@@ -164,11 +174,15 @@ def test_legacy_shard_store_migrates_into_consolidated_db():
                        "sha256s": []}, f)
     # only the live session still has a transcript
     m._write_session(live_sid, [_msg("user", "fresh turn")], {"title": "migrated"})
-    assert os.path.exists(os.path.join(d, ".store.sqlite"))
+    assert os.path.exists(m._sessiondb._store_path())
     assert not os.path.isdir(m._index_dir())          # legacy shards retired
     idx = m._load_index()
     assert live_sid in idx and idx[live_sid]["title"] == "migrated"
-    assert dead_sid not in idx                         # no transcript → not imported as live
+    # the dead shard's transcript is gone (no mirror file), but its listing
+    # summary survives as a stub — the user's history list doesn't lose rows
+    assert dead_sid in idx and idx[dead_sid]["title"] == "ghost"
+    # ...and it is not resumable content: the stub has no messages
+    assert m._load_session(dead_sid)["messages"] == []
     # the FTS half came along: body search finds the migrated session
     from nx._sessions_search import search_sessions
     hits = search_sessions("fresh turn")
@@ -177,25 +191,29 @@ def test_legacy_shard_store_migrates_into_consolidated_db():
 
 def test_stale_fts_row_cannot_offer_deleted_session():
     """The 2.3a bug pinned: a body-search row for a session deleted out-of-
-    band (crash, manual rm) must not surface in /sessions <query>."""
+    band (crash, manual DB surgery) must not surface in /sessions <query>."""
     _clear_test_sessions_dir()
     sid = "20250101-120000-idx010"
     m._write_session(sid, [_msg("user", "quokka in the body")], {"title": "doomed"})
     from nx._sessions_fs import _prune_sessions_store
     from nx._sessions_search import search_sessions
     assert [h["id"] for h in search_sessions("quokka")] == [sid]
-    # out-of-band deletion: transcript removed without /delete
-    os.remove(m._session_path(sid))
+    # out-of-band deletion: transcript row dropped without /delete, FTS row left
+    import sqlite3 as _sq
+    conn = _sq.connect(m._sessiondb._store_path())
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+    conn.commit()
+    conn.close()
     stats = _prune_sessions_store()
     assert stats["rows_pruned"] == 1
     assert search_sessions("quokka") == []             # stale FTS row pruned
-    assert sid not in m._load_index()                  # stale listing row pruned
+    assert sid not in m._load_index()                  # no transcript row either
 
 
 def test_store_file_is_private():
     _clear_test_sessions_dir()
     m._write_session("20250101-120000-idx011", [_msg("user", "hi")])
-    path = m._storeindex._store_path()
+    path = m._sessiondb._store_path()
     mode = os.stat(path).st_mode & 0o777
     assert mode == 0o600, oct(mode)
     assert os.stat(os.path.dirname(path)).st_mode & 0o777 == 0o700
