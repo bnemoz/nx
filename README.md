@@ -362,7 +362,7 @@ line per action.
 | `NX_CACHE_ROUTING` | attach a stable per-session routing hint to every request — `user` (plus `prompt_cache_key` in the body) derived from the session id, so a vLLM / SGLang / llama.cpp prefix-cache router can pin this session to a replica or KV block instead of cold-prefilling on a different worker each turn (default on; `0` disables). Constant within a session by construction, and a source that sets its own `user` / `prompt_cache_key` via `EXTRA_BODY` always wins. Per-source: `NX_SOURCE_<NAME>_CACHE_ROUTING` |
 | `NX_SOURCE_<NAME>_CACHE_ROUTING` | per-source override of `NX_CACHE_ROUTING` (e.g. `0` for an aggregator that rejects unknown body fields) |
 | `NX_SEARCH_EXCLUDE_DIRS` | space-separated dirs the `grep` fallback skips (mirrors ripgrep's `.gitignore` handling; default includes `.venv node_modules __pycache__ build dist`) |
-| `NX_<ROLE>_COLOR` | override one of ten semantic roles (see below) |
+| `NX_<ROLE>_COLOR` | override one of eleven semantic roles (see below) |
 
 `nx --help` covers flags; the source (grep `_env_int`/`_env_float` calls in
 `nx/`) has the full env var list — dozens more knobs tune recovery samplers,
@@ -413,7 +413,7 @@ trailing note cannot fold away your last real tool result.
 
 Each theme supplies twelve palette hues — `cyan`, `green`, `yellow`, `red`,
 `magenta`, `gray`, `blue`, `orange`, `purple`, `teal`, `pink`, and `brown` —
-that ten semantic roles draw from. All twelve slots are used: the roles take
+that eleven semantic roles draw from. All twelve slots are used: the roles take
 the original eight, and the say-panel's markdown + code rendering maps the
 rest (purple bullets/numbers, teal table borders, brown link URLs and
 docstrings, pink decorators):
@@ -425,6 +425,7 @@ docstrings, pink decorators):
 | `STATUS_BAR` | cyan | per-turn stats footer (tok/s, ctx, ttft, wall) |
 | `TOOL_OUTPUT` | magenta | tool/bash result body lines |
 | `ACCENT` | blue | borders, model name, chatbox prompt |
+| `MEMORY` | purple | memory tool calls (`memory_search`/`memory_write`/`memory_delete`/`recall_lessons`) — box rail and header |
 | `LABEL` | orange | source name / session id badges |
 | `TODO` | orange | `todo_write` list items — **pending** items; **done** items use `SUCCESS` (green), **in_progress** items use `WARNING` (yellow) |
 | `SUCCESS` | green | yolo/auto-approve/allow indicators |

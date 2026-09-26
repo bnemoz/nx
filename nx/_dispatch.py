@@ -50,7 +50,7 @@ from ._gitcommit import git_commit
 from ._obs import obs_recall
 from ._webfetch import web_fetch
 from ._lint import lint_check
-from ._toolblocks import ToolBlock, current_recorder, tool_display
+from ._toolblocks import ToolBlock, current_recorder, tool_accent, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
@@ -406,8 +406,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     recorder = current_recorder() if ctx is None else None
     buffered = recorder is not None
     if not quiet and not buffered:
-        print(f"\n{C.ACCENT}  ┌─ {header}{RESET}")
-        print(f"{C.ACCENT}  │ {RESET}{DIM}{arg_preview}{RESET}")
+        accent = tool_accent(name)
+        print(f"\n{accent}  ┌─ {header}{RESET}")
+        print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -428,7 +429,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     except _EscToChat:
         # Close the tool box before propagating so it isn't left visually open.
         if not quiet and not buffered:
-            print(f"{C.ACCENT}  └─{RESET} {DIM}(escaped){RESET}")
+            print(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         result = f"ERROR: {type(e).__name__}: {e}"
@@ -562,16 +563,16 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         if len(disp) > 8:
             disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
         for line in disp:
-            print(f"{C.ACCENT}  │ {RESET}{line}{RESET}")
+            print(f"{accent}  │ {RESET}{line}{RESET}")
     elif st.TOOL_OUTPUT_VISIBLE:
         for line in preview_lines:
-            print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+            print(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     else:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
-        print(f"{C.ACCENT}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
+        print(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
     if not quiet and not buffered:
-        print(f"{C.ACCENT}  └─{RESET}")
+        print(f"{accent}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         # git_* results reflect .git/ state, which the root dir's mtime never
         # tracks (commits write under .git/ only) — store_cacheable_result

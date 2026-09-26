@@ -39,6 +39,17 @@ from ._ansi import DIM, RESET, C, LifeSpinner
 from ._progress import ProgressCounter
 
 
+# Tools whose call boxes render in the MEMORY role color instead of ACCENT,
+# so memory traffic stands apart from ordinary tool calls.
+_MEMORY_TOOLS = frozenset({"memory_search", "memory_write", "memory_delete", "recall_lessons"})
+
+
+def tool_accent(name: str) -> str:
+    """The rail/border color for one tool call's box: C.MEMORY for the memory
+    tools, C.ACCENT for everything else."""
+    return C.MEMORY if name in _MEMORY_TOOLS else C.ACCENT
+
+
 def clip(text: str, limit: int) -> str:
     """Truncate a one-line display preview to about `limit` characters."""
     if len(text) <= limit:
@@ -171,14 +182,16 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     be tested directly."""
     if not blocks:
         return
-    print(f"\n{C.ACCENT}  ┌─ {_group_title(blocks)}{RESET}")
+    accent = tool_accent(next((b.name for b in blocks if b.name), ""))
+    print(f"\n{accent}  ┌─ {_group_title(blocks)}{RESET}")
     calls = [b for b in blocks if b.name]
     for i, b in enumerate(blocks):
         branch = "└─" if i == len(blocks) - 1 else "├─"
         if not b.name:  # standalone note (pre-hook veto): no call header
-            print(f"{C.ACCENT}  │{RESET}  {C.ACCENT}{branch}{RESET} {b.note}")
+            print(f"{accent}  │{RESET}  {accent}{branch}{RESET} {b.note}")
             continue
-        line = f"{C.ACCENT}  │{RESET}  {C.ACCENT}{branch} {b.header or b.name}{RESET}"
+        b_accent = tool_accent(b.name)
+        line = f"{b_accent}  │{RESET}  {b_accent}{branch} {b.header or b.name}{RESET}"
         if b.detail:
             line += f" {DIM}{b.detail}{RESET}"
         if b.cached:
@@ -194,7 +207,7 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
             # where the box has already closed.
             rail = "│ " if i < len(blocks) - 1 else "  "
             for body_line in b.body:
-                print(f"{C.ACCENT}  │{RESET}  {rail}{body_line}")
+                print(f"{b_accent}  │{RESET}  {rail}{body_line}")
     n = len(calls)
     footer = f"{n} call{'' if n == 1 else 's'} · {elapsed:.1f}s"
     errs = sum(1 for b in calls if b.failed)
@@ -202,4 +215,4 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
         footer += f" · {errs} error{'' if errs == 1 else 's'}"
     if not visible:
         footer += " · output collapsed (/tooloutput)"
-    print(f"{C.ACCENT}  └─{RESET} {DIM}{footer}{RESET}")
+    print(f"{accent}  └─{RESET} {DIM}{footer}{RESET}")
