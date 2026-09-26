@@ -30,7 +30,12 @@ nx = "nx:main"
 packages = ["nx"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-xdist>=3.8"]
+dev = ["pytest", "pytest-xdist>=3.8", "ruff", "ty"]
+
+[tool.ruff.lint]
+# Explicit so every ruff version lints identically (0.16+ defaults to all
+# stable rules; the project gate is the classic E4/E7/E9/F set).
+select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
 # nx/__init__.py re-exports names from submodules (consumed as `nx.X` by tests

@@ -19,8 +19,10 @@ Plan-mode note: read-only tools are not gated by plan mode, and neither is
 this (it writes nothing).
 
 Command shapes (one per linter, chosen by marker/binary detection):
-  python  -> ruff check <paths>       (fallback: python -m py_compile when
-                                       ruff is absent)
+  python  -> ruff check <paths> + ty check           (fallback: python -m
+                                                       py_compile when ruff
+                                                       is absent; ty runs
+                                                       package-wide)
   go      -> go vet <paths>
   rust    -> cargo check --message-format short
   js/ts   -> npx --no-install eslint <paths>   (when eslint is installed)
@@ -67,11 +69,12 @@ def _session_touched_files() -> list[str]:
         return []
 
 
-def _detect_linter(paths: list[str]) -> tuple[str, list[str]] | None:
-    """(linter, base_argv) for the first supported ecosystem among paths'
-    project root(s). Falls back through: python (ruff or py_compile), go
-    (go vet), rust (cargo check), js/ts (eslint via npx, only when
-    installed)."""
+def _detect_linters(paths: list[str]) -> list[tuple[str, list[str]]]:
+    """(linter, base_argv) runs for the first supported ecosystem among paths'
+    project root(s). Python projects get BOTH checks when installed —
+    `ty check` (types) and `ruff check` (style/lint) are one workflow gate —
+    falling back to `python -m py_compile` when ruff is absent. Other
+    ecosystems: go vet, cargo check, eslint via npx (only when installed)."""
     roots = []
     for p in paths:
         d = os.path.dirname(os.path.abspath(_expand(p)))
@@ -79,7 +82,7 @@ def _detect_linter(paths: list[str]) -> tuple[str, list[str]] | None:
             roots.append(d)
             d = os.path.dirname(d)
     exts = {os.path.splitext(p)[1].lower() for p in paths}
-    by_marker: list[tuple[str, list[str]]] = []
+    runs: list[tuple[str, list[str]]] = []
     for d in dict.fromkeys(roots):
         try:
             names = set(os.listdir(d))
@@ -87,24 +90,28 @@ def _detect_linter(paths: list[str]) -> tuple[str, list[str]] | None:
             continue
         if any(n in names for n in ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt")) or any(
                 e in exts for e in (".py",)):
+            # ty (types) then ruff (style/lint) — the standard python gate;
+            # py_compile is the last-resort syntax check when ruff is absent.
+            if shutil.which("ty"):
+                runs.append(("python", ["ty", "check"]))
             if shutil.which("ruff"):
-                by_marker.append(("python", ["ruff", "check"]))
-            else:
-                by_marker.append(("python", [os.sys.executable, "-m", "py_compile"]))
+                runs.append(("python", ["ruff", "check"]))
+            elif not runs:
+                runs.append(("python", [os.sys.executable, "-m", "py_compile"]))
         if "go.mod" in names:
-            by_marker.append(("go", ["go", "vet"]))
+            runs.append(("go", ["go", "vet"]))
         if "Cargo.toml" in names:
-            by_marker.append(("rust", ["cargo", "check", "--message-format", "short"]))
+            runs.append(("rust", ["cargo", "check", "--message-format", "short"]))
         if "package.json" in names and shutil.which("npx") and shutil.which("eslint"):
-            by_marker.append(("js", ["npx", "--no-install", "eslint"]))
-        if by_marker:
+            runs.append(("js", ["npx", "--no-install", "eslint"]))
+        if runs:
             break
-    return by_marker[0] if by_marker else None
+    return runs
 
 
 def lint_check(paths: str = "", **_: Any) -> str:
     """Tool body. `paths`: space-separated files/dirs; empty = this session's
-    edited files. Returns the linter's (truncated) output with a verdict."""
+    edited files. Returns the linter(s') (truncated) output with a verdict."""
     argv_override = os.environ.get("NX_LINT_CMD", "").strip()
     plist = [_expand(p) for p in (paths or "").split() if p.strip()]
     if not plist:
@@ -117,40 +124,44 @@ def lint_check(paths: str = "", **_: Any) -> str:
         return f"ERROR: lint_check: path(s) not found: {', '.join(missing)}"
     if argv_override:
         import shlex
-        argv = shlex.split(argv_override)
-        linter = "custom (NX_LINT_CMD)"
+        runs = [("custom (NX_LINT_CMD)", shlex.split(argv_override))]
     else:
-        det = _detect_linter(plist)
-        if det is None:
+        runs = _detect_linters(plist)
+        if not runs:
             return ("ERROR: lint_check: no supported linter ecosystem detected "
                     "(python/pyproject, go.mod, Cargo.toml, package.json). Set "
                     "NX_LINT_CMD to a fixed lint command for this project.")
-        linter, argv = det
-    if linter == "go":
-        argv = argv + plist
-    elif linter == "rust":
-        pass  # cargo check ignores explicit paths; runs the workspace
-    else:
-        argv = argv + plist[:50]
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=_TIMEOUT_SECS, cwd=st.PROJECT_ROOT or None)
-    except subprocess.TimeoutExpired:
-        return f"[lint_check: {linter}] TIMED OUT after {_TIMEOUT_SECS}s"
-    except FileNotFoundError:
-        return f"ERROR: lint_check: {argv[0]!r} not found on PATH — install it or set NX_LINT_CMD"
-    out = ((r.stdout or "") + (r.stderr or "")).strip()
-    if len(out) > _MAX_OUT_CHARS:
-        out = out[:_MAX_OUT_CHARS] + f"\n... [lint output truncated at {_MAX_OUT_CHARS} chars]"
-    verdict = "clean" if r.returncode == 0 else f"{linter} reported issues (exit {r.returncode})"
-    return f"[lint_check: {linter}] {verdict}\n{out}"
+    blocks = []
+    for linter, argv in runs:
+        if linter == "go":
+            argv = argv + plist
+        elif linter == "rust":
+            pass  # cargo check ignores explicit paths; runs the workspace
+        elif linter == "python" and argv[:1] == ["ty"]:
+            pass  # ty check takes no paths; it resolves the package from cwd
+        else:
+            argv = argv + plist[:50]
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, check=False,
+                               timeout=_TIMEOUT_SECS, cwd=st.PROJECT_ROOT or None)
+        except subprocess.TimeoutExpired:
+            blocks.append(f"[lint_check: {linter}] TIMED OUT after {_TIMEOUT_SECS}s")
+            continue
+        except FileNotFoundError:
+            return f"ERROR: lint_check: {argv[0]!r} not found on PATH — install it or set NX_LINT_CMD"
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if len(out) > _MAX_OUT_CHARS:
+            out = out[:_MAX_OUT_CHARS] + f"\n... [lint output truncated at {_MAX_OUT_CHARS} chars]"
+        verdict = "clean" if r.returncode == 0 else f"{linter} reported issues (exit {r.returncode})"
+        blocks.append(f"[lint_check: {linter}] {verdict}\n{out}")
+    return "\n".join(blocks)
 
 
 LINT_CHECK_TOOL = {
     "type": "function",
     "function": {
         "name": "lint_check",
-        "description": "Run the project's linter (ruff/py_compile for python, go vet, cargo check, eslint) read-only over the given files — or, with no paths, over the files edited this session. Fixed command shapes (never free-text shell, never writes, no approval). For arbitrary lint flags or fixes, use run_bash instead.",
+        "description": "Run the project's linter (ruff + ty for python, go vet, cargo check, eslint) read-only over the given files — or, with no paths, over the files edited this session. Fixed command shapes (never free-text shell, never writes, no approval). For arbitrary lint flags or fixes, use run_bash instead.",
         "parameters": {
             "type": "object",
             "properties": {

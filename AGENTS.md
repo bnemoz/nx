@@ -25,12 +25,16 @@ Use `uv` for local development:
 uv pip install -e .                 # install the CLI and runtime dependencies
 uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~10s; workers capped at 32)
 uv run python3 tests/test_sources.py # run a standalone assertion-style test
+uv run ruff check .                 # lint gate — must be clean before committing
+uv run ty check nx                  # type check; no new diagnostics in touched files
 nx --help                           # inspect the installed CLI
 ```
 
 `-n auto` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~27s) works too and is the fallback if xdist is unavailable.
 
 Target a single pytest test during development with `uv run pytest tests/test_risk_context.py -k test_name`. The suite is designed to run offline; do not depend on a live model endpoint.
+
+Ruff and ty are pinned in the `dev` dependency group (installed with `uv sync --group dev`). Ruff is a hard gate; ty's existing ~125 diagnostics are tracked, not owed — see CONTRIBUTING.md's "Lint and type check" section for the policy.
 
 ## Coding Style & Naming Conventions
 
@@ -49,6 +53,8 @@ Ruff configuration includes intentional import exceptions for `nx/__init__.py`; 
 ## Testing Guidelines
 
 Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it. The suite is xdist-safe by construction: `tests/conftest.py` rewinds `NX_*` env vars and all `nx.*` module state around every test, so a new test file must not rely on state left behind by other files — set up what it needs (module scope or a fixture) instead of depending on execution order.
+
+Every change to `nx/` or `tests/` also passes `uv run ruff check .` (hard gate) and adds no new `uv run ty check nx` diagnostics in the touched files. See CONTRIBUTING.md's "Lint and type check" section.
 
 ## Commit & Pull Request Guidelines
 

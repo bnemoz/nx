@@ -254,6 +254,42 @@ tests/test_test_speed_tunables.py).
 
 ## Choosing what tests to run
 
+### Lint and type check (ruff + ty)
+
+Both are part of the standard workflow; run them before committing any change
+to `nx/` or `tests/`. `ty` is pinned in the `dev` dependency group, so
+`uv run ruff check .` and `uv run ty check nx` work on a fresh checkout with
+no global installs.
+
+```bash
+uv run ruff check .      # style/lint — must be clean, zero suppressions debt
+uv run ty check nx       # type check over the nx/ package
+```
+
+- **ruff is the gate**: a change that fails `ruff check .` is not done. New
+  code must not add per-line `# noqa` suppressions — fix the code, or if the
+  rule genuinely fights a deliberate pattern, extend the commented
+  `per-file-ignores` blocks in `pyproject.toml` (they exist for the two
+  intentional exceptions: `nx/__init__.py`'s re-export surface and
+  `tests/**`'s dynamic-test ergonomics). Keep new files out of those blocks.
+- **ty is advisory-but-not-ignored**: the codebase carries ~125 pre-existing
+  diagnostics (mostly `st.<name>` writes done via the `_StateProxyModule`
+  seam, which is dynamic by design, and `Optional[Connection]` patterns in
+  the SQLite stores). Do not add new diagnostics in the code you touch; do
+  not go on a drive-by fixing spree in one PR either — fix the ones on your
+  path and mention the delta in the PR description.
+- **`tests/**` under `ty`** runs with the dynamic-access rules relaxed via
+  the `[[tool.ty.overrides]]` block in `pyproject.toml` — the suite
+  monkeypatches module attributes by design, so `unresolved-attribute` /
+  `invalid-assignment` noise there is expected, not a bug signal.
+- **The agent-facing `lint_check` tool** (tier-2, `NX_LINT=1`) runs the same
+  stack: `ruff check <paths>` plus `ty check` for python projects. Keep its
+  detection logic in `nx/_lint.py` in sync if the workflow commands change.
+
+The suite (see below) stays the behavioral gate — lint catches the class of
+thing a passing test can still hide (unused imports that were load-bearing
+re-exports, undefined names behind a lazy import, shadowed definitions).
+
 The suite is fast, but "run everything every time" isn't required — scale the
 verification to what the diff could actually break:
 
@@ -271,6 +307,9 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
 
 ## General checklist before calling a feature done
 
+- [ ] `uv run ruff check .` is clean (no new `# noqa`, no new per-file-ignores
+      beyond the two intentional blocks in `pyproject.toml`).
+- [ ] `uv run ty check nx` adds no new diagnostics in the files you touched.
 - [ ] Does it show up in the chatbox `/` hint menu (if it's a slash command)?
 - [ ] If it takes an enum-like keyword argument, is it in `SLASH_ARG_OPTIONS`
       (`nx/_chatbox.py`) so the argument dropdown offers it?
