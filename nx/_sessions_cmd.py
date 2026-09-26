@@ -295,7 +295,12 @@ def _cli_migrate_sessions(args: list[str]) -> bool:
     from ._sessiondb import migrate_files, store_stats
     n = migrate_files(force=True)
     stats = store_stats()
-    print(f"  imported {n} legacy session file(s) into the store")
+    if n:
+        print(f"  imported {n} legacy session file(s) into the store")
+    else:
+        print(f"  nothing to import: every legacy JSON file in the sessions"
+              f" dir is already in the store (idempotent; files are kept as"
+              f" backups and rescanned each run)")
     print(f"  {DIM}{stats['sessions_indexed']} session(s) now in "
           f"{_sessiondb_store_path()}{RESET}")
     return True
