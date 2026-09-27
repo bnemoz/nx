@@ -542,7 +542,10 @@ Data analysis: prefer the duckdb tool (SQL over CSV/Parquet/JSON files
 directly) over pandas scripts for aggregation/filtering. Sub-agents have
 the same duckdb tool — for any join/aggregate/filter task, tell the
 sub-agent to use duckdb rather than expecting shell scripting (its
-run_bash is a read-only single-command allowlist: no pipes, no python)."""
+run_bash is a read-only single-command allowlist: no pipes, no python).
+
+Concurrency: a write refused with "changed since this session last read"
+means another session/editor owns the file — re-read it; never retry blind."""
 
 from ._env import _env_int, _env_float
 
