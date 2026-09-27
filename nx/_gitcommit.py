@@ -81,7 +81,6 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
       message: commit message (first line; kept verbatim).
       path: repo/directory to commit in (default: the project root).
     """
-    from ._bash_jobs import _confirm  # lazy: avoid an import cycle at module load
     repo = (path or "").strip() or st.PROJECT_ROOT or "."
     if not os.path.isdir(os.path.join(repo, ".git")):
         return (f"ERROR: git_commit: {repo} is not a git repository — run inside "
