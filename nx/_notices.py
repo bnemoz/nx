@@ -54,7 +54,7 @@ _CURRENT: contextvars.ContextVar["NoticeFrame | None"] = \
 class NoticeFrame:
     """One turn loop's private notice slots, seeded from its parent."""
 
-    __slots__ = ("slots", "prev")
+    __slots__ = ("slots", "seed", "prev")
 
     def __init__(self, prev: "NoticeFrame | None") -> None:
         self.prev = prev
@@ -67,6 +67,7 @@ class NoticeFrame:
                 cur = vars(st).get(name, st._NOTICE_DEFAULTS[name])
             vals[name] = cur.copy() if isinstance(cur, (dict, set, list)) else cur
         self.slots = vals
+        self.seed = dict(vals)
 
 
 def current() -> NoticeFrame | None:
@@ -86,10 +87,29 @@ def pop_notice_ctx(fr: NoticeFrame) -> None:
     if _CURRENT.get() is not fr:
         return  # stale finally after a swapped frame
     prev = fr.prev
+    # Fold back only slots THIS frame changed. A worker thread that finished
+    # mid-turn has no frame, so its staged note landed in the module store
+    # (or a parent frame); an unconditional overwrite with our stale seed
+    # would destroy it — and the sub-agent's `announced` flag is already
+    # burned, so the note could never be re-staged (0.104 wake-up fix).
     if prev is not None:
-        prev.slots.update(fr.slots)
+        for name in SLOTS:
+            if fr.slots[name] == fr.seed[name]:
+                continue  # untouched here — keep whatever the parent has
+            prev.slots[name] = fr.slots[name]
     else:
         for name in SLOTS:
+            if fr.slots[name] == fr.seed[name]:
+                # Untouched here — a worker may have staged into the module
+                # store while we ran; keep whatever it wrote.
+                continue
+            cur = vars(st).get(name, st._NOTICE_DEFAULTS.get(name))
+            if (cur and fr.seed[name] == st._NOTICE_DEFAULTS.get(name)
+                    and isinstance(cur, str) and isinstance(fr.slots[name], str)):
+                # Both a worker and this frame staged a note: concatenate so
+                # neither is lost.
+                setattr(st, name, cur + fr.slots[name])
+                continue
             # Write the plain module-global default (no dict-entry dance here:
             # notice slots have no hot read site, and tests rewind vars(st)).
             setattr(st, name, fr.slots[name])
