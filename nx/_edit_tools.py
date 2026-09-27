@@ -80,7 +80,19 @@ def _read_with_mtime(path: str) -> tuple[str, float | None]:
         return f.read(), mtime
 
 
+def _staleness_error(path: str) -> str | None:
+    """Cross-session staleness refusal (nx/_staleness.py): the file changed
+    after this session last READ it — likely another session or an editor.
+    Silently skipped when there's no read record (a never-read file writes
+    freely; write_file creating a new file has no record by construction)."""
+    from ._staleness import staleness_error
+    return staleness_error(path)
+
+
 def write_file(path: str, content: str, **_: Any) -> str:
+    stale = _staleness_error(path)
+    if stale:
+        return stale
     try:
         before, before_mtime = _read_with_mtime(path)
     except (FileNotFoundError, IsADirectoryError):
@@ -179,6 +191,9 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     ignored, blank-line runs collapsed) and the result says so, so a model
     that mis-indents doesn't have to re-read the file and retry."""
     src, src_mtime = _read_with_mtime(path)
+    stale = _staleness_error(path)
+    if stale:
+        return stale
     ws_fallback_used = False
     garble_note = ""
     if old_lines:
@@ -316,6 +331,9 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     five-line refactor becomes one tool call, not five.
     """
     src, src_mtime = _read_with_mtime(path)
+    stale = _staleness_error(path)
+    if stale:
+        return stale
     if not isinstance(edits, list) or not edits:
         return "ERROR: `edits` must be a non-empty list of {old, new} objects"
     garble_notes: list[str] = []
@@ -372,6 +390,9 @@ def delete_file(path: str, **_: Any) -> str:
         return f"ERROR: refusing to delete {path!r} (need a concrete non-dotfile path)"
     if os.path.isdir(path):
         return f"ERROR: {path} is a directory — delete_file only removes files"
+    stale = _staleness_error(path)
+    if stale:
+        return stale
     existed = os.path.exists(path)
     if not existed:
         return f"ERROR: {path} does not exist"
@@ -437,6 +458,12 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     files = [f for f in files if os.path.isfile(f) and os.path.splitext(f)[1].lower() not in _BINARY_EXTS]
     if not files:
         return f"ERROR: no files matched {path}"
+    from ._staleness import staleness_error as _se
+    _stale = [f for f in files if _se(f)]
+    if _stale:
+        return ("ERROR: " + ", ".join(_stale) + " changed on disk since this session "
+                "last read it (likely another session or editor) — re-read and "
+                "retry; refusing to overwrite possibly-newer content")
     # replacement is always literal text, never a backreference template:
     # escape backslashes so `\1`, `\U`, a Windows path, etc. don't get
     # interpreted as re.subn's replacement-string syntax.

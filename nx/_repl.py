@@ -183,10 +183,19 @@ def _repl() -> None:
         # Persistent todo file (0.94.0): a fresh session picks up the task
         # plan a previous session wrote through todo_write (see _todo.py).
         # The /todo command views it; the next todo_write overwrites both.
-        if not resumed:
-            _persisted = load_persisted_todos()
-            if _persisted:
-                st._TODOS = _persisted
+        _persisted = load_persisted_todos()
+        if _persisted:
+            st._TODOS = _persisted
+    # Cross-session repo advisory lock (0.103.0): another REPL in this repo
+    # gets a warning + explicit opt-in to share, instead of both sessions
+    # silently interleaving edits. Never fatal; degrades to unlocked when
+    # .nx/ isn't writable. Skipped in headless one-shot/batch runs.
+    if os.environ.get("NX_SESSION_LOCK", "1") not in ("0", "false", "off"):
+        from ._sessionlock import acquire as _lock_acquire
+        try:
+            _lock_acquire(ask_confirm=lambda m: _m._confirm(m))
+        except Exception:
+            pass
 
     while True:
         try:
@@ -208,6 +217,12 @@ def _repl() -> None:
                 user = _m.read_multiline(initial=prefill, history=state.history)
         except (EOFError, KeyboardInterrupt):
             print()
+            # Drop the repo advisory lock so the next session starts clean.
+            try:
+                from ._sessionlock import release as _lock_release
+                _lock_release()
+            except Exception:
+                pass
             # Flush the current session on Ctrl-D / Ctrl-C exit so the last
             # turn isn't lost (matches Hermes's exit-path flush).
             if state.session_dirty:

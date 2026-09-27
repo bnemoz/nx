@@ -64,6 +64,9 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
     path may also be a list of paths; each is read with the same offset/limit
     and the results are concatenated under a "==> path <==" header per file."""
     if isinstance(path, list):
+        from ._staleness import record_read
+        for p in path:
+            record_read(p)
         return "\n".join(
             f"==> {p} <==\n{read_file(p, offset=offset, limit=limit)}" for p in path
         )
@@ -119,6 +122,8 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
     if not body.endswith("\n"):
         body += "\n"
     end = start + len(out)
+    from ._staleness import record_read
+    record_read(path)  # freshness anchor for the write tools (nx/_staleness.py)
     truncated = 0 < limit <= len(out)  # stopped at limit, EOF not yet seen
     total: int | None = None
     plus = ""
