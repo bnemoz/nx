@@ -47,6 +47,97 @@ def _worktree_enabled() -> bool:
     return bool(_env_int("NX_SUBAGENT_WORKTREE", 0))
 
 
+# --- per-SESSION worktrees (0.103.0, session-isolation phase 3) ----------------
+# NX_SESSION_WORKTREE=1 (or `nx --isolate`) puts the whole interactive session
+# in its own worktree under SESSION_HOME/worktrees/nx-wt-session-<sid>,
+# branched from the repo's HEAD. Two sessions in one repo then share NOTHING:
+# separate trees, separate indexes, separate commits — merging is an explicit
+# `git merge`/cherry-pick the user controls. st.SESSION_WORKTREE names this
+# session's tree (None = normal shared-tree mode).
+
+def _session_worktree_enabled() -> bool:
+    import nx as _m
+    if "NX_SESSION_WORKTREE" in vars(_m):
+        return bool(int(_m.NX_SESSION_WORKTREE or 0))
+    return bool(_env_int("NX_SESSION_WORKTREE", 0))
+
+
+def create_session_worktree(session_id: str) -> tuple[str | None, str | None]:
+    """Create the session's own worktree. Unlike create_worktree() this makes
+    a BRANCH (nx/session-<sid>) off HEAD so the session's commits have a name,
+    and it tolerates reuse: re-entering the same session id re-attaches to the
+    existing tree instead of failing. Returns (path, None) or (None, error)."""
+    if not st.PROJECT_ROOT_IS_GIT:
+        return None, "no git repo at the project root"
+    base = st.PROJECT_ROOT or os.getcwd()
+    home = st.SESSION_HOME or os.path.expanduser("~/.nx")
+    root = os.path.join(home, "worktrees")
+    os.makedirs(root, exist_ok=True)
+    wt = os.path.realpath(os.path.join(root, f"nx-wt-session-{session_id}"))
+    branch = f"nx/session-{session_id}"
+    if os.path.isdir(wt):
+        # Re-entering a session (crash recovery, deliberate resume): keep it.
+        return wt, None
+    r = subprocess.run(
+        ["git", "-C", base, "worktree", "add", "-b", branch, wt, "HEAD"],
+        capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        # A stale branch from an earlier crashed run: reuse its tip.
+        r2 = subprocess.run(
+            ["git", "-C", base, "worktree", "add", "--detach", wt, branch],
+            capture_output=True, text=True, timeout=30)
+        if r2.returncode != 0:
+            return None, (r2.stderr or r2.stdout
+                          or (r.stderr or r.stdout)
+                          or "git worktree add failed").strip()
+    return wt, None
+
+
+def remove_session_worktree(path: str) -> None:
+    """Best-effort cleanup of the session's tree AND its branch. Only called
+    when the session ends with nothing to keep (the normal exit path asks
+    first; never auto-run when the tree is dirty)."""
+    if not path or not os.path.isdir(path):
+        return
+    try:
+        dirty = subprocess.run(
+            ["git", "-C", path, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        if dirty:
+            return  # refuse to destroy work
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    base = st.PROJECT_ROOT
+    branch = _branch_of(path) or ""  # read BEFORE remove_worktree deletes the tree
+    remove_worktree(path)
+    if base and branch:
+        try:
+            subprocess.run(["git", "-C", base, "branch", "-D", branch],
+                           capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _branch_of(worktree: str) -> str | None:
+    try:
+        r = subprocess.run(
+            ["git", "-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        name = (r.stdout or "").strip()
+        if r.returncode == 0 and name != "HEAD":
+            return name
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _session_worktree_enabled_with_fallback() -> bool:
+    """NX_SESSION_WORKTREE on + isolation actually possible? A repo whose
+    dirty tree can't be committed silently stays in the shared tree — the
+    caller prints the reason when this returns False."""
+    return _session_worktree_enabled() and bool(st.PROJECT_ROOT_IS_GIT)
+
+
 def _parent_worktree_roots() -> set[str]:
     """Real paths of the parent repo + all its linked worktrees — paths an
     agent must NOT be pointed into as ITS worktree (a worktree of a worktree

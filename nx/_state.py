@@ -126,6 +126,11 @@ def toggle_yolo() -> bool:
 # the REPL.
 SESSION_ID: str | None = None
 
+# This session's own git worktree (0.103.0, NX_SESSION_WORKTREE / `nx
+# --isolate`): the path this REPL treats as the project root. None in the
+# normal shared-tree mode. Set together with PROJECT_ROOT at REPL startup.
+SESSION_WORKTREE: str | None = None
+
 # Project root used by the risk classifier's path-scoping. Set once at
 # startup by _detect_project_root() in _risk.py / _approval.py.
 PROJECT_ROOT: str | None = None

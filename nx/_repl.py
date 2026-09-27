@@ -164,8 +164,30 @@ def _repl() -> None:
         if _resume_requested:
             print(f"{DIM}  no saved sessions to resume — starting fresh{RESET}")
         session_id = _new_session_id()
+    assert session_id  # both branches above mint one; narrows for ty
     state = _ReplState(messages, session_id, False, history)
     st.SESSION_ID = session_id  # mirror: per-session stores key on it (undo, staleness)
+
+    # --- per-session worktree isolation (0.103.0, phase 3) -------------------
+    # NX_SESSION_WORKTREE=1 / `nx --isolate`: create (or re-attach to) this
+    # session's own worktree off HEAD and chdir into it, so PROJECT_ROOT, the
+    # write fence, git_commit and run_bash all land in this session's private
+    # tree. Two isolated sessions in one repo share nothing; merging the
+    # session branch back is the user's explicit `git merge nx/session-<id>`.
+    if (os.environ.get("NX_SESSION_WORKTREE", "0") in ("1", "true", "on")
+            or "--isolate" in sys.argv[1:]):
+        from ._worktree import create_session_worktree
+        wt, err = create_session_worktree(session_id)
+        if wt:
+            os.chdir(wt)
+            st.SESSION_WORKTREE = wt
+            st.PROJECT_ROOT = wt
+            print(f"{DIM}  ⟂ isolated: worktree {wt} "
+                  f"(branch nx/session-{session_id}; merge it back with "
+                  f"`git merge nx/session-{session_id}`){RESET}")
+        elif err:
+            print(f"{C.WARNING}  ⚠ couldn't isolate into a worktree: {err} "
+                  f"— running in the shared tree{RESET}")
     if _wanted_session is not None and (_resume_requested
                                         or any(a == "--session" for a in sys.argv[1:])):
         # Both entry points share resume_session() (nx/_resume.py) — see
@@ -188,12 +210,15 @@ def _repl() -> None:
             st._TODOS = _persisted
     # Cross-session repo advisory lock (0.103.0): another REPL in this repo
     # gets a warning + explicit opt-in to share, instead of both sessions
-    # silently interleaving edits. Never fatal; degrades to unlocked when
-    # .nx/ isn't writable. Skipped in headless one-shot/batch runs.
+    # silently interleaving edits. An isolated session (own worktree) can't
+    # contend, so it claims the lock without prompting. Never fatal; degrades
+    # to unlocked when .nx/ isn't writable. Skipped in headless one-shot runs.
     if os.environ.get("NX_SESSION_LOCK", "1") not in ("0", "false", "off"):
         from ._sessionlock import acquire as _lock_acquire
+        _locked = st.SESSION_WORKTREE is not None
         try:
-            _lock_acquire(ask_confirm=lambda m: _m._confirm(m))
+            _lock_acquire(ask_confirm=None if _locked
+                          else (lambda m: _m._confirm(m)))
         except Exception:
             pass
 
