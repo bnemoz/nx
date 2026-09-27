@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from typing import Any
 
 from . import _state as st
@@ -20,10 +21,12 @@ from . import _state as st
 _DEFAULT_TIMEOUT = 60
 
 
-def _git(repo: str, args: list[str], timeout: int) -> tuple[str | None, str | None]:
+def _git(repo: str, args: list[str], timeout: int,
+         env: dict[str, str] | None = None) -> tuple[str | None, str | None]:
     try:
         proc = subprocess.run(["git", "-C", repo, *args],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout,
+                              env=env)
     except subprocess.TimeoutExpired:
         return None, f"ERROR: git {' '.join(args[:2])} timed out after {timeout}s"
     except OSError as e:
@@ -31,6 +34,30 @@ def _git(repo: str, args: list[str], timeout: int) -> tuple[str | None, str | No
     if proc.returncode != 0:
         return None, (f"ERROR: {(proc.stderr or proc.stdout).strip() or 'git command failed'}")
     return proc.stdout, None
+
+
+def _stage_index(repo: str) -> str:
+    """A private temp GIT_INDEX_FILE seeded from the repo's real index.
+
+    Staging runs against this copy, so the preview/secret-scan/denied-commit
+    path never touches the shared .git/index: a concurrent nx session (or the
+    user's own git commands) can't have its WIP swept into our staging, and a
+    denial leaves THEIR index untouched. The real index is only ever written
+    by the final `git commit` itself, which reads the tree from this index.
+    """
+    fd, idx = tempfile.mkstemp(prefix=".nx-index-", dir=os.path.join(repo, ".git"))
+    os.close(fd)
+    env_seed = dict(os.environ, GIT_INDEX_FILE=idx)
+    try:
+        subprocess.run(["git", "-C", repo, "read-tree", "HEAD"],
+                       env=env_seed, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # fresh empty index still stages correctly below
+    return idx
+
+
+def _git_env(index_file: str) -> dict[str, str]:
+    return dict(os.environ, GIT_INDEX_FILE=index_file)
 
 
 def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> str:
@@ -42,6 +69,12 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
     exactly what the commit will contain. The same text is scanned for
     secret-shaped strings (keys, tokens, PEM blocks); a hit refuses the commit
     before any prompt.
+
+    Staging happens in a private temp index (GIT_INDEX_FILE), not the shared
+    .git/index: the preview can never include another session's (or the
+    user's) already-staged work, and a denial/secret-refusal leaves the
+    shared index exactly as it was. Only the final `git commit` (which reads
+    the tree from the private index) touches the repo.
 
     Args:
       files: files to stage, space-separated (pass "." to stage every change).
@@ -60,10 +93,24 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
                 "paths, or \".\" for every change); use git_diff first to review")
     timeout = _env_timeout()
     file_list = files.split()
-    out, err = _git(repo, ["add", "--", *file_list], timeout)
+    idx = _stage_index(repo)
+    try:
+        return _git_commit_with_index(repo, file_list, message, timeout, idx)
+    finally:
+        try:
+            os.unlink(idx)
+        except OSError:
+            pass
+
+
+def _git_commit_with_index(repo: str, file_list: list[str], message: str,
+                           timeout: int, idx: str) -> str:
+    from ._bash_jobs import _confirm  # lazy: avoid an import cycle at module load
+    env = _git_env(idx)
+    out, err = _git(repo, ["add", "--", *file_list], timeout, env=env)
     if err:
         return err
-    staged, err = _git(repo, ["diff", "--staged"], timeout)
+    staged, err = _git(repo, ["diff", "--staged"], timeout, env=env)
     if err:
         return err
     if not (staged or "").strip():
@@ -73,20 +120,51 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
     hit = _contains_secret(staged)
     if hit:
         return (f"REFUSED: the staged diff contains a secret-shaped string "
-                f"({hit}…) — unstage it (git restore --staged), remove the secret, "
-                "and commit again. Nothing was committed.")
+                f"({hit}…) — remove the secret and commit again. Nothing was "
+                "committed and nothing was staged in the shared index.")
     short = message.strip().splitlines()[0][:120]
     preview = _preview(staged, short, repo)
     action = f"git commit: {short}"
     if not _confirm(action, preview=preview):
-        # Denied AFTER staging: leave the index as the model set it (the diff is
-        # still inspectable via git_diff staged=true) but commit nothing.
-        return ("DENIED by user — commit not made; the staged changes are still "
-                "in the index (git_diff staged=true to review, `git reset` to unstage)")
-    out, err = _git(repo, ["commit", "-m", message.strip()], timeout)
+        # Denied AFTER staging: staging happened in our private index, so the
+        # SHARED index is untouched — nothing to unstage, nothing of another
+        # session's work was ever swept in.
+        return ("DENIED by user — commit not made; the working tree is "
+                "unchanged (git_diff staged=true reviews the shared index)")
+    out, err = _git(repo, ["commit", "-m", message.strip()], timeout, env=env)
     if err:
         return err
+    _sync_shared_index(repo, file_list, timeout)
     return (f"[git_commit] {short}\n{(out or '').strip()}")
+
+
+def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
+    """Re-cacheinfo the committed paths into the SHARED index (best-effort).
+
+    The commit read its tree from the private index, so the shared index still
+    holds the pre-commit blob for those paths — `git status`/`git diff --staged`
+    would show a phantom staged change after a successful commit. Rewriting the
+    entries to HEAD's blobs (the commit just made) makes the shared index
+    consistent again without touching any other path another session staged.
+    """
+    out, err = _git(repo, ["ls-tree", "-z", "HEAD", "--"], timeout)
+    if err or not out:
+        return
+    by_path: dict[str, tuple[str, str]] = {}
+    for rec in out.split("\0"):
+        if not rec:
+            continue
+        meta, _, name = rec.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 3:
+            by_path[name] = (parts[0], parts[2])
+    wanted = set(file_list) if file_list != ["."] else set(by_path)
+    specs: list[str] = []
+    for p in sorted(wanted & set(by_path)):
+        mode, blob = by_path[p]
+        specs.append(f"{mode},{blob},{p}")
+    if specs:
+        _git(repo, ["update-index", "--add", "--cacheinfo", *specs], timeout)
 
 
 def _env_timeout() -> int:

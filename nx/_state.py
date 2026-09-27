@@ -119,6 +119,13 @@ def toggle_yolo() -> bool:
     return YOLO
 
 
+# The id of the session this process is currently serving. Mirrored from the
+# REPL's state.session_id at mint/resume/fork time so non-REPL code (the
+# undo store, staleness bookkeeping) can key per-session state without
+# threading _ReplState through. None in embedded uses/tests that never ran
+# the REPL.
+SESSION_ID: str | None = None
+
 # Project root used by the risk classifier's path-scoping. Set once at
 # startup by _detect_project_root() in _risk.py / _approval.py.
 PROJECT_ROOT: str | None = None

@@ -552,6 +552,7 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     # A reset forks a new session id so the fresh chat isn't written
     # over the old one (mirrors Hermes's "new session on /new").
     state.session_id = _new_session_id()
+    st.SESSION_ID = state.session_id  # mirror: undo stack swaps with the fresh id
     state.session_dirty = False
     # Fresh recorder for the fresh session.
     st._METRICS = _fresh_metrics(state.session_id)

@@ -166,6 +166,7 @@ def resume_session(session_id: str, state: Any, *, show_transcript: bool = True,
 
     state.messages[:] = messages
     state.session_id = session_id
+    st.SESSION_ID = session_id  # mirror: the undo store keys per-session on it
     state.session_dirty = False
 
     title = data.get("title") or "(untitled)"

@@ -165,6 +165,7 @@ def _repl() -> None:
             print(f"{DIM}  no saved sessions to resume — starting fresh{RESET}")
         session_id = _new_session_id()
     state = _ReplState(messages, session_id, False, history)
+    st.SESSION_ID = session_id  # mirror: per-session stores key on it (undo, staleness)
     if _wanted_session is not None and (_resume_requested
                                         or any(a == "--session" for a in sys.argv[1:])):
         # Both entry points share resume_session() (nx/_resume.py) — see

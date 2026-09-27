@@ -8,7 +8,10 @@ Contract under test:
 - the same text is secret-scanned BEFORE any confirm round-trip — a hit
   refuses without committing;
 - an empty staged diff commits nothing;
-- denial leaves the index staged but makes no commit;
+- denial commits nothing and leaves the SHARED index untouched (staging ran
+  in a private GIT_INDEX_FILE; since 0.103.0 another session's or the user's
+  already-staged work can never be swept into a preview, and a denied commit
+  never leaves stray staged changes);
 - the action string "git commit: <subject>" has a local medium risk hint (no
   classifier round-trip), and _allowlist_tool maps it to git_commit.
 """
@@ -100,10 +103,11 @@ def test_denial_commits_nothing(repo, monkeypatch):
     result = nx._gitcommit.git_commit(files="a.py", message="nope")
     assert result.startswith("DENIED")
     assert _git_count(rp) == 1  # no commit
-    # the index keeps the staged change (reviewable via git_diff staged=true)
+    # the SHARED index was never touched (staging ran in a private index):
+    # nothing left staged, and the denial can't leak into other sessions.
     r = subprocess.run(["git", "diff", "--staged", "--name-only"], cwd=rp,
                        capture_output=True, text=True)
-    assert "a.py" in r.stdout
+    assert r.stdout.strip() == ""
 
 
 def test_secret_in_diff_refuses_before_confirm(repo, monkeypatch):

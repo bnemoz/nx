@@ -571,6 +571,7 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     # metadata (title/source/cwd/metrics) the same way /resume would see it.
     from ._repl_state import _save_current_locked, _fresh_metrics
     state.session_id = new_id
+    st.SESSION_ID = new_id  # mirror: undo stack swaps with the forked id
     state.session_dirty = True
     meta: dict = {"forked_from": old_id}
     if label:

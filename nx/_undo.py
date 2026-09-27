@@ -12,9 +12,11 @@ restores every file in it in one step, so undoing a `multi_edit` or
 
 Since 0.47.0 the stack is also PERSISTENT and idempotent:
 
-- `_UNDO_PATH` (default `<NX_HOME>/undo.json`) is written atomically on every
-  push/pop, so a crash no longer loses the recovery story that YOLO/batch
-  postures assume; `/reset` clears it. One pending-delete per path is kept:
+- `_UNDO_PATH` (per session id: `<NX_HOME>/undo/<session-id>.json`; the legacy
+  shared `<NX_HOME>/undo.json` only when no session id is known) is written
+  atomically on every push/pop, so a crash no longer loses the recovery story
+  that YOLO/batch postures assume; `/reset` clears it. One pending-delete per
+  path is kept:
   a re-delete of a file already pending undo updates the entry in place
   (one `/undo` still passes one delete) instead of stacking duplicates.
 - `undo_last()` is atomic per file: each file's restore is written to a temp
