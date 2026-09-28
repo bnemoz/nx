@@ -98,7 +98,9 @@ def test_corrupt_memindex_still_set_aside(monkeypatch):
     monkeypatch.setattr(mi, "_fts_supported", lambda: True, raising=False)
     mi.enabled()  # ensure module state
     # build the index once
-    assert mi.search_dir(d, "probe") is None or True
+    # build the index once (first search may legitimately return None on an
+    # empty dir; the point is it must not raise)
+    mi.search_dir(d, "probe")
     path = mi._db_path(d)
     if os.path.exists(path):
         with open(path, "w") as f:

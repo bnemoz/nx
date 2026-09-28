@@ -217,7 +217,6 @@ def test_duckdb_is_always_on_and_in_dispatch():
         if saved is not None:
             _os.environ["NX_TOOL_FLOOR_SLIM"] = saved
     assert m._dispatch.DISPATCH["duckdb"] is dd.duckdb_query
-    assert "duckdb" in dd.__doc__ or True
 
 
 def test_duckdb_in_active_tools_and_plan_gated():

@@ -212,6 +212,8 @@ names = [t["function"]["name"] for t in m._active_tools()]
 assert "plan_edit" not in names
 _plan_state = _ReplState([], "s2", False, [])
 builtins.print = fake_print
+reset_plan_state()
+st.PROJECT_ROOT = tempfile.mkdtemp(prefix="nx-test-plan-gate-")  # never the cwd/repo
 try:
     _plan._cmd_plan("/plan gate test", _plan_state)
 finally:
@@ -269,7 +271,9 @@ try:
     # compress() reaches st.client — fake it
     class _FakeCompletions:
         def create(self, **kw):
-            assert "plan_edit" in kw["messages"][0]["content"] or True
+            # real assert: the plan-compress prompt must carry the plan_edit
+            # marker (the old `or True` made this a tautology)
+            assert "plan_edit" in kw["messages"][0]["content"]
             return _Resp()
     class _FakeClient:
         base_url = "http://x"

@@ -29,6 +29,12 @@ os.environ["NX_SUBAGENT_SYNC_INLINE"] = "1"
 
 @pytest.fixture(autouse=True)
 def _sync_inline(monkeypatch):
+    # Load-bearing (not a no-op): nx/_subagent._sync_inline prefers the module
+    # attr _m.NX_SUBAGENT_SYNC_INLINE over the env. nx_fresh's reload()
+    # re-executes nx/__init__ in the SAME module dict without defining this
+    # name, so setting it here (autouse runs before nx_fresh) survives the
+    # reload and pins inline mode. raising=False because the attr is not
+    # defined at import time.
     import nx as _nx
     monkeypatch.setattr(_nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
     yield

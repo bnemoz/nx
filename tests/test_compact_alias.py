@@ -72,6 +72,7 @@ def run_with(cmd):
 out_compact = run_with("/compact")
 out_compress = run_with("/compress")
 
+
 # --- assertions --------------------------------------------------------------
 def normalize(out, cmd):
     """Strip the command-name mention so /compact and /compress outputs compare equal."""
@@ -79,34 +80,28 @@ def normalize(out, cmd):
     # which is identical between runs since it just lists the toggles.
     return out
 
-assert "nothing to compress" not in out_compact, \
-    f"/compact should have triggered compress branch, got:\n{out_compact}"
-assert "compressed 3 turns → 1 summary (42 chars), kept last 2 verbatim" in out_compact, \
-    f"/compact didn't run compress() — got:\n{out_compact}"
 
-assert "nothing to compress" not in out_compress, \
-    f"/compress should have triggered compress branch, got:\n{out_compress}"
-assert "compressed 3 turns → 1 summary (42 chars), kept last 2 verbatim" in out_compress, \
-    f"/compress didn't run compress() — got:\n{out_compress}"
+def test_compact_and_compress_alias():
+    # /compact and /compress must take the exact same code path.
+    assert "nothing to compress" not in out_compact, \
+        f"/compact should have triggered compress branch, got:\n{out_compact}"
+    assert "compressed 3 turns → 1 summary (42 chars), kept last 2 verbatim" in out_compact, \
+        f"/compact didn't run compress() — got:\n{out_compact}"
 
-# also: the "nothing to compress" branch must still fire for both when there's
-# not enough context. Build a messages list with only the system prompt.
-captured.truncate(0); captured.seek(0)
-import builtins
-builtins.print = fake_print
-m.read_multiline = lambda history=None, initial=None: "/compact" if False else "/quit"  # just exit
-m.main()
-builtins.print = real_print
+    assert "nothing to compress" not in out_compress, \
+        f"/compress should have triggered compress branch, got:\n{out_compress}"
+    assert "compressed 3 turns → 1 summary (42 chars), kept last 2 verbatim" in out_compress, \
+        f"/compress didn't run compress() — got:\n{out_compress}"
 
-# direct unit test of the "nothing to compress" branch — call the REAL
-# compress() (not the stub) so we exercise the actual early-return logic
-msgs = [{"role": "system", "content": m.SYSTEM}]
-result = _real_compress(msgs)
-assert result is None, f"expected None on too-short context, got {result}"
+    # byte-identical output when run back-to-back (modulo timestamps, which
+    # aren't printed in this path)
+    assert normalize(out_compact, "/compact") == normalize(out_compress, "/compress"), \
+        f"output differs:\n--- /compact ---\n{out_compact}\n--- /compress ---\n{out_compress}"
 
-# also verify /compact and /compress produce byte-identical output when run
-# back-to-back (modulo timestamps, which we don't print in this path)
-assert normalize(out_compact, "/compact") == normalize(out_compress, "/compress"), \
-    f"output differs:\n--- /compact ---\n{out_compact}\n--- /compress ---\n{out_compress}"
 
-print("OK — /compact and /compress take the exact same code path")
+def test_compress_none_on_short_context():
+    # direct unit test of the "nothing to compress" branch — call the REAL
+    # compress() (not the stub) so we exercise the actual early-return logic
+    msgs = [{"role": "system", "content": m.SYSTEM}]
+    result = _real_compress(msgs)
+    assert result is None, f"expected None on too-short context, got {result}"

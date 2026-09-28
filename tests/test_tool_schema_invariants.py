@@ -74,7 +74,10 @@ def _reads_as_prose(d):
 
 
 def _all_tools():
-    return m.TOOLS
+    # final_answer is terminal-dispatched (not in DISPATCH) and would
+    # permanently skip in the body-introspection test — exclude it here
+    # rather than skip at test time.
+    return [t for t in m.TOOLS if _fn(t)["name"] != "final_answer"]
 
 
 def _fn(tool):

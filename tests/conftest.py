@@ -28,8 +28,11 @@ Three jobs, all about keeping the suite fast, hermetic, and xdist-safe:
    honored: each module's import-time env assignments are captured (against a
    clean env, see pytest_collectstart) and re-applied for that module's tests.
 """
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import threading
 
 import pytest
@@ -66,18 +69,19 @@ _DEFAULTS = {
 _SAFE_NX = dict(_DEFAULTS)
 _SAFE_NX["NX_ENV_FILE"] = "/dev/null"
 
-# Under xdist, workers share the real $HOME — tests that touch ~/.nx (the
-# overflow spill dir, session files, logs) would race each other across
-# processes. Give each worker its own NX_HOME tempdir; serial runs unchanged.
-if os.environ.get("PYTEST_XDIST_WORKER"):
-    import atexit
-    import shutil
-    import tempfile
-
-    _worker_home = tempfile.mkdtemp(
-        prefix="nx-test-%s-" % os.environ["PYTEST_XDIST_WORKER"])
-    atexit.register(shutil.rmtree, _worker_home, ignore_errors=True)
-    _SAFE_NX["NX_HOME"] = _worker_home
+# Session tests and REPL-driving tests (which take the repo advisory lock via
+# _repl.main -> _sessionlock.acquire) must never touch the developer's real
+# ~/.nx or the repo's .nx/ — point NX_HOME at a per-process tempdir for ALL
+# runs, not only xdist workers (serial runs appended to the real ~/.nx logs
+# and input_history.json via _logging/_session_save).
+# NX_SESSION_LOCK=0: a test suite is exactly the "many fake sessions in one
+# repo" case the 0.103.0 advisory lock is not for — without it, REPL-driving
+# tests flock the real repo's .nx/session.lock and can hang prompting on a
+# contended lock.
+_worker_home = tempfile.mkdtemp(prefix="nx-test-%d-" % os.getpid())
+atexit.register(shutil.rmtree, _worker_home, ignore_errors=True)
+_SAFE_NX["NX_HOME"] = _worker_home
+_SAFE_NX["NX_SESSION_LOCK"] = "0"
 
 
 def _scrub_env():
@@ -149,7 +153,12 @@ def pytest_collectreport(report):
         for k, v in os.environ.items()
         if k.startswith("NX_") and _BASELINE_ENV.get(k) != v
     }
-    intents.update({k: None for k in _BASELINE_ENV if k not in os.environ})
+    # Deletable intents: never treat the per-process isolation home or the
+    # lock-off baseline as a module's deletable intent.
+    intents.update({
+        k: None for k in _BASELINE_ENV
+        if k not in os.environ and k not in ("NX_HOME", "NX_SESSION_LOCK")
+    })
     _INTENTS[os.path.abspath(report.nodeid)] = intents
     _scrub_env()  # next module's import starts clean too
 
@@ -237,7 +246,8 @@ def _restore(fspath):
         _nx = sys.modules["nx"]
         _home = os.path.expanduser(os.environ.get("NX_HOME", "~/.nx"))
         _nx.SESSION_HOME = _home
-        sys.modules["nx._state"].SESSION_HOME = _home
+        if "nx._state" in sys.modules:
+            sys.modules["nx._state"].SESSION_HOME = _home
 
 
 @pytest.hookimpl(wrapper=True)

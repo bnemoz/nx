@@ -47,6 +47,16 @@ def _restore():
     builtins.print = _REAL_PRINT
 
 
+_TMPDIR = tempfile.mkdtemp(prefix="nx-test-autowake-")
+_FIXTURE_LOGS = {
+    "424242": os.path.join(_TMPDIR, "nx-test-424242.log"),
+    "424243": os.path.join(_TMPDIR, "nx-test-424243.log"),
+    "424244": os.path.join(_TMPDIR, "nx-test-424244.log"),
+    "530001": os.path.join(_TMPDIR, "nx-test-530001.log"),
+    "530002": os.path.join(_TMPDIR, "nx-test-530002.log"),
+}
+
+
 def setup_function(_function):
     m.st._WAKE_ARMED = False
     m.st._WAKE_DUE = False
@@ -55,11 +65,10 @@ def setup_function(_function):
     os.environ["NX_WAKE_PROMPT"] = "1"
     # Fake job fixtures point log_path here; the wake sweep (0.37.4) skips a
     # dead job whose log is gone, so the fixtures' logs must exist.
-    _make_fixture_log("/tmp/nx-test-424242.log")
-    _make_fixture_log("/tmp/nx-test-424243.log")
-    _make_fixture_log("/tmp/nx-test-424244.log")
-    _make_fixture_log("/tmp/nx-test-530001.log")
-    _make_fixture_log("/tmp/nx-test-530002.log")
+    # Paths live in a per-process tempdir — fixed /tmp names race across
+    # pytest-xdist workers (and leak files).
+    for _path in _FIXTURE_LOGS.values():
+        _make_fixture_log(_path)
     # Don't leave a real poller thread running between tests.
     _autowake._POLLER = None
 
@@ -145,7 +154,7 @@ def test_wake_due_on_finished_unseen_bg_job(monkeypatch):
     m.st._WAKE_ARMED = True
     fake_jobs = [{"pid": "424242", "alive": False,
                   "owner_pid": os.getpid(), "command": "true",
-                  "log_path": "/tmp/nx-test-424242.log"}]
+                  "log_path": _FIXTURE_LOGS["424242"]}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     assert _autowake._finished_unseen_bg_jobs() == ["424242"]
     assert _autowake.wake_due() is True
@@ -326,7 +335,7 @@ def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
     m.st._WAKE_ARMED = True
     fake_jobs = [{"pid": "424243", "alive": False,
                   "owner_pid": os.getpid(), "command": "true",
-                  "tail": "done", "log_path": "/tmp/nx-test-424243.log"}]
+                  "tail": "done", "log_path": _FIXTURE_LOGS["424243"]}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))
@@ -356,7 +365,7 @@ def test_run_bg_scan_merges_into_unflushed_notice(monkeypatch):
     _silence()
     fake_jobs = [{"pid": "530001", "alive": False,
                   "owner_pid": os.getpid(), "command": "true", "tail": "a",
-                  "log_path": "/tmp/nx-test-530001.log"}]
+                  "log_path": _FIXTURE_LOGS["530001"]}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))
@@ -368,7 +377,7 @@ def test_run_bg_scan_merges_into_unflushed_notice(monkeypatch):
         # A second job finishes before the turn's first tool call re-scans.
         fake_jobs.append({"pid": "530002", "alive": False,
                           "owner_pid": os.getpid(), "command": "true",
-                          "tail": "b", "log_path": "/tmp/nx-test-530002.log"})
+                          "tail": "b", "log_path": _FIXTURE_LOGS["530002"]})
         m._run_bg_completion_scan()
         note = m.st._PENDING_BG_COMPLETION_NOTICE or ""
         assert "530001" in note and "530002" in note, \
@@ -400,7 +409,7 @@ def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
     m.st._BG_NOTICE_SEEN = None
     fake_jobs = [{"pid": "424244", "alive": False,
                   "owner_pid": os.getpid(), "command": "true", "tail": "ok",
-                  "log_path": "/tmp/nx-test-424244.log"}]
+                  "log_path": _FIXTURE_LOGS["424244"]}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("nx._bash_jobs._read_bg_exit_status",
                         lambda pid: (True, 0, "/tmp/x.log"))

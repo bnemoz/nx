@@ -114,7 +114,7 @@ def test_read_file_of_running_log_does_not_mark_seen(nx_fresh):
     m._bash_jobs._poll_pid(pid, 4.0)
     assert m._dispatch._scan_background_completions() is not None, \
         "the exit after a mid-run read is still worth announcing"
-    assert "9902" not in "".join(m.st._PENDING_BG_COMPLETION_NOTICE or "") or True
+    assert "9902" not in "".join(m.st._PENDING_BG_COMPLETION_NOTICE or "")
     m.st._PENDING_BG_COMPLETION_NOTICE = None
     m.st._BG_NOTICE_SEEN = None
 

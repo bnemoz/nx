@@ -134,8 +134,9 @@ def test_restore_wait_env_honored_by_watch_and_turn(nx_fresh, monkeypatch):
     os.environ["NX_INTERRUPT_RESTORE_WAIT"] = "0.05"
     from nx import _interrupt as iw
     from nx import _turn as turn_mod
-    monkeypatch.setattr(iw, "_RESTORE_ENV_NAME", "NX_INTERRUPT_RESTORE_WAIT",
-                        raising=False)
+    # _RESTORE_ENV_NAME never existed as a module attr (the knob is read as a
+    # literal env lookup at _interrupt.py/_turn.py); the old patching here was
+    # a silent no-op under raising=False.
     # _watch_for_interrupts must return quickly when RESTORED is already set
     iw._INTERRUPT_ARMED.clear()
     iw._INTERRUPT_RESTORED.set()

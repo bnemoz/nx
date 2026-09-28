@@ -31,7 +31,7 @@ def fake_open_stream(msgs):
 
 def fake_model_turn(msgs, reasoning_loop_cut_count=0, malformed_stream_cut_count=0,
                     empty_turn_count=0, forced_final=False, recovery_sampling=False,
-                    malformed_call_count=0):
+                    malformed_call_count=0, step_retries=0):
     return False  # no tool calls → REPL moves to next prompt
 
 
@@ -46,6 +46,10 @@ def fake_print(*a, **kw):
 def run_with(cmd):
     """Run the REPL with a small seeded conversation then `cmd`, return output."""
     captured.truncate(0); captured.seek(0)
+    # Isolate the persistent-todo file (0.94.0): a fresh session loads
+    # .nx/todo.md under PROJECT_ROOT over st._TODOS at startup, which would
+    # clobber the seeded list with the repo's real todo file.
+    st.PROJECT_ROOT = tempfile.mkdtemp(prefix="nx-test-todo-")
     import builtins
     builtins.print = fake_print
     try:
