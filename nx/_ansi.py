@@ -134,7 +134,7 @@ ROLE_DEFAULTS: dict[str, str] = {
     "STATUS_BAR": "cyan",      # per-turn stats footer (tok/s, ctx, ttft, wall)
     "TOOL_OUTPUT": "magenta",  # tool/bash result body lines
     "ACCENT": "blue",          # borders, model name, chatbox prompt
-    "MEMORY": "purple",        # memory tool calls (memory_search/write/delete, recall_lessons)
+    "MEMORY": "purple",        # memory tool calls (memory_search/write/delete)
     "LABEL": "orange",         # source name / session id badges
     "TODO": "orange",          # todo_write tool output (distinct from TOOL_OUTPUT)
     "SUCCESS": "green",        # yolo/auto-approve/allow indicators

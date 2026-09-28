@@ -41,12 +41,19 @@ from ._progress import ProgressCounter
 
 # Tools whose call boxes render in the MEMORY role color instead of ACCENT,
 # so memory traffic stands apart from ordinary tool calls.
-_MEMORY_TOOLS = frozenset({"memory_search", "memory_write", "memory_delete", "recall_lessons"})
+_MEMORY_TOOLS = frozenset({"memory_search", "memory_write", "memory_delete"})
+
+# Tools whose call boxes render in the diff-deletion color (C.RED, the hue the
+# approval diff uses for removed lines) — recall_lessons digs through PAST
+# (i.e. deleted-from-context) transcripts.
+_DELETED_TOOLS = frozenset({"recall_lessons"})
 
 
 def tool_accent(name: str) -> str:
-    """The rail/border color for one tool call's box: C.MEMORY for the memory
-    tools, C.ACCENT for everything else."""
+    """The rail/border color for one tool call's box: C.RED for the
+    deletion-accent tools, C.MEMORY for the memory tools, C.ACCENT otherwise."""
+    if name in _DELETED_TOOLS:
+        return C.RED
     return C.MEMORY if name in _MEMORY_TOOLS else C.ACCENT
 
 
