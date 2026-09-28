@@ -146,7 +146,10 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
     entries to HEAD's blobs (the commit just made) makes the shared index
     consistent again without touching any other path another session staged.
     """
-    out, err = _git(repo, ["ls-tree", "-z", "HEAD", "--"], timeout)
+    # -r: without it ls-tree lists only top-level tree entries, so paths in
+    # subdirectories (nx/, tests/) were absent from by_path and the sync
+    # silently no-oped — the persistent phantom MM.
+    out, err = _git(repo, ["ls-tree", "-r", "-z", "HEAD", "--"], timeout)
     if err or not out:
         return
     by_path: dict[str, tuple[str, str]] = {}

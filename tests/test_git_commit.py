@@ -203,6 +203,38 @@ def test_sync_resets_stale_entry_when_worktree_matches_head(repo):
     assert r.stdout.strip() == "", f"phantom status after sync: {r.stdout!r}"
 
 
+def test_sync_covers_subdirectory_paths(repo):
+    """Root cause of the persistent phantom MM (found after 0.103.10): plain
+    `git ls-tree HEAD` lists only TOP-LEVEL entries, so every path in a
+    subdirectory was missing from the sync's path map and the sync silently
+    no-oped for files under nx/ or tests/. The fixture repos kept files at
+    the root, so all prior tests passed. -r must make subdir paths sync."""
+    nx, rp = repo
+    sub = rp / "pkg"
+    sub.mkdir()
+    (sub / "m.py").write_text("v = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pkg/m.py"], cwd=rp, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add pkg"], cwd=rp,
+                   check=True, capture_output=True)
+    old = _index_blob(rp, "pkg/m.py")
+    (sub / "m.py").write_text("v = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pkg/m.py"], cwd=rp, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "second"], cwd=rp,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                    f"100644,{old},pkg/m.py"], cwd=rp, check=True,
+                   capture_output=True)  # poison: stale pre-change blob
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "MM pkg/m.py", "setup failed: poison not visible"
+    nx._gitcommit._sync_shared_index(str(rp), ["pkg/m.py"], 60)
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "", f"phantom status after sync: {r.stdout!r}"
+
+
 def test_sync_does_not_clobber_live_wip_entry(repo):
     """Worktree differs from HEAD after a commit (0.103.9 residual bug): the
     shared index holds the PRE-commit blob and the worktree has FURTHER edits,
