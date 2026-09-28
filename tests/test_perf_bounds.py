@@ -7,7 +7,7 @@ silently regress:
 - **PF-16** — `st._TOOL_RESULT_CACHE` had no cap and `_ASYNC_AGENTS` never
   evicted finished records. Both are now bounded (T-10: `len <= cap`).
 - **PF-17** — async fan-out was one thread + HTTP stream + parser per spawn,
-  unbounded. A semaphore (NX_SUBAGENT_MAX_CONCURRENT, default 4) parks the
+  unbounded. A semaphore (NX_SUBAGENT_MAX_CONCURRENT, default 12) parks the
   excess as `queued`.
 - **PF-18** — cache validity anchored on `path_arg[0]` only, so editing file
   #2 of a multi-path read never invalidated it, and a `search_files` hit

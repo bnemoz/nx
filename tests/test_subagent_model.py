@@ -98,6 +98,25 @@ def test_source_routes_to_that_source(nx_env):
     assert t2[1] == "qwen3.8-flash-next"
 
 
+def test_model_pool_round_robin(nx_env):
+    nx, tmp = nx_env
+    from nx._subagent_model import subagent_call_target
+    nx._state.client = _FakeClient()
+    nx._state.MODEL = "parent-model"
+    nx._state.ACTIVE = None
+    os.environ["NX_SUBAGENT_MODEL_POOL"] = "a-model,flash:b-model"
+    from nx._sources import Source
+    src = Source("flash", "http://localhost:9/v1", "k", model="glm-5.3-flash")
+    flash_client = _FakeClient()
+    src.client = flash_client
+    nx._state.SOURCES["flash"] = src
+    seen = [subagent_call_target() for _ in range(4)]
+    assert [t[1] for t in seen] == ["a-model", "b-model", "a-model", "b-model"]
+    assert seen[0][0] is nx._state.client      # bare model → parent's client
+    assert seen[1][0] is flash_client          # source:model → that endpoint
+    os.environ.pop("NX_SUBAGENT_MODEL_POOL")
+
+
 def test_unknown_source_warns_once_and_falls_back(nx_env):
     nx, tmp = nx_env
     from nx._subagent_model import subagent_call_target

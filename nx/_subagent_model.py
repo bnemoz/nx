@@ -28,10 +28,45 @@ the same reason the restricted dispatch table is TLS and not a global.
 
 from __future__ import annotations
 
+import itertools
 import os
+import threading
 from typing import Any
 
 from . import _state as st
+
+# Model pool (0.103.6): NX_SUBAGENT_MODEL_POOL is a comma-separated list of
+# sub-agent models, each entry a bare "model" on the parent's client or
+# "source:model" to ride another endpoint. spawn_agent() calls next_pool_model()
+# once per agent start and entries are handed out round-robin, so a 3-model
+# pool under NX_SUBAGENT_MAX_CONCURRENT=12 keeps ~4 agents per model in flight
+# and spreads load across every idle server.
+_POOL_LOCK = threading.Lock()
+_POOL_CYCLE = None
+_POOL_SIGNATURE = None
+
+
+def _parse_pool():
+    raw = os.environ.get("NX_SUBAGENT_MODEL_POOL", "").strip()
+    if not raw:
+        return ()
+    return tuple(e.strip() for e in raw.split(",") if e.strip())
+
+
+def next_pool_model():
+    """Next entry of NX_SUBAGENT_MODEL_POOL (round-robin), or None when unset —
+    callers then fall back to NX_SUBAGENT_SOURCE / NX_SUBAGENT_MODEL."""
+    global _POOL_CYCLE, _POOL_SIGNATURE
+    pool = _parse_pool()
+    if not pool:
+        _POOL_CYCLE = None
+        _POOL_SIGNATURE = None
+        return None
+    with _POOL_LOCK:
+        if _POOL_SIGNATURE != pool or _POOL_CYCLE is None:
+            _POOL_CYCLE = itertools.cycle(pool)
+            _POOL_SIGNATURE = pool
+        return next(_POOL_CYCLE)
 
 
 def _subagent_model() -> str:
@@ -60,6 +95,15 @@ def subagent_call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
     REPL flip of nx.NX_SUBAGENT_MODEL is picked up by the next agent."""
     model = _subagent_model()
     name = _subagent_source()
+    pooled = next_pool_model()
+    if pooled:
+        # Pool entry wins over the single-model knobs. "source:model" rides
+        # that endpoint; a bare name rides the parent's active source.
+        src_name, sep, pooled_model = pooled.rpartition(":")
+        if sep and src_name:
+            name, model = src_name.strip(), pooled_model.strip()
+        else:
+            model = pooled.strip()
     if not model and not name:
         return None
     if name:

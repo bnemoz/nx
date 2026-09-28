@@ -812,10 +812,11 @@ NX_SUBAGENTS = _env_int("NX_SUBAGENTS", 1)
 # boxes and reasoning live.
 NX_SUBAGENT_ASYNC = _env_int("NX_SUBAGENT_ASYNC", 1)
 # Concurrency cap for a background fan-out (NX_SUBAGENT_MAX_CONCURRENT, default
-# 4; 0 = unbounded). Each async sub-agent is its own thread + HTTP stream +
+# 12; 0 = unbounded). Each async sub-agent is its own thread + HTTP stream +
 # parser, so a spawn beyond the cap parks as "queued" on a BoundedSemaphore and
-# starts when a running one finishes (PF-17, 0.61.0).
-NX_SUBAGENT_MAX_CONCURRENT = _env_int("NX_SUBAGENT_MAX_CONCURRENT", 4)
+# starts when a running one finishes (PF-17, 0.61.0). 12 pairs with a 3-model
+# NX_SUBAGENT_MODEL_POOL (~4 agents per model in flight).
+NX_SUBAGENT_MAX_CONCURRENT = _env_int("NX_SUBAGENT_MAX_CONCURRENT", 12)
 # Opt-in write tier for sub-agents (NX_SUBAGENT_WRITE=1): the four file-mutation
 # tools (write_file/edit_file/multi_edit/sed_edit) are additionally offered
 # inside a sub-agent, bound to wrappers that run the parent's real bodies — so
@@ -840,6 +841,12 @@ NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
 # NX_SUBAGENT_* knobs so tests/REPL can flip them live.
 NX_SUBAGENT_MODEL = os.environ.get("NX_SUBAGENT_MODEL", "").strip()
 NX_SUBAGENT_SOURCE = os.environ.get("NX_SUBAGENT_SOURCE", "").strip()
+# Model pool (0.103.6): comma-separated sub-agent models handed out round-robin
+# per spawn, "model" (parent's client) or "source:model" (that endpoint) — e.g.
+# "glm-5.3-flash,qwen3.8-flash-next,deepseek-v4.1-flash". Takes priority over
+# NX_SUBAGENT_MODEL/_SOURCE; unset → single-model routing as before. Consumed
+# by nx/_subagent_model.py (next_pool_model) at each agent start.
+NX_SUBAGENT_MODEL_POOL = os.environ.get("NX_SUBAGENT_MODEL_POOL", "").strip()
 NX_VISION = _env_int("NX_VISION", 0)
 # --- SoL-Pi ports (0.67.0) ---------------------------------------------------
 # Action fusion (nx/_fusion.py): NX_FUSION lets write_file/edit_file/
