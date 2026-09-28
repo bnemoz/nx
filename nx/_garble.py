@@ -30,8 +30,11 @@ locality: the two copies must be adjacent or overlapping (a restart, not two
 separate mentions — loop bodies and parallel guard blocks legitimately repeat
 a phrase a few words apart). Two outcomes:
 
-  - repairable (duplicate line / near-duplicate phrase / splice): the
-    duplicate copy is dropped, the edit proceeds, and the result says so;
+  - repairable (an exact duplicated line — the only signature that cannot be
+    intended content): the duplicate copy is dropped, the edit proceeds, and
+    the result says so. Phrase/stutter/splice hits are heuristic, so since
+    0.103.15 they take the error path rather than auto-repair — a wrong
+    "repair" silently deleting meant text is worse than one resubmit.
   - not repairable: hard ERROR quoting the suspect text, so the model
     retries with clean text rather than persisting corruption.
 
@@ -436,9 +439,16 @@ def garble_check(new: str, src: str, old: str = "",
                 if _sig_fragment_novel(s, work, src, old)]
         if not sigs:
             break
+        # Only an exact duplicated line is unambiguous enough to auto-repair:
+        # the second copy cannot be intended content. Phrase/stutter/splice
+        # signatures are heuristic guesses, and a wrong guess silently deletes
+        # text the model meant — those take the error/insist path instead
+        # (0.103.15: repairs poisoned trust in the whole edit, forcing the
+        # model to re-diff the file against git).
+        repairable = [s for s in sigs if s.startswith("duplicated line")]
         if first_sigs is None:
             first_sigs = sigs
-        fixed = realign_new(work, sigs, src + "\n" + (old or ""))
+        fixed = realign_new(work, repairable, src + "\n" + (old or ""))
         if fixed == work:
             quoted = "; ".join(sigs[:2])
             if key in _INSISTED:
@@ -458,26 +468,10 @@ def garble_check(new: str, src: str, old: str = "",
     if first_sigs is None:
         return "clean", None, new
     quoted = "; ".join(first_sigs[:2])
-    if old and work == old:
-        # auto-repair erased the edit: the only "corruption" was a stutter
-        # adjacent to `old`, and collapsing it left `new` == `old` — writing it
-        # would be a silent no-op (field bug fixed in 0.37.3: the model then resubmits
-        # and gets a misleading "no change" error). Refuse with guidance; a
-        # byte-identical resubmission is insistence and writes `new` as-is.
-        if key in _INSISTED:
-            return ("repaired",
-                    "(garble guard: repairing would make `new` identical to "
-                    "`old`; the same suspect `new` was resubmitted — written "
-                    "as-is; " + quoted + ")", new)
-        if len(_INSISTED) >= _INSISTED_MAX:
-            _INSISTED.clear()
-        _INSISTED.add(key)
-        return ("error",
-                "ERROR: the suspect text is only a stutter adjacent to `old` — "
-                "repairing it would leave `new` identical to `old` (a no-op "
-                "edit), so nothing was written. If `new` is really what you "
-                "want, resubmit the byte-identical edit and it will be written "
-                "as-is.", new)
+    # Note: the 0.37.3 "repair would leave `new` identical to `old`" refusal
+    # is unreachable since 0.103.15 — a dup-line repair that collapsed to
+    # `old` implies the duplicated line already appears in `old`/src, so the
+    # novelty veto filters that signature before any repair.
     note = ("(garble guard: `new` contained " + quoted
             + " — repaired automatically; check the diff)")
     return "repaired", note, work

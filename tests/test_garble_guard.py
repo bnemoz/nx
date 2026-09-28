@@ -166,21 +166,21 @@ def test_repair_drops_duplicated_line():
     assert "garble guard" in msg
 
 
-def test_repair_dedups_repeated_phrase():
+def test_repeated_phrase_errors_instead_of_repairing():
+    # 0.103.15: phrase/stutter/splice hits are heuristic guesses; a wrong
+    # auto-repair silently deletes meant text (and poisoned trust in the whole
+    # edit, forcing a re-diff against git). Only an exact duplicated line
+    # auto-repairs; the rest take the error/insist path.
     new = "the tuple compare hits the fast path fast path fast path and never recurses\n"
-    status, _msg, repaired = _garble.garble_check(new, "unrelated source", "")
-    assert status == "repaired"
-    assert repaired == "the tuple compare hits the fast path and never recurses\n"
+    status, msg, text = _garble.garble_check(new, "unrelated source", "")
+    assert status == "error" and "textually corrupted" in msg and text == new
 
 
-def test_repair_desplices_line_boundary():
+def test_splice_errors_instead_of_repairing():
     new = ("Kept cheap: scalars compare by value and the dicts are\n"
            "the dicts are cached objects their setters replace wholesale\n")
-    status, _msg, repaired = _garble.garble_check(new, "unrelated source", "")
-    assert status == "repaired"
-    # shared words kept once, on the first line
-    assert repaired == ("Kept cheap: scalars compare by value and the dicts are\n"
-                        "cached objects their setters replace wholesale\n")
+    status, msg, text = _garble.garble_check(new, "unrelated source", "")
+    assert status == "error" and "spliced line boundary" in msg and text == new
 
 
 def test_clean_new_is_untouched():
@@ -238,15 +238,16 @@ def test_swapped_args_not_flagged_when_old_matches():
 
 # --- end-to-end through the edit tools ---------------------------------------
 
-def test_edit_file_repairs_garbled_new():
+def test_edit_file_repairs_duplicated_line_new():
     _allow()
     path = _write("g1.py", "def f():\n    return 1\n")
-    garbled = "def f():\n    return 2\n    return 2\n"
+    dup = "    return self._snap"
+    garbled = "def f():\n" + dup + "\n" + dup + "\n"
     res = m.edit_file(path, old="def f():\n    return 1\n", new=garbled)
     assert res.startswith("edited")
     assert "garble guard" in res
     with open(path) as fh:
-        assert fh.read() == "def f():\n    return 2\n"
+        assert fh.read() == "def f():\n" + dup + "\n"
 
 
 def test_edit_file_errors_on_unrepairable_abandoned_rewrite():
@@ -264,18 +265,19 @@ def test_edit_file_errors_on_unrepairable_abandoned_rewrite():
         assert fh.read() == "def f():\n    return 1\n", "nothing must be written"
 
 
-def test_multi_edit_repairs_one_edit_and_reports_once():
+def test_multi_edit_repairs_dup_line_and_reports_once():
     _allow()
     path = _write("g3.py", "A = 1\nB = 2\n")
+    line = "A = 10  # cached marker note"
     res = m.multi_edit(path, [
-        {"old": "A = 1", "new": "A = 10  # set once set once set once set once set once"},
+        {"old": "A = 1", "new": line + "\n" + line},
         {"old": "B = 2", "new": "B = 20"},
     ])
     assert res.startswith(f"edited {path} (2 edits applied)"), res
     assert res.count("garble guard") == 1
     with open(path) as fh:
         src = fh.read()
-    assert src == "A = 10  # set once\nB = 20\n"
+    assert src == "A = 10  # cached marker note\nB = 20\n"
 
 
 def test_multi_edit_garbled_edit_rolls_back_batch():
@@ -355,11 +357,13 @@ def test_operator_residue_is_not_a_splice():
         "        saved = m._confirm\n        m._confirm = 1\n") == []
 
 
-def test_one_line_echo_still_caught():
-    # a genuine period-2 echo on a single line is still repaired
-    status, _msg, repaired = _garble.garble_check(
+def test_one_line_echo_errors_instead_of_repairing():
+    # 0.103.15: a period-2 echo is a stutter signature, not a dup line —
+    # error/insist, not auto-repair
+    status, msg, text = _garble.garble_check(
         "keep the fast-path fast-path fast-path here\n", "unrelated source\n", "")
-    assert status == "repaired" and repaired == "keep the fast-path here\n", (status, repaired)
+    assert status == "error" and "stuttered" in msg
+    assert text == "keep the fast-path fast-path fast-path here\n"
 
 
 # --- field misfire 0.37.2: period-2 echo across a line break ------------------
@@ -396,26 +400,25 @@ def test_edit_file_keeps_return_d_fallback():
         assert "            return d\n    return mab.split(\"_\")[0]" in fh.read()
 
 
-def test_noop_repair_is_refused_then_insisted():
-    # repair would collapse `new` back to `old` (a silent no-op edit): refuse
-    # once with guidance, then honor a byte-identical resubmission
-    _allow()
-    path = _write("g11.py", "AA BB, CC\nCC DD\n")
+def test_noop_repair_cannot_silently_noop():
+    # 0.103.15: with only dup-line auto-repair left, the 0.37.3 refusal case
+    # is unreachable — a dup whose repair would yield `old` is already in
+    # `old`/src, so the novelty veto drops the signature and the repair never
+    # runs. Verify directly: a dup adjacent to `old`'s own lines is `clean`
+    # (the veto spares it), and a dup of novel text still repairs.
     old = "AA BB, CC\nCC DD\n"
-    new = "AA BB, CC\nBB, CC CC DD\n"
-    res1 = m.edit_file(path, old=old, new=new)
-    assert res1.startswith("ERROR") and "identical to `old`" in res1, res1
-    with open(path) as fh:
-        assert fh.read() == old  # nothing written on the refusal
-    res2 = m.edit_file(path, old=old, new=new)
-    assert res2.startswith("edited") and "written as-is" in res2, res2
-    with open(path) as fh:
-        assert fh.read() == new  # insistence wins, text preserved
+    line = "CC DD with enough words to clear the minimum"
+    dup_of_old = old + old.strip().split("\n")[-1] + "\n"
+    status, msg, _text = _garble.garble_check(dup_of_old, old, old)
+    assert status == "clean", (status, msg)  # veto spares repetition of `old`
+    status, msg, repaired = _garble.garble_check(old + line + "\n" + line + "\n",
+                                                 old, old)
+    assert status == "repaired" and repaired == old + line + "\n", (status, msg)
 
 
 def test_noop_repair_new_does_not_silently_noop():
     # the tool must never report success while writing `old`: a repair that
-    # erases the edit surfaces as the refusal above, not an "edited" result
+    # erases the edit surfaces as an error, not an "edited" result
     _allow()
     path = _write("g12.py", "AA BB, CC\nCC DD\n")
     res = m.edit_file(path, old="AA BB, CC\nCC DD\n",
