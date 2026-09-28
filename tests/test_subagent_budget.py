@@ -101,7 +101,7 @@ def test_default_and_ceiling_turns(nx_fresh, monkeypatch):
     spawn_agent("q")
     assert seen[-1] == 30
     spawn_agent("q", max_turns=9999)
-    assert seen[-1] == 200  # ceiling
+    assert seen[-1] == 500  # ceiling (0.103.10, matches MAX_MODEL_TURNS)
     # the default is a FLOOR: a request below it is raised to it
     spawn_agent("q", max_turns=3)
     assert seen[-1] == 30

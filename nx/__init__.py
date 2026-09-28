@@ -826,13 +826,18 @@ NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 # Sub-agent budget knobs (read in nx/_subagent.py at spawn time): the default
 # turn budget the schema advertises (NX_SUBAGENT_DEFAULT_TURNS, 100 — the old
 # 12 left real investigations capping out with no answer) and the hard ceiling
-# for a requested max_turns (NX_SUBAGENT_MAX_TURNS, 200). The default is also a
-# FLOOR: a model that passes its own smaller max_turns (several carry a 5/10/12-
-# scale notion and were capping their agents out) is raised to it. Kept here
+# for a requested max_turns (NX_SUBAGENT_MAX_TURNS, 500, raised in 0.103.10 to
+# match the parent loop's MAX_MODEL_TURNS for the write-capable era). Both are
+# FLOORS by tier: a model that passes its own smaller max_turns (several carry
+# a 5/10/12-scale notion and were capping their agents out) is raised to the
+# floor. Read-tier agents floor at NX_SUBAGENT_DEFAULT_TURNS (100); write/
+# implement-tier agents floor at the higher NX_SUBAGENT_WRITE_TURNS (250) —
+# delegated multi-file work needs more turns than a read sweep. Kept here
 # alongside the other NX_SUBAGENT_* resolution points so tests/REPL can flip
 # them live.
 NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
-NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 200)
+NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 500)
+NX_SUBAGENT_WRITE_TURNS = _env_int("NX_SUBAGENT_WRITE_TURNS", 250)
 # Per-subagent model routing (0.86.0): NX_SUBAGENT_MODEL (alone = same client,
 # different model id) and/or NX_SUBAGENT_SOURCE (that source's client + default
 # model; combined with _MODEL = that source + the named model). Unset → sub-

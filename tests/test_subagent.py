@@ -143,7 +143,7 @@ def test_subagent_rejects_bad_args_and_nested(nx_fresh, monkeypatch):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("q", max_turns=9999)
-    assert seen["max_turns"] == 200
+    assert seen["max_turns"] == 500  # ceiling (0.103.10)
     # a request below the default floor is RAISED to it (0.36.1); with the
     # default left at 100, max_turns=0 lands on 100, not 1.
     spawn_agent("q", max_turns=0)

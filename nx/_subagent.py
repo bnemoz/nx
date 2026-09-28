@@ -99,9 +99,12 @@ from ._prompts import (  # prompt registry (re-exported)
 # 3-4 files, search, verify, answer) need ~15-20 turns, and the parent model
 # kept passing the schema default through unexamined. 100 gives a read-heavy
 # investigation plenty of room, recovery cycles included; the ceiling is
-# env-tunable (NX_SUBAGENT_MAX_TURNS, 200) instead of hard-coded. Resolved through
-# the top-level module attributes (NX_SUBAGENT_DEFAULT_TURNS /
-# NX_SUBAGENT_MAX_TURNS in nx/__init__.py) so tests/REPL can flip them live.
+# env-tunable (NX_SUBAGENT_MAX_TURNS, 500 in the write-capable era, matching the
+# parent loop's MAX_MODEL_TURNS) instead of hard-coded. Write/implement-tier
+# agents floor higher (NX_SUBAGENT_WRITE_TURNS, 250): delegated multi-file work
+# needs more turns than a read sweep. Resolved through the top-level module
+# attributes (NX_SUBAGENT_DEFAULT_TURNS / NX_SUBAGENT_MAX_TURNS /
+# NX_SUBAGENT_WRITE_TURNS in nx/__init__.py) so tests/REPL can flip them live.
 #
 # The default is a FLOOR, not only the omitted-value fallback. Several models
 # carry their own notion of a turn budget and pass a small max_turns (5/10/12
@@ -123,14 +126,27 @@ def _subagent_max_turns() -> int:
     try:
         return max(1, int(_m.NX_SUBAGENT_MAX_TURNS))
     except (AttributeError, TypeError, ValueError):
-        return _env_int("NX_SUBAGENT_MAX_TURNS", 200)
+        return _env_int("NX_SUBAGENT_MAX_TURNS", 500)
+
+
+def _subagent_write_turns() -> int:
+    """Floor for write/implement-tier agents (NX_SUBAGENT_WRITE_TURNS, 250).
+    Mirrors _subagent_default_turns(): the top-level module attribute first so
+    tests/REPL can flip it live, env as fallback. Delegated multi-file work
+    (read the area, edit, verify, iterate) needs more turns than a read sweep,
+    so write-tier spawns floor here rather than at NX_SUBAGENT_DEFAULT_TURNS."""
+    import nx as _m
+    try:
+        return max(1, int(_m.NX_SUBAGENT_WRITE_TURNS))
+    except (AttributeError, TypeError, ValueError):
+        return _env_int("NX_SUBAGENT_WRITE_TURNS", 250)
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
     "description": "Hand one task or investigation to a sub-agent that returns only its findings. Read-tier agents (default) change no files; write/implement tiers can edit files when NX_SUBAGENT_WRITE=1. PROACTIVELY spawn one per independent area for multi-file work you haven't read -- callers/uses of a symbol, cross-module traces, unfamiliar code, and independent multi-file edits (tier='write'/'implement'). ONE CALL PER QUESTION, all in one turn; they run concurrently. Prefer 2-3 concurrent spawn_agent calls over a long serial read sequence when the task spans multiple independent areas. Not for: one known file, one targeted search, or edits already in progress.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
-        "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, and 100 is a FLOOR: a smaller request is raised to it; ceiling 200). Omit it for broad questions — an agent that runs out spends its last turn answering instead of searching."},
+        "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement agents; both are FLOORS: a smaller request is raised to them; ceiling 500). Omit it for broad work — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Background (default): job id now, answer later. false runs it in the foreground, rendering its searches live and blocking until it finishes."},
         "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. In the background (async, the default) they require a yolo session (--yolo); without yolo they are refused — pass async:false so the approval prompt can be shown. With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. With NX_SUBAGENT_WORKTREE=1 parallel write agents are safe even without scopes (each works in its own checkout) — scope is then about reviewability: keep each agent's diff focused on one concern so its report is easy to merge and judge."},
@@ -868,19 +884,6 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         return ("ERROR: instruction is empty (spawn_agent takes {\"instruction\": "
                 "\"...\"} — you may have used a different key, e.g. `prompt`; "
                 "retry with `instruction`)")
-    # The default is a FLOOR, not just the omitted-value fallback (see the note
-    # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
-    # and pass a small max_turns for a broad sweep, then the agent dies mid-
-    # investigation. Clamp to the ceiling first, then raise to the floor; the
-    # floor is itself ceiling-bounded so an inverted config (default > ceiling)
-    # can never exceed the ceiling. int(None) raises → the floor, so an omitted
-    # max_turns lands on the default.
-    _ceiling = _subagent_max_turns()
-    _floor = min(_subagent_default_turns(), _ceiling)
-    try:
-        max_turns = max(_floor, min(_ceiling, int(max_turns)))
-    except (TypeError, ValueError):
-        max_turns = _floor
     # Models send booleans as real booleans through native tool calls but as
     # "true"/"1" strings through the text-protocol fallback — accept both.
     # The schema key is `async` — a Python keyword, so it can never bind to a
@@ -893,6 +896,25 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     if not t:
         return ("ERROR: tier must be one of read/write/implement "
                 "(or omit it — NX_SUBAGENT_WRITE=1 defaults to write)")
+    # The default is a FLOOR, not just the omitted-value fallback (see the note
+    # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
+    # and pass a small max_turns for a broad sweep, then the agent dies mid-
+    # investigation. The floor is tier-aware (tier resolved above): read-tier
+    # spawns floor at NX_SUBAGENT_DEFAULT_TURNS, write/implement-tier spawns
+    # floor at the higher NX_SUBAGENT_WRITE_TURNS. Clamp to the ceiling first,
+    # then raise to the floor; the floor is itself ceiling-bounded so an
+    # inverted config (floor > ceiling) can never exceed the ceiling. int(None)
+    # raises → the floor, so an omitted max_turns lands on the tier default.
+    _ceiling = _subagent_max_turns()
+    _default = _subagent_default_turns()
+    if t == "read":
+        _floor = min(_default, _ceiling)
+    else:
+        _floor = min(max(_default, _subagent_write_turns()), _ceiling)
+    try:
+        max_turns = max(_floor, min(_ceiling, int(max_turns)))
+    except (TypeError, ValueError):
+        max_turns = _floor
     # Explicit read-tier request wins over the env default even when
     # NX_SUBAGENT_WRITE=1; write/implement tiers require the env opt-in.
     if t in ("write", "implement") and not _write_tier_enabled():
