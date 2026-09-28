@@ -180,7 +180,11 @@ fired = m._maybe_autocompress(test_msgs, prompt_tokens=5000)  # 50% < 85%
 assert fired is False, "should not fire below threshold"
 print("  below threshold (50% < 85%) → no fire → PASS")
 
-# (b) at/above threshold → compress fires
+# (b) at/above threshold → compress fires. With the 0.103.5 async fold on by
+# default the crossing STARTS a background fold (returns False); this test
+# pins the synchronous contract, so disable async for it.
+_ASYNC_WAS = getattr(m, "NX_ASYNC_COMPRESS", None)
+m.NX_ASYNC_COMPRESS = False
 _compress_calls.clear()
 m.compress = _stub_compress
 fired = m._maybe_autocompress(test_msgs, prompt_tokens=8500)  # 85% ≥ 85%
@@ -189,6 +193,11 @@ assert _compress_calls and _compress_calls[-1][1] is True, "should call compress
 print(f"  at threshold (85%) → fire, keep={_compress_calls[-1][0]} → PASS")
 m.compress = _real_compress
 _compress_calls.clear()
+if _ASYNC_WAS is None:
+    if hasattr(m, "NX_ASYNC_COMPRESS"):
+        del m.NX_ASYNC_COMPRESS
+else:
+    m.NX_ASYNC_COMPRESS = _ASYNC_WAS
 
 # (c) disabled (0%) → no compress even at 100%
 m.AUTOCOMPRESS_PERCENT = 0
