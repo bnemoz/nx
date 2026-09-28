@@ -37,7 +37,7 @@ _COMBINED_FLAGS = re.compile(r"^-(?P<body>[A-Za-z]{2,})$")
 _KEEP_CHARS = set("niclqvwxFHoxasP")
 _DROP_CHARS = set("ErR")
 # Operators that end one command and start the next.
-_OPERATORS = {"|", "|&", "&&", "||", ";", "&", ">", ">>", "<", "<<"}
+_OPERATORS = {"|", "|&", ">&", "&&", "||", ";", "&", ">", ">>", "<", "<<"}
 # Redirection targets like 2>&1: never a pattern, never re-quoted as a word.
 _REDIRECTION = re.compile(r"^\d*[<>]")
 
@@ -66,6 +66,34 @@ def _requote(tokens: list[str]) -> str:
                     else shlex.quote(t) for t in tokens)
 
 
+def _merge_fd_redirects(tokens: list[str]) -> list[str]:
+    """Stitch fd-redirections back together after punctuation_chars splitting.
+
+    shlex(punctuation_chars=True) tokenizes ``2>&1`` as ``2``, ``>&``, ``1``
+    (the digit is a word char, the operators are punctuation), which defeats
+    _REDIRECTION's same-token guard and leaves the ``2`` to be emitted as an
+    ordinary argument. Merge a lone digit word with the operator token that
+    follows it (plus the target token for ``>&``/``>``) so the guard sees the
+    combined form again. Only digits qualify: a plain word before ``>`` is a
+    real argument, never a fd number.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.isdigit() and i + 1 < len(tokens) and tokens[i + 1] in _OPERATORS:
+            merged = tok + tokens[i + 1]
+            i += 2
+            if merged in ("2>", "1>", "2>&", "1>&") and i < len(tokens):
+                merged += tokens[i]   # 2>&1 / 2>/dev/null target token
+                i += 1
+            out.append(merged)
+        else:
+            out.append(tok)
+            i += 1
+    return out
+
+
 def prefer_ripgrep(command: str) -> str:
     """Return `command` with grep-family calls rewritten to ripgrep.
 
@@ -77,6 +105,7 @@ def prefer_ripgrep(command: str) -> str:
     tokens = _split_shell(command)
     if tokens is None:
         return command
+    tokens = _merge_fd_redirects(tokens)
     out: list[str] = []
     pattern_done = False   # first non-flag operand of a rewritten grep seen
     in_rewritten = False   # tokens of the grep invocation being rewritten

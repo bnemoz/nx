@@ -77,6 +77,19 @@ class TestGrepRewrite(unittest.TestCase):
         self.assertEqual(prefer_ripgrep("grep foo > out.txt"),
                          "rg foo > out.txt")
 
+    def test_fd_redirection_survives(self):
+        # punctuation_chars splitting used to tear 2>/dev/null and 2>&1 into
+        # separate tokens ("2", ">", "/dev/null"), so the digit was re-emitted
+        # as a literal argument and the redirect became a file named dev/null.
+        self.assertEqual(prefer_ripgrep("grep -n foo app.log 2>/dev/null"),
+                         "rg -n foo app.log 2>/dev/null")
+        self.assertEqual(prefer_ripgrep("grep -rn TODO . 2>&1"),
+                         "rg -n TODO . 2>&1")
+        self.assertEqual(prefer_ripgrep('grep -E "a|b" . 2>&1 | head'),
+                         "rg 'a|b' . 2>&1 | head")
+        # A real argument that happens to be a digit before > is not an fd.
+        self.assertEqual(prefer_ripgrep("grep foo 2 out.txt"), "rg foo 2 out.txt")
+
     def test_non_grep_command_untouched(self):
         self.assertEqual(prefer_ripgrep("ls -la && cat f.md"), "ls -la && cat f.md")
 
