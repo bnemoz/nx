@@ -158,9 +158,26 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
         if len(parts) >= 3:
             by_path[name] = (parts[0], parts[2])
     wanted = set(file_list) if file_list != ["."] else set(by_path)
+    paths = sorted(wanted & set(by_path))
+    # Re-hash the actual worktree blobs instead of trusting the index: after a
+    # commit the worktree normally equals HEAD, so a shared-index entry still
+    # holding a stale pre-change blob (phantom MM) must be reset from HEAD.
+    # A path whose worktree blob DIFFERS from HEAD has live staged/unstaged
+    # WIP — cacheinfo-ing it would clobber that, so leave its entry alone.
+    wt: dict[str, str] = {}
+    guarded = True
+    if paths:
+        hout, herr = _git(repo, ["hash-object", "--", *paths], timeout)
+        if herr or not hout:
+            guarded = False  # can't verify; sync every path as before
+        else:
+            for p, h in zip(paths, hout.split()):
+                wt[p] = h
     specs: list[str] = []
-    for p in sorted(wanted & set(by_path)):
+    for p in paths:
         mode, blob = by_path[p]
+        if guarded and wt.get(p) != blob:
+            continue
         specs.append(f"{mode},{blob},{p}")
     if specs:
         # ONE --cacheinfo per spec: git's parser consumes exactly one

@@ -13,7 +13,10 @@ Contract under test:
   already-staged work can never be swept into a preview, and a denied commit
   never leaves stray staged changes);
 - the shared index is re-synced to the commit's tree afterwards (0.103.7):
-  a multi-file commit must leave `git status` clean, not phantom-MM;
+  a multi-file commit must leave `git status` clean, not phantom-MM; the
+  sync re-hashes the worktree blobs and only resets entries that match HEAD
+  (0.103.9), so a stale pre-change entry with worktree == HEAD is cleared
+  while live WIP entries are never clobbered;
 - the action string "git commit: <subject>" has a local medium risk hint (no
   classifier round-trip), and _allowlist_tool maps it to git_commit.
 """
@@ -69,6 +72,12 @@ def _git_count(repo_path):
     return int(r.stdout.strip())
 
 
+def _index_blob(repo_path, path):
+    r = subprocess.run(["git", "ls-files", "-s", "--", path], cwd=repo_path,
+                       capture_output=True, text=True)
+    return r.stdout.split()[1]
+
+
 def test_commit_reviews_staged_diff_and_commits(repo, monkeypatch):
     nx, rp = repo
     seen = {}
@@ -121,7 +130,7 @@ def test_secret_in_diff_refuses_before_confirm(repo, monkeypatch):
         return True
 
     monkeypatch.setattr(nx._bash_jobs, "_confirm", fake_confirm)
-    (rp / "a.py").write_text('key = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"\n',
+    (rp / "a.py").write_text(f'key = "ghp_{"A" * 36}"\n',
                              encoding="utf-8")
     result = nx._gitcommit.git_commit(files="a.py", message="oops")
     assert result.startswith("REFUSED")
@@ -159,6 +168,45 @@ def test_multi_file_commit_leaves_status_clean(repo, monkeypatch):
     r = subprocess.run(["git", "status", "--short"], cwd=rp,
                        capture_output=True, text=True)
     assert r.stdout.strip() == "", f"phantom status after commit: {r.stdout!r}"
+
+
+def test_sync_resets_stale_entry_when_worktree_matches_head(repo):
+    """Residual phantom-MM (0.103.8 follow-up): an aborted update-index can
+    leave the shared index holding a PRE-change blob while the worktree is
+    byte-identical to HEAD. _sync_shared_index must reset that entry from
+    HEAD (not cacheinfo a stale hash), leaving `git status` clean."""
+    nx, rp = repo
+    # Advance HEAD past the pre-change blob, then poison the index with that
+    # PRE-change blob while the worktree keeps HEAD's (new) content: exactly
+    # the residual phantom-MM state (stale index entry, worktree == HEAD).
+    old = _index_blob(rp, "a.py")
+    (rp / "a.py").write_text("x = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.py"], cwd=rp, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "second"], cwd=rp,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                    f"100644,{old},a.py"], cwd=rp, check=True,
+                   capture_output=True)  # poison: stale pre-change blob
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "MM a.py", "setup failed: poison not visible"
+    nx._gitcommit._sync_shared_index(str(rp), ["a.py"], 60)
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "", f"phantom status after sync: {r.stdout!r}"
+
+
+def test_sync_does_not_clobber_live_wip_entry(repo):
+    """The re-hash guard: a path whose worktree blob DIFFERS from HEAD has
+    live WIP; syncing must not cacheinfo HEAD's blob over its index entry."""
+    nx, rp = repo
+    (rp / "a.py").write_text("x = 9\n", encoding="utf-8")  # live WIP
+    subprocess.run(["git", "add", "a.py"], cwd=rp, check=True,
+                   capture_output=True)  # staged in the shared index
+    staged = _index_blob(rp, "a.py")
+    nx._gitcommit._sync_shared_index(str(rp), ["a.py"], 60)
+    assert _index_blob(rp, "a.py") == staged, "sync clobbered live WIP entry"
 
 
 def test_non_repo_path_is_refused(repo, tmp_path):
