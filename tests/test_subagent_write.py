@@ -231,27 +231,37 @@ def test_write_tier_never_parallel_fanout(nx_fresh, monkeypatch, tmp_path):
 
 
 def test_write_tier_no_bash_widening(nx_fresh, monkeypatch, tmp_path):
-    """The write tier widens nothing but the four file mutations: bash stays
-    allowlist-gated, delete/wait_background/memory_write stay unavailable."""
+    """The write tier widens the toolset only by the file mutations + real
+    run_bash (gated by _confirm, 0.103.17 — building/running tests is the
+    write agent's job); delete/wait_background/memory_write stay unavailable."""
     from nx import _dispatch
     from nx._subagent import _SubagentContext, _write_tier_dispatch, _SUBAGENT_TLS
     nx_fresh.NX_SUBAGENT_WRITE = 1
     table = _write_tier_dispatch()
     from nx._subagent import _subagent_bash
-    assert table["run_bash"] is _subagent_bash  # bash stays allowlist-gated
+    assert table["run_bash"] is _subagent_bash  # same gate, tier-aware inside
     ran = []
     monkeypatch.setattr(nx_fresh._bash_jobs, "run_bash", lambda command="", **kw: ran.append(command) or "ran")
     _SUBAGENT_TLS.ctx = _SubagentContext(table, write=True)
     try:
-        out = _dispatch.run_tool("run_bash", {"command": "rm -rf x"})
-        assert out.startswith("ERROR") and "read-only" in out
+        # write tier: the command reaches the real run_bash (whose own
+        # _confirm gate applies — here monkeypatched away).
+        out = _dispatch.run_tool("run_bash", {"command": "cargo check"})
+        assert out == "ran" and ran == ["cargo check"]
         out2 = _dispatch.run_tool("memory_write", {"title": "t", "body": "b"})
         assert "not available to the read-only sub-agent" in out2
         out3 = _dispatch.run_tool("wait_background", {"pid": 1})
         assert "not available to the read-only sub-agent" in out3
     finally:
         _SUBAGENT_TLS.ctx = None
-    assert ran == []  # nothing reached bash
+    # read tier: the same wrapper still refuses non-allowlisted commands.
+    _SUBAGENT_TLS.ctx = _SubagentContext(table, write=False)
+    try:
+        out = _dispatch.run_tool("run_bash", {"command": "rm -rf x"})
+        assert out.startswith("ERROR") and "read-only" in out
+    finally:
+        _SUBAGENT_TLS.ctx = None
+    assert ran == ["cargo check"]  # only the write-tier call reached bash
 
 
 def test_write_tier_nested_spawn_refused(nx_fresh, monkeypatch):

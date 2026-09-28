@@ -202,6 +202,34 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         assert not a(c), repr(c)
 
 
+def test_subagent_bash_write_tier_unblocked(nx_fresh, monkeypatch):
+    """0.103.17: a write/implement-tier agent gets the parent's real run_bash
+    (its own _confirm gate) instead of the read-only allowlist — building and
+    running the test suite is what a write agent exists to do. Read-tier
+    agents keep the allowlist."""
+    from nx import _subagent_tiers as t
+    from nx._subagent import spawn_agent
+    seen = {}
+
+    def fake_run_bash(command="", **kw):
+        seen["command"] = command
+        return "ran"
+
+    monkeypatch.setattr("nx._bash_jobs.run_bash", fake_run_bash)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
+
+    def fake_loop(messages, *a, **kw):
+        table = t._subagent_ctx().table
+        # write tier: the gate steps aside, arbitrary commands reach run_bash
+        assert table["run_bash"]("cargo check") == "ran"
+        assert seen["command"] == "cargo check"
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("q", tier="write")
+    assert not out.startswith("ERROR"), out
+
+
 def test_subagent_bash_tier_dispatch(nx_fresh, monkeypatch):
     """Inside the sub-loop, run_bash resolves to the allowlist-gated wrapper:
     allowlisted commands reach run_bash, everything else is refused before it

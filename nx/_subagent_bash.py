@@ -70,13 +70,26 @@ def _subagent_bash_allowed(command: str) -> bool:
 
 
 def _subagent_bash(command: str, **_: Any) -> str:
-    """run_bash replacement installed in the sub-agent's dispatch table: runs
-    the command only when it passes the read-only allowlist. The sub-loop
+    """run_bash replacement installed in the read-only sub-agent dispatch table:
+    runs the command only when it passes the read-only allowlist. The sub-loop
     already forces YOLO (read-only tools never prompt), and an allowlisted
     single command can't carry redirection/chaining, so there is no approval
     path to reason about. wait_background is not offered at all — if an
     allowlisted command somehow outlives the poll window, the [background]
-    result tells the sub-agent to read the log with read_file."""
+    result tells the sub-agent to read the log with read_file.
+
+    A WRITE-tier agent (tier='write'/'implement') is dispatched here too —
+    _write_tier_dispatch layers the write tools on top of the read-only table —
+    but it gets the parent's real run_bash with its own _confirm approval gate
+    instead of this allowlist: the same gate its file edits cross. Building
+    (cargo check, uv run pytest, ...) is exactly what a write agent exists to
+    do, and no read-only allowlist can express it. A quiet write agent still
+    can't prompt — _confirm auto-denies there, same as its edits."""
+    from ._subagent_tiers import _subagent_ctx
+    ctx = _subagent_ctx()
+    if ctx is not None and ctx.write:
+        from ._bash_jobs import run_bash as _real_run_bash
+        return _real_run_bash(command)
     if not _subagent_bash_allowed(command):
         return ("ERROR: sub-agent bash is limited to single read-only commands "
                 f"(grep/ls/du/ps/pgrep/git log/git status/...); refused: {command!r}. "
