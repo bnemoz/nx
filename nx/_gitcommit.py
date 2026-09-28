@@ -160,10 +160,10 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
     wanted = set(file_list) if file_list != ["."] else set(by_path)
     paths = sorted(wanted & set(by_path))
     # Re-hash the actual worktree blobs instead of trusting the index: after a
-    # commit the worktree normally equals HEAD, so a shared-index entry still
-    # holding a stale pre-change blob (phantom MM) must be reset from HEAD.
-    # A path whose worktree blob DIFFERS from HEAD has live staged/unstaged
-    # WIP — cacheinfo-ing it would clobber that, so leave its entry alone.
+    # commit the shared-index entry for a committed path is stale. Rewrite it
+    # to the WORKTREE blob — worktree == HEAD gives the clean committed entry;
+    # worktree != HEAD (live WIP, the reported residual bug) keeps the change
+    # as staged without a phantom. The worktree file itself is never touched.
     wt: dict[str, str] = {}
     guarded = True
     if paths:
@@ -176,9 +176,9 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
     specs: list[str] = []
     for p in paths:
         mode, blob = by_path[p]
-        if guarded and wt.get(p) != blob:
-            continue
-        specs.append(f"{mode},{blob},{p}")
+        # Worktree differs from HEAD: write the worktree blob (WIP stays
+        # staged), not HEAD's (which would unstage it).
+        specs.append(f"{mode},{wt.get(p, blob) if guarded else blob},{p}")
     if specs:
         # ONE --cacheinfo per spec: git's parser consumes exactly one
         # <mode>,<blob>,<path> triple per flag; extra specs after a single

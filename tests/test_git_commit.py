@@ -78,6 +78,12 @@ def _index_blob(repo_path, path):
     return r.stdout.split()[1]
 
 
+def _head_blob(repo_path, path):
+    r = subprocess.run(["git", "rev-parse", f"HEAD:{path}"], cwd=repo_path,
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
 def test_commit_reviews_staged_diff_and_commits(repo, monkeypatch):
     nx, rp = repo
     seen = {}
@@ -198,15 +204,50 @@ def test_sync_resets_stale_entry_when_worktree_matches_head(repo):
 
 
 def test_sync_does_not_clobber_live_wip_entry(repo):
-    """The re-hash guard: a path whose worktree blob DIFFERS from HEAD has
-    live WIP; syncing must not cacheinfo HEAD's blob over its index entry."""
+    """Worktree differs from HEAD after a commit (0.103.9 residual bug): the
+    shared index holds the PRE-commit blob and the worktree has FURTHER edits,
+    so `git status` shows a phantom MM — and the old guard SKIPPED the path
+    entirely. Sync must write the WORKTREE blob: WIP stays staged, no phantom,
+    and the worktree file is never touched."""
     nx, rp = repo
-    (rp / "a.py").write_text("x = 9\n", encoding="utf-8")  # live WIP
+    (rp / "a.py").write_text("x = 2\n", encoding="utf-8")
+    old = _index_blob(rp, "a.py")  # pre-change blob (v1)
+    subprocess.run(["git", "add", "a.py"], cwd=rp, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "second"], cwd=rp, check=True,
+                   capture_output=True)
+    # Poison the index with the PRE-commit blob: the exact stale state a
+    # git_commit leaves when its sync skipped a worktree-dirty path.
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                    f"100644,{old},a.py"], cwd=rp, check=True,
+                   capture_output=True)
+    (rp / "a.py").write_text("x = 3\n", encoding="utf-8")
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "MM a.py", "setup failed: MM not visible"
+    nx._gitcommit._sync_shared_index(str(rp), ["a.py"], 60)
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "M  a.py", \
+        f"expected staged WIP without phantom, got: {r.stdout!r}"
+    wtblob = subprocess.run(["git", "hash-object", "--", "a.py"], cwd=rp,
+                            capture_output=True, text=True).stdout.strip()
+    assert _index_blob(rp, "a.py") == wtblob, "index not set to worktree blob"
+    assert (rp / "a.py").read_text(encoding="utf-8") == "x = 3\n", \
+        "sync modified the worktree file"
+
+
+def test_sync_keeps_live_wip_staged(repo):
+    """A path with staged live WIP (index blob differs from both HEAD and the
+    worktree) keeps its WIP entry; the worktree file is never touched."""
+    nx, rp = repo
+    (rp / "a.py").write_text("x = 9\n", encoding="utf-8")
     subprocess.run(["git", "add", "a.py"], cwd=rp, check=True,
                    capture_output=True)  # staged in the shared index
     staged = _index_blob(rp, "a.py")
     nx._gitcommit._sync_shared_index(str(rp), ["a.py"], 60)
-    assert _index_blob(rp, "a.py") == staged, "sync clobbered live WIP entry"
+    assert _index_blob(rp, "a.py") != _head_blob(rp, "a.py"), \
+        "sync unstaged live WIP (index reset to HEAD)"
+    assert (rp / "a.py").read_text(encoding="utf-8") == "x = 9\n"
 
 
 def test_non_repo_path_is_refused(repo, tmp_path):
