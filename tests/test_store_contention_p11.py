@@ -148,7 +148,8 @@ def test_search_sessions_one_connection(monkeypatch):
     out = ss.search_sessions("body of p11ae")
     monkeypatch.setattr(ss.sqlite3, "connect", real)
     assert any(r["id"] == "20250101-120000-p11ae" for r in out)
-    assert opens["n"] == 2  # refresh + query (one connect each, one connection)
+    assert opens["n"] == 1  # 0.103.11: refresh + query share the caller conn
+    # (the backfill no longer re-opens via iter_rows)
 
 
 def test_refresh_index_still_works_standalone():

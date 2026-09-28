@@ -157,15 +157,24 @@ def _refresh_index(force: bool = False,
             conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (sid,))
         if stale:
             conn.commit()
-        # backfill missing bodies from the store itself
-        for sid, data in _sessiondb.iter_rows():
-            if not data or sid in fts_ids:
-                continue
-            _sessiondb.refresh_fts(
-                sid, data.get("messages") or [],
-                title=data.get("title"), description=data.get("description"),
-                conn=conn)
-            n += 1
+        # backfill missing bodies from the store itself. 0.103.11: only fetch
+        # transcripts of rows that actually lack an FTS body — iter_rows()
+        # over the whole store (1000+ sessions) costs tens of seconds on
+        # every search even when nothing needs backfilling.
+        missing = [sid for sid in have - fts_ids]
+        if missing:
+            qmarks = ",".join("?" * len(missing))
+            for sid, blob in conn.execute(
+                    f"SELECT session_id, data FROM sessions "
+                    f"WHERE session_id IN ({qmarks})", missing).fetchall():
+                data = _sessiondb._row_to_data(sid, blob)
+                if not data:
+                    continue
+                _sessiondb.refresh_fts(
+                    sid, data.get("messages") or [],
+                    title=data.get("title"), description=data.get("description"),
+                    conn=conn)
+                n += 1
     finally:
         if own:
             conn.close()
