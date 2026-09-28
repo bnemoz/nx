@@ -105,6 +105,16 @@ THEMES: dict[str, dict[str, str]] = {
         "purple": "babbf1", "teal": "99d1db", "pink": "f4b8e4",
         "brown": "d699b6",
     },
+    "opencode": {   # OpenCode default theme (opencode.ai) — dark, warm orange
+        # primary #fab283 as orange; accent #9d7cd8 as magenta; secondary
+        # #5c9cf5 as blue; warning #f5a742 as yellow; error #e06c75,
+        # success #7fd88f, info #56b6c2; text #eeeeee, muted #808080.
+        "cyan": "56b6c2", "green": "7fd88f", "yellow": "f5a742",
+        "red": "e06c75", "magenta": "9d7cd8", "gray": "808080",
+        "blue": "5c9cf5", "orange": "fab283",
+        "purple": "ffc09f", "teal": "94e2d5", "pink": "f5c2e7",
+        "brown": "e0af79",
+    },
     "amethyst": {   # monochrome purple — every hue is a violet/orchid/pink
         # shade, so roles stay distinguishable by lightness and by position in
         # the violet→pink band rather than by hue. "gray" stays a true neutral
@@ -116,7 +126,7 @@ THEMES: dict[str, dict[str, str]] = {
         "brown": "b092d9",
     },
 }
-DEFAULT_THEME = "mocha"
+DEFAULT_THEME = "opencode"
 _PALETTE_KEYS: tuple[str, ...] = (
     "cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
     "purple", "teal", "pink", "brown",
