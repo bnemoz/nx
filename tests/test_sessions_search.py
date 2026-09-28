@@ -23,7 +23,6 @@ def nx_fresh(tmp_path, monkeypatch):
     import nx
     importlib.reload(nx)
     yield nx, tmp_path
-    os.chdir("/home/nmishra/Documents/Projects/nx")
     for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
         os.environ.pop(k, None)
 

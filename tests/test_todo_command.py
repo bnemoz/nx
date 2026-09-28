@@ -50,6 +50,11 @@ def run_with(cmd):
     # .nx/todo.md under PROJECT_ROOT over st._TODOS at startup, which would
     # clobber the seeded list with the repo's real todo file.
     st.PROJECT_ROOT = tempfile.mkdtemp(prefix="nx-test-todo-")
+    # Pin argv: another test module leaking a bare "--resume" in sys.argv
+    # (process-global, conftest doesn't rewind it) would make main() resume
+    # the newest stored session and reload ITS todos over the seeded list.
+    old_argv = sys.argv
+    sys.argv = ["nx"]
     import builtins
     builtins.print = fake_print
     try:
@@ -60,34 +65,34 @@ def run_with(cmd):
         m.read_multiline = lambda history=None, initial=None: next(prompts)
         m.main()
     finally:
+        sys.argv = old_argv
         builtins.print = real_print
     return captured.getvalue()
 
 
 # --- assertions --------------------------------------------------------------
-st._TODOS = [
-    {"text": "inspect repository", "status": "done"},
-    {"text": "add /todo command", "status": "in_progress"},
-    {"text": "write tests", "status": "pending"},
-]
-out = run_with("/todo")
+def test_todo_renders_seeded_list():
+    st._TODOS = [
+        {"text": "inspect repository", "status": "done"},
+        {"text": "add /todo command", "status": "in_progress"},
+        {"text": "write tests", "status": "pending"},
+    ]
+    out = run_with("/todo")
+    assert "(todo list empty)" not in out, \
+        f"/todo should have shown the seeded list, got:\n{out}"
+    assert "inspect repository" in out, \
+        f"/todo should render each item text, got:\n{out}"
+    assert "add /todo command" in out, \
+        f"/todo should render each item text, got:\n{out}"
+    assert "write tests" in out, \
+        f"/todo should render each item text, got:\n{out}"
+    # status marks from render_todos must come through (done=[x], in_progress=[~])
+    assert "[x]" in out and "[~]" in out and "[ ]" in out, \
+        f"/todo should show status marks, got:\n{out}"
 
-assert "(todo list empty)" not in out, \
-    f"/todo should have shown the seeded list, got:\n{out}"
-assert "inspect repository" in out, \
-    f"/todo should render each item text, got:\n{out}"
-assert "add /todo command" in out, \
-    f"/todo should render each item text, got:\n{out}"
-assert "write tests" in out, \
-    f"/todo should render each item text, got:\n{out}"
-# status marks from render_todos must come through (done=[x], in_progress=[~])
-assert "[x]" in out and "[~]" in out and "[ ]" in out, \
-    f"/todo should show status marks, got:\n{out}"
 
-# empty-list fallback
-st._TODOS = []
-out_empty = run_with("/todo")
-assert "(todo list empty)" in out_empty, \
-    f"/todo on an empty list should say so, got:\n{out_empty}"
-
-print("OK — /todo renders the model's current todo_write list")
+def test_todo_empty_list_fallback():
+    st._TODOS = []
+    out_empty = run_with("/todo")
+    assert "(todo list empty)" in out_empty, \
+        f"/todo on an empty list should say so, got:\n{out_empty}"

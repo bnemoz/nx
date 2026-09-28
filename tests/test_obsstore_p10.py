@@ -221,9 +221,10 @@ def test_prune_covers_obsstore():
 # --- bounded send counts -----------------------------------------------------------
 
 def test_send_counts_bounded(monkeypatch):
+    # NX_OBS_MAX_TRACKED is resolved at CALL time now (_obs._max_tracked()),
+    # so setenv alone drives the cap.
     monkeypatch.setenv("NX_OBS_MAX_TRACKED", "10")
     import nx._obs as O
-    O._MAX_TRACKED = 10
     try:
         O._SEND_COUNTS.clear()
         for i in range(50):

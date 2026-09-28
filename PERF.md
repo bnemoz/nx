@@ -584,10 +584,11 @@ justifying the cost, exactly like the token floor already requires.**
 
 Optimization without a pinned number regresses within two releases. The suite
 stays offline and fast: everything is a pure function, a fake chunk object, or a
-temp dir. Ratio-based assertions (not absolute ms) so a loaded CI box does not
-flap; `--perf-tolerance` (default 1.25) multiplies every bound; `best_of(5)` and
-a recorded `tests/perf/baselines.json` ledger, mirroring the repo's existing
-"recorded budget + justification ledger" convention.
+temp dir. The harness as originally sketched below (ratio tests with a
+`--perf-tolerance` flag and a `perf` marker) was **never built** — the only
+tests that exist are the static budget checks (`test_static_budgets.py`: T-9,
+T-15), which run in the normal suite with no special marker. The ratio-test
+table is kept as a design sketch, not a claim.
 
 | ID | Asserts | Sizes | Bound (measured today) | Pins |
 | --- | --- | --- | --- | --- |
@@ -672,7 +673,7 @@ tier-2 lifter: it returns the full schema of any tool the gate table withheld
 this turn, so the NEXT always-on tool can ship at 0 tokens until used instead
 of ~150 in all sessions. The feature-cost rule (item 4) is enforced by
 `tests/test_perf_tiered_registry.py` (gate coverage) +
-`tests/perf/baselines.json` (`active_tools_floor`).
+`tests/test_background_gating.py` (literal always-on set check).
 
 Secondary: single-source-of-truth for the four hand-synced command lists
 (ROADMAP 1.5 shipped parity *tests*; codegen would also make adding a command

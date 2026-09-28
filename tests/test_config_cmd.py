@@ -136,7 +136,7 @@ def test_doctor_flags_legacy_vars_and_vision_gate(monkeypatch):
 
 # ----------------------------------------------------------------- /status ---
 def test_render_status_snapshot(monkeypatch):
-    monkeypatch.setenv("NX_FLOOR_BUDGET", "3180")
+    monkeypatch.setenv("NX_FLOOR_BUDGET", "5200")
     monkeypatch.delenv("NX_VISION", raising=False)
     saved = (m.st.SOURCES, m.st.SOURCE_ORDER, m.st.ACTIVE, m.st.MODEL)
     m.st.SOURCES, m.st.SOURCE_ORDER, m.st.ACTIVE = {}, [], None
@@ -150,7 +150,7 @@ def test_render_status_snapshot(monkeypatch):
 
 
 def test_render_status_with_active_source(monkeypatch):
-    monkeypatch.setenv("NX_FLOOR_BUDGET", "3180")
+    monkeypatch.setenv("NX_FLOOR_BUDGET", "5200")
     saved = (m.st.SOURCES, m.st.SOURCE_ORDER, m.st.ACTIVE, m.st.MODEL)
     try:
         m.st.SOURCES = {"local": m.st.SOURCES.get("local")}

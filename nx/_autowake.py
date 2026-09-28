@@ -222,6 +222,14 @@ class _WakePoller(threading.Thread):
         super().__init__(name="nx-wake-poller", daemon=True)
         self._interval = interval
         self._cond = threading.Condition()
+        self._stop_flag = False
+
+    def stop(self) -> None:
+        """Ask the poller to exit (tests use this instead of dropping a live
+        daemon thread on the floor, which can still flip st._WAKE_DUE)."""
+        self._stop_flag = True
+        with self._cond:
+            self._cond.notify_all()
 
     def nudge(self) -> None:
         """Hint the poller to look soon (called from arm_wake)."""
@@ -229,9 +237,11 @@ class _WakePoller(threading.Thread):
             self._cond.notify_all()
 
     def run(self) -> None:
-        while True:
+        while not self._stop_flag:
             with self._cond:
                 self._cond.wait(self._interval)
+            if self._stop_flag:
+                return
             if st._WAKE_DUE:
                 continue  # already raised; the REPL clears it
             try:

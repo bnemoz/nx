@@ -27,7 +27,13 @@ _REGEX_ALLOWLIST = set()
 
 
 def test_t9_conftest_snapshot_budget():
-    import tests.conftest as c
+    # Reach the conftest pytest ALREADY imported (sys.modules["conftest"]) —
+    # `import tests.conftest` would execute the module a SECOND time against
+    # whatever nx modules happen to be loaded on this worker, producing a
+    # fresh (order-dependent) _BASELINE_MODS and running _scrub_env() mid-run.
+    import conftest as c
+    assert c is sys.modules.get("conftest"), (
+        "expected the root conftest pytest already imported, not a re-exec")
     b = _BASELINES["conftest_snapshot"]
     n_mods = len(c._BASELINE_MODS)
     n_entries = sum(len(v) for v in c._BASELINE_MODS.values())

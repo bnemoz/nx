@@ -17,9 +17,11 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 
-_tmp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    ".tmp-preview-visibility")
+# per-process tempdir (NOT a repo-relative path — that would be shared by all
+# xdist workers and pollutes the checkout)
+_tmp = tempfile.mkdtemp(prefix="nx-test-preview-visibility-")
 os.environ.setdefault("NX_SESSIONS_DIR", _tmp)
 os.environ.setdefault("NX_HOME", _tmp)
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")

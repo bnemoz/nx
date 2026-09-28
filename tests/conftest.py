@@ -103,10 +103,14 @@ def _is_nx(name):
     return name == "nx" or name.startswith("nx.")
 
 
-# env baseline (NX_* only) and nx.* module dicts, both taken before any test
-# module has been imported — the pristine state each test rewinds to. Module
-# dicts are copied one level deep so tests mutating module-level containers
-# in place (st._TOOL_RESULT_CACHE.clear() etc.) can't corrupt the baseline.
+# env baseline (NX_* plus a small allowlist of non-NX keys) and nx.* module
+# dicts, both taken before any test module has been imported — the pristine
+# state each test rewinds to. Module dicts are copied one level deep so tests
+# mutating module-level containers in place (st._TOOL_RESULT_CACHE.clear()
+# etc.) can't corrupt the baseline.
+# Non-NX keys: _sources auto-registers built-in providers when these are set,
+# so a module that sets one at import (test_sources.py) must not leak it into
+# later modules' source builds on the same worker.
 
 def _copy_val(v):
     if isinstance(v, dict):
@@ -118,7 +122,9 @@ def _copy_val(v):
     return v
 
 
-_BASELINE_ENV = {k: v for k, v in os.environ.items() if k.startswith("NX_")}
+_OTHER_ENV_KEYS = ("TOGETHER_API_KEY", "OPENROUTER_API_KEY", "ZAI_API_KEY")
+_BASELINE_ENV = {k: v for k, v in os.environ.items()
+                 if k.startswith("NX_") or k in _OTHER_ENV_KEYS}
 _BASELINE_MODS = {
     name: {k: _copy_val(v) for k, v in mod.__dict__.items()}
     for name, mod in sys.modules.items()
@@ -180,9 +186,10 @@ def _restore(fspath):
     # handshake — doing that 2x per test added ~2 minutes to the serial run.
     # Events are snapshotted/restored as plain state below instead.
 
-    # env: NX_* -> baseline, then this module's own import-time deltas
-    # (value None = the module deleted it at import)
-    for _k in [k for k in os.environ if k.startswith("NX_")]:
+    # env: NX_* (+ the non-NX source keys) -> baseline, then this module's own
+    # import-time deltas (value None = the module deleted it at import)
+    for _k in [k for k in os.environ
+               if k.startswith("NX_") or k in _OTHER_ENV_KEYS]:
         del os.environ[_k]
     os.environ.update(_BASELINE_ENV)
     for _k, _v in _INTENTS.get(str(fspath).split("::")[0], {}).items():

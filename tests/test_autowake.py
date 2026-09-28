@@ -69,7 +69,14 @@ def setup_function(_function):
     # pytest-xdist workers (and leak files).
     for _path in _FIXTURE_LOGS.values():
         _make_fixture_log(_path)
-    # Don't leave a real poller thread running between tests.
+    # Don't leave a real poller thread running between tests: stop it (a
+    # dropped daemon can still flip st._WAKE_DUE mid-next-test), then clear.
+    _poller = getattr(_autowake, "_POLLER", None)
+    if _poller is not None:
+        try:
+            _poller.stop()
+        except Exception:
+            pass
     _autowake._POLLER = None
 
 

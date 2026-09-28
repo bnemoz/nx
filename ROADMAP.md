@@ -246,9 +246,9 @@ first byte, `_openai_client.py:14-18`; a mid-stream timeout still prints
 **partial** (read-only `git_status`/`git_diff`/`git_log` shipped in `TOOLS`;
 commit is still classifier prose); P3-10 is **partial** (capability cached per
 `Source` instance, reset on model pin, no TTL, not shown by `/source`).
-Floor ledger: **3177 tok measured** against the enforced `NX_FLOOR_BUDGET`=3180
-(`tests/test_initial_context.py` — 1.7's tripwire is now a budget; 0.51's
-git_commit schema cost ~157 tok, ledger updated).
+Floor ledger: the enforced budget is `BUDGET_TOKENS` in
+`tests/test_initial_context.py` (5200 as of the 0.99.x era; the 3180-era
+`NX_FLOOR_BUDGET` numbers elsewhere in this file are historical).
 Config surface is **143** `NX_*` vars, up from ~119 at audit time.
 
 | # | Item | Effort | Why here |

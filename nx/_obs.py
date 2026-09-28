@@ -58,8 +58,13 @@ _ID_PREFIX = "obs_"
 # In-memory per-session counters (conftest rewinds module attrs). Bounded:
 # a swarm session that packs thousands of results used to grow this dict
 # without bound (swarm audit item 3). Drop-oldest past the cap.
-_MAX_TRACKED = _env_int("NX_OBS_MAX_TRACKED", 4096)
+# Resolved at CALL time (repo rule: NX_* env reads are call-time so tests can
+# setenv) — see _max_tracked().
 _SEND_COUNTS: dict[str, int] = {}
+
+
+def _max_tracked() -> int:
+    return _env_int("NX_OBS_MAX_TRACKED", 4096)
 
 
 def obs_enabled() -> bool:
@@ -142,9 +147,9 @@ def build_placeholder(text: str, obs_id: str, tool_name: str) -> str:
 
 def _bump_send_count(key: str) -> int:
     """Read-and-increment this process's send counter for `key`, evicting the
-    oldest tracked key past _MAX_TRACKED (bounded RAM, P10)."""
+    oldest tracked key past _max_tracked() (bounded RAM, P10)."""
     sends = _SEND_COUNTS.get(key, 0)
-    if len(_SEND_COUNTS) >= _MAX_TRACKED and key not in _SEND_COUNTS:
+    if len(_SEND_COUNTS) >= _max_tracked() and key not in _SEND_COUNTS:
         oldest = next(iter(_SEND_COUNTS), None)
         if oldest is not None:
             _SEND_COUNTS.pop(oldest, None)

@@ -7,7 +7,7 @@ schema rent ×N for tools a member rarely calls on turn 1.
 
 Invariants:
 - default (env unset): the active set is EXACTLY the pre-P13 always-on set
-  (baselines.json's active_tools_floor=20 unchanged);
+  (pinned by test_background_gating.py's literal active-set check);
 - with =1: duckdb and read_image are withheld, discoverable via
   search_tools, and dispatch refuses with the gate wording naming the knob;
 - the memoized _active_tools() gate-vector reflects the toggle.

@@ -919,7 +919,10 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
                 # sub-agents or batch-task threads hitting this line together
                 # would race the settle log and double-launch the verify
                 # command.
-                _launch_verify_if_settled()  # model went quiet — fire NX_VERIFY_CMD if its settle window passed
+                # Module-attribute call so a test patching nx._launch_verify_if_settled
+                # (the historical seam) lands — see
+                # test_batch_run.test_verify_and_bg_scan_gated_off_for_batch.
+                _launch_verify_if_settled()
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input
