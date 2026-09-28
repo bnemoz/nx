@@ -421,6 +421,8 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
                 status = f"{DIM}queued{RESET}"
             elif a["status"] == "done":
                 status = f"{C.SUCCESS}done{RESET}"
+            elif a["status"] == "partial":
+                status = f"{C.WARNING}partial{RESET}"
             else:
                 status = f"{C.ERROR}{a['status']}{RESET}"
             instr = a["instruction"]

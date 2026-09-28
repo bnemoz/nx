@@ -465,6 +465,48 @@ def test_finished_agent_writes_report_and_note_carries_path(nx_fresh, monkeypatc
     assert "detail detail" in body  # the FULL answer is on disk
 
 
+def test_partial_agent_is_not_announced_as_finished(nx_fresh, monkeypatch, capsys):
+    """0.103.9 regression: a turn-capped async agent whose report is only an
+    interim note used to be announced as "finished" with status done — the
+    parent trusted it. It must now be announced as PARTIAL (status: partial in
+    the report file, "stopped early" in the [Runtime note], and "partial" in
+    /bg)."""
+    from nx._subagent import _agents_report_dir, spawn_agent
+
+    def fake_loop(messages, *a, **kw):
+        messages.append({"role": "assistant", "content": "still exploring the schema"})
+        return {"status": "cap", "turns": 100}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("sweep the repo", async_=True)
+    jid = out.split("job ")[1].split("\n")[0]
+    deadline = time.time() + 5
+    note = None
+    while time.time() < deadline:
+        note = _drain(nx_fresh)
+        if note:
+            break
+        time.sleep(0.02)
+    assert note is not None
+    assert "PARTIAL" in note and "stopped early" in note
+    assert "finished. Its answer" not in note
+    report = os.path.join(_agents_report_dir(), jid + ".md")
+    body = open(report, encoding="utf-8").read()
+    assert "- status: partial" in body
+    # /bg renders partial distinctly from done/error.
+    from nx._repl_settings_cmds import _cmd_bg
+    from nx._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+    with _ASYNC_LOCK:
+        _ASYNC_AGENTS["agent-1-partial"] = {
+            "instruction": "sweep the repo", "status": "partial",
+            "answer": "still exploring", "started": time.time(),
+            "announced": True, "report": "/tmp/fake/agents/agent-1-partial.md",
+        }
+    _cmd_bg("/bg", None)
+    bg_out = capsys.readouterr().out
+    assert "partial" in bg_out
+
+
 def test_failed_agent_writes_error_report(nx_fresh, monkeypatch):
     """A failed agent's report is written too (status: error) — it is what the
     parent reads to decide whether an inline retry is worth it."""

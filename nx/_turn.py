@@ -898,6 +898,18 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         was_forced = force_final  # TURN_TOOL after a forced-final turn is special-cased below
         force_final = False
         recovery_sampling = False
+        # A forced-final turn that ends TURN_DONE with NO new assistant text is
+        # the "FORCED FINAL ANSWER EMPTY" path: the model was given its last
+        # chance to write the answer and produced none, so the last interim
+        # assistant text would be silently promoted to the final report (seen
+        # live at 0.103.8 — an async agent reported "done" carrying only an
+        # interim note). That is a turn-budget death, not a settled finish:
+        # report "cap" so the sub-agent wrapper stamps the answer partial.
+        if status == TURN_DONE and was_forced and sub_loop \
+                and not any(m.get("role") == "assistant"
+                            and isinstance(m.get("content"), str) and m["content"].strip()
+                            for m in messages[_sent_len:]):
+            return {"status": "cap", "turns": steps + 1}
         if status == TURN_DONE:
             # A settled turn: whatever posture produced it works. The next
             # stall, if any, re-derives the escalation from its own evidence.

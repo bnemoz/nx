@@ -469,7 +469,12 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
         # failures into an "ERROR: sub-agent
         # failed: ..." answer string rather than raising (a failed agent is a
         # tool error, not a crash) — surface those as FAILED to the parent.
-        status = "error" if answer.startswith("ERROR: sub-agent failed") else "done"
+        # 0.103.9: partial (turn-capped / token-truncated) answers must not be
+        # announced as "finished" — the parent otherwise trusts an interim note
+        # as a final report.
+        status = _answer_completion(answer)
+        if status == "error" and not answer.startswith("ERROR: sub-agent failed"):
+            status = "done"  # duplicate-refusal style errors keep the old handling
     except Exception as e:  # noqa: BLE001 — a failed agent is a note, not a crash
         answer = f"{type(e).__name__}: {e}"
         status = "error"
@@ -521,7 +526,19 @@ def _stage_subagent_answer(job_id: str) -> None:
         # A 160-char tail survives for /bg's preview. The body is dropped at
         # the END of this function, after the note string is built below.
         prev = _notices.get(_PENDING_NOTICE_KEY)
-        if status == "done":
+        if status == "partial":
+            # 0.103.9: a turn-capped / token-truncated agent is announced as
+            # PARTIAL, never as "finished" — its answer may be an interim note.
+            cut = answer[:_ASYNC_REPORT_CHARS]
+            more = " ...[truncated]" if len(answer) > _ASYNC_REPORT_CHARS else ""
+            where = ""
+            if report:
+                where = "\nFull report: " + report + " — read_file it for the rest."
+            note = ("[Runtime note: background sub-agent " + job_id +
+                    " hit its turn/token budget and stopped early — this is a " +
+                    "PARTIAL answer, verify before relying on it:\n" +
+                    cut + more + where + "]")
+        elif status == "done":
             head = answer[:_ASYNC_REPORT_CHARS]
             marker = " ...[truncated]" if len(answer) > _ASYNC_REPORT_CHARS else ""
             report_line = ""
@@ -643,16 +660,32 @@ def _sync_inline() -> bool:
         return bool(_env_int("NX_SUBAGENT_SYNC_INLINE", 0))
 
 
+def _answer_completion(answer: str) -> str:
+    """Classify a sub-agent answer as "done" | "partial" | "error".
+
+    0.103.9: async completion used to reduce everything to done/error by the
+    ERROR: prefix alone, so a turn-capped or token-truncated agent was
+    announced as "finished" with an interim note as its report (seen live).
+    The body stamps stopped-early answers with known in-band markers — classify
+    from those so every delivery surface (report file, [Runtime note],
+    foreground result) can say partial honestly."""
+    if answer.startswith("ERROR:"):
+        return "error"
+    if answer.startswith("[sub-agent hit its ") \
+            or answer.endswith("[Truncated by token limit before completion.]"):
+        return "partial"
+    return "done"
+
+
 def _lean_result(answer, job_id, instruction):
     """The head+path tool result shared by both delivery paths (0.96.0): the
     full answer goes to SESSION_HOME/agents/<job>.md and the parent sees a
     short head plus the report path, so a foreground agent's whole
     exploration costs ~600 chars of parent context, not its entire report.
     The model read_file's the report only when the head isn't enough."""
-    failed = answer.startswith("ERROR:")
+    completion = _answer_completion(answer)
     try:
-        path = _write_agent_report(job_id, instruction,
-                                   "error" if failed else "done", answer)
+        path = _write_agent_report(job_id, instruction, completion, answer)
     except Exception:  # noqa: BLE001 - the report is best-effort
         path = None
     limit = _ASYNC_REPORT_CHARS
@@ -661,7 +694,12 @@ def _lean_result(answer, job_id, instruction):
         head = head + " ...[truncated]"
     if path:
         head = head + "\nFull report: " + path + " — read_file it for the rest."
-    tag = "failed" if failed else "finished"
+    if completion == "error":
+        tag = "failed"
+    elif completion == "partial":
+        tag = "stopped early — PARTIAL answer, verify before relying on it"
+    else:
+        tag = "finished"
     return "[sub-agent " + tag + "]\n" + head
 
 
