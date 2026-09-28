@@ -927,6 +927,9 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             # The ladder ends at OVERFLOW_FOLD_TIERS exhausted, or when a tier
             # both folded and got refused again (handled by the continue).
             if context_retries < st.OVERFLOW_FOLD_TIERS:
+                # 0.103.5: an async fold may be one second from done — wait
+                # for it before spending a synchronous fold on the ladder.
+                _m._collect_async_fold(messages, wait=2.0)
                 _m._compress_for_overrun(messages, tier=context_retries)
                 context_retries += 1
                 prev_prompt_tokens = -1  # the next settled reading is post-fold; re-evaluate

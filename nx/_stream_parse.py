@@ -88,6 +88,22 @@ def _first_tool_tag_index(text: str, start: int = 0) -> int | None:
     return idx
 
 
+# Speculative read-only dispatch (0.103.3, nx/_spec_reads): a text-protocol tag
+# body is only worth re-parsing once a CLOSING tag has landed, so that check
+# gates the scan. A close tag can straddle chunk boundaries, hence the small
+# carried tail rather than a per-chunk find.
+_SPEC_CLOSE_TAIL = 64
+# A real call body is a name plus a few arguments; past this many bytes since
+# the opener the "tag" is prose or a runaway repeat, and re-parsing per close
+# would stop being cheap.
+_SPEC_TEXT_CAP = 8192
+
+
+def _close_tag_in(text: str) -> bool:
+    from ._text_fallback import TOOL_CLOSE_TAGS
+    return any(tag.search(text) for tag in TOOL_CLOSE_TAGS)
+
+
 def _tool_call_progress(tcs: dict[int, dict[str, Any]]) -> str:
     parts = []
     for i in sorted(tcs):
@@ -153,6 +169,13 @@ class StreamParser:
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
         self._tag_carry = ""        # raw tail carried across chunks for the tag scan (PF-02/03)
         self._tag_carry_start = 0   # absolute offset of _tag_carry in raw content
+        # Speculative read-only dispatch (0.103.3): raw body text accumulated
+        # SINCE a text-protocol tag opened, so a completed tag can be executed
+        # while the stream is still running (nx/_spec_reads). Bounded: past
+        # _SPEC_TEXT_CAP the tag is too big to be a real call body and the
+        # per-chunk re-parse would stop being cheap.
+        self._spec_text = ""
+        self._spec_text_full = False
         self.had_tool_call = False  # a native tool_calls delta already arrived this turn
         self._live_committed = False  # say_live already frozen once; never reopen it
         self.think_start: float | None = None
@@ -184,6 +207,42 @@ class StreamParser:
         sys.stdout.flush()
         self.tool_status_active = True
         self.last_tool_status = now
+
+    def _spec_text_poll(self, chunk: str) -> None:
+        """Speculatively dispatch a text-protocol call whose tag just CLOSED.
+
+        Called per chunk while a &lt;tool_call&gt;/&#91;nx_tool_call&#93; tag is open. Cheap by
+        construction: the body buffer only gets re-parsed once a closing tag
+        landed in the carried tail, and it is capped, so a long tag costs
+        nothing per chunk. Dispatch and every safety rule live in
+        nx/_spec_reads.maybe_speculate; the post-stream text path
+        (_handle_text_tool_calls) re-parses the whole answer itself and is
+        unaffected — it simply finds warm cache entries."""
+        if self._spec_text_full:
+            return
+        self._spec_text += chunk
+        if len(self._spec_text) > _SPEC_TEXT_CAP:
+            # Not a call body we can reason about cheaply — give up on this
+            # turn's text tags rather than re-parse a growing buffer.
+            self._spec_text_full = True
+            self._spec_text = ""
+            return
+        if not _close_tag_in(self._spec_text[-_SPEC_CLOSE_TAIL:]):
+            return
+        from ._spec_reads import maybe_speculate
+        from ._text_fallback import _find_close_tag, parse_text_calls
+        for name, args in parse_text_calls(self._spec_text):
+            maybe_speculate(name, args)
+        # Consume through the LAST close tag: anything before it has already
+        # been dispatched, and re-parsing it on the next chunk would queue the
+        # same speculative run again.
+        pos = 0
+        while True:
+            m = _find_close_tag(self._spec_text, pos)
+            if m is None:
+                break
+            pos = m.end()
+        self._spec_text = self._spec_text[pos:]
 
     def stop_say_live(self) -> None:
         """Force a final render of any pending content, then stop/clear the
@@ -456,6 +515,7 @@ class StreamParser:
                     self._live_committed = True
                     self.in_text_tool_tag = True
             if self.in_text_tool_tag:
+                self._spec_text_poll(chunk)
                 self.show_tool_status()
         if ((LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT)
                 or (REPEAT_CHUNK_LIMIT > 0 and self.repeat_chunk_run >= REPEAT_CHUNK_LIMIT)):
@@ -487,6 +547,16 @@ class StreamParser:
         if tc.function and tc.function.arguments:
             s["args"] += tc.function.arguments
             self.streamed_chars += len(tc.function.arguments)
+            # Speculative read-only dispatch (0.103.3, nx/_spec_reads): the
+            # args of a cacheable read that just became BALANCED JSON are
+            # already a complete call, so start it now on a background pool
+            # and let the post-stream dispatch find a warm cache entry.
+            # maybe_speculate() re-checks name/balance/in-flight (and is a
+            # no-op when disabled), so the per-delta cost outside that set is
+            # one membership test — big write_file args never even reach the
+            # json.loads.
+            from ._spec_reads import maybe_speculate
+            maybe_speculate(s["name"], s["args"])
         self.show_tool_status()
 
     def finish(self) -> None:
