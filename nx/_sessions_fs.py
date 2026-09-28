@@ -265,7 +265,31 @@ def _write_session(
     session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None,
     update_index: bool = True,
 ) -> None:
-    """Persist `messages` to the session store. Creates the dir if needed.
+    """Synchronous write: drain any pending async save first, then store.
+
+    0.103.4 (nx/_session_save.py): saves may now be queued on the session-save
+    writer thread. An inline `_write_session` must never land *ahead* of a
+    snapshot that is still in that queue (it would let a stale transcript be
+    merged in afterwards and bump the revision counter out of order), so this
+    entry point flushes first. `flush_pending()` is a no-op both when nothing
+    is queued and when called from the writer thread itself, so the async path
+    (which calls `_write_session_snapshot` directly) never deadlocks here.
+    """
+    from . import _session_save
+    _session_save.flush_pending()
+    _write_session_snapshot(session_id, messages, meta, update_index=update_index)
+
+
+def _write_session_snapshot(
+    session_id: str, messages: list[dict[str, Any]], meta: dict[str, Any] | None = None,
+    update_index: bool = True,
+) -> None:
+    """The store write itself, with no flush gate.
+
+    This is what the session-save writer thread runs, so `messages` must
+    already be a private snapshot (nx/_session_save.snapshot_messages): this
+    function prunes `messages` in place and must never reach into the REPL's
+    live transcript. Persist `messages` to the session store. Creates the dir if needed.
 
     0.101.0: the store is sessions.sqlite (nx/_sessiondb.py) -- one row per
     session, the transcript JSON as the `data` blob. The old per-session
@@ -579,7 +603,13 @@ def _deserialize_image_parts(messages: list[dict[str, Any]]) -> int:
 def _load_session(session_id: str) -> dict[str, Any] | None:
     """Read a session from the store. Returns the dict (id, messages,
     meta...) or None. A legacy mirror file that predates the store is
-    imported first (lazy migration, idempotent)."""
+    imported first (lazy migration, idempotent).
+
+    0.103.4: flushes a pending async save first (nx/_session_save.py) so a
+    reader — /resume, a staleness check, /compress's read-back — never sees a
+    transcript one turn behind what the REPL already has."""
+    from . import _session_save
+    _session_save.flush_pending()
     from . import _sessiondb
     data = _sessiondb.load_session(session_id)
     if data is None:
@@ -625,6 +655,9 @@ def _list_sessions(limit: int | None = 20, offset: int = 0, query: str | None = 
     than the static first-message title). `n` is the turn count (non-system
     messages)."""
     import nx as _m
+    from . import _session_save
+    # A listing must show the newest transcript, not the last landed one.
+    _session_save.flush_pending()
     limit = max(0, int(limit)) if limit is not None else None
     offset = max(0, int(offset or 0))
     files = _session_files_newest()
@@ -711,6 +744,9 @@ def _delete_session(session_id: str) -> bool:
     precede the GC (it is the ref list being dropped); the scan covers
     every other session, and the 60s grace protects concurrent writers.
     A legacy mirror file, if one still exists, is removed too."""
+    from . import _session_save
+    # Never let a queued save resurrect a session the user just deleted.
+    _session_save.flush_pending()
     from . import _sessiondb
     existed = _sessiondb.load_session(session_id) is not None
     path = _session_path(session_id)
@@ -764,7 +800,14 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
         and isinstance(m.get("content"), str)
         and not m["content"].lstrip().startswith("[")
     )
-    existing = _load_session(session_id) or {}
+    # 0.103.4: reads the store WITHOUT the flush-before-read gate that
+    # `_load_session` applies. This runs after every turn (right after the
+    # async autosave was queued) and `desc_turns` is a refresh-threshold
+    # counter where a one-save-stale read is harmless — flushing here would
+    # block on the writer thread and put the save straight back on the
+    # prompt's critical path, defeating NX_ASYNC_SAVE.
+    from . import _sessiondb
+    existing = _sessiondb.load_session(session_id) or {}
     last_desc_turns = existing.get("desc_turns", 0)
     # Refresh when we've crossed a multiple of SESSION_DESC_REFRESH since the
     # last recorded refresh. Don't refresh before the first threshold (so a

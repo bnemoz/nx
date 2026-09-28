@@ -27,7 +27,7 @@ from . import (
     SESSION_LIST_DEFAULT_LIMIT, SESSION_LIST_MAX_LIMIT,
     _load_session, _list_sessions, _delete_session, _resolve_session,
 )
-from ._repl_state import _ReplState, _save_current
+from ._repl_state import _ReplState, _save_current, _flush_save
 
 
 def _fmt_when(ts: float | None) -> str:
@@ -542,6 +542,10 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     # Persist the outgoing session before switching away.
     if state.session_dirty:
         _save_current(state)
+    # 0.103.4: drain before the id switches (and before resume_session reads
+    # the target transcript back), so the outgoing save can never land under
+    # the incoming session's id.
+    _flush_save()
     # Same function `nx --resume` runs: images expanded to live form, endpoint +
     # provider routing + cwd restored, nudge flags re-derived, metrics reloaded.
     from ._resume import resume_session
@@ -564,6 +568,9 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     # the ORIGINAL id too (fork = copy, not move).
     if state.session_dirty:
         _save_current(state)
+    # 0.103.4: the fork must not inherit a snapshot that still names the OLD
+    # id — drain anything queued before the id below is reassigned.
+    _flush_save()
     old_id = state.session_id
     new_id = _new_session_id()
     # Carry the transcript + endpoint context into the new session file via
@@ -589,6 +596,9 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
 def _cmd_save(user: str, state: _ReplState) -> None:
     title = user.split(None, 1)[1].strip() if " " in user else None
     _save_current(state, {"title": title} if title else {})
+    # 0.103.4: "saved" is a promise the transcript is durable — with
+    # NX_ASYNC_SAVE the call above only queued it, so drain before reporting.
+    _flush_save()
     state.session_dirty = False
     shown = f" as {title!r}" if title else ""
     print(f"{DIM}  ✓ saved session {state.session_id}{shown}{RESET}")

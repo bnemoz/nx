@@ -31,7 +31,7 @@ from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
 from ._subagent import list_async_agents
-from ._repl_state import _ReplState, _save_current, _fresh_metrics
+from ._repl_state import _ReplState, _save_current, _fresh_metrics, _flush_save
 from ._todo import render_todos_display
 
 
@@ -77,6 +77,10 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
 def _cmd_quit(user: str, state: _ReplState) -> str | None:
     if state.session_dirty:
         _save_current(state)
+    # 0.103.4: /quit is the documented exit path — drain the async save queue
+    # so the last turn is on disk before the process starts tearing down
+    # (atexit covers a normal exit too, but not an `os._exit()`/exec one).
+    _flush_save()
     return "break"
 
 
@@ -551,6 +555,10 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     print(f"{DIM}  context cleared{RESET}")
     # A reset forks a new session id so the fresh chat isn't written
     # over the old one (mirrors Hermes's "new session on /new").
+    # 0.103.4: drain first — a queued save still carries the OLD session id,
+    # so letting it land after the switch would write the previous
+    # conversation under a brand-new, supposedly empty session.
+    _flush_save()
     state.session_id = _new_session_id()
     st.SESSION_ID = state.session_id  # mirror: undo stack swaps with the fresh id
     state.session_dirty = False
@@ -680,6 +688,11 @@ def _cmd_undo(user: str, state: _ReplState) -> None:
 
 def _cmd_compress(user: str, state: _ReplState) -> None:
     import nx as _m
+    # 0.103.4: drain any queued autosave BEFORE folding. A pending
+    # pre-compression snapshot that lands after the compressed save would hit
+    # _merge_session_messages()'s compaction-rewrite branch and resurrect the
+    # turns just folded away.
+    _flush_save()
     # nothing to compress if we're under (system + KEEP) turns
     body_len = len(state.messages) - (1 if state.messages and state.messages[0].get("role") == "system" else 0)
     if body_len <= st.COMPRESS_KEEP:

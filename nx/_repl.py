@@ -33,7 +33,7 @@ from . import (
     _resolve_session, _new_session_id, _maybe_refresh_description,
 )
 
-from ._repl_state import _ReplState, _save_current, _fresh_metrics
+from ._repl_state import _ReplState, _save_current, _fresh_metrics, _flush_save
 from ._resume import resume_session
 from ._sessions_cmd import (
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
@@ -252,6 +252,10 @@ def _repl() -> None:
             # turn isn't lost (matches Hermes's exit-path flush).
             if state.session_dirty:
                 _save_current(state)
+            # 0.103.4: with NX_ASYNC_SAVE the save above may only have queued;
+            # drain it here so the documented "exit never loses the last turn"
+            # holds even if a later atexit hook calls os._exit().
+            _flush_save()
             # Show a grey resume hint so the user can pick up right where they
             # left off without having to run `nx sessions` first.
             if state.session_id:

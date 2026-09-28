@@ -38,6 +38,19 @@ class _ReplState:
         self.history = history
 
 
+def _flush_save() -> None:
+    """Block until any queued async save has been written (0.103.4).
+
+    Cheap no-op when nothing is pending. Call this before anything that reads
+    the session back or moves the session file — /fork (before the id
+    switches), /resume, /delete, an export — and on any custom exit path, so
+    the async save window never exposes a stale transcript. `_load_session`
+    and `_list_sessions` already flush internally, which covers the read side
+    of every REPL command; this is the explicit hook for the write side."""
+    from . import _session_save
+    _session_save.flush_pending()
+
+
 def _save_current(
     state: _ReplState, meta: dict[str, Any] | None = None, update_index: bool = True,
 ) -> None:
@@ -50,8 +63,18 @@ def _save_current(
     `update_index=False` (see `_write_session`) skips refreshing the
     sidecar listing index — pass this for mid-turn autosaves, since the
     per-turn save that follows will refresh it anyway.
+
+    0.103.4 (nx/_session_save.py): with NX_ASYNC_SAVE=1 (the default) this
+    builds the meta + a private transcript snapshot and hands them to the
+    session-save writer thread, so the per-turn `on_step()` in the turn loop
+    no longer pays the store-form copy + SQLite read-merge-write + re-read
+    inline. `NX_ASYNC_SAVE=0` restores the exact old synchronous path.
     """
     if state.session_id is None:
+        return
+    from . import _session_save
+    if _session_save.async_save_enabled():
+        _save_current_async(state, meta, update_index, _session_save)
         return
     # The save path is the critical path of the ^C handler (`except
     # KeyboardInterrupt: ... _save_current`) and of the per-turn finally, so a
@@ -79,15 +102,21 @@ def _save_current(
                 pass  # a pending ^C delivered on unmask — next prompt sees it
 
 
-def _save_current_locked(
-    state: "_ReplState", meta: dict[str, Any] | None = None,
-    update_index: bool = True,
-) -> None:
-    """Body of `_save_current`, run with SIGINT blocked."""
+def _build_save_meta(state: "_ReplState", messages: list[dict[str, Any]],
+                     meta: dict[str, Any] | None) -> dict[str, Any]:
+    """The session-JSON metadata block a save carries (title/source/cwd/model/
+    provider routing/metrics/todos/plan/wip). Split out of
+    `_save_current_locked` so the async path can build it on the caller thread
+    — everything it reads (st.ACTIVE, st.MODEL, the metrics totals) is live
+    REPL state the writer thread must not go looking for later.
+
+    `messages` is passed in (not read off `state`) because the async path
+    derives it from its private snapshot: iterating the live transcript while
+    another thread appends would risk a 'list changed size during iteration'."""
     m = dict(meta or {})
     if "title" not in m:
         first_user = next(
-            (msg["content"] for msg in state.messages
+            (msg["content"] for msg in messages
              if msg.get("role") == "user" and isinstance(msg.get("content"), str)),
             "",
         )
@@ -117,6 +146,15 @@ def _save_current_locked(
                  "slug": st._PLAN_SLUG, "started": st._PLAN_STARTED}
     if st._WIP is not None:
         m["wip"] = st._WIP
+    return m
+
+
+def _save_current_locked(
+    state: "_ReplState", meta: dict[str, Any] | None = None,
+    update_index: bool = True,
+) -> None:
+    """Body of `_save_current`, run with SIGINT blocked."""
+    m = _build_save_meta(state, state.messages, meta)
     try:
         _write_session(state.session_id, state.messages, m, update_index=update_index)
     except OSError as e:
@@ -126,6 +164,30 @@ def _save_current_locked(
     # Fire-and-forget push to the optional metrics endpoint. Only does
     # anything if NX_METRICS_URL is set; self-disables on first
     # failure so a down/absent dashboard never slows the REPL.
+    if st._METRICS is not None:
+        st._METRICS.flush()
+
+
+def _save_current_async(state: "_ReplState", meta: dict[str, Any] | None,
+                        update_index: bool, _session_save) -> None:
+    """The async half of `_save_current` (NX_ASYNC_SAVE=1, 0.103.4).
+
+    Everything derived from live process state (the meta block, the metrics
+    push) happens here on the caller thread; the writer thread only gets the
+    session id, a private transcript snapshot and the finished meta dict, so
+    it never touches REPL state that may still be mutating. Errors surface on
+    the writer thread where a print would interleave with the live UI, so
+    `_write_session_snapshot`'s own fail-soft handling is what applies — same
+    contract as a failed background description refresh."""
+    msgs = _session_save.snapshot_messages(state.messages)
+    m = _build_save_meta(state, msgs, meta)
+    # The meta block shares these by reference; the snapshot rule is that the
+    # writer owns everything it is handed, so copy the mutable ones.
+    if isinstance(m.get("todos"), list):
+        m["todos"] = list(m["todos"])
+    if isinstance(m.get("wip"), dict):
+        m["wip"] = dict(m["wip"])
+    _session_save.submit_save(state.session_id, msgs, m, update_index)
     if st._METRICS is not None:
         st._METRICS.flush()
 
