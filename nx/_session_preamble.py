@@ -1,10 +1,10 @@
-"""The fresh-session message list and the per-session one-time nudge strings.
+"""The fresh-session message list and the per-session runtime nudge strings.
 
 Split out of `_dispatch.py` (which keeps run_tool — the site that fires the
-nudges). Three paid-once runtime notes (backgrounding guidance, multi_edit
-batching, delegation streak) plus the resume-time "already shown" checks and
-`_initial_messages()`, the canonical fresh-session head built from
-_prefix.prefix_notes() (PERF.md PF-15)."""
+nudges). Three runtime notes (backgrounding guidance, multi_edit
+batching — both paid once — and the delegation streak, which RE-ARMS) plus the
+resume-time "already shown" checks and `_initial_messages()`, the canonical
+fresh-session head built from _prefix.prefix_notes() (PERF.md PF-15)."""
 from __future__ import annotations
 
 from typing import Any
@@ -13,11 +13,14 @@ from ._env import _env_int
 
 _MULTI_EDIT_NUDGE_THRESHOLD = 2  # ≥2 single edits in a row before the batching nudge fires
 
-# ≥ this many such reads before the delegation nudge fires. Deliberately above
-# any legitimate single-task read count (an edit usually touches 1-3 files) and
-# far below the 20-40-read sweeps models grind through when they never think to
-# delegate. NX_DELEGATION_NUDGE_READS=0 disables the nudge.
-_DELEGATION_NUDGE_THRESHOLD = _env_int("NX_DELEGATION_NUDGE_READS", 8)
+# ≥ this many such reads before the delegation nudge fires. The streak resets on
+# each fire, so the nudge re-arms every 2x threshold additional consecutive
+# reads (5, then 15, then 25 cumulative). Lowered from 8 to 5 to make steering
+# more aggressive: an edit usually touches 1-3 files, so 5 solo exploration reads
+# already suggests a sweep that should have been a fan-out. Re-firing keeps a
+# model that ignored the first nudge from grinding a long sweep undisturbed.
+# NX_DELEGATION_NUDGE_READS=0 disables the nudge.
+_DELEGATION_NUDGE_THRESHOLD = _env_int("NX_DELEGATION_NUDGE_READS", 5)
 
 
 def _messages_show_prior_backgrounding(messages: list[dict[str, Any]]) -> bool:
@@ -128,10 +131,13 @@ MULTI_EDIT_GUIDANCE = (
     "instead of several, and applies atomically.]"
 )
 
-# Third instance of the same paid-once pattern: staged when the model has made
-# _DELEGATION_NUDGE_THRESHOLD exploration calls itself without ever spawning a
-# sub-agent. Only staged while the spawn_agent schema is actually offered
-# (NX_SUBAGENTS=1) — see run_tool()'s counter and _delegation_note._delegation_enabled.
+# Third instance of the same pattern, with one difference: it RE-ARMS. Staged
+# when the model has made _DELEGATION_NUDGE_THRESHOLD exploration calls itself
+# without spawning a sub-agent; the fire resets the streak, so ignoring it once
+# only buys the model 2x threshold more reads before it lands again (see
+# run_tool()'s counter and st._DELEGATION_NUDGE_COUNT). Only staged while the
+# spawn_agent schema is actually offered (NX_SUBAGENTS=1) — see
+# _delegation_note._delegation_enabled.
 DELEGATION_STREAK_NOTICE = (
     "[Runtime note: you've read or searched many files yourself without using "
     "spawn_agent. The remaining investigation is exactly what sub-agents are "

@@ -125,7 +125,11 @@ def _apply_resumed_nudge_flags(messages: list[dict[str, Any]]) -> None:
 
     st._SESSION_HAS_BACKGROUNDED = _m._messages_show_prior_backgrounding(messages)
     st._MULTI_EDIT_NUDGED = _m._messages_show_prior_multi_edit_nudge(messages)
-    st._DELEGATION_NUDGED = _m._messages_show_prior_delegation_nudge(messages)
+    # Fired-count semantics: a transcript that already spawned or already got a
+    # nudge counts as one fire, so the next one needs a full 2*threshold run
+    # rather than re-firing after only `threshold` reads (see run_tool()).
+    st._DELEGATION_NUDGE_COUNT = (1 if _m._messages_show_prior_delegation_nudge(messages)
+                                  else 0)
 
 
 def resume_session(session_id: str, state: Any, *, show_transcript: bool = True,

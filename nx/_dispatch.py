@@ -122,7 +122,7 @@ st._PENDING_DELEGATION_NOTICE = None  # ditto (delegation streak nudge)
 # thread — so concurrent turn loops never consume each other's runtime notes.
 # Outside a turn loop (tests, import time) the module dict remains the store.
 st._READ_STREAK = 0  # how many exploration reads in a row with no spawn_agent
-st._DELEGATION_NUDGED = False  # flips True once the delegation nudge has fired this session
+st._DELEGATION_NUDGE_COUNT = 0  # how many times the delegation nudge has fired this session (re-fires; see run_tool())
 
 # (Thresholds, guidance strings, _BG_SCAN_LOCK and the fresh-session preamble
 # live in _session_preamble / _bg_completions — re-exported above.)
@@ -304,18 +304,24 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # anything else (an edit, a bash run, a todo) breaks the streak — those
     # mean the model is acting on what it read, not surveying. Skipped inside
     # a sub-agent/batch loop: those threads don't own the parent's notice
-    # channel and a sub-agent can't fan out anyway.
+    # channel and a sub-agent can't fan out anyway. Each fire ALSO resets the
+    # streak, so the nudge re-arms instead of being once-per-session: fire #1
+    # lands at `threshold` reads, every later one needs `2*threshold` more
+    # (cumulative 5, 15, 25 with the default 5) — a model that ignored the
+    # first nudge gets reminded before it can grind a whole sweep solo.
     if name == "spawn_agent":
         st._READ_STREAK = 0
     else:
         from ._subagent import _subagent_ctx as _dc_ctx
         from ._batch import _batch_active as _dc_batch
-        if name in ("read_file", "list_dir", "search_files"):
+        if name in ("read_file", "list_dir", "search_files", "duckdb"):
             if _dc_ctx() is None and not _dc_batch() and _DELEGATION_NUDGE_THRESHOLD > 0:
                 st._READ_STREAK += 1
-                if (st._READ_STREAK >= _DELEGATION_NUDGE_THRESHOLD
-                        and not st._DELEGATION_NUDGED and _delegation_enabled()):
-                    st._DELEGATION_NUDGED = True
+                _fire_after = (_DELEGATION_NUDGE_THRESHOLD if st._DELEGATION_NUDGE_COUNT == 0
+                               else 2 * _DELEGATION_NUDGE_THRESHOLD)
+                if (st._READ_STREAK >= _fire_after and _delegation_enabled()):
+                    st._DELEGATION_NUDGE_COUNT += 1
+                    st._READ_STREAK = 0
                     from . import _notices
                     _notices.set_("_PENDING_DELEGATION_NOTICE", DELEGATION_STREAK_NOTICE)
         else:

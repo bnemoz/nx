@@ -202,11 +202,19 @@ _PENDING_MULTI_EDIT_NOTICE: str | None = None
 
 # --- delegation (spawn_agent) nudge -------------------------------------------
 # How many consecutive self-performed exploration calls (read_file/list_dir/
-# search_files) since the last spawn_agent. Crossing the threshold stages the
-# one-time DELEGATION_STREAK_NOTICE: the observed failure mode is a model that
-# has the tool and never uses it, reading the repo one file per turn forever.
+# search_files/duckdb) since the last spawn_agent. Crossing the threshold stages
+# the DELEGATION_STREAK_NOTICE AND resets the streak, so the notice RE-ARMS every
+# 2x threshold additional consecutive reads (5, then 15, then 25 cumulative).
+# The observed failure mode is a model that has the tool and never uses it,
+# reading the repo one file per turn forever, and a once-per-session nudge it can
+# simply ignore was not enough. _DELEGATION_NUDGE_COUNT is how many times it has
+# fired this session (0 = never; the first fire needs `threshold` reads and every
+# later one needs `2*threshold`, which is exactly what the reset streak buys — see
+# run_tool()). The resume path seeds it from a loaded transcript so a session that
+# already saw a nudge still counts as having fired (see
+# _resume._apply_resumed_nudge_flags).
 _READ_STREAK: int = 0
-_DELEGATION_NUDGED: bool = False
+_DELEGATION_NUDGE_COUNT: int = 0
 _PENDING_DELEGATION_NOTICE: str | None = None
 
 # --- native tool-call malformed-args circuit breaker --------------------------
