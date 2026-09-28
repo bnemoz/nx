@@ -12,6 +12,8 @@ Contract under test:
   in a private GIT_INDEX_FILE; since 0.103.0 another session's or the user's
   already-staged work can never be swept into a preview, and a denied commit
   never leaves stray staged changes);
+- the shared index is re-synced to the commit's tree afterwards (0.103.7):
+  a multi-file commit must leave `git status` clean, not phantom-MM;
 - the action string "git commit: <subject>" has a local medium risk hint (no
   classifier round-trip), and _allowlist_tool maps it to git_commit.
 """
@@ -140,6 +142,23 @@ def test_missing_message_and_files_are_arg_errors(repo):
     nx, _ = repo
     assert nx._gitcommit.git_commit(files="", message="m").startswith("ERROR")
     assert nx._gitcommit.git_commit(files="a.py", message="").startswith("ERROR")
+
+
+def test_multi_file_commit_leaves_status_clean(repo, monkeypatch):
+    """0.103.7 regression: _sync_shared_index used to emit ONE --cacheinfo
+    flag for ALL specs; git consumes one triple per flag, the extras parsed
+    as positional paths, update-index aborted, and every committed path
+    showed a phantom `MM` in `git status` afterwards."""
+    nx, rp = repo
+    monkeypatch.setattr(nx._bash_jobs, "_confirm", lambda a, preview=None: True)
+    (rp / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (rp / "b.py").write_text("y = 1\n", encoding="utf-8")
+    result = nx._gitcommit.git_commit(files="a.py b.py", message="fix: two")
+    assert "[git_commit]" in result
+    assert _git_count(rp) == 2
+    r = subprocess.run(["git", "status", "--short"], cwd=rp,
+                       capture_output=True, text=True)
+    assert r.stdout.strip() == "", f"phantom status after commit: {r.stdout!r}"
 
 
 def test_non_repo_path_is_refused(repo, tmp_path):

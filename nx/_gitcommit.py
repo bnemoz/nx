@@ -163,7 +163,16 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
         mode, blob = by_path[p]
         specs.append(f"{mode},{blob},{p}")
     if specs:
-        _git(repo, ["update-index", "--add", "--cacheinfo", *specs], timeout)
+        # ONE --cacheinfo per spec: git's parser consumes exactly one
+        # <mode>,<blob>,<path> triple per flag; extra specs after a single
+        # flag parse as positional paths and abort the whole update-index,
+        # leaving the shared index stale (phantom MM after every multi-file
+        # commit — 0.103.8).
+        args: list[str] = ["update-index", "--add"]
+        for spec in specs:
+            args.append("--cacheinfo")
+            args.append(spec)
+        _git(repo, args, timeout)
 
 
 def _env_timeout() -> int:

@@ -290,7 +290,10 @@ def _purge_old_agent_reports(max_age_days: int = _ASYNC_REPORT_TTL_DAYS) -> None
 # finished answer whose [Runtime note] has been staged — staged once, never
 # re-announced on later turns (mirrors _bash_jobs' _BG_NOTICE_SEEN).
 _ASYNC_AGENTS: dict[str, dict[str, Any]] = {}
-_ASYNC_LOCK = threading.Lock()
+# RLock (0.103.7): _evict_finished_agents locks itself now, and existing
+# callers/tests still wrap it in `with _ASYNC_LOCK:` — same-thread
+# re-entrancy keeps both postures deadlock-free.
+_ASYNC_LOCK = threading.RLock()
 _ASYNC_SEQ = 0
 
 # st slot the finished answer is staged into, flushed (and cleared) by
@@ -341,17 +344,28 @@ def _evict_finished_agents() -> None:
     """Drop fully-consumed finished records oldest-first (PF-16, I-8). Pinned
     to a floor of MAX_FINISHED so /bg still has history; running/queued records
     and un-announced answers are never candidates (the parent still needs
-    them)."""
+    them). An evicted write-tier record's worktree goes with it (0.103.7):
+    the parent has already read the answer/report, so the checkout is just
+    disk rent now — the paths are popped under the lock and removed after it
+    is released (remove_worktree shells out; never hold the lock for it).
+    Locks itself; safe to call with or without the lock held (RLock)."""
     if _MAX_FINISHED_AGENTS <= 0:
         return
-    done = [jid for jid, rec in _ASYNC_AGENTS.items()
-            if rec.get("status") not in ("running", "queued")
-            and rec.get("announced")]
-    if len(done) <= _MAX_FINISHED_AGENTS:
-        return
-    done.sort(key=lambda jid: _ASYNC_AGENTS[jid].get("finished") or 0)
-    for jid in done[: len(done) - _MAX_FINISHED_AGENTS]:
-        _ASYNC_AGENTS.pop(jid, None)
+    from ._worktree import remove_worktree
+    with _ASYNC_LOCK:
+        done = [jid for jid, rec in _ASYNC_AGENTS.items()
+                if rec.get("status") not in ("running", "queued")
+                and rec.get("announced")]
+        if len(done) <= _MAX_FINISHED_AGENTS:
+            return
+        done.sort(key=lambda jid: _ASYNC_AGENTS[jid].get("finished") or 0)
+        trees = []
+        for jid in done[: len(done) - _MAX_FINISHED_AGENTS]:
+            rec = _ASYNC_AGENTS.pop(jid, None)
+            if rec is not None and rec.get("worktree"):
+                trees.append(rec["worktree"])
+    for wt in trees:
+        remove_worktree(wt)
 
 
 def _prune_queued() -> None:
@@ -436,8 +450,12 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     worktree = None
     wt_note = None
     if tier in ("write", "implement"):
-        from ._worktree import _worktree_enabled, create_worktree
+        from ._worktree import (_worktree_enabled, create_worktree,
+                               sweep_stale_worktrees)
         if _worktree_enabled():
+            # reaping (0.103.7): a crashed process leaves nx-wt-agent-* dirs
+            # behind; every spawn reaps the stale ones before claiming a name
+            sweep_stale_worktrees()
             worktree, err = create_worktree(job_id)
             if worktree is None:
                 wt_note = (f"worktree isolation unavailable ({err}) — the "
@@ -578,8 +596,9 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
             _ASYNC_QUIET_SLOTS.quiet = False
             if acquired and sem is not None:
                 sem.release()
-            with _ASYNC_LOCK:
-                _evict_finished_agents()
+            # self-locking (0.103.7): pops under the lock, then removes the
+            # evicted records' worktrees AFTER releasing it
+            _evict_finished_agents()
 
     threading.Thread(target=_worker, daemon=True,
                      name=f"nx-subagent-{job_id}").start()

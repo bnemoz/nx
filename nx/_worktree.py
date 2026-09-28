@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 
 from . import _state as st
 from ._env import _env_int
@@ -216,6 +217,47 @@ def remove_worktree(path: str) -> None:
                            capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def sweep_stale_worktrees() -> None:
+    """Reap leftover per-AGENT worktrees older than a TTL (0.103.7).
+
+    The normal path removes a write-tier agent's tree when its finished
+    record is evicted, but a killed process leaks `nx-wt-agent-*` dirs under
+    SESSION_HOME/worktrees forever. Every write-tier spawn calls this once
+    before creating its own tree: a single os.scandir pass, remove_worktree
+    only on dirs whose mtime is older than NX_SUBAGENT_WORKTREE_TTL_HOURS
+    (default 24; 0 = never sweep). Session worktrees (`nx-wt-session-*`) are
+    never touched — a live session's tree must survive. Best-effort: every
+    failure is swallowed; the sweep must never break the spawn it guards.
+    One `git worktree prune` at the end (if a base repo is known) so
+    registrations whose dirs are already gone are swept too."""
+    try:
+        hours = _env_int("NX_SUBAGENT_WORKTREE_TTL_HOURS", 24)
+        if hours <= 0:
+            return
+        root = os.path.join(st.SESSION_HOME or os.path.expanduser("~/.nx"),
+                            "worktrees")
+        cutoff = time.time() - hours * 3600
+        with os.scandir(root) as it:
+            entries = [e for e in it if e.name.startswith("nx-wt-agent-")]
+        for e in entries:
+            try:  # per-entry: one unreadable dir must not stop the sweep
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+                if e.stat(follow_symlinks=False).st_mtime < cutoff:
+                    remove_worktree(e.path)
+            except OSError:
+                continue
+        base = st.PROJECT_ROOT
+        if base:
+            try:
+                subprocess.run(["git", "-C", base, "worktree", "prune"],
+                               capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    except Exception:  # noqa: BLE001 — pure janitorial work, never fatal
+        pass
 
 
 def rewrite_path(path: str, worktree: str) -> str:
