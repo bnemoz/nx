@@ -41,9 +41,10 @@ Commands:
                  NX_TELEGRAM_ALLOWED_CHATS (hard allowlist — empty refuses to
                  serve). Gated calls auto-deny unless started with --yolo.
   sessions       List/filter saved sessions and exit (--page N --limit N to
-                 page). "nx sessions --prune" runs the store's GC by hand:
-                 reconcile vanished rows, collect unreferenced image payloads,
-                 enforce NX_IMAGES_QUOTA_MB.
+                 page; -p/-n also work). "nx sessions --prune" (or bare
+                 `nx prune`) runs the store's GC by hand: reconcile vanished
+                 rows, collect unreferenced image payloads, enforce
+                 NX_IMAGES_QUOTA_MB.
   config         View/check the env layer: list [filter] / get NAME /
                  set NAME VALUE / path / doctor. Never touches the network,
                  so it works against a dead endpoint.
@@ -65,25 +66,30 @@ Options:
       --approval <mode>     Start with a non-default approval mode
                             [possible values: all, low, medium, high, yolo]
   -y, --yolo                Start in never-prompt mode (auto-approve everything)
+      --isolate             Run this session in its own git worktree
+                            (NX_SESSION_WORKTREE=1)
       --source <name>       Start on a specific source
-      --resume [target]     Resume a saved session; bare = most recent
+  -r, --resume [target]     Resume a saved session; bare = most recent
       --session <id>        Start a fresh run attached to a specific session id
       --tokens              Print the exact prompt-token floor and exit
       --bench               Alias for --tokens
   -h, --help                Display the concise help for this command
-  -V, --version             Display the nx version
+  -V, --version             Display the nx version (also -v)
 
 Exit codes:
   0     Done
+  1     Unexpected error (turn-loop exception, invalid --session id; `nx eval
+        run` exits 1 when any scenario fails)
   2     Misuse (unreadable/empty prompt file, no source, bad flags)
   3     Turn cap reached (batch per-task / process summary)
-  4     Run errored (endpoint down, API rejected the request)
-  130   Interrupted
+  4     Run errored (endpoint down, API rejected the request; batch also maps
+        a task interrupt to 4)
+  130   Interrupted (one-shot / interactive only; batch never exits 130)
 
-Use `nx help <command>` or `nx <command> --help` for details on a command.
-Run `nx sessions` to list saved sessions, `nx config doctor` to check the env
-layer, or `/help` in the REPL for the full in-session command list. See
-README.md for the full NX_* env var table.
+Use `nx <command> --help` for details on a command. Run `nx sessions` to list
+saved sessions, `nx config doctor` to check the env layer, or `/help` in the
+REPL for the full in-session command list. See README.md for the full NX_* env
+var table.
 """
 
 

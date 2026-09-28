@@ -62,7 +62,7 @@ def test_help_colored_marks_entries_and_headers(monkeypatch):
         "Start on a specific source")
     # continuation and prose lines stay entirely plain
     assert "line per task on stdout. Flags: --parallel N" in out
-    assert "README.md for the full NX_* env var table." in out
+    assert "See README.md for the full NX_* env" in out
 
 
 def test_help_colored_falls_back_without_tty(monkeypatch):
