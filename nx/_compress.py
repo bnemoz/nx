@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+import threading
 from typing import Any
 
 import httpx
@@ -45,7 +47,8 @@ from ._runtime_notes import (  # noqa: F401 (re-exports)
 )
 from ._request_opts import (  # noqa: F401 (re-exports)
     _clamp_max_tokens, _default_tool_choice, _grammar_extra_body,
-    _prompt_estimate, _recovery_sampling_opts, set_toolcalls_mode,
+    _parallel_tool_calls_opts, _prompt_estimate, _recovery_sampling_opts,
+    set_toolcalls_mode,
     toolcalls_mode,
 )
 from ._stream_errors import (  # noqa: F401 (re-exports)
@@ -125,6 +128,32 @@ NX_GRAMMAR = RECOVERY_BACKEND != "vllm" and os.environ.get("NX_GRAMMAR", "") not
 # "0" -> the old "none" posture for a source/model whose native args are
 # unusable, without giving up the text-protocol fallback.
 NX_NATIVE_TOOLS = os.environ.get("NX_NATIVE_TOOLS", "") not in ("", "0", "auto", "1")
+
+# Parallel tool calls (0.103.2): once native tool_calls are confirmed for the
+# source (st._NATIVE_TOOL_CALLS_CONFIRMED), requests that send tools with
+# tool_choice="auto" also carry "parallel_tool_calls": True — the OpenAI body
+# field telling the server it may return several tool_calls in one turn.
+# Without it, several strict backends (vLLM, some OpenAI-compat proxies)
+# serialize the model's independent read-only lookups one-per-turn. Default
+# on; NX_PARALLEL_TOOL_CALLS=0 disables. Non-consumers ignore the field.
+NX_PARALLEL_TOOL_CALLS = _env_int("NX_PARALLEL_TOOL_CALLS", 1) != 0
+# Speculative read-only dispatch (0.103.3): when a streamed tool call's name
+# is a cacheable read and its partial arguments become BALANCED JSON, the call
+# is dispatched on a small background pool immediately, warming
+# st._TOOL_RESULT_CACHE so the real post-stream dispatch is an instant cache
+# hit (the tool's wall-clock overlaps the rest of the stream). Default on;
+# NX_SPECULATIVE_READS=0 disables. Read lazily (nx/_spec_reads._enabled) so a
+# mid-session env change and the tests' module reload both take effect — the
+# same contract as the flag above (see nx/_request_opts.py's reader).
+NX_SPECULATIVE_READS = _env_int("NX_SPECULATIVE_READS", 1) != 0
+# Async autocompress fold (0.103.5): when the threshold is crossed, the fold
+# (summary model call + splice) runs on a background thread over a snapshot;
+# the result is applied on the turn thread at the next threshold check, only
+# if the foldable region still fingerprint-matches the snapshot. The whole
+# fold round-trip therefore stops blocking the loop at the largest prompt.
+# Default on; NX_ASYNC_COMPRESS=0 restores the synchronous fold. Read lazily
+# (see _async_fold_enabled) like the flag above.
+NX_ASYNC_COMPRESS = _env_int("NX_ASYNC_COMPRESS", 1) != 0
 # Renamed mirror with the post-0.54 semantics (True = tool_choice="auto" is
 # the default posture). Kept as a separate name so the config viewer/doctor
 # and the vision gate read intent, not a double negative.
@@ -215,7 +244,15 @@ def open_stream(
     if target is not None and st.client is not None and st.MODEL is not None:
         call_client, call_model, call_extra, call_src = target
     else:
-        call_client, call_model, call_extra, call_src = st.client, st.MODEL, None, st.ACTIVE
+        # Regression fix (0.103.2): 0.86.0 hardcoded call_extra=None here,
+        # dropping the parent's per-request kwargs (st.ACTIVE.extra_request_
+        # kwargs(): OpenRouter provider routing, thinking toggles, the
+        # reasoning budget, PF-10 cache routing) from every parent turn.
+        # extra_request_kwargs() is a pure per-call dict build (it re-reads
+        # st.MODEL/st._METRICS at call time), so deriving it per turn is
+        # exactly what the pre-0.86 code did.
+        call_client, call_model, call_src = st.client, st.MODEL, st.ACTIVE
+        call_extra = st.ACTIVE.extra_request_kwargs() if st.ACTIVE else None
     assert call_client is not None and call_model is not None
     if tool_choice is None and tools:
         # Default posture (0.54.0): tool_choice="auto". The pre-0.54 default
@@ -255,6 +292,7 @@ def open_stream(
             request_opts["top_p"] = st.TOP_P
         if tool_choice is not None:
             request_opts["tool_choice"] = tool_choice
+        request_opts.update(_parallel_tool_calls_opts(tool_choice, tools))
         # Per-request body fields (e.g. OpenRouter provider routing) ride in
         # extra_body. Merged here once so both the tools and no-tools fallback
         # branches below carry it through unchanged.
@@ -284,6 +322,7 @@ def open_stream(
                     if extra_ok or k != "extra_body"}
             if not tools_ok:
                 opts.pop("tool_choice", None)
+                opts.pop("parallel_tool_calls", None)  # meaningless without tools
             _tag = RUNG_TAG[rung]
             _log_event("req", {"model": call_model, "messages": messages,
                                "tools": tools if tools_ok else None, "stream": True,
@@ -693,6 +732,138 @@ def compress(
     return len(tail), summarized_n, len(summary)
 
 
+# --- async autocompress fold (0.103.5) ---------------------------------------
+# State lives in one module-level dict slot: conftest's per-test rewind
+# (clear + update from the baseline snapshot, which is {}) strands any
+# in-flight record — the worker thread writes into its own record object, so
+# a cleared slot makes the finished fold a no-op instead of leaking into the
+# next test. One fold in flight at a time, guarded by _FOLD_LOCK.
+_ASYNC_FOLD: dict[str, Any] = {}
+_FOLD_LOCK = threading.Lock()
+# Set by _collect_async_fold when it discards a finished fold as stale, keyed
+# by the list it was discarded for: the next _maybe_autocompress on that list
+# must fold synchronously instead of starting yet another deferring fold.
+_LAST_DISCARD: dict[str, Any] = {}
+
+
+def _async_fold_enabled() -> bool:
+    """Kill switch, read lazily so a mid-session env change or a test's env
+    scrub takes effect without a module reload (same contract as
+    NX_SPECULATIVE_READS' reader in _spec_reads). Checked on the top-level
+    module FIRST (tests and the REPL patch nx.NX_ASYNC_COMPRESS; nx and
+    nx._compress are distinct module objects) and then on this module (the
+    flag's definition site)."""
+    import nx as _m
+    v = getattr(_m, "NX_ASYNC_COMPRESS", None)
+    if v is None:
+        v = getattr(sys.modules[__name__], "NX_ASYNC_COMPRESS", False)
+    return bool(v)
+
+
+def _region_fingerprint(msgs: list[dict[str, Any]]) -> tuple:
+    """Cheap per-process fingerprint of a transcript region: role, content
+    hash and length, tool-call count, tool_call_id per message. Compared at
+    apply time against the dispatch-time fingerprint so a fold computed from a
+    stale snapshot is discarded rather than mis-spliced (hash() of str is
+    per-process randomized but stable within one process, which is all a
+    dispatch→apply comparison needs)."""
+    out = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            out.append(("raw", hash(repr(m))))
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            s = "".join(str(p) for p in c)
+        else:
+            s = str(c or "")
+        out.append((m.get("role"), len(s), hash(s),
+                    len(m.get("tool_calls") or ()), m.get("tool_call_id")))
+    return tuple(out)
+
+
+def _start_async_fold(messages: list[dict[str, Any]]) -> bool:
+    """Dispatch a background fold over a snapshot of `messages`. True iff a new
+    fold was started (False: disabled, one already in flight, or nothing
+    foldable). The snapshot discipline mirrors _session_save.snapshot_messages:
+    new list + new dict per message (and copied parts for list content), so
+    the turn loop can keep appending/mutating the live transcript while the
+    worker reads its private copy."""
+    from ._session_save import snapshot_messages
+    snap = snapshot_messages(messages)
+    fp = _region_fingerprint(snap)
+    rec: dict[str, Any] = {"done": False, "ok": False, "result": None, "fp": fp,
+                           "snap": snap}
+
+    def _work() -> None:
+        try:
+            import nx as _m
+            rec["result"] = _m.compress(snap, auto=True)
+            rec["ok"] = rec["result"] is not None
+        except Exception:  # noqa: BLE001 — a failed fold just falls back to sync
+            rec["ok"] = False
+        finally:
+            rec["done"] = True
+
+    with _FOLD_LOCK:
+        if _ASYNC_FOLD and not _ASYNC_FOLD.get("rec", {}).get("done", True):
+            return False  # one fold in flight; the next check collects it
+        th = threading.Thread(target=_work, daemon=True, name="nx-async-fold")
+        _ASYNC_FOLD.clear()
+        _ASYNC_FOLD["rec"] = rec
+        _ASYNC_FOLD["thread"] = th
+    th.start()
+    return True
+
+
+def _collect_async_fold(messages: list[dict[str, Any]], wait: float = 0.0) -> bool:
+    """Apply a finished background fold at a safe boundary (turn thread only).
+    `wait > 0` blocks up to that many seconds for an in-flight fold to finish
+    (the context-400 retry path uses this: the ladder may wait briefly for an
+    almost-done fold before folding synchronously). A fold applies ONLY if the
+    live region it would replace still fingerprint-matches the snapshot it
+    was computed from; otherwise it is discarded and the caller folds
+    synchronously. Returns True iff the fold was applied."""
+    with _FOLD_LOCK:
+        rec = _ASYNC_FOLD.get("rec")
+        th = _ASYNC_FOLD.get("thread")
+    if rec is None or rec.get("done") is False:
+        if th is not None and wait > 0:
+            th.join(timeout=wait)
+            return _collect_async_fold(messages, wait=0.0)
+        return False
+    with _FOLD_LOCK:
+        _ASYNC_FOLD.clear()  # claim it: applied, discarded, or failed — once
+    if not rec.get("ok"):
+        return False
+    fp = rec.get("fp")
+    if fp is None or _region_fingerprint(messages) != fp:
+        _LAST_DISCARD["list"] = messages
+        return False  # stale snapshot: the region changed under the fold
+    result = rec.get("result")
+    snap = rec.get("snap")
+    if result is None or not isinstance(snap, list):
+        return False
+    # Apply: the fold ran over `snap` and mutated it into the folded form
+    # (compress() rewrites its argument in place). The fingerprint check above
+    # proved the live region is byte-identical to the snapshot's input, so the
+    # folded snapshot is exactly what a synchronous compress() would have
+    # produced on the live list. Copy the folded form back message-by-message
+    # (not a list-slice assign of the same dicts — the live list keeps its own
+    # message dicts for messages that survived the fold unchanged, and the
+    # digest/popped-prefix messages come over from the snapshot).
+    messages[:] = [dict(m) if isinstance(m, dict) else m for m in snap]
+    kept_n, summarized_n, summary_chars = result
+    mx = st.ACTIVE.resolve_context_window() if st.ACTIVE else None
+    pct = int((st._LAST_PROMPT_TOKENS / mx) * 100) if isinstance(mx, int) and mx > 0 else -1
+    from ._subagent import _subagent_quiet
+    if not _subagent_quiet():
+        print(f"{DIM}  ↻ auto-compressed {summarized_n} turns → 1 summary "
+              f"({summary_chars} chars), kept last {kept_n} verbatim "
+              f"(context was at {pct}% of {_abbr(mx)}){RESET}")
+    return True
+
+
 def _maybe_autocompress(messages: list[dict[str, Any]], prompt_tokens: int) -> bool:
     """Silently compress when context usage crosses the AUTOCOMPRESS_PERCENT
     threshold. Called after each settled model turn with the last turn's
@@ -716,6 +887,26 @@ def _maybe_autocompress(messages: list[dict[str, Any]], prompt_tokens: int) -> b
     ratio = prompt_tokens / mx
     if ratio * 100 < st.AUTOCOMPRESS_PERCENT:
         return False
+    # 0.103.5: async fold. Collect a finished background fold first (started
+    # on a previous threshold crossing over a snapshot; a fingerprint mismatch
+    # discards it and we fall through to the sync fold), then start one if
+    # none is in flight. The turn loop continues immediately either way — the
+    # summary round-trip no longer blocks the next request.
+    if _async_fold_enabled():
+        if _collect_async_fold(messages):
+            return True
+        # A fold discarded by collect (stale region on THIS list) or still
+        # in flight → fold synchronously now: the threshold crossing must
+        # never be dropped, and starting yet another async fold on top of a
+        # discarded one would keep deferring while the context grows.
+        discarded = _LAST_DISCARD.get("list") is messages
+        _LAST_DISCARD.clear()
+        with _FOLD_LOCK:
+            pending = bool(_ASYNC_FOLD.get("rec"))
+        if not discarded and not pending and _start_async_fold(messages):
+            return False
+        # (sync fold runs below; a fresh async fold's round-trip no longer
+        # blocks this loop)
     # Via the top-level package (not a bare same-module reference) so a test
     # that monkeypatches `nx.compress` (to stub out the network call, or
     # to assert it's never invoked) takes effect.

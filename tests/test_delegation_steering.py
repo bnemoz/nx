@@ -8,8 +8,9 @@ fan-out. Three prompt layers fix that, and this file guards each:
   2. a session-start [Delegation note:] paid ONLY in sub-agent-enabled sessions
      (_initial_messages / _add_delegation_note_if_absent),
   3. a runtime streak nudge staged by run_tool() after enough solo exploration
-     calls without a spawn (one-time, reset by a spawn, silent when the tool
-     isn't offered, flushed by _flush_pending_background_notice).
+     calls without a spawn (re-arming: the fire resets the streak, so a later
+     full run stages it again; silent when the tool isn't offered, flushed by
+     _flush_pending_background_notice — see test_delegation_nudge.py).
 
 No model/network round-trip.
 """
@@ -99,7 +100,7 @@ def test_delegation_note_not_duplicated_on_resume(nx_fresh):
 
 def _streak_reset(m):
     m.st._READ_STREAK = 0
-    m.st._DELEGATION_NUDGED = False
+    m.st._DELEGATION_NUDGE_COUNT = 0
     m.st._PENDING_DELEGATION_NOTICE = None
 
 
@@ -117,11 +118,14 @@ def test_streak_nudge_fires_after_threshold_reads(nx_fresh, tmp_path, monkeypatc
     assert nx_fresh.st._PENDING_DELEGATION_NOTICE is not None, \
         "streak nudge should fire once the threshold is crossed"
     assert "spawn_agent" in nx_fresh.st._PENDING_DELEGATION_NOTICE
-    # one-time: further reads don't re-stage it
+    # the fire resets the streak, so a single further read does NOT re-stage it
+    # (re-fire needs a full 2x-threshold run — see test_delegation_nudge.py)
+    assert nx_fresh.st._READ_STREAK == 0
+    assert nx_fresh.st._DELEGATION_NUDGE_COUNT == 1
     nx_fresh.st._PENDING_DELEGATION_NOTICE = None
     nx_fresh.run_tool("read_file", {"path": str(f)})
     assert nx_fresh.st._PENDING_DELEGATION_NOTICE is None, \
-        "delegation nudge must fire only once per session"
+        "a lone read after a fire must not re-stage the nudge"
 
 
 def test_spawn_agent_resets_streak(nx_fresh, tmp_path, monkeypatch):
@@ -154,7 +158,7 @@ def test_streak_silent_when_subagents_disabled(nx_fresh, tmp_path, monkeypatch):
         nx_fresh.run_tool("read_file", {"path": str(f)})
     assert nx_fresh.st._PENDING_DELEGATION_NOTICE is None, \
         "no nudge toward a tool the session doesn't offer"
-    assert not nx_fresh.st._DELEGATION_NUDGED
+    assert not nx_fresh.st._DELEGATION_NUDGE_COUNT
 
 
 def test_threshold_zero_disables_nudge(nx_fresh, tmp_path, monkeypatch):

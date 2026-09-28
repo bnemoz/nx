@@ -173,6 +173,27 @@ def _recovery_sampling_opts() -> dict[str, Any]:
     return opts
 
 
+def _parallel_tool_calls_opts(tool_choice: Any, tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """0.103.2: {"parallel_tool_calls": True} when the request actually rides
+    native tool_calls — tools attached, tool_choice == "auto", and the source
+    already CONFIRMED native (_NATIVE_TOOL_CALLS_CONFIRMED, the same flag the
+    grammar attach and /toolcalls read). Until native is confirmed the source
+    may be a text-protocol model and the field is noise; the flag is set
+    reactively the first time a turn returns real tool_calls, so this attach
+    is exactly as conservative as the tool_choice="auto" posture itself.
+    Gated by NX_PARALLEL_TOOL_CALLS (default on; 0 disables — defined in
+    _compress and read lazily here so a mid-session env change and the
+    tests' module reload both take effect)."""
+    from . import _compress as _c  # lazy: _compress imports this module
+    if not getattr(_c, "NX_PARALLEL_TOOL_CALLS", False):
+        return {}
+    if not tools or tool_choice != "auto":
+        return {}
+    if not st._NATIVE_TOOL_CALLS_CONFIRMED:
+        return {}
+    return {"parallel_tool_calls": True}
+
+
 def _default_tool_choice() -> str:
     """The tool_choice open_stream() applies when the caller didn't force one:
     "auto" unless (a) the session explicitly forced the text protocol

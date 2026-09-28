@@ -307,6 +307,17 @@ _JSON_OUTPUT = "--json" in sys.argv
 # --- base-level traffic log -------------------------------------------------
 from ._logging import LOG_PATH, LOG_MAX_BYTES, _AsyncLogWriter, _llog, _log_event
 
+# --- async session-save writer (0.103.4) ------------------------------------
+# Same shape as the traffic-log writer above: the class plus a lazily-created
+# module-level singleton live in _session_save (no import-time thread). These
+# names are for tests and for anything that must drain a pending save.
+from ._session_save import (  # noqa: F401
+    _SessionSaveWriter, submit_save,
+    flush_pending as _flush_session_save,
+    has_pending as _session_save_pending,
+    snapshot_messages,
+)
+
 # C is unused directly here but kept: _StateProxyModule.__getattr__ below
 # proxies m.GREEN/m.CYAN/etc (the _COLOR_NAMES set) through to C's attributes.
 from ._ansi import C
@@ -498,7 +509,7 @@ FINAL_ANSWER_TOOL_CHOICE = {
 }
 
 SYSTEM = """Terminal coding agent, cwd = user's current directory.
-Use tools to inspect/modify code. One concrete step at a time.
+Use tools to inspect/modify code. One task at a time; batch independent read-only lookups as multiple tool calls in the same turn.
 Locating something (a function, string, section) in a file you haven't
 already read in full? search_files FIRST, always -- even on small files.
 read_file is for reading a file you already need in full, never for finding
@@ -524,7 +535,7 @@ related edits into one multi_edit; "DENIED by user" means stop and ask, not retr
 
 No native tool calls? Emit text-protocol call exactly:
 <tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>
-Prefer the tag alone; wait for Observation. Tool-call examples in prose/code-block only (not standalone). Task done -> reply plain prose.
+Prefer the tag alone; wait for Observation. Batch independent read-only calls instead when emitting native tool_calls. Tool-call examples in prose/code-block only (not standalone). Task done -> reply plain prose.
 
 Shell cmds run detached (own session) and never block you: a quick one returns its
 output, a slow one backgrounds (result gives PID + log path -- read_file it).
@@ -874,6 +885,7 @@ from ._compress import (
     RECOVERY_DRY_MULTIPLIER, RECOVERY_DRY_BASE, RECOVERY_DRY_ALLOWED_LENGTH,
     RECOVERY_DRY_SEQUENCE_BREAKERS, _recovery_sampling_opts, open_stream,
     compress, _maybe_autocompress, _compress_for_overrun,
+    _collect_async_fold, _start_async_fold,
     _default_tool_choice,
 )
 
