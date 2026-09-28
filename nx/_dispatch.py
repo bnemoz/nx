@@ -409,10 +409,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # yet its call must still be recorded for the group.
     recorder = current_recorder() if ctx is None else None
     buffered = recorder is not None
+    # todo_write's args ARE the list, which the result body re-renders below —
+    # the raw-JSON args line would only duplicate it, so it is suppressed.
     if not quiet and not buffered:
         accent = tool_accent(name)
         print(f"\n{accent}  ┌─ {header}{RESET}")
-        print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
+        if name != "todo_write":
+            print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -558,7 +561,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             first = strip_ansi_for_display(result.splitlines()[0])
             note = first[:100] + "..." if len(first) > 100 else first
         recorder.blocks.append(ToolBlock(
-            name=name, header=header, detail=detail,
+            name=name, header=header,
+            detail="" if name == "todo_write" else detail,
             body=body, note=note, failed=failed))
     elif quiet:
         pass  # quiet (async-agent) loop: no box, no result echo
