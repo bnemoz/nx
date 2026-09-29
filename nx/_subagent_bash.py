@@ -89,7 +89,12 @@ def _subagent_bash(command: str, **_: Any) -> str:
     ctx = _subagent_ctx()
     if ctx is not None and ctx.write:
         from ._bash_jobs import run_bash as _real_run_bash
-        return _real_run_bash(command)
+        # Anchor the command in the agent's own worktree when it has one:
+        # otherwise git add/stash/reset and other side-effecting commands the
+        # agent runs "on its tree" hit the PARENT's index/worktree — the
+        # primary source of phantom MM in the parent (0.103.15).
+        cwd = getattr(ctx, "worktree", None) or None
+        return _real_run_bash(command, _cwd=cwd)
     if not _subagent_bash_allowed(command):
         return ("ERROR: sub-agent bash is limited to single read-only commands "
                 f"(grep/ls/du/ps/pgrep/git log/git status/...); refused: {command!r}. "

@@ -226,7 +226,7 @@ def _worktree_args(name: str, args: dict[str, Any], worktree: str) -> dict[str, 
     targets and cwd anchored; git_commit lands in the tree."""
     from ._worktree import rewrite_path
     args = dict(args)
-    for key in ("path", "file", "targets"):
+    for key in ("path", "file", "targets", "files"):
         v = args.get(key)
         if isinstance(v, str) and v.strip():
             args[key] = rewrite_path(v, worktree)
@@ -236,7 +236,7 @@ def _worktree_args(name: str, args: dict[str, Any], worktree: str) -> dict[str, 
     if name == "git_commit" and not str(args.get("path", "")).strip():
         args["path"] = worktree
     if name == "run_tests":
-        args.setdefault("path", worktree)
+        args["cwd"] = worktree
     return args
 
 

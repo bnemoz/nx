@@ -179,7 +179,7 @@ def test_git_commit_and_run_tests_default_to_worktree(tmp_path, monkeypatch):
     finally:
         T._SUBAGENT_TLS.ctx = None
     assert seen["git"]["path"] == wt
-    assert seen["tests"]["path"] == wt
+    assert seen["tests"]["cwd"] == wt
 
 
 def test_scope_check_uses_worktree_root(tmp_path):

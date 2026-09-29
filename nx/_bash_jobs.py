@@ -157,7 +157,7 @@ def _heredoc_terminator_suffix_trap(command: str) -> str | None:
     return None
 
 
-def _run_bash(command: str) -> tuple[str, str]:
+def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
     The command is started in a **new session / new process group**, fully
@@ -204,7 +204,7 @@ def _run_bash(command: str) -> tuple[str, str]:
     wrapped = (f"sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
                f"echo $!")
     r = subprocess.run(wrapped, shell=True, capture_output=True, text=True,
-                       start_new_session=True)
+                       start_new_session=True, cwd=_cwd or None)
     pid = r.stdout.strip()
     # The launcher must echo exactly the PID of the detached job ($!) — an
     # integer. Anything else (empty output when sh died before the
@@ -617,7 +617,8 @@ def _contains_secret(command: str) -> str | None:
     return None
 
 
-def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
+def run_bash(command: str, timeout: int | None = None,
+             _cwd: str | None = None, **_: Any) -> str:
     """Run a shell command.
 
     Commands always run detached in their own session — they never block the agent loop.
@@ -694,7 +695,7 @@ def run_bash(command: str, timeout: int | None = None, **_: Any) -> str:
     if timeout <= 0:
         timeout = 999999999  # ∞ — wait indefinitely
     max_seconds = _env_int("NX_BASH_MAX_SECONDS", 0)
-    pid, log_path = _run_bash(command)
+    pid, log_path = _run_bash(command, _cwd=_cwd)
     status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
                        expected_start_time=_find_bg_start_time_for_pid(pid))
     if status == "interrupted":

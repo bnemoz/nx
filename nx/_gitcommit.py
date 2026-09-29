@@ -82,7 +82,11 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
       path: repo/directory to commit in (default: the project root).
     """
     repo = (path or "").strip() or st.PROJECT_ROOT or "."
-    if not os.path.isdir(os.path.join(repo, ".git")):
+    # Accept linked worktrees: their .git is a FILE pointing at the real
+    # gitdir, not a directory — isdir(join(repo, ".git")) rejected them and
+    # pushed write-tier worktree agents to raw `git` via run_bash (0.103.15).
+    if not (os.path.isdir(os.path.join(repo, ".git"))
+            or os.path.isfile(os.path.join(repo, ".git"))):
         return (f"ERROR: git_commit: {repo} is not a git repository — run inside "
                 "the repo (pass `path` if the project root differs)")
     if not message.strip():
@@ -174,7 +178,14 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
         if herr or not hout:
             guarded = False  # can't verify; sync every path as before
         else:
-            for p, h in zip(paths, hout.split()):
+            hashes = hout.split()
+            # A short/misaligned hash list must NOT fall through to the
+            # positional zip: writing HEAD's blob for a path whose worktree
+            # file differs stages the WIP wrong — the exact MM signature.
+            # Bail and leave the shared index for the normal add/commit path.
+            if len(hashes) != len(paths):
+                return
+            for p, h in zip(paths, hashes):
                 wt[p] = h
     specs: list[str] = []
     for p in paths:
