@@ -93,12 +93,12 @@ def test_every_dispatched_command_is_in_the_readme_table():
 
 
 def test_ctx_all_is_implemented_not_just_hinted():
-    """The hint at the bottom of the compact /ctx report must point at a real
+    """The hint at the bottom of the compact /context report must point at a real
     branch (1.5: it advertised /ctx all while nothing read the argument)."""
     src = open(rs.__file__, encoding="utf-8").read()
-    assert 'sub == "all"' in src, "/ctx all branch is gone — fix the hint or the branch"
+    assert 'sub == "all"' in src, "/context all branch is gone — fix the hint or the branch"
     # and the hint still matches the branch
-    assert "/ctx all" in src
+    assert "/context all" in src
 
 
 def test_every_documented_env_var_is_actually_read():

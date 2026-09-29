@@ -55,7 +55,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/recover [note]", "force a visible recovery checkpoint turn"),
     ("/undo [--list]", "undo last file change / list undo checkpoints"),
     ("/compress, /compact", "fold older turns into a summary"),
-    ("/ctx [all|pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
+    ("/context [all|pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
     ("/cost", "session usage + per-source cost scoreboard"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
     ("/budget [<tokens|off>]", "cap the model's reasoning phase (reasoning token budget)"),
@@ -294,8 +294,8 @@ def _cmd_resources(user: str, state: _ReplState) -> None:
 
 
 def _cmd_ctx(user: str, state: _ReplState) -> None:
-    """/ctx — per-message token report; /ctx pin|unpin <spec> — pin turns so
-    compress() keeps them verbatim; /ctx clear — drop all pins."""
+    """/context — per-message token report; /context pin|unpin <spec> — pin turns so
+    compress() keeps them verbatim; /context clear — drop all pins."""
     from ._ctxreport import (_messages_token_report, _ctx_pin, _ctx_unpin,
                              _overhead_lines)
     from ._metrics import _abbr
@@ -309,7 +309,7 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     if sub in ("pin", "unpin"):
         spec = " ".join(parts[2:]) if len(parts) >= 3 else None
         if not spec:
-            print(f"{C.WARNING}  usage: /ctx {sub} <n | n-m | n,m,n-m>  (1-based message numbers from /ctx){RESET}")
+            print(f"{C.WARNING}  usage: /context {sub} <n | n-m | n,m,n-m>  (1-based message numbers from /context){RESET}")
             return
         try:
             if sub == "pin":
@@ -319,7 +319,7 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
                 removed, remaining = _ctx_unpin(spec, messages)
                 print(f"{DIM}  unpinned {len(removed)} turn(s) ({len(remaining)} pinned remain){RESET}")
         except (ValueError, TypeError) as e:
-            print(f"{C.WARNING}  {e} — want e.g. /ctx pin 12  or  /ctx pin 4,8,12-15{RESET}")
+            print(f"{C.WARNING}  {e} — want e.g. /context pin 12  or  /context pin 4,8,12-15{RESET}")
         return
     if sub == "all":
         # Every message row, none rolled up (0.42): the compact default hides
@@ -356,7 +356,7 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     rolled = [r for r in rows if r[0] not in top_idx or r[2] < max(32, report["total_est"] // 40)]
     if rolled and len(rolled) < len(rows):
         print(f"{DIM}        … {len(rolled)} smaller turn(s), ~{sum(r[2] for r in rolled)} tokens "
-              f"(all messages: /ctx all){RESET}")
+              f"(all messages: /context all){RESET}")
     # Per-turn overhead (tools= schemas) is in total_est but has no message
     # row — name it here so "by role" summing to less than the header isn't
     # mistaken for lost tokens.
@@ -370,7 +370,7 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
         pct = 100 * report["total_est"] // mx
         print(f"{DIM}  ≈{pct}% of {_abbr(mx)} window (estimate; the per-turn footer "
               f"uses the server's exact count){RESET}")
-    print(f"{DIM}  pin turns to protect them from /compress: /ctx pin <n | n-m | n,m>{RESET}")
+    print(f"{DIM}  pin turns to protect them from /compress: /context pin <n | n-m | n,m>{RESET}")
 
 
 def _cmd_cost(user: str, state: _ReplState) -> None:

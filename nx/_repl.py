@@ -93,7 +93,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/budget": _cmd_budget,
     "/resources": _cmd_resources,
     "/resmon": _cmd_resources,
-    "/ctx": _cmd_ctx,
+    "/context": _cmd_ctx,
     "/cost": _cmd_cost,
     "/status": _cmd_status,
     "/bg": _cmd_bg,

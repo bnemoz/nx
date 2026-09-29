@@ -153,7 +153,7 @@ prompt was served from the server's KV/prompt cache (llama.cpp `cache_n`,
 OpenAI `prompt_tokens_details.cached_tokens`) — green ≥75%, yellow ≥40%, red
 below. A steady high number is the append-only discipline working; a sudden
 collapse to ~0 means something rewrote early history and silently busted the
-prefix. `/ctx` shows the same fraction per turn in its cache column. At
+prefix. `/context` shows the same fraction per turn in its cache column. At
 `NX_AUTOCOMPRESS_PERCENT` (default 85%) of the window, older
 turns fold into a summary automatically — see `/autocompress`. The guard runs
 inside long agentic tasks too, not just between user prompts, and if a server
@@ -557,8 +557,8 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
 | `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/memory reflect [focus]` | cross-project connection pass: reviews the whole store (both scopes) and writes at most 3 global notes — recurring preferences promoted out of project scopes, cross-project patterns the user may not have connected; proposals about broken notes print as advice only. One approval for the run |
-| `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/ctx`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
-| `/ctx [pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
+| `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/context`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
+| `/context` (`/ctx`) `[pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
 | `/status` | one-screen snapshot of the session posture: source, model, tool-calling capability, budgets, write fence, approval mode (same state `nx config doctor` checks) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold; every fold auto-pins the latest `todo_write` turn so the live task plan survives compression |
