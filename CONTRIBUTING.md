@@ -89,8 +89,8 @@ CLAUDE.md. Beyond the schema itself:
   automatically. An always-on tool may instead raise `BUDGET_TOKENS` in
   `tests/test_initial_context.py` with a ledger entry justifying the cost —
   the ceiling is ~5K tokens, and the point is to stay under it, not to
-  compress every schema to the minimum.
-  `tests/perf/baselines.json`'s `active_tools_floor` pins the always-on count.
+  compress every schema to the minimum. The always-on schema count currently
+  stands at 23 (0.103.22); there is no separate pinned count to maintain.
 - Risk classification: if the tool can write or execute, confirm
   `_assess_risk()` (`nx/_risk.py`) handles it sensibly — don't assume a new
   tool defaults to a safe risk tier.
@@ -272,7 +272,7 @@ uv run ty check nx       # type check over the nx/ package
   `per-file-ignores` blocks in `pyproject.toml` (they exist for the two
   intentional exceptions: `nx/__init__.py`'s re-export surface and
   `tests/**`'s dynamic-test ergonomics). Keep new files out of those blocks.
-- **ty is advisory-but-not-ignored**: the codebase carries ~125 pre-existing
+- **ty is advisory-but-not-ignored**: the codebase carries ~130 pre-existing
   diagnostics (mostly `st.<name>` writes done via the `_StateProxyModule`
   seam, which is dynamic by design, and `Optional[Connection]` patterns in
   the SQLite stores). Do not add new diagnostics in the code you touch; do

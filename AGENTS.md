@@ -26,18 +26,18 @@ Use `uv` for local development:
 
 ```bash
 uv pip install -e .                 # install the CLI and runtime dependencies
-uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~10s; workers capped at 32)
+uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~20s; workers capped at 32)
 uv run python3 tests/test_sources.py # run a standalone assertion-style test
 uv run ruff check .                 # lint gate — must be clean before committing
 uv run ty check nx                  # type check; no new diagnostics in touched files
 nx --help                           # inspect the installed CLI
 ```
 
-`-n auto` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~27s) works too and is the fallback if xdist is unavailable.
+`-n auto` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~40s) works too and is the fallback if xdist is unavailable.
 
 Target a single pytest test during development with `uv run pytest tests/test_risk_context.py -k test_name`. The suite is designed to run offline; do not depend on a live model endpoint.
 
-Ruff and ty are pinned in the `dev` dependency group (installed with `uv sync --group dev`). Ruff is a hard gate; ty's existing ~125 diagnostics are tracked, not owed — see CONTRIBUTING.md's "Lint and type check" section for the policy.
+Ruff and ty are pinned in the `dev` dependency group (installed with `uv sync --group dev`). Ruff is a hard gate; ty's existing ~130 diagnostics are tracked, not owed — see CONTRIBUTING.md's "Lint and type check" section for the policy.
 
 ## Coding Style & Naming Conventions
 
@@ -45,7 +45,7 @@ Use standard Python conventions: four-space indentation, `snake_case` functions 
 
 ### Prompt & schema budget
 
-We target models with 128K-1M-token context windows, so the per-turn floor of `SYSTEM` prompt + always-on tool schemas is held under a **hard, recorded budget of ~5K tokens** (`BUDGET_TOKENS` in `tests/test_initial_context.py`; currently 5200, measured floor ~4.7K per the 0.99.4 ledger entry; `SOFT_TOKENS = BUDGET_TOKENS - 50`). Within that ceiling, favor *clarity over terseness*: every argument the model can pass gets a `description`, overlapping tools name each other, and self-healing behavior is spelled out in the schema. Do not abbreviate prose to save a handful of tokens — the budget is enforced mechanically, so a schema only needs trimming when the floor actually approaches the ceiling.
+We target models with 128K-1M-token context windows, so the per-turn floor of `SYSTEM` prompt + always-on tool schemas is held under a **hard, recorded budget of ~5K tokens** (`BUDGET_TOKENS` in `tests/test_initial_context.py`; currently 5200, measured floor ~5.1K (5120) per the 0.103.22 measurement; `SOFT_TOKENS = BUDGET_TOKENS - 50`). Within that ceiling, favor *clarity over terseness*: every argument the model can pass gets a `description`, overlapping tools name each other, and self-healing behavior is spelled out in the schema. Do not abbreviate prose to save a handful of tokens — the budget is enforced mechanically, so a schema only needs trimming when the floor actually approaches the ceiling.
 
 The budget is a forcing function, not a soft warn: a change that pushes the floor past `BUDGET_TOKENS` fails the suite until either a schema is trimmed or the number is raised **with a ledger entry justifying the cost**. A new always-on tool should first consider displacing an existing one into tier 2 (a `_TOOL_GATES` entry in `nx/_tool_gates.py`, surfaced by `search_tools`) — tier-2 tools cost 0 tokens until used. Adding a gated tool is a **one-file** change: one entry in `_TOOL_GATES` plus one in `_GATE_REFUSALS`, both in `nx/_tool_gates.py` — the gate vector, the withheld-tool refusals, and run_tool's pre-dispatch re-check all derive from that registry. See CONTRIBUTING.md for the tool touch points.
 
