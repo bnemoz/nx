@@ -7,7 +7,7 @@ framed, multi-line editor:
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
     Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
-    F1 for /help, Shift+C (empty buffer) is shorthand for /compress
+    F1 for /help, Ctrl+Shift+C is shorthand for /compress
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -610,7 +610,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · shift+C compress · shift+tab {mode}"
+        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · ^⇧C compress · shift+tab {mode}"
         max_hints = max(0, box_w - 11)
         truncated = _str_width(hints) > max_hints
         if truncated:
@@ -836,6 +836,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         if seq in ("[13;2u", "[27;2;13~"):
             insert_text("\n")
             return
+        if seq in ("[67;6u", "[27;6;67~"):
+            # Ctrl+Shift+C -> /compress (CSI-u / xterm modifyOtherKeys form).
+            # Some desktop terminals intercept it as Copy and never send the
+            # key; there the typed /compress command is the fallback.
+            finish()
+            return "/compress"
         if seq in ("[Z", "[1;2Z"):
             st.toggle_yolo()
             return
