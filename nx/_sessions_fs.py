@@ -176,6 +176,10 @@ def _update_index(session_id: str, data: dict[str, Any]) -> None:
 _SUMMARY_HEADER_RE = re.compile(
     r"^\[Compressed context — \d+ earlier turns summarized")
 
+# Extra trailing turns a compaction rewrite may be missing because the
+# snapshot it carries predates a couple of just-saved turns.
+_COMPACTION_TAIL_SLACK = 4
+
 
 def _is_compaction_rewrite(
     existing: list[dict[str, Any]], incoming: list[dict[str, Any]],
@@ -207,11 +211,20 @@ def _is_compaction_rewrite(
     first_body = incoming[off_i].get("content")
     if not (isinstance(first_body, str) and _SUMMARY_HEADER_RE.match(first_body)):
         return False
-    # every incoming turn after the summary must be a verbatim tail of existing
+    # every incoming turn after the summary must be a verbatim tail of existing,
+    # allowing a few trailing turns that the snapshot predates (autosaves land
+    # between the compress() dispatch and this save; demanding an exact suffix
+    # made every post-compression save look like a fork and append the whole
+    # compressed snapshot again, growing the store unboundedly).
     tail = incoming[off_i + 1:]
     if not tail or len(tail) > len(existing) - off_e:
         return False
-    return existing[-len(tail):] == tail
+    for slack in range(0, _COMPACTION_TAIL_SLACK + 1):
+        if len(tail) + slack > len(existing) - off_e:
+            break
+        if existing[len(existing) - len(tail) - slack:len(existing) - slack] == tail:
+            return True
+    return False
 
 
 def _merge_session_messages(

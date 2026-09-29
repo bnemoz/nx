@@ -144,9 +144,25 @@ def test_fork_splice_unchanged():
 
 # --- 5. structural detection is specific ------------------------------------
 
+def test_compaction_merge_with_a_few_unsaved_trailing_turns():
+    # The regression behind the 600K-message store bloat: autosaves land
+    # between the compress() snapshot and the post-turn save, so the
+    # incoming tail is missing a couple of just-saved turns. That must
+    # still count as a compaction rewrite, not a fork that re-appends the
+    # whole compressed snapshot on every save.
+    existing = _pre_compress_history() + \
+        [_msg("user", "just-saved turn"), _msg("assistant", "ack")]
+    incoming = _compress_snapshot(existing, keep=4)
+    incoming = incoming[:-2]  # snapshot predates those two turns
+    merged = m._merge_session_messages(existing, incoming)
+    assert merged == incoming
+
+
 def test_summary_header_without_matching_tail_is_not_compaction():
     existing = _pre_compress_history()
-    incoming = _compress_snapshot(existing, keep=4)[:-1]  # tail broken
+    incoming = _compress_snapshot(existing, keep=4)
+    # break the tail so it is not a suffix of existing at any slack offset
+    incoming[-1] = _msg("user", "tail rewritten after snapshot")
     merged = m._merge_session_messages(existing, incoming)
     assert merged != incoming  # falls through to the fork splice
 
