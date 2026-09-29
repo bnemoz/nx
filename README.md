@@ -580,8 +580,8 @@ Run `/help` in the REPL for the full list. The essentials:
 In the REPL input box:
 
 - **F1** opens `/help`, **Ctrl+L** runs `/clear`, **Ctrl+Q** runs `/exit`,
-  **Ctrl+Shift+C** runs `/compress` (where the terminal sends CSI-u /
-  xterm modifyOtherKeys keys; some desktop terminals intercept it as Copy)
+  **Ctrl+Alt+C** runs `/compress` (CSI-u / xterm modifyOtherKeys keys;
+  not grabbed by desktop Copy the way Ctrl+Shift+C is)
   (so you don't have to type the full command).
 - **Enter** submits; **Shift+Enter** (or **Ctrl+J**) inserts a newline.
 - **Up/Down** navigate history; **Left/Right** move within a line;
