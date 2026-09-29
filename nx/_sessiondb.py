@@ -687,6 +687,26 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
             conn.close()
 
 
+def _delete_session_conn(conn: sqlite3.Connection, session_id: str) -> None:
+    """Delete one session's rows (transcript + FTS + events + chain) on the
+    caller's connection. The caller owns the transaction; this never opens or
+    closes a connection, so a sweep can reuse one conn for many deletes."""
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+    try:
+        row = conn.execute(
+            "SELECT id FROM fts_body WHERE sid = ?",
+            (session_id,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
+            conn.execute("DELETE FROM fts_body WHERE id = ?", (row[0],))
+    except sqlite3.OperationalError:
+        pass  # no FTS5 here — the transcript rows are what matter
+    conn.execute("DELETE FROM session_events WHERE session_id = ?",
+                 (session_id,))
+    conn.execute("DELETE FROM session_chain WHERE session_id = ?",
+                 (session_id,))
+
+
 def delete_session_row(session_id: str) -> bool:
     """Drop one session's rows (transcript + FTS). Best-effort."""
     conn = _open()
@@ -694,23 +714,7 @@ def delete_session_row(session_id: str) -> bool:
         return False
     try:
         with conn:
-            conn.execute("DELETE FROM sessions WHERE session_id = ?",
-                         (session_id,))
-            try:
-                row = conn.execute(
-                    "SELECT id FROM fts_body WHERE sid = ?",
-                    (session_id,)).fetchone()
-                if row:
-                    conn.execute("DELETE FROM sessions_fts WHERE rowid = ?",
-                                 (row[0],))
-                    conn.execute("DELETE FROM fts_body WHERE id = ?",
-                                 (row[0],))
-            except sqlite3.OperationalError:
-                pass
-            conn.execute("DELETE FROM session_events WHERE session_id = ?",
-                         (session_id,))
-            conn.execute("DELETE FROM session_chain WHERE session_id = ?",
-                         (session_id,))
+            _delete_session_conn(conn, session_id)
         return True
     except sqlite3.Error:
         return False
@@ -827,6 +831,79 @@ def prune_stale() -> int:
         return 0
     finally:
         conn.close()
+
+
+def retention_sweep(conn: Optional[sqlite3.Connection] = None) -> dict[str, int]:
+    """Opt-in age x size session retention (0.104.x). Disabled by default.
+
+    A store that silently deletes must never be the default, so every gate is
+    OFF when its env value is 0 (the default). Two independent gates, both
+    checked at sweep time against each session's `updated_at` and event
+    count (the committed `session_chain.chain_len`; a legacy stub row with no
+    chain row counts as 0 messages, so it is a gate-1 candidate when aged):
+
+    1. Small-session expiry — NX_SESSION_RETAIN_SMALL_DAYS (default 0 =
+       disabled): sessions with fewer than NX_SESSION_RETAIN_SMALL_MAX_MSGS
+       events (default 10) AND older than N days are deleted.
+    2. Hard floor — NX_SESSION_RETAIN_FLOOR_MSGS (default 0 = disabled):
+       sessions with >= this many events are NEVER auto-deleted by gate 1,
+       no matter their age (the "100 messages, don't touch them" rule).
+       Optionally NX_SESSION_RETAIN_FLOOR_DAYS (default 0 = disabled): even
+       big sessions expire after this many days; 0 = keep forever. The floor
+       protects gate 1 only — gate 2 applies regardless of size.
+
+    Returns {"expired_small": n, "expired_floor": n}. With every gate
+    disabled this returns zeros without touching the DB. sqlite3.Error never
+    propagates: a failing sweep returns zeros.
+    """
+    small_days = _env_int("NX_SESSION_RETAIN_SMALL_DAYS", 0)
+    small_max = _env_int("NX_SESSION_RETAIN_SMALL_MAX_MSGS", 10)
+    floor_msgs = _env_int("NX_SESSION_RETAIN_FLOOR_MSGS", 0)
+    floor_days = _env_int("NX_SESSION_RETAIN_FLOOR_DAYS", 0)
+    # Fast path: nothing to do, don't even open the store.
+    if small_days <= 0 and floor_days <= 0:
+        return {"expired_small": 0, "expired_floor": 0}
+    if small_days > 0 and small_max <= 0:
+        small_days = 0  # a non-positive size threshold disables gate 1
+    own = conn is None
+    if own:
+        conn = _open()
+    if conn is None:
+        return {"expired_small": 0, "expired_floor": 0}
+    expired_small = 0
+    expired_floor = 0
+    now = time.time()
+    try:
+        rows = conn.execute(
+            "SELECT s.session_id, c.chain_len, s.updated_at FROM sessions s"
+            " LEFT JOIN session_chain c USING (session_id)").fetchall()
+        small: list[str] = []
+        floor: list[str] = []
+        for sid, chain_len, updated_at in rows:
+            n_msgs = int(chain_len) if chain_len is not None else 0
+            age_days = (now - float(updated_at or 0.0)) / 86400.0
+            if (floor_days > 0 and age_days >= floor_days):
+                floor.append(sid)
+                continue
+            if (small_days > 0 and n_msgs < small_max
+                    and age_days >= small_days):
+                if not (floor_msgs > 0 and n_msgs >= floor_msgs):
+                    small.append(sid)
+        if not small and not floor:
+            return {"expired_small": 0, "expired_floor": 0}
+        with conn:
+            for sid in small:
+                _delete_session_conn(conn, sid)
+                expired_small += 1
+            for sid in floor:
+                _delete_session_conn(conn, sid)
+                expired_floor += 1
+    except sqlite3.Error:
+        return {"expired_small": 0, "expired_floor": 0}
+    finally:
+        if own:
+            conn.close()
+    return {"expired_small": expired_small, "expired_floor": expired_floor}
 
 
 def store_stats() -> dict[str, int]:

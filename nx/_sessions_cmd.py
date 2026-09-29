@@ -187,6 +187,9 @@ insensitive) across title, description, preview and id.
                        payloads immediately, enforce the NX_IMAGES_QUOTA_MB
                        cap, and sweep expired/over-quota objects from the
                        shared tool-result store (obsstore). One line per action.
+                       Opt-in retention (off by default) also runs: see
+                       NX_SESSION_RETAIN_SMALL_DAYS / _SMALL_MAX_MSGS and
+                       NX_SESSION_RETAIN_FLOOR_MSGS / _FLOOR_DAYS.
 
 Resume with: nx --resume <n|short-id|title>
 """
@@ -269,6 +272,10 @@ def _cli_prune_sessions(args: list[str]) -> bool:
           f" from {_sessions_dir()}/_images")
     if stats["quota_removed"]:
         print(f"  quota eviction removed {stats['quota_removed']} more payload(s)")
+    if stats.get("expired_small", 0) + stats.get("expired_floor", 0) > 0:
+        print(f"  retention removed {stats['expired_small'] + stats['expired_floor']} "
+              f"session(s) ({stats['expired_small']} small-expired, "
+              f"{stats['expired_floor']} floor-expired)")
     print(f"  {DIM}{stats['images_kept']} payload(s) still referenced by sessions{RESET}")
     if stats.get("obs_removed"):
         print(f"  collected {stats['obs_removed']} expired/unreferenced tool-result "

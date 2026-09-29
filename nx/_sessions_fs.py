@@ -374,6 +374,9 @@ def _write_session_snapshot(
             from . import _sessiondb
             if _sweep_due("prune"):
                 _sessiondb.prune_stale()
+                # Opt-in retention (disabled by default): ride the existing
+                # "prune" gate, no new sweep kind.
+                _sessiondb.retention_sweep()
         except Exception:
             pass
     _maybe_gc_image_sidecars(merged)
@@ -739,6 +742,11 @@ def _prune_sessions_store() -> dict[str, int]:
         rows_pruned = _sessiondb.prune_stale()
     except Exception:
         rows_pruned = 0
+    # 0b. opt-in retention (disabled by default): age x size gates.
+    try:
+        retention = _sessiondb.retention_sweep()
+    except Exception:
+        retention = {"expired_small": 0, "expired_floor": 0}
     # 1. orphaned legacy shards (pre-2.3b store)
     shards_dropped = 0
     try:
@@ -772,7 +780,9 @@ def _prune_sessions_store() -> dict[str, int]:
     return {"shards_dropped": shards_dropped, "images_removed": images_removed,
             "images_kept": kept, "quota_removed": quota_removed,
             "rows_pruned": rows_pruned, "obs_removed": obs_removed,
-            "obs_kept": obs_stats["objects"], "obs_bytes": obs_stats["bytes"]}
+            "obs_kept": obs_stats["objects"], "obs_bytes": obs_stats["bytes"],
+            "expired_small": retention["expired_small"],
+            "expired_floor": retention["expired_floor"]}
 
 
 def _delete_session(session_id: str) -> bool:
