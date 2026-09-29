@@ -356,6 +356,7 @@ line per action.
 | `NX_LINT` | `1` enables the tier-2 `lint_check` tool (default off — 0 schema tokens until enabled; surfaced via `search_tools`) |
 | `NX_LINT_CMD` | fixed lint command lint_check runs verbatim (shell-parsed), overriding the built-in per-ecosystem shapes — e.g. `NX_LINT_CMD="ruff check --select I"` |
 | `NX_LINT_TIMEOUT` | wall-clock ceiling for one `lint_check` call in seconds (default 120) |
+| `NX_PROJECT_TOOLS` | `1` enables project-local tools declared in `.nx/tools/manifest.json` (default `0`). `nx` only reads the manifest while listing tools; it imports a handler module from `.nx/tools/` only after `call_project_tool` validates arguments and, for a `risk: "write"` tool, receives normal user approval. The provider always sees the same two gateway schemas, so project tools do not invalidate the shared tool-schema prompt prefix. |
 | `NX_TODO_FILE` | where `todo_write` mirrors its list so fresh sessions pick up the plan (default `.nx/todo.md` under the project root; empty value disables). A leading `# nx todos` header marks it auto-managed |
 | `NX_DUCKDB_TIMEOUT` | wall-clock ceiling for one `duckdb` tool call in seconds (default 300; `0` = no cap). On timeout the result names `run_bash` (which backgrounds) as the investigation path for a genuinely long analytical query |
 | `NX_DUCKDB_NOTES` | SQL file auto-loaded (`-init`) before every `duckdb` query, so views/macros/types from earlier sessions are present without re-defining them (default `.nx-duckdb-notes.sql` under the project root; missing file = no prologue). The model appends reusable SQL to it with write_file/edit_file — the session-memory idea from duckdb-skills, as a plain file |
@@ -951,6 +952,40 @@ as "no timeout"), so `NX_HTTP_TIMEOUT_READ` never applied to real requests.
 Read-only tools never need approval; state-touching tools (write/edit/bash)
 go through the approval gate above.
 
+### Project tools
+
+Set `NX_PROJECT_TOOLS=1` to expose the stable `search_project_tools` and
+`call_project_tool` gateways. Define project-local handlers in `.nx/tools/`
+and declare them in `.nx/tools/manifest.json`; listing tools reads only this
+JSON file, while calling a tool imports its module on demand. Project code is
+therefore trusted code: enable this only in repositories whose `.nx/tools/`
+contents you trust.
+
+```json
+{
+  "deploy_preview": {
+    "module": "preview",
+    "handler": "deploy_preview",
+    "description": "Create a staging deployment preview.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "environment": {"type": "string", "enum": ["staging"]}
+      },
+      "required": ["environment"],
+      "additionalProperties": false
+    },
+    "risk": "write"
+  }
+}
+```
+
+The corresponding `.nx/tools/preview.py` exports
+`def deploy_preview(environment): ...`. `risk` is `"read"` or `"write"`
+(default: `"write"`); write tools use nx's normal approval prompt and are
+blocked during plan mode. Their individual schemas stay in tool results rather
+than the provider's `tools=` request, preserving the stable schema prefix.
+
 | tool | args | notes |
 | --- | --- | --- |
 | `read_file` | `path`, `offset?`, `limit?` | cat -n style (1-based); `path` may be a list; streams — only the window is held in memory; limit capped by `NX_READ_FILE_MAX_LINES` (default 25000); `.pdf` paths extract to markdown instead of erroring |
@@ -976,6 +1011,8 @@ go through the approval gate above.
 | `final_answer` | `answer` | always-on: end the turn with a final answer instead of leaving the model hanging; also the forced answer when a budget is exhausted |
 | `plan_edit` | `old?`, `new`, `old_lines?`, `write?` | splice/replace the current plan file (`.nx/<slug>.md`); offered only while plan mode is active |
 | `search_tools` | `pattern?` | list tools withheld this turn (gated/tier-2) with their full schemas, so one can be called next turn — read-only, always offered. This is the tier-2 mechanism (0.62.0): a tool that doesn't need to be always-on costs 0 tokens until the model asks for it here |
+| `search_project_tools` | `pattern?` | list enabled project-local tools from `.nx/tools/manifest.json`, including each exact argument schema, without importing the Python handler. Enable with `NX_PROJECT_TOOLS=1` |
+| `call_project_tool` | `name`, `arguments` | validate and run one tool returned by `search_project_tools`. The manifest's `risk: "write"` tools require normal approval; `risk: "read"` tools are trusted as read-only declarations |
 | `web_fetch` | `query?`, `url?` | keyless web tool (default ON; `NX_WEBFETCH=0` disables): exactly one of `query` (web search via SearXNG when `NX_SEARX_URL` is set, else DuckDuckGo-lite; up to 10 title/URL/snippet results) or `url` (page fetched GET-only and stripped to readable text, links as `[text](url)`, truncated at `NX_WEBFETCH_MAX_BYTES`). Cached globally for 7 days under `<NX_HOME>/web-cache/` and search-throttled to stay polite to the free endpoints; see the `NX_WEBFETCH` entry under Configuration |
 | `todo_write` | `todos` | rewrites whole list `[{text, status}]`; no per-item id |
 | `memory_write` | `title`, `body`, `scope?`, `kind?` | save a durable memory note (`kind`: `preference` for a durable style/behavior note, `fact` otherwise); requires confirmation |

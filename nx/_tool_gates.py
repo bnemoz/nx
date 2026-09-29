@@ -18,6 +18,7 @@ Split out of `_dispatch.py` (which keeps the DISPATCH table and run_tool)."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -71,6 +72,11 @@ _TOOL_GATES: dict[str, Any] = {
     # lint_check (0.94.0): tier-2, opt-in via NX_LINT=1. Read-only lint over
     # edited files without an approval-gated run_bash round-trip.
     "lint_check": lambda: bool(getattr(_m_safe(), "NX_LINT", 0)),
+    # Stable gateways for project-local manifest tools. They are opt-in, so
+    # ordinary sessions retain their existing prompt floor; once enabled the
+    # two generic schemas never vary with the project's actual tool catalog.
+    "search_project_tools": lambda: bool(os.environ.get("NX_PROJECT_TOOLS", "") not in ("", "0", "false", "False")),
+    "call_project_tool": lambda: bool(os.environ.get("NX_PROJECT_TOOLS", "") not in ("", "0", "false", "False")),
 }
 
 # Per-gate refusal text (the "why it's closed and what to do instead" line the
@@ -86,6 +92,8 @@ _GATE_REFUSALS: dict[str, str] = {
     "web_fetch": "(NX_WEBFETCH is off, or the gate has not opened). Work from local files, or ask the user to paste the relevant page/search results.",
     "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
     "duckdb": "(NX_TOOL_FLOOR_SLIM=1 — the SQL tool is tier-2 in this session to keep the shared floor small). Ask search_tools for its schema, or shell out to the duckdb CLI with run_bash.",
+    "search_project_tools": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",
+    "call_project_tool": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}

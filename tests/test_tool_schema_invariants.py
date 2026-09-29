@@ -89,8 +89,8 @@ def test_every_tool_appears_once():
     assert len(names) == len(set(names)), f"duplicate tool names: {names}"
     # test_background_gating pins the exact count when a tool is added/removed.
     # 0.87.0: duckdb joins (27). 0.94.0: lint_check joins (28).
-    # 0.102.0: recall_lessons joins (29).
-    assert len(names) == 29
+    # 0.103.22: stable project-tool search/call gateways join (31).
+    assert len(names) == 31
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -146,8 +146,11 @@ def test_property_shapes_are_the_flat_subset(tool):
             # the one documented object-of-scalars property (action fusion's
             # then_run, nx/_fusion.py): same shape contract as the
             # array-of-objects case -- flat scalar properties, required keys.
-            assert name in ("write_file", "edit_file", "multi_edit") and prop == "then_run", (
+            assert ((name in ("write_file", "edit_file", "multi_edit") and prop == "then_run")
+                    or (name == "call_project_tool" and prop == "arguments")), (
                 f"{name}.{prop}: unexpected object property")
+            if name == "call_project_tool":
+                continue
             inner = schema.get("properties") or {}
             assert schema.get("required"), f"{name}.{prop}: object property should require its keys"
             for ik, isch in inner.items():

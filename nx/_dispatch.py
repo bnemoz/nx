@@ -49,6 +49,7 @@ from ._gitcommit import git_commit
 from ._obs import obs_recall
 from ._webfetch import web_fetch
 from ._lint import lint_check
+from ._project_tools import search_project_tools, call_project_tool
 from ._toolblocks import ToolBlock, current_recorder, tool_accent, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
 
@@ -88,6 +89,8 @@ DISPATCH = {
 # defined with the tiered registry below; registered here so `nx`'s import-time
 # `from ._dispatch import (...)` (and any test table) sees one flat dispatch map.
 DISPATCH["search_tools"] = lambda pattern="": search_tools(pattern)
+DISPATCH["search_project_tools"] = search_project_tools
+DISPATCH["call_project_tool"] = call_project_tool
 
 # Observation pack recall tool (0.67.0): pages an archived large tool result
 # back verbatim. Schema appended to TOOLS in __init__.py; gated to appear

@@ -73,8 +73,8 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     names = [t["function"]["name"] for t in m.TOOLS]
     assert names.count("wait_background") == 1
     # ...+ obs_recall + web_fetch (0.70.0, tier-2) + duckdb (0.87.0)
-    # + lint_check (0.94.0) + recall_lessons (0.102.0)
-    assert len(m.TOOLS) == 29
+    # + lint_check (0.94.0) + recall_lessons (0.102.0) + stable project gateways
+    assert len(m.TOOLS) == 31
 
 
 # ---------------------------------------------------------------------------
