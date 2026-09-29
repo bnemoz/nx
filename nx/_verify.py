@@ -142,15 +142,21 @@ def _is_verify_job(job: dict[str, Any]) -> bool:
         and job.get("owner_pid") == os.getpid()
 
 
-def _stage_verify_outcome() -> None:
+def _stage_verify_outcome(jobs: list[dict[str, Any]] | None = None) -> None:
     """Scan tracked bg jobs for a finished NX_VERIFY_CMD launch and stage its
     outcome as _PENDING_VERIFY_NOTICE (once per pid). Called from run_tool()'s
-    first-tool-of-turn scan; flushed by _flush_pending_background_notice."""
+    first-tool-of-turn scan; flushed by _flush_pending_background_notice.
+
+    *jobs* is an already-computed list_bg_jobs() result a caller can share
+    (the wake sweep scans the pid->log map once and threads it through);
+    None scans it here."""
     from . import _notices
     if _notices.get("_PENDING_VERIFY_NOTICE") or not verify_enabled():
         return
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
-    for j in list_bg_jobs():
+    if jobs is None:
+        jobs = list_bg_jobs()
+    for j in jobs:
         if not _is_verify_job(j) or j.get("alive"):
             continue
         pid = str(j.get("pid", ""))

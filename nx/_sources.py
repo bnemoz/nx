@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from typing import Any
 
@@ -27,6 +28,11 @@ from ._openai_client import OpenAI
 
 from ._ansi import RESET, C
 from . import _state as st
+
+# A slow/dead endpoint must not block the /source model dropdown on every
+# keystroke: a failed list_model_ids() is remembered for this long and served
+# from cache as [] before the fetch is retried (PERF).
+_MODEL_IDS_FAIL_TTL = 10.0
 
 # --- model sources ----------------------------------------------------------
 # nx talks to any OpenAI-compatible endpoint. A "source" bundles a
@@ -102,6 +108,11 @@ class Source:
         # (None = not yet tried) so the /source arg-completion dropdown in
         # _chatbox.py doesn't hit the network on every keystroke.
         self._model_ids: list[str] | None = None
+        # Negative cache (PERF): a slow/dead endpoint would otherwise block the
+        # /source arg-completion dropdown on every keystroke while its fetch
+        # times out. Remember the failure with a timestamp and serve [] from
+        # cache for _MODEL_IDS_FAIL_TTL seconds before retrying.
+        self._model_ids_failed_at: float | None = None
         # Per-model "make this server separate its reasoning" body kwargs, as
         # probed by nx/_thinking.py (see ensure_thinking_probe). Maps model id
         # → the extra_body dict that flips the template's thinking toggle on
@@ -413,12 +424,20 @@ class Source:
             return list(self._pinned_model_ids)
         if self._model_ids is not None and not force:
             return self._model_ids
+        if not force and self._model_ids_failed_at is not None \
+                and (time.monotonic() - self._model_ids_failed_at) < _MODEL_IDS_FAIL_TTL:
+            return []
         try:
             data = self.client.models.list(timeout=3).data
             ids = sorted(m.id for m in data if getattr(m, "id", None))
         except Exception:
+            # Negative-cache the failure so the next keystrokes don't re-pay
+            # the timeout; a later retry (past the TTL, or force=True) can
+            # still succeed once the server is up.
+            self._model_ids_failed_at = time.monotonic()
             return []
         self._model_ids = ids
+        self._model_ids_failed_at = None
         return ids
 
     def _ctx_from_models(self, mid: str | None) -> int | None:

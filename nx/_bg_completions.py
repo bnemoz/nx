@@ -18,19 +18,24 @@ from . import _notices
 _BG_SCAN_LOCK = threading.Lock()
 
 
-def _scan_background_completions() -> str | None:
+def _scan_background_completions(jobs=None) -> str | None:
     """One-time notice for tracked background jobs that finished since the
     model last looked (checked on the first tool call of each turn).
 
     The model must otherwise REMEMBER to wait_background/read_file a job it
     backgrounded turns ago; a build that failed 20 minutes ago doesn't
     announce itself. Returns the note text (or None): lists finished jobs with
-    exit codes once, then marks them seen — no repeated noise."""
+    exit codes once, then marks them seen — no repeated noise.
+
+    *jobs* is an already-computed list_bg_jobs() result a caller can share
+    (wake_due scans the map once and threads it through the whole sweep);
+    None scans it here."""
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
     from ._verify import _is_verify_job  # verify jobs report via _stage_verify_outcome instead
     with _BG_SCAN_LOCK:
         try:
-            jobs = list_bg_jobs()
+            if jobs is None:
+                jobs = list_bg_jobs()
         except Exception:
             return None
         mine = os.getpid()
@@ -100,13 +105,13 @@ def _stage_bg_note(note: str) -> None:
     _notices.set_("_PENDING_BG_COMPLETION_NOTICE", note)
 
 
-def _stage_verify_outcome_safe() -> None:
+def _stage_verify_outcome_safe(jobs=None) -> None:
     """The verify half of the sweep, split out so run_tool()'s inline call and
     _run_bg_completion_scan share one implementation (NX_VERIFY_CMD job just
     finished? Its outcome is staged as its own pending notice)."""
     from ._verify import _stage_verify_outcome
     try:
-        _stage_verify_outcome()
+        _stage_verify_outcome(jobs=jobs)
     except Exception:
         pass
 
@@ -121,14 +126,17 @@ def _stage_subagent_completions_safe() -> None:
         pass
 
 
-def _run_bg_completion_scan() -> None:
+def _run_bg_completion_scan(jobs=None) -> None:
     """The completion sweep run_tool() runs on the first tool call of a turn:
     scan finished bg jobs, NX_VERIFY_CMD outcomes, and finished async agents,
     staging each as its one-time [Runtime note]. The wake path shares it —
     see _autowake.wake_due for why a wake turn must not fire on an empty
-    sweep."""
-    note = _scan_background_completions()
+    sweep.
+
+    *jobs* lets a caller (wake_due) pass the list_bg_jobs() result it already
+    paid for, so one keystroke scans the pid->log map once, not three times."""
+    note = _scan_background_completions(jobs=jobs)
     if note:
         _stage_bg_note(note)
-    _stage_verify_outcome_safe()
+    _stage_verify_outcome_safe(jobs=jobs)
     _stage_subagent_completions_safe()

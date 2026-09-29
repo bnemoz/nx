@@ -244,6 +244,16 @@ _TREE_FILTER_CACHE: tuple[str, str, list[tuple[str, str, str, int]]] | None = No
 _TREE_RESULT_CACHE: tuple[str, str, list[str]] | None = None  # (root, prefix, top-8)
 _PROJECT_ROOT_CACHE: tuple[str, str] | None = None  # (cwd, root)
 
+# Stale-while-revalidate (PERF): on TTL expiry a keystroke must NOT pay the
+# full `_walk_tree()` (up to _TREE_SCAN_CAP entries) before redrawing -- that is
+# the 38-56 ms cold hit PF-01 first fixed. Instead the stale tree is returned
+# immediately and a single daemon thread rebuilds it; the lock + flag keep
+# concurrent keystrokes from spawning duplicate rebuilds, and the generation
+# counter drops a rebuild whose result was invalidated mid-walk.
+_TREE_REVALIDATE_LOCK = threading.Lock()
+_TREE_REVALIDATING = False
+_TREE_CACHE_GEN = 0
+
 # Bitset of which characters an entry's path contains, for a cheap
 # necessary-condition rejection before the (Python-loop) fuzzy scorer. A
 # subsequence match implies every query char is present, so dropping entries
@@ -275,10 +285,14 @@ def _bust_tree_cache() -> None:
     """Drop the completion caches (called on each prompt entry so files created
     mid-session show up, and available to any caller that knows the tree moved)."""
     global _TREE_CACHE, _TREE_FILTER_CACHE, _TREE_RESULT_CACHE, _PROJECT_ROOT_CACHE
+    global _TREE_CACHE_GEN
     _TREE_CACHE = None
     _TREE_FILTER_CACHE = None
     _TREE_RESULT_CACHE = None
     _PROJECT_ROOT_CACHE = None
+    # Invalidate any in-flight background revalidation: its result was built
+    # against a tree snapshot this bust just discarded.
+    _TREE_CACHE_GEN += 1
 
 
 def _project_root() -> str:
@@ -296,10 +310,54 @@ def _project_root() -> str:
     return root
 
 
+def _walk_tree_entries(root: str) -> list[tuple[str, str, str, int]]:
+    """`_walk_tree()` plus the per-entry derived data (lowercased base/path,
+    char mask) the fuzzy scan consumes -- computed once per walk."""
+    entries = []
+    for rel in _walk_tree(root):
+        path_l = rel.lower()
+        entries.append((rel, path_l.rstrip("/").rsplit("/", 1)[-1], path_l,
+                        _char_mask(path_l)))
+    return entries
+
+
+def _revalidate_tree(root: str, mtime: float) -> None:
+    """Stale-while-revalidate refresh: rebuild the tree cache off the keystroke
+    path in a daemon thread. Single-flight (lock + flag) so a burst of
+    keystrokes past the TTL spawns one rebuild, not one per key."""
+    global _TREE_REVALIDATING
+    with _TREE_REVALIDATE_LOCK:
+        if _TREE_REVALIDATING:
+            return
+        _TREE_REVALIDATING = True
+    gen = _TREE_CACHE_GEN
+
+    def _worker() -> None:
+        global _TREE_CACHE, _TREE_REVALIDATING
+        try:
+            entries = _walk_tree_entries(root)
+            # Skip the swap if the cache was busted while we walked: the new
+            # snapshot is already stale by the caller's reckoning.
+            if _TREE_CACHE_GEN == gen:
+                _TREE_CACHE = (root, mtime, time.monotonic() + _TREE_CACHE_TTL, entries)
+        except Exception:
+            pass  # a failed refresh just leaves the stale tree in place
+        finally:
+            with _TREE_REVALIDATE_LOCK:
+                _TREE_REVALIDATING = False
+
+    threading.Thread(target=_worker, name="nx-tree-revalidate", daemon=True).start()
+
+
 def _cached_tree(root: str) -> list[tuple[str, str, str, int]]:
     """`_walk_tree(root)` behind a short TTL + root-mtime guard so a keystroke
     never pays the BFS scan (PERF.md PF-01), with the per-entry derived data
-    (lowercased base/path, char mask) computed once per walk."""
+    (lowercased base/path, char mask) computed once per walk.
+
+    Stale-while-revalidate: once the TTL has expired the stale entries are
+    returned immediately and a background thread refreshes them (a cold or
+    mtime-changed tree still walks synchronously, so the first completion and
+    post-write completions stay correct)."""
     global _TREE_CACHE
     now = time.monotonic()
     try:
@@ -308,13 +366,12 @@ def _cached_tree(root: str) -> list[tuple[str, str, str, int]]:
         mtime = 0.0
     if _TREE_CACHE is not None:
         c_root, c_mtime, deadline, entries = _TREE_CACHE
-        if c_root == root and c_mtime == mtime and now < deadline:
+        if c_root == root and c_mtime == mtime:
+            if now < deadline:
+                return entries
+            _revalidate_tree(root, mtime)
             return entries
-    entries = []
-    for rel in _walk_tree(root):
-        path_l = rel.lower()
-        entries.append((rel, path_l.rstrip("/").rsplit("/", 1)[-1], path_l,
-                        _char_mask(path_l)))
+    entries = _walk_tree_entries(root)
     _TREE_CACHE = (root, mtime, now + _TREE_CACHE_TTL, entries)
     return entries
 

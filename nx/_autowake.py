@@ -125,21 +125,26 @@ def _finished_unstaged_subagents() -> list[str]:
         return []
 
 
-def _finished_unseen_bg_jobs() -> list[str]:
+def _finished_unseen_bg_jobs(jobs=None) -> list[str]:
     """Finished bg-bash pids the completion sweep hasn't announced yet.
 
     Mirrors _dispatch._scan_background_completions' filter (this process's
     jobs only, verify jobs excluded) but read-only: it never mutates
-    _BG_NOTICE_SEEN, so the real sweep still announces them later."""
+    _BG_NOTICE_SEEN, so the real sweep still announces them later.
+
+    *jobs* lets a caller that already ran list_bg_jobs() (wake_due) share that
+    single scan instead of paying a second listdir+json+tail pass."""
     try:
         from ._bash_jobs import list_bg_jobs
         from ._verify import _is_verify_job
+        if jobs is None:
+            jobs = list_bg_jobs()
         mine = os.getpid()
         seen = getattr(st, "_BG_NOTICE_SEEN", None)
         if seen is None:
             seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
         out = []
-        for j in list_bg_jobs():
+        for j in jobs:
             pid = str(j.get("pid", ""))
             if not pid or pid in seen or j.get("alive"):
                 continue
@@ -198,16 +203,32 @@ def wake_due() -> bool:
     # itself instead of re-waking forever with nothing to deliver. A sweep
     # that comes back empty means there is genuinely nothing to say: don't
     # wake on work that has already been reported.
+    # Scan the pid->log map once and share it with the sweep below: the sweep
+    # and _finished_unseen_bg_jobs each ran their own list_bg_jobs() (listdir +
+    # json.load per map + a log tail per job) — three full scans per keystroke
+    # was a measurable share of the poll cost (PERF).
+    try:
+        from ._bash_jobs import list_bg_jobs
+        jobs = list_bg_jobs()
+    except Exception:
+        jobs = None
+    if not jobs:
+        # No bg-pid maps at all: the sweep can only ever announce a bg job, a
+        # verify outcome, or a finished async agent — and the first two cannot
+        # exist without a map. Skip the expensive sweep and report on the async
+        # agents directly. A scan that found no map files genuinely means
+        # "nothing left to say" — no wake.
+        return bool(_finished_unstaged_subagents())
     try:
         from ._dispatch import _run_bg_completion_scan
-        _run_bg_completion_scan()
+        _run_bg_completion_scan(jobs=jobs)
     except Exception:
         pass
     if _any_pending_notice():
         return True
     # Anything left here is finished-but-unstaged work the sweep could not
     # announce (e.g. a sub-agent record with no answer) — still wake-worthy.
-    return bool(_finished_unstaged_subagents() or _finished_unseen_bg_jobs())
+    return bool(_finished_unstaged_subagents() or _finished_unseen_bg_jobs(jobs=jobs))
 
 
 # --- the poller ---------------------------------------------------------------
