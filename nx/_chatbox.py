@@ -7,7 +7,7 @@ framed, multi-line editor:
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
     Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
-    F1 for /help, F2 is shorthand for /compress
+    F1 for /help, Ctrl+S is shorthand for /compress
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -610,7 +610,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · F2 compress · shift+tab {mode}"
+        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · ^S compress · shift+tab {mode}"
         max_hints = max(0, box_w - 11)
         truncated = _str_width(hints) > max_hints
         if truncated:
@@ -836,12 +836,6 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         if seq in ("[13;2u", "[27;2;13~"):
             insert_text("\n")
             return
-        if seq in ("OQ", "[12~"):
-            # F2 -> /compress. Single unambiguous encoding (SS3 / CSI form),
-            # not grabbed by the desktop or terminal, and no byte-split Esc
-            # to fall into the KeyboardInterrupt branch.
-            finish()
-            return "/compress"
         if seq in ("[Z", "[1;2Z"):
             st.toggle_yolo()
             return
@@ -941,6 +935,14 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 elif c == "\x0c":
                     finish()
                     return "/clear"
+                elif c == "\x13":
+                    # Ctrl+S -> /compress. raw_mode clears IXON, so the
+                    # terminal hands the byte over instead of using it as
+                    # the output-flow stop; single byte, unambiguous (the
+                    # old Ctrl+Alt+C was byte-split into Esc + Ctrl-C and
+                    # quit the REPL).
+                    finish()
+                    return "/compress"
                 elif c == "\x11":
                     finish()
                     return "/exit"
