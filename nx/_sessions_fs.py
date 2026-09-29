@@ -327,14 +327,14 @@ def _write_session_snapshot(
     store_messages = _store_form_messages(messages)
     try:
         from . import _sessiondb
-        ok = _sessiondb.store_session(session_id, store_messages, meta)
+        merged = _sessiondb.store_session(session_id, store_messages, meta)
     except Exception:
-        ok = False
-    if not ok:
+        merged = None
+    if merged is None:
         return
     if _EXITING:
-        # Cheap exit form: no re-read (nothing will consume the merged view
-        # before the process dies) and no GC sweeps (they exist to bound
+        # Cheap exit form: no merge re-read (nothing will consume the merged
+        # view before the process dies) and no GC sweeps (they exist to bound
         # growth across sessions; the next save re-runs them). FTS is kept:
         # a session searched right after a restart must see its last turn.
         if update_index:
@@ -347,24 +347,24 @@ def _write_session_snapshot(
             except Exception:
                 pass
         return
-    # Post-write re-read: the stored transcript is what load returns, and
-    # the merged result covers another writer's turns the merge preserved
-    # (so the image-GC live-set protects their payloads too).
-    stored: dict[str, Any] = {}
-    try:
-        from . import _sessiondb
-        stored = _sessiondb.load_session(session_id) or {}
-    except Exception:
-        stored = {}
-    merged = stored.get("messages")
+    # store_session returned the authoritative merged list, which covers
+    # another writer's turns the merge preserved (so the image-GC live-set
+    # protects their payloads too).
     if not isinstance(merged, list):
         merged = store_messages
     if update_index:
         try:
             from . import _sessiondb
-            _sessiondb.refresh_fts(session_id, merged,
-                                   title=stored.get("title"),
-                                   description=stored.get("description"))
+            stored_meta: dict[str, Any] = {}
+            try:
+                stored_meta = _sessiondb._session_meta(session_id)
+            except Exception:
+                stored_meta = {}
+            _sessiondb.refresh_fts(
+                session_id, merged,
+                title=(meta or {}).get("title") or stored_meta.get("title"),
+                description=(meta or {}).get("description")
+                or stored_meta.get("description"))
         except Exception:
             pass
         # Stale FTS rows are swept here too -- amortized once per

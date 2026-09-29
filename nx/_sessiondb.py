@@ -110,6 +110,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             "session_id UNINDEXED, title, description, body, mtime UNINDEXED)")
     except sqlite3.OperationalError:
         pass
+    # Append-only event log (0.104.x): the authoritative transcript lives in
+    # per-message rows; the sessions.data blob becomes a lagging cache (only
+    # rebuilt on merge/compaction/fork/migration). session_chain is the
+    # per-session index into the log.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_events("
+        "session_id TEXT NOT NULL,"
+        "seq INTEGER NOT NULL,"
+        "msg TEXT NOT NULL,"
+        "PRIMARY KEY(session_id, seq)) WITHOUT ROWID")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_chain("
+        "session_id TEXT PRIMARY KEY,"
+        "chain_len INTEGER NOT NULL,"
+        "updated_at REAL)")
     conn.commit()
 
 
@@ -302,86 +317,250 @@ def _store_path_exists() -> bool:
 # --- load ------------------------------------------------------------------
 
 def load_session(session_id: str) -> Optional[dict[str, Any]]:
-    """The transcript dict for `session_id`, or None."""
+    """The transcript dict for `session_id`, or None.
+
+    0.104.x: when a session_chain row exists, the messages come from the
+    append-only event log (the authoritative store) while the metadata
+    (title, revision, ...) comes from the blob cache with the live
+    revision/updated_at taken from the indexed columns (the blob cache is
+    stale between rebuilds); a missing blob degrades to a synthesized dict.
+    """
     _ensure_migrated()
     conn = _open()
     if conn is None:
         return None
     try:
         row = conn.execute(
-            "SELECT data FROM sessions WHERE session_id = ?",
-            (session_id,)).fetchone()
+            "SELECT data, revision, updated_at FROM sessions"
+            " WHERE session_id = ?", (session_id,)).fetchone()
+        chain = _read_chain(conn, session_id)
+        events = _read_events(conn, session_id) if chain is not None else None
     except sqlite3.Error:
         return None
     finally:
         conn.close()
+    if chain is not None:
+        out = _row_to_data(session_id, row[0]) if row else {}
+        if out is None:
+            out = {}
+        out["id"] = session_id
+        out["messages"] = events or []
+        if row:
+            if row[1] is not None:
+                out["revision"] = int(row[1])
+            if row[2] is not None:
+                out["updated_at"] = float(row[2])
+        out.setdefault("updated_at", 0.0)
+        return out
     if not row:
         return None
     return _row_to_data(session_id, row[0])
 
 
-# --- write -----------------------------------------------------------------
+def _session_meta(session_id: str) -> dict[str, Any]:
+    """Cheap metadata-only view (title/description/cwd/...) for the save
+    path's FTS refresh — a JSON parse of the one blob, no event-log reads
+    (the caller already holds the authoritative merged message list)."""
+    _ensure_migrated()
+    conn = _open()
+    if conn is None:
+        return {}
+    try:
+        row = conn.execute(
+            "SELECT data FROM sessions WHERE session_id = ?",
+            (session_id,)).fetchone()
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    if not row:
+        return {}
+    return _row_to_data(session_id, row[0]) or {}
+
+
+# --- event log helpers ------------------------------------------------------
+
+def _read_chain(conn: sqlite3.Connection, session_id: str) -> Optional[int]:
+    """The committed chain length for a session (None = no chain row)."""
+    row = conn.execute(
+        "SELECT chain_len FROM session_chain WHERE session_id = ?",
+        (session_id,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def _read_events(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    """The committed event-log messages, oldest first. A corrupt/unparseable
+    event degrades that turn to a skipped slot (a rebuild heals the gap)."""
+    out: list[dict[str, Any]] = []
+    for (blob,) in conn.execute(
+            "SELECT msg FROM session_events WHERE session_id = ?"
+            " ORDER BY seq", (session_id,)):
+        try:
+            m = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(m, dict):
+            out.append(m)
+    return out
+
+
+# --- write ------------------------------------------------------------------
+
+def _store_session_txn(
+    session_id: str,
+    messages: list[dict[str, Any]],
+    meta: Optional[dict[str, Any]],
+    force_rebuild: bool = False,
+) -> Optional[list[dict[str, Any]]]:
+    """One BEGIN IMMEDIATE attempt. Returns the authoritative merged message
+    list, or None when the store is unavailable."""
+    conn = _open()
+    if conn is None:
+        return None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            now = time.time()
+            from ._sessions_fs import _merge_session_messages
+            chain_len = _read_chain(conn, session_id)
+            row = conn.execute(
+                "SELECT data, revision FROM sessions WHERE session_id = ?",
+                (session_id,)).fetchone()
+            existing: dict[str, Any] = {}
+            if row:
+                parsed = _row_to_data(session_id, row[0])
+                if parsed:
+                    existing = parsed
+            # the indexed revision is the live counter (the blob cache is
+            # stale between rebuilds)
+            live_revision = int(row[1] or 0) if row else 0
+
+            fast = False
+            if (not force_rebuild and chain_len is not None
+                    and 0 < chain_len <= len(messages)):
+                tail = conn.execute(
+                    "SELECT msg FROM session_events"
+                    " WHERE session_id = ? AND seq = ?",
+                    (session_id, chain_len - 1)).fetchone()
+                if tail is not None:
+                    try:
+                        fast = json.loads(tail[0]) == messages[chain_len - 1]
+                    except (ValueError, TypeError):
+                        fast = False
+
+            if fast:
+                # Fast append: new events only; the data blob is a lagging
+                # cache and is deliberately NOT rewritten.
+                for i, m in enumerate(messages[chain_len:], start=chain_len):
+                    conn.execute(
+                        "INSERT INTO session_events(session_id, seq, msg)"
+                        " VALUES (?,?,?)",
+                        (session_id, i,
+                         json.dumps(m, ensure_ascii=False)))
+                merged = list(messages)
+            else:
+                # Full rebuild (no chain / compaction / fork / shorter than
+                # chain / tail mismatch / collision retry): merge, collapse
+                # the chain, rewrite the blob cache.
+                if chain_len is not None:
+                    existing_msgs: list[dict[str, Any]] = _read_events(
+                        conn, session_id)
+                else:
+                    existing_msgs = existing.get("messages") or []
+                merged = _merge_session_messages(existing_msgs, messages)
+                conn.execute(
+                    "DELETE FROM session_events WHERE session_id = ?",
+                    (session_id,))
+                for i, m in enumerate(merged):
+                    conn.execute(
+                        "INSERT INTO session_events(session_id, seq, msg)"
+                        " VALUES (?,?,?)",
+                        (session_id, i,
+                         json.dumps(m, ensure_ascii=False)))
+                data = dict(existing)
+                data["id"] = session_id
+                data["messages"] = merged
+                data["created_at"] = existing.get("created_at", now)
+                data["updated_at"] = now
+                data["revision"] = live_revision + 1
+                if meta:
+                    for k, v in meta.items():
+                        if v is not None:
+                            data[k] = v
+                conn.execute(
+                    "INSERT OR REPLACE INTO sessions"
+                    " (session_id, data, updated_at, revision, title, cwd,"
+                    "  model, source) VALUES (?,?,?,?,?,?,?,?)",
+                    _data_to_row(session_id, data))
+
+            # Shared tail: chain upsert + indexed meta columns. On a rebuild
+            # the blob INSERT OR REPLACE already set the indexed columns, so
+            # only the chain row is written; on a fast append the blob cache
+            # is stale by design and only the indexed columns are touched.
+            conn.execute(
+                "INSERT OR REPLACE INTO session_chain"
+                " (session_id, chain_len, updated_at) VALUES (?,?,?)",
+                (session_id, len(merged), now))
+            if fast:
+                # Only the columns the caller actually supplied may change —
+                # the blob cache's values are stale, so defaulting to them
+                # here could regress a title another writer just set.
+                sets = ["updated_at = ?", "revision = COALESCE(revision, 0) + 1"]
+                vals: list[Any] = [now]
+                for col in ("title", "cwd", "model", "source"):
+                    v = (meta or {}).get(col)
+                    if v is not None:
+                        sets.append(f"{col} = ?")
+                        vals.append(v)
+                vals.append(session_id)
+                conn.execute(
+                    f"UPDATE sessions SET {', '.join(sets)}"
+                    " WHERE session_id = ?", vals)
+            conn.commit()
+            return merged
+        except Exception:
+            conn.rollback()
+            raise
+    except sqlite3.IntegrityError:
+        # fast-path insert collided with a concurrent writer's event: let
+        # store_session roll back and retry as a full rebuild
+        raise
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
 
 def store_session(
     session_id: str,
     messages: list[dict[str, Any]],
     meta: Optional[dict[str, Any]] = None,
-) -> bool:
-    """Insert/replace one session row — the old _write_session critical
+) -> Optional[list[dict[str, Any]]]:
+    """Insert/append one session's transcript — the old _write_session critical
     section, in one BEGIN IMMEDIATE transaction (the writer lock the old
     per-file flock provided).
 
-    The committed transcript is re-read *inside* the transaction and
-    merged against the caller's snapshot via _merge_session_messages, so a
-    stale writer (e.g. a background description refresh) appends its turns
-    instead of clobbering another process's. Meta keys the caller supplies
-    win over stored ones; created_at/revision come from the stored row.
+    0.104.x: the authoritative transcript is the append-only event log
+    (session_events + session_chain); the sessions.data blob is a lagging
+    cache. A fast append (the committed chain tail matches the caller's
+    prefix) inserts only the new events and updates the indexed columns —
+    the blob is NOT rewritten. A full rebuild (compaction, fork, migration,
+    shorter than the chain, tail mismatch) merges via
+    _merge_session_messages, collapses the chain, and rewrites the blob.
 
-    Returns True on success (False = store unavailable; callers treat the
-    session as unsaved-but-alive, same as the old failed file write)."""
+    Returns the authoritative merged message list on success (None = store
+    unavailable; old truthiness checks still work)."""
     _ensure_migrated()
-    conn = _open()
-    if conn is None:
-        return False
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            existing: dict[str, Any] = {}
-            row = conn.execute(
-                "SELECT data FROM sessions WHERE session_id = ?",
-                (session_id,)).fetchone()
-            if row:
-                parsed = _row_to_data(session_id, row[0])
-                if parsed:
-                    existing = parsed
-            now = time.time()
-            from ._sessions_fs import _merge_session_messages
-            merged = _merge_session_messages(
-                existing.get("messages") or [], messages)
-            data = dict(existing)
-            data["id"] = session_id
-            data["messages"] = merged
-            data["created_at"] = existing.get("created_at", now)
-            data["updated_at"] = now
-            data["revision"] = int(existing.get("revision") or 0) + 1
-            if meta:
-                for k, v in meta.items():
-                    if v is not None:
-                        data[k] = v
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions"
-                " (session_id, data, updated_at, revision, title, cwd,"
-                "  model, source) VALUES (?,?,?,?,?,?,?,?)",
-                _data_to_row(session_id, data))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        return True
+        merged = _store_session_txn(session_id, messages, meta)
     except sqlite3.Error:
-        return False
-    finally:
-        conn.close()
+        # A collision on the fast-path insert (another writer extended the
+        # chain after our tail check): retry once as a full rebuild — the
+        # tail still matches, so the fast path must be disabled or it would
+        # collide with the same committed event a second time.
+        return _store_session_txn(session_id, messages, meta, force_rebuild=True)
+    return merged
+
 
 
 # --- search index (FTS5) ------------------------------------------------------
@@ -438,6 +617,10 @@ def delete_session_row(session_id: str) -> bool:
                              (session_id,))
             except sqlite3.OperationalError:
                 pass
+            conn.execute("DELETE FROM session_events WHERE session_id = ?",
+                         (session_id,))
+            conn.execute("DELETE FROM session_chain WHERE session_id = ?",
+                         (session_id,))
         return True
     except sqlite3.Error:
         return False
@@ -491,11 +674,36 @@ def iter_rows() -> list[tuple[str, Optional[dict[str, Any]]]]:
         return []
     try:
         rows = conn.execute("SELECT session_id, data FROM sessions").fetchall()
+        chains = {r[0] for r in conn.execute(
+            "SELECT session_id FROM session_chain")}
     except sqlite3.Error:
         return []
     finally:
         conn.close()
-    return [(sid, _row_to_data(sid, blob)) for sid, blob in rows]
+    out: list[tuple[str, Optional[dict[str, Any]]]] = []
+    for sid, blob in rows:
+        data = _row_to_data(sid, blob)
+        if sid in chains:
+            # Event-log-backed: materialize messages from the events so the
+            # live-set sees appended-but-not-yet-cached turns.
+            try:
+                conn2 = _open()
+                if conn2 is not None:
+                    try:
+                        events = _read_events(conn2, sid)
+                    finally:
+                        conn2.close()
+                else:
+                    events = None
+            except sqlite3.Error:
+                events = None
+            if events is not None:
+                base = dict(data or {})
+                base["id"] = sid
+                base["messages"] = events
+                data = base
+        out.append((sid, data))
+    return out
 
 
 def prune_stale() -> int:
