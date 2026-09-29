@@ -172,27 +172,36 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
     # worktree != HEAD (live WIP, the reported residual bug) keeps the change
     # as staged without a phantom. The worktree file itself is never touched.
     wt: dict[str, str] = {}
-    guarded = True
     if paths:
         hout, herr = _git(repo, ["hash-object", "--", *paths], timeout)
         if herr or not hout:
-            guarded = False  # can't verify; sync every path as before
-        else:
-            hashes = hout.split()
-            # A short/misaligned hash list must NOT fall through to the
-            # positional zip: writing HEAD's blob for a path whose worktree
-            # file differs stages the WIP wrong — the exact MM signature.
-            # Bail and leave the shared index for the normal add/commit path.
-            if len(hashes) != len(paths):
-                return
-            for p, h in zip(paths, hashes):
-                wt[p] = h
+            # Can't verify ANY worktree blob: the old unguarded fallback
+            # wrote HEAD's blob for every path, staging HEAD content over a
+            # worktree file that differs — the exact MM signature this sync
+            # exists to remove. Skip the whole sync instead; the shared index
+            # keeps whatever another session staged for the normal add path.
+            return
+        hashes = hout.split()
+        # A short/misaligned hash list must NOT fall through to the
+        # positional zip: writing HEAD's blob for a path whose worktree
+        # file differs stages the WIP wrong — the exact MM signature.
+        # Bail and leave the shared index for the normal add/commit path.
+        if len(hashes) != len(paths):
+            return
+        for p, h in zip(paths, hashes):
+            wt[p] = h
     specs: list[str] = []
     for p in paths:
         mode, blob = by_path[p]
+        # No verified worktree blob for this path: writing HEAD's blob would
+        # stage HEAD content over a differing worktree file (the MM
+        # signature again), so leave the path's index entry alone entirely.
+        whash = wt.get(p)
+        if whash is None:
+            continue
         # Worktree differs from HEAD: write the worktree blob (WIP stays
         # staged), not HEAD's (which would unstage it).
-        specs.append(f"{mode},{wt.get(p, blob) if guarded else blob},{p}")
+        specs.append(f"{mode},{whash},{p}")
     if specs:
         # ONE --cacheinfo per spec: git's parser consumes exactly one
         # <mode>,<blob>,<path> triple per flag; extra specs after a single

@@ -243,6 +243,91 @@ def test_failed_restore_keeps_entry_pending(nx_env, monkeypatch):
     assert msg2.startswith("ERROR")
 
 
+# --- data-loss guard (stale/cross-session checkpoints) -------------------------
+
+def test_undo_refuses_when_file_changed_since_checkpoint(nx_env):
+    """The undo stack is persistent and cross-session: a checkpoint loaded
+    later can be older than edits made since. undo_last() must NOT blindly
+    rewrite the snapshot's old content over newer bytes (which leaves the git
+    index holding the newer content — the "staged diff = inverse of unstaged
+    diff" mirror state)."""
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "guarded.txt"
+    p.write_text("v1")
+    # A real tool call: the dispatcher pushes AFTER write_file lands on disk, so
+    # the entry records the file's post-tool content hash (after_sha).
+    nx.run_tool("write_file", {"path": str(p), "content": "v2"})
+    assert p.read_text() == "v2"
+    # Simulate another session / an editor changing the file after the push.
+    p.write_text("v3 from another session")
+    entry, msg = _undo.undo_last()
+    assert msg.startswith("ERROR"), msg
+    assert "changed since checkpoint" in msg and str(p) in msg
+    assert p.read_text() == "v3 from another session"  # NOT reverted
+    # A fully-skipped entry stays pending, exactly like a failed restore.
+    assert len(nx._state._UNDO_STACK) == 1
+
+
+def test_undo_still_reverts_when_file_unchanged(nx_env):
+    """The guard is not over-eager: an untouched file still reverts."""
+    nx, tmp = nx_env
+    p = tmp / "ok.txt"
+    p.write_text("v1")
+    nx.run_tool("write_file", {"path": str(p), "content": "v2"})
+    from nx._undo import undo_last
+    _, msg = undo_last()
+    assert "reverted" in msg and p.read_text() == "v1"
+
+
+def test_after_sha_survives_persist_and_reload(nx_env):
+    """The guard field must round-trip through undo.json so a fresh session
+    (which loads the persisted stack) enforces it too."""
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "r.txt"
+    p.write_text("before")
+    nx.run_tool("write_file", {"path": str(p), "content": "after"})
+    _undo.flush_undo_stack()
+    nx._state._UNDO_STACK.clear()
+    _undo._load_persisted()  # fresh-process reload
+    assert "after_sha" in nx._state._UNDO_STACK[-1]["files"][0]
+    p.write_text("changed behind the session's back")
+    _, msg = _undo.undo_last()
+    assert msg.startswith("ERROR") and "changed since checkpoint" in msg, msg
+    assert p.read_text() == "changed behind the session's back"
+
+
+def test_legacy_entry_without_after_sha_still_restores(nx_env):
+    """Backwards compat: an old-format persisted entry carries no after_sha and
+    keeps the pre-0.104 blind-restore behavior."""
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "legacy.txt"
+    p.write_text("newer content")
+    # Hand-built entry, as loaded from a pre-0.104 undo.json: no after_sha.
+    nx._state._UNDO_STACK.append({"tool": "write_file", "ts": 0.0,
+                                  "files": [{"path": str(p), "existed": True,
+                                             "content": "orig"}]})
+    _, msg = _undo.undo_last()
+    assert "reverted" in msg and p.read_text() == "orig"
+
+
+def test_pending_delete_sentinel_blocks_recreate(nx_env):
+    """A pending delete stamps the "" sentinel; if the file was recreated after
+    the delete (cross-session), undo must skip rather than os.remove it."""
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "gone.txt"
+    p.write_text("x")
+    nx.run_tool("delete_file", {"path": str(p)})
+    assert not p.exists()
+    p.write_text("recreated by another session")  # sentinel "" no longer matches
+    _, msg = _undo.undo_last()
+    assert msg.startswith("ERROR") and "changed since checkpoint" in msg, msg
+    assert p.exists() and p.read_text() == "recreated by another session"
+
+
 # --- 2.4: compression v2 --------------------------------------------------------
 
 def _mk(nx):

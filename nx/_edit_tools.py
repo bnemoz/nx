@@ -504,17 +504,27 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     if stale:
         return ("ERROR: " + ", ".join(stale) + " changed on disk while awaiting approval; "
                 "re-read and retry (no files were modified)")
-    # After the staleness abort (0.47.0, ROADMAP 2.2): the checkpoint used to
-    # be pushed BEFORE this scan, so a call that aborted without modifying
-    # anything still left a pending undo entry whose restore was a no-op
-    # rewrite. Now nothing is pushed unless the files were actually written.
-    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src, _n, _mtime in changes])
-    for f, _src, new_src, _n, _mtime in changes:
-        _atomic_write(f, new_src)
+    # After the staleness abort (0.47.0, ROADMAP 2.2): nothing is pushed
+    # unless the files were actually written. 0.103.29: pushed AFTER the
+    # write loop so _stamp_after_sha sees the post-edit content and the
+    # /undo guard (refuse to revert a file changed since the checkpoint)
+    # can cover sed_edit too — a pre-write push would stamp the pre-edit
+    # hash and make every sed_edit /undo refuse.
+    ok: list[tuple[str, str, str]] = []
+    for f, src, new_src, _n, _mtime in changes:
+        try:
+            _atomic_write(f, new_src)
+            ok.append((f, src, new_src))
+        except OSError:
+            pass  # failed file: leave it out of the checkpoint, keep the rest
+    if not ok:
+        return "ERROR: no files could be written"
+    _undo_push("sed_edit", [{"path": f, "existed": True, "content": src} for f, src, _new_src in ok])
     hunks = "\n".join(
-        f"--- {f} ---\n{_diff_hunk(src, new_src)}" for f, src, new_src, _n, _mtime in changes)
-    return (f"edited {len(changes)} file(s), {total} replacement(s): "
-            + ", ".join(f"{f} ({n})" for f, _, _, n, _mtime in changes)
+        f"--- {f} ---\n{_diff_hunk(src, new_src)}" for f, src, new_src in ok)
+    return (f"edited {len(ok)} file(s), {total} replacement(s): "
+            + ", ".join(f"{f} ({n})" for f, _s, _ns, n, _m in changes
+                        if any(f == of and _s == osrc for of, osrc, _ in ok))
             + "\n" + hunks)
 
 

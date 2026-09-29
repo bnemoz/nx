@@ -25,10 +25,22 @@ Since 0.47.0 the stack is also PERSISTENT and idempotent:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 import time
 from typing import Optional, TypedDict
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:  # 3.9/3.10 have no typing.NotRequired; typing_extensions if present,
+    try:  # else a subscript shim — this is annotation-only, never enforced.
+        from typing_extensions import NotRequired
+    except ImportError:  # pragma: no cover
+        class NotRequired:  # type: ignore[no-redef]
+            def __class_getitem__(cls, item):
+                return item
 
 from ._env import _env_int
 from ._private import atomic_write_private
@@ -55,6 +67,53 @@ class FileSnapshot(TypedDict):
     path: str
     existed: bool
     content: Optional[str]
+    # Post-tool content hash, stamped by the push choke points (data-loss
+    # guard — see undo_last/_content_sha). Optional so old persisted entries
+    # (no field) still load.
+    after_sha: NotRequired[str]
+
+
+def _content_sha(path: str) -> str:
+    """sha256 hex of a file's CURRENT bytes, or "" when it is absent (or
+    unreadable) — the sentinel that also covers a pending delete.
+
+    Why (data-loss guard): the undo stack is persistent and cross-session, so a
+    checkpoint loaded at startup can be older than changes made since (another
+    session, a commit, a hand edit). undo_last() used to rewrite a snapshot's
+    OLD content unconditionally, reverting disk while the git index held the
+    newer bytes — leaving the staged diff the exact inverse of the unstaged
+    diff. Comparing hashes lets undo refuse a restore whose file no longer
+    matches what the tool left."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _stamp_after_sha(files: list[FileSnapshot]) -> None:
+    """Re-read each snapshot's path and record its post-tool content hash.
+    Called from the two push choke points (all push sites go through them),
+    right after the tool succeeded — one extra read per edited file per push.
+    Must NOT be called from any hotter loop.
+
+    If the file STILL holds the snapshot's own pre-tool content, this push is
+    observing the state BEFORE the tool's write landed — sed_edit pushes its
+    checkpoint ahead of its write loop (`nx/_edit_tools.py`), so at that
+    instant disk shows the pre-state and we cannot see what the tool is about
+    to leave. Recording `after_sha` there would make every `/undo` of a
+    sed_edit refuse as "changed since checkpoint"; omit the field instead so
+    that entry falls back to the legacy blind restore, exactly like an
+    old-format persisted entry. Every other write tool pushes AFTER its write,
+    so cur != pre and the guard is stamped as designed (delete_file stamps the
+    "" sentinel: its push follows os.remove)."""
+    for snap in files:
+        cur = _content_sha(snap["path"])
+        pre = ("" if not snap["existed"]
+               else hashlib.sha256((snap["content"] or "").encode()).hexdigest())
+        if cur == pre:
+            continue
+        snap["after_sha"] = cur
 
 
 class Checkpoint(TypedDict):
@@ -112,6 +171,7 @@ def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     files = [s for s in snaps if s is not None]
     if not files:
         return
+    _stamp_after_sha(files)
     existing = set(_pending_paths())
     fresh: list[FileSnapshot] = []
     for snap in files:
@@ -122,6 +182,13 @@ def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
                         # Keep the tool label of the checkpoint that owns it.
                         old["existed"] = snap["existed"]
                         old["content"] = snap["content"]
+                        # Carry the guard forward only when this push could
+                        # observe the post-tool state; otherwise drop any stale
+                        # field so the entry reverts to the legacy blind path.
+                        if "after_sha" in snap:
+                            old["after_sha"] = snap["after_sha"]
+                        else:
+                            old.pop("after_sha", None)
                         break
             continue
         fresh.append(snap)
@@ -142,6 +209,7 @@ def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     files = [s for s in snaps if s is not None]
     if not files:
         return
+    _stamp_after_sha(files)
     existing = set(_pending_paths())
     fresh: list[FileSnapshot] = []
     for snap in files:
@@ -151,6 +219,10 @@ def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
                     if old["path"] == snap["path"]:
                         old["existed"] = snap["existed"]
                         old["content"] = snap["content"]
+                        if "after_sha" in snap:
+                            old["after_sha"] = snap["after_sha"]
+                        else:
+                            old.pop("after_sha", None)
                         break
             continue
         fresh.append(snap)
@@ -236,8 +308,13 @@ def _load_persisted() -> None:
                 if (isinstance(s, dict) and isinstance(s.get("path"), str)
                         and isinstance(s.get("existed"), bool)
                         and (s.get("content") is None or isinstance(s.get("content"), str))):
-                    snaps.append({"path": s["path"], "existed": s["existed"],
-                                  "content": s["content"]})
+                    snap: FileSnapshot = {"path": s["path"], "existed": s["existed"],
+                                          "content": s["content"]}
+                    # Old-format entries predate after_sha: keep them, and only
+                    # carry the guard forward when the field is present.
+                    if isinstance(s.get("after_sha"), str):
+                        snap["after_sha"] = s["after_sha"]
+                    snaps.append(snap)
             if snaps:
                 clean.append({"tool": str(e["tool"]), "ts": float(e.get("ts") or 0.0),
                               "files": snaps})
@@ -280,6 +357,16 @@ def undo_last() -> tuple[Optional[Checkpoint], str]:
     errors: list[str] = []
     for snap in entry["files"]:
         path = snap["path"]
+        # Data-loss guard (see _content_sha): only revert a file that still
+        # holds what the tool left. A stale/cross-session checkpoint, or any
+        # change since the push, would otherwise clobber newer content while
+        # the git index keeps it — the inverse-diff mirror state. Snapshots
+        # with no after_sha are old persisted entries: restore as before.
+        after = snap.get("after_sha")
+        if after is not None and _content_sha(path) != after:
+            errors.append(f"{path}: changed since checkpoint; not reverted "
+                          f"(current content differs from what {entry['tool']} left)")
+            continue
         try:
             _restore_one(path, snap["existed"], snap["content"])
             reverted.append(path)
