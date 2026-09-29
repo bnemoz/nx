@@ -101,6 +101,15 @@ def _detect_runner(d: str) -> str | None:
     return None
 
 
+def _has_xdist() -> bool:
+    """True when pytest-xdist is importable (enables `-n auto` parallel runs)."""
+    try:
+        import xdist  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _test_command(runner: str, targets: str) -> list[str]:
     """The fixed command shape for *runner* (never free-text shell).
 
@@ -116,6 +125,11 @@ def _test_command(runner: str, targets: str) -> list[str]:
             base = [uv, "run", "pytest", "-q"]
         else:
             base = [sys.executable, "-m", "pytest", "-q"]
+        if _has_xdist():
+            base.extend(["-n", "auto"])
+        else:
+            print("pytest-xdist not found; running pytest sequentially.")
+            print("Install pytest-xdist to enable parallel test execution.")
     elif runner == "go":
         base = ["go", "test", "./..."]
     elif runner == "cargo":
