@@ -101,13 +101,26 @@ def _detect_runner(d: str) -> str | None:
     return None
 
 
-def _has_xdist() -> bool:
-    """True when pytest-xdist is importable (enables `-n auto` parallel runs)."""
-    try:
-        import xdist  # noqa: F401
-        return True
-    except ImportError:
-        return False
+def _has_xdist(prefix: list[str]) -> bool:
+    """True when pytest-xdist is importable in the SAME environment the tests
+    will run in — e.g. the uv-managed venv, not the interpreter nx itself runs
+    under. *prefix* is the command before `pytest` (`[uv, "run"]` or
+    `[sys.executable]`); the probe appends `python -c "import xdist"` to it.
+    Cached once per prefix per process."""
+    key = tuple(prefix)
+    cached = _XDIST_CACHE.get(key)
+    if cached is None:
+        probe = prefix + (["python"] if prefix and prefix[0].endswith("uv")
+                          else [sys.executable]) + ["-c", "import xdist"]
+        try:
+            cached = subprocess.run(probe, capture_output=True).returncode == 0
+        except OSError:
+            cached = False
+        _XDIST_CACHE[key] = cached
+    return cached
+
+
+_XDIST_CACHE: dict[tuple[str, ...], bool] = {}
 
 
 def _test_command(runner: str, targets: str) -> list[str]:
@@ -122,14 +135,11 @@ def _test_command(runner: str, targets: str) -> list[str]:
     if runner == "pytest":
         uv = shutil.which("uv") or shutil.which("uv3")
         if uv:
-            base = [uv, "run", "pytest", "-q"]
+            prefix = [uv, "run"]
+            base = prefix + ["pytest", "-q"]
         else:
+            prefix = [sys.executable]
             base = [sys.executable, "-m", "pytest", "-q"]
-        if _has_xdist():
-            base.extend(["-n", "auto"])
-        else:
-            print("pytest-xdist not found; running pytest sequentially.")
-            print("Install pytest-xdist to enable parallel test execution.")
     elif runner == "go":
         base = ["go", "test", "./..."]
     elif runner == "cargo":
@@ -352,6 +362,12 @@ def run_tests(targets: str = "", **_: Any) -> str:
     from ._bash_jobs import _confirm  # lazy: avoid an import cycle at module load
     if not _confirm(action):
         return "DENIED by user"
+    if runner == "pytest":
+        # Probe xdist only after approval (the probe executes the same
+        # interpreter/uv binary, which stubbed-bin tests must not see pre-confirm).
+        prefix_len = argv.index("pytest")
+        if _has_xdist(argv[:prefix_len]):
+            argv.extend(["-n", "auto"])
     timeout = _env_int("NX_TESTRUNNER_TIMEOUT", _DEFAULT_TIMEOUT)
     try:
         r = subprocess.run(argv, capture_output=True, text=True,
