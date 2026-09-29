@@ -7,7 +7,7 @@ framed, multi-line editor:
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
     Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
-    F1 for /help, Ctrl+Alt+C is shorthand for /compress
+    F1 for /help, F2 is shorthand for /compress
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -610,7 +610,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · ^⌥C compress · shift+tab {mode}"
+        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · F2 compress · shift+tab {mode}"
         max_hints = max(0, box_w - 11)
         truncated = _str_width(hints) > max_hints
         if truncated:
@@ -836,9 +836,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         if seq in ("[13;2u", "[27;2;13~"):
             insert_text("\n")
             return
-        if seq in ("[67;7u", "[27;7;67~"):
-            # Ctrl+Alt+C -> /compress (CSI-u / xterm modifyOtherKeys form).
-            # Unlike Ctrl+Shift+C this is not grabbed by desktop Copy.
+        if seq in ("OQ", "[12~"):
+            # F2 -> /compress. Single unambiguous encoding (SS3 / CSI form),
+            # not grabbed by the desktop or terminal, and no byte-split Esc
+            # to fall into the KeyboardInterrupt branch.
             finish()
             return "/compress"
         if seq in ("[Z", "[1;2Z"):
@@ -940,11 +941,6 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 elif c == "\x0c":
                     finish()
                     return "/clear"
-                elif c == "C" and not any(buf):
-                    # Shift+C: same byte as a typed capital C, so only fire
-                    # on an empty buffer where it can't be message text.
-                    finish()
-                    return "/compress"
                 elif c == "\x11":
                     finish()
                     return "/exit"
