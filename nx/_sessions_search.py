@@ -167,7 +167,11 @@ def _refresh_index(force: bool = False,
             for sid, blob in conn.execute(
                     f"SELECT session_id, data FROM sessions "
                     f"WHERE session_id IN ({qmarks})", missing).fetchall():
-                data = _sessiondb._row_to_data(sid, blob)
+                # 0.104.0: the blob cache carries no messages once a session
+                # is chain-backed — the event log is the body source.
+                data = _sessiondb.load_session(sid)
+                if not data:
+                    data = _sessiondb._row_to_data(sid, blob)
                 if not data:
                     continue
                 _sessiondb.refresh_fts(
