@@ -47,6 +47,7 @@ import threading
 from typing import Any, Callable
 
 from ._env import _env_int
+from ._sessions_fs import begin_exit as _begin_exit
 
 # Kill switch: NX_ASYNC_SAVE=0 -> every save writes inline, exactly the
 # pre-0.103.4 behavior (read at call time, like every other NX_* knob).
@@ -244,7 +245,13 @@ def has_pending() -> bool:
 def _flush_at_exit() -> None:
     """atexit hook: a normal shutdown never loses the last turn. Re-reads the
     module global so a writer rewound away by the test harness flushes as a
-    no-op."""
+    no-op. Puts the save path in its cheap exit form first (0.103.28): the
+    final write skips the post-write re-read and the GC sweeps, which the
+    user is not waiting on at the moment they pressed Ctrl+Q."""
+    try:
+        _begin_exit()
+    except Exception:
+        pass
     w = _writer
     if w is not None:
         try:

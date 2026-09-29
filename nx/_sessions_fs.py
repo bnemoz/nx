@@ -319,6 +319,21 @@ def _write_session_snapshot(
         ok = False
     if not ok:
         return
+    if _EXITING:
+        # Cheap exit form: no re-read (nothing will consume the merged view
+        # before the process dies) and no GC sweeps (they exist to bound
+        # growth across sessions; the next save re-runs them). FTS is kept:
+        # a session searched right after a restart must see its last turn.
+        if update_index:
+            try:
+                from . import _sessiondb
+                _sessiondb.refresh_fts(
+                    session_id, store_messages,
+                    title=(meta or {}).get("title"),
+                    description=(meta or {}).get("description"))
+            except Exception:
+                pass
+        return
     # Post-write re-read: the stored transcript is what load returns, and
     # the merged result covers another writer's turns the merge preserved
     # (so the image-GC live-set protects their payloads too).
@@ -348,9 +363,7 @@ def _write_session_snapshot(
                 _sessiondb.prune_stale()
         except Exception:
             pass
-        _maybe_gc_image_sidecars(merged)
-    else:
-        _maybe_gc_image_sidecars(merged)
+    _maybe_gc_image_sidecars(merged)
     # Swarm P10: obsstore TTL/quota, amortized (own gate) -- a packed-
     # result store must not grow forever now that it is shared.
     _maybe_gc_obsstore()
@@ -365,6 +378,22 @@ def _write_session_snapshot(
 
 _SWEEP_LOCK = threading.Lock()
 _SWEEP_LAST: dict[str, float] = {}
+
+# Exit posture (0.103.28): once set, the store write skips the post-write
+# re-read and every amortized GC sweep. The final flush at /quit or atexit
+# used to pay the full maintenance bill (an O(store) read-merge-write plus a
+# whole-transcript re-read plus any sweep whose interval had elapsed) at the
+# one moment the user is waiting for the process to go away. The transcript
+# blob itself is still written — only the derived work is skipped; the next
+# session's first save re-reads and re-sweeps as usual.
+_EXITING = False
+
+
+def begin_exit() -> None:
+    """Switch the save path to its cheap exit form. Idempotent; safe to call
+    from /quit, the EOF/^C exit branch, and the atexit hook."""
+    global _EXITING
+    _EXITING = True
 
 
 def _sweep_due(kind: str) -> bool:

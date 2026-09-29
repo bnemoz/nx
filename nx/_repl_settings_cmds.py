@@ -80,6 +80,10 @@ def _cmd_quit(user: str, state: _ReplState) -> str | None:
     # 0.103.4: /quit is the documented exit path — drain the async save queue
     # so the last turn is on disk before the process starts tearing down
     # (atexit covers a normal exit too, but not an `os._exit()`/exec one).
+    # 0.103.28: cheap exit form first — the final write skips the post-write
+    # re-read and the GC sweeps, which used to make Ctrl+Q visibly lag.
+    from ._sessions_fs import begin_exit
+    begin_exit()
     _flush_save()
     return "break"
 

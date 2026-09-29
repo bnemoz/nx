@@ -39,6 +39,8 @@ one.
 from __future__ import annotations
 
 import json
+import atexit
+
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -97,6 +99,15 @@ def shutdown_pool() -> None:
     pool = _pool_holder.pop("pool", None)
     if pool is not None:
         pool.shutdown(wait=False)
+
+
+# Interpreter-exit hygiene (0.103.28): ThreadPoolExecutor workers are
+# non-daemon, and CPython joins them at shutdown — a slow speculative read
+# still running when the user pressed Ctrl+Q delayed the exit. Registering
+# the shutdown with wait=False removes that join: the process dies
+# immediately, and a warm read finishing afterwards is harmless (it only
+# ever writes a cache entry).
+atexit.register(shutdown_pool)
 
 
 def _loads_balanced(raw: str) -> Any:

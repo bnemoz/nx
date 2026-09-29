@@ -249,7 +249,11 @@ def _repl() -> None:
             except Exception:
                 pass
             # Flush the current session on Ctrl-D / Ctrl-C exit so the last
-            # turn isn't lost (matches Hermes's exit-path flush).
+            # turn isn't lost (matches Hermes's exit-path flush). Cheap exit
+            # form first (0.103.28): the final write skips the post-write
+            # re-read and the GC sweeps.
+            from ._sessions_fs import begin_exit as _begin_exit
+            _begin_exit()
             if state.session_dirty:
                 _save_current(state)
             # 0.103.4: with NX_ASYNC_SAVE the save above may only have queued;
