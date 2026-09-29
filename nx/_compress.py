@@ -679,6 +679,16 @@ def compress(
     # answer itself is bounded (2.4e) by NX_COMPRESS_SUMMARY_TOKENS, clamped
     # by the same window-aware rule open_stream uses (1.8).
     _client, _model, _extra = _compress_call_target()
+    # A fold is a one-shot mechanical digest — thinking burns max_tokens
+    # without contributing. Attach the common off-toggles (harmlessly ignored
+    # by servers that don't know them, same convention as _thinking.py's
+    # on-toggles); a reasoning model that can't be turned off remotely is
+    # covered by the length-retry below.
+    _body = dict(_extra.get("extra_body") or {})
+    _body.setdefault("chat_template_kwargs", {})
+    _body["chat_template_kwargs"].setdefault("thinking", False)
+    _body["chat_template_kwargs"].setdefault("enable_thinking", False)
+    _extra = {**_extra, "extra_body": _body}
     _max_tokens = _clamp_max_tokens(payload, st.COMPRESS_SUMMARY_TOKENS)
     try:
         _log_event("req", {"model": _model, "messages": payload, "stream": False,
@@ -707,7 +717,25 @@ def compress(
         fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
     )
 
-    summary = (resp.choices[0].message.content or "").strip()
+    def _extract(r: Any) -> str:
+        try:
+            return (r.choices[0].message.content or "").strip()
+        except Exception:  # noqa: BLE001 — malformed response must not crash
+            return ""
+
+    summary = _extract(resp)
+    if not summary and resp.choices[0].finish_reason == "length":
+        # A reasoning model spends its max_tokens on reasoning_content first;
+        # a length-truncated EMPTY answer means the thinking alone ate the
+        # budget. Retry once with double the room before giving up.
+        try:
+            resp = _client.chat.completions.create(
+                model=_model, messages=payload, stream=False,
+                max_tokens=_max_tokens * 2, **_extra)
+            summary = _extract(resp)
+        except Exception:
+            pass
+
     if not summary:
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():

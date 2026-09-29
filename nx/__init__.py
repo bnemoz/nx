@@ -714,7 +714,7 @@ st.COMPRESS_MODEL = os.environ.get("NX_COMPRESS_MODEL", "").strip()
 st._COMPRESS_SOURCE_WARNED = False
 st._SUBAGENT_SOURCE_WARNED = False
 # (e) Bound the summary answer; the window-aware clamp still applies.
-st.COMPRESS_SUMMARY_TOKENS = _env_int("NX_COMPRESS_SUMMARY_TOKENS", 1536)
+st.COMPRESS_SUMMARY_TOKENS = _env_int("NX_COMPRESS_SUMMARY_TOKENS", 8192)
 
 # When the model stalls in reasoning-only (thinks and thinks but never
 # produces a tool call or visible text), the first nudge should push it to
