@@ -119,7 +119,7 @@ def _iter_session_files() -> list[tuple[str, float]]:
 
 def _indexed_mtime(conn: sqlite3.Connection, session_id: str) -> Optional[float]:
     row = conn.execute(
-        "SELECT mtime FROM sessions_fts WHERE session_id = ?",
+        "SELECT mtime FROM fts_body WHERE sid = ?",
         (session_id,)).fetchone()
     return row[0] if row else None
 
@@ -146,15 +146,20 @@ def _refresh_index(force: bool = False,
     try:
         try:
             fts_ids = {r[0] for r in conn.execute(
-                "SELECT session_id FROM sessions_fts").fetchall()}
+                "SELECT sid FROM fts_body").fetchall()}
         except sqlite3.OperationalError:
             return 0  # no FTS5 here
-        # prune FTS rows whose transcript row is gone
+        # prune FTS/body rows whose transcript row is gone
         have = {r[0] for r in conn.execute(
             "SELECT session_id FROM sessions").fetchall()}
         stale = fts_ids - have
         for sid in stale:
-            conn.execute("DELETE FROM sessions_fts WHERE session_id = ?", (sid,))
+            row = conn.execute("SELECT id FROM fts_body WHERE sid = ?",
+                               (sid,)).fetchone()
+            if row:
+                conn.execute("DELETE FROM sessions_fts WHERE rowid = ?",
+                             (row[0],))
+                conn.execute("DELETE FROM fts_body WHERE id = ?", (row[0],))
         if stale:
             conn.commit()
         # backfill missing bodies from the store itself. 0.103.11: only fetch
@@ -206,14 +211,16 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
             return []
         try:
             rows = conn.execute(
-                "SELECT session_id, title, description, body, "
-                "highlight(sessions_fts, 3, '[[', ']]') "
-                "FROM sessions_fts WHERE sessions_fts MATCH ? "
+                "SELECT fts_body.sid, fts_body.title, fts_body.description,"
+                " highlight(sessions_fts, 2, '[[', ']]') "
+                "FROM sessions_fts JOIN fts_body"
+                " ON fts_body.id = sessions_fts.rowid "
+                "WHERE sessions_fts MATCH ? "
                 "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
         except sqlite3.OperationalError:
             return []  # bad FTS query (operators, quotes) — caller falls back
         out = []
-        for sid, title, desc, _body, hl in rows:
+        for sid, title, desc, hl in rows:
             snippet = (hl or "").strip()
             # trim around the first highlight for display
             k = snippet.find("[[")

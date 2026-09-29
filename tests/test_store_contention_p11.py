@@ -161,7 +161,7 @@ def test_refresh_index_still_works_standalone():
     conn = si._open()
     try:
         row = conn.execute(
-            "SELECT mtime FROM sessions_fts WHERE session_id = ?",
+            "SELECT mtime FROM fts_body WHERE sid = ?",
             ("20250101-120000-p11af",)).fetchone()
         assert row is not None
     finally:

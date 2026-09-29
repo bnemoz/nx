@@ -93,6 +93,80 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+_FTS_OLD_MARKER = "session_id UNINDEXED"
+
+
+def _create_external_fts(conn: sqlite3.Connection) -> None:
+    """The external-content FTS pair. The bodies live in the real
+    `fts_body` table (one row per session); the FTS table references them
+    by rowid and stores only the inverted index — no second copy of the
+    text. Created with IF NOT EXISTS, so a call on an up-to-date store is
+    a cheap no-op."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fts_body("
+        "id INTEGER PRIMARY KEY,"
+        "sid TEXT NOT NULL UNIQUE,"
+        "title TEXT, description TEXT, body TEXT, mtime REAL)")
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5("
+            "title, description, body, content='fts_body',"
+            " content_rowid='id')")
+    except sqlite3.OperationalError:
+        pass  # no FTS5 here — fts_body still serves the delete/prune paths
+
+
+def _fts_is_external(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'sessions_fts'"
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None and "content='fts_body'" in (row[0] or "")
+
+
+def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
+    """Create the external-content FTS pair, migrating a legacy standalone
+    sessions_fts (which stored its own copy of every body — ~2x the text
+    plus a fragmented index) in place: rows move to fts_body, the old table
+    is dropped, and the index is rebuilt fresh. One transaction; any error
+    rolls back to the legacy table and search keeps working."""
+    if _fts_is_external(conn):
+        _create_external_fts(conn)
+        return
+    try:
+        old: list[tuple] = []
+        try:
+            old = conn.execute(
+                "SELECT session_id, title, description, body, mtime"
+                " FROM sessions_fts").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                _create_external_fts(conn)  # fresh store — just create
+                return
+            return  # no FTS5 in this build — nothing to migrate or create
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE sessions_fts")
+            _create_external_fts(conn)
+            for sid, title, desc, body, mtime in old:
+                cur = conn.execute(
+                    "INSERT INTO fts_body(sid, title, description, body,"
+                    " mtime) VALUES (?,?,?,?,?)",
+                    (sid, title, desc, body, mtime))
+                conn.execute(
+                    "INSERT INTO sessions_fts(rowid, title, description, body)"
+                    " SELECT id, title, description, body FROM fts_body"
+                    " WHERE id = ?", (cur.lastrowid,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    except sqlite3.Error:
+        pass  # keep the legacy table; search degrades but still works
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions("
@@ -103,13 +177,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at)")
     # FTS5 ships in every CPython build nx supports, but degrade to a
-    # listing-only store if this one lacks it.
-    try:
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5("
-            "session_id UNINDEXED, title, description, body, mtime UNINDEXED)")
-    except sqlite3.OperationalError:
-        pass
+    # listing-only store if this one lacks it. 0.104.x: external-content
+    # mode — the bodies live in the real `fts_body` table and the FTS
+    # index holds only the inverted index, not its own content copy.
+    _ensure_fts_schema(conn)
     # Append-only event log (0.104.x): the authoritative transcript lives in
     # per-message rows; the sessions.data blob becomes a lagging cache (only
     # rebuilt on merge/compaction/fork/migration). session_chain is the
@@ -588,14 +659,27 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                 parts.append(f"[{m.get('role', '?')}] {txt}")
         body = "\n".join(parts)
         with conn:
-            conn.execute("DELETE FROM sessions_fts WHERE session_id = ?",
-                         (session_id,))
+            # External-content mode (0.104.x): the body row lives in
+            # fts_body; the FTS row is keyed to it by rowid and must be
+            # deleted/reinserted in step.
             try:
-                conn.execute(
-                    "INSERT INTO sessions_fts (session_id, title, description,"
-                    " body, mtime) VALUES (?,?,?,?,?)",
+                row = conn.execute(
+                    "SELECT id FROM fts_body WHERE sid = ?",
+                    (session_id,)).fetchone()
+                if row:
+                    conn.execute(
+                        "DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
+                    conn.execute(
+                        "DELETE FROM fts_body WHERE id = ?", (row[0],))
+                cur = conn.execute(
+                    "INSERT INTO fts_body (sid, title, description, body,"
+                    " mtime) VALUES (?,?,?,?,?)",
                     (session_id, title or "", description or "", body,
                      time.time()))
+                conn.execute(
+                    "INSERT INTO sessions_fts (rowid, title, description,"
+                    " body) SELECT id, title, description, body"
+                    " FROM fts_body WHERE id = ?", (cur.lastrowid,))
             except sqlite3.OperationalError:
                 pass  # no FTS5 here — the transcript row is the part that matters
     finally:
@@ -613,8 +697,14 @@ def delete_session_row(session_id: str) -> bool:
             conn.execute("DELETE FROM sessions WHERE session_id = ?",
                          (session_id,))
             try:
-                conn.execute("DELETE FROM sessions_fts WHERE session_id = ?",
-                             (session_id,))
+                row = conn.execute(
+                    "SELECT id FROM fts_body WHERE sid = ?",
+                    (session_id,)).fetchone()
+                if row:
+                    conn.execute("DELETE FROM sessions_fts WHERE rowid = ?",
+                                 (row[0],))
+                    conn.execute("DELETE FROM fts_body WHERE id = ?",
+                                 (row[0],))
             except sqlite3.OperationalError:
                 pass
             conn.execute("DELETE FROM session_events WHERE session_id = ?",
@@ -716,7 +806,7 @@ def prune_stale() -> int:
     try:
         try:
             fts_ids = [r[0] for r in conn.execute(
-                "SELECT session_id FROM sessions_fts").fetchall()]
+                "SELECT sid FROM fts_body").fetchall()]
         except sqlite3.OperationalError:
             return 0  # no FTS5 here
         have = {r[0] for r in conn.execute("SELECT session_id FROM sessions")}
@@ -725,8 +815,13 @@ def prune_stale() -> int:
             return 0
         with conn:
             for sid in doomed:
-                conn.execute(
-                    "DELETE FROM sessions_fts WHERE session_id = ?", (sid,))
+                row = conn.execute(
+                    "SELECT id FROM fts_body WHERE sid = ?", (sid,)).fetchone()
+                if row:
+                    conn.execute(
+                        "DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
+                    conn.execute("DELETE FROM fts_body WHERE id = ?",
+                                 (row[0],))
         return len(doomed)
     except sqlite3.Error:
         return 0

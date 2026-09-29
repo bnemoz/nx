@@ -80,9 +80,10 @@ def search_lessons(query: str, limit: int | None = None,
         pass  # a failing backfill degrades this call, never raises
     try:
         rows = conn.execute(
-            "SELECT sessions_fts.session_id, sessions_fts.title, sessions.cwd, "
-            "sessions_fts.body, bm25(sessions_fts) AS rank "
-            "FROM sessions_fts JOIN sessions USING (session_id) "
+            "SELECT fts_body.sid, fts_body.title, sessions.cwd, "
+            "fts_body.body, bm25(sessions_fts) AS rank "
+            "FROM sessions_fts JOIN fts_body ON fts_body.id = sessions_fts.rowid "
+            "JOIN sessions ON sessions.session_id = fts_body.sid "
             "WHERE sessions_fts MATCH ? "
             "ORDER BY rank LIMIT ?",
             (query, limit if limit > 0 else -1)).fetchall()

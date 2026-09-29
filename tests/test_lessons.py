@@ -157,7 +157,7 @@ def test_lessons_never_serve_a_store_only_body():
     _seed("20260101-120000-lsj1", "otter sliding behavior")
     import sqlite3 as _sq
     conn = _sq.connect(_sessiondb._store_path())
-    conn.execute("DELETE FROM sessions_fts WHERE session_id = ?",
+    conn.execute("DELETE FROM fts_body WHERE sid = ?",
                  ("20260101-120000-lsj1",))
     conn.commit()
     conn.close()
