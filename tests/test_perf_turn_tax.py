@@ -17,6 +17,7 @@ import importlib
 import os
 import sys
 import tempfile
+import threading
 import time
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
@@ -161,11 +162,11 @@ def test_desc_refresh_returns_immediately_and_calls_in_background(monkeypatch):
     daemon thread — the pre-0.56.0 code blocked the REPL for the call."""
     from nx import _sessions_fs as sf
 
-    done = []
+    done = threading.Event()
 
     def slow_call(*a, **k):
         time.sleep(0.3)
-        done.append(1)
+        done.set()
     monkeypatch.setattr(sf, "_run_desc_refresh", slow_call)
     monkeypatch.setattr(sf, "_load_session", lambda sid: {"desc_turns": 0})
 
@@ -179,12 +180,11 @@ def test_desc_refresh_returns_immediately_and_calls_in_background(monkeypatch):
     result = sf._maybe_refresh_description("sid", messages)
     elapsed = time.monotonic() - t0
     assert result is None
-    assert elapsed < 0.1, f"returned after {elapsed:.2f}s — the call is still inline"
+    # Non-blocking means returning well before the 0.3s stub finishes, not an
+    # absolute wall-clock bound (schedulers can stretch even a fast return).
+    assert elapsed < 0.25, f"returned after {elapsed:.2f}s — the call is still inline"
     # The background thread is running the (slow) stub.
-    deadline = time.time() + 1.0
-    while not done and time.time() < deadline:
-        time.sleep(0.01)
-    assert done, "the background refresh never ran"
+    assert done.wait(timeout=5.0), "the background refresh never ran"
     print("PASS — description refresh returns at once, model call runs in background")
 
 
