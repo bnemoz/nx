@@ -7,7 +7,7 @@ framed, multi-line editor:
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
     Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
-    F1 for /help
+    F1 for /help, Shift+C (empty buffer) is shorthand for /compress
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -610,7 +610,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · shift+tab {mode}"
+        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · shift+C compress · shift+tab {mode}"
         max_hints = max(0, box_w - 11)
         truncated = _str_width(hints) > max_hints
         if truncated:
@@ -935,6 +935,11 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 elif c == "\x0c":
                     finish()
                     return "/clear"
+                elif c == "C" and not any(buf):
+                    # Shift+C: same byte as a typed capital C, so only fire
+                    # on an empty buffer where it can't be message text.
+                    finish()
+                    return "/compress"
                 elif c == "\x11":
                     finish()
                     return "/exit"

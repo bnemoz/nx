@@ -579,7 +579,8 @@ Run `/help` in the REPL for the full list. The essentials:
 
 In the REPL input box:
 
-- **F1** opens `/help`, **Ctrl+L** runs `/clear`, **Ctrl+Q** runs `/exit`
+- **F1** opens `/help`, **Ctrl+L** runs `/clear`, **Ctrl+Q** runs `/exit`,
+  **Shift+C** (empty box) runs `/compress`
   (so you don't have to type the full command).
 - **Enter** submits; **Shift+Enter** (or **Ctrl+J**) inserts a newline.
 - **Up/Down** navigate history; **Left/Right** move within a line;
