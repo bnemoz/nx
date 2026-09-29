@@ -687,7 +687,28 @@ def run_bash(command: str, timeout: int | None = None,
             raise _EscToChat(f"run: {command}")
         if choice != "y":
             return "DENIED by user"
-    elif not _confirm(f"run: {command}"):
+    else:
+        # Clobber guard (0.104.2): a command that would TRUNCATE an existing,
+        # non-empty file forces its own prompt even in YOLO — a truncated
+        # dotfile is unrecoverable in a way a mere failed command is not.
+        # Precedent: the secret guard above. NX_CLOBBER_GUARD=0 disables.
+        from ._clobber import clobber_targets, clobber_guard_message
+        clobber = clobber_targets(command) or None
+        if clobber:
+            from ._subagent import _subagent_quiet
+            if _subagent_quiet():
+                return (f"ERROR: command would truncate existing file(s) "
+                        f"{', '.join(clobber[:3])}; refused in a background "
+                        "sub-agent — let the parent run it")
+            import nx as _m
+            choice = _m._ask_approval(
+                clobber_guard_message(clobber), allow_hint=None)
+            if choice == "esc":
+                from ._approval import _EscToChat
+                raise _EscToChat(f"run: {command}")
+            if choice != "y":
+                return "DENIED by user"
+    if not secret and clobber is None and not _confirm(f"run: {command}"):
         return "DENIED by user"
     if timeout is None:
         timeout = _env_int("NX_BASH_POLL_SECONDS", 3)
