@@ -679,9 +679,11 @@ def run_bash(command: str, timeout: int | None = None,
         # force the prompt even under YOLO: bypass the level/YOLO short-circuit
         # with a direct ask (Esc still drops to chat)
         import nx as _m
-        choice = _m._ask_approval(
-            f"  run (contains possible secret {secret!r}): {command[:120]}? "
-            f"[Y/n/esc] ", allow_hint=None)
+        from ._approval import _paused_spinner
+        with _paused_spinner():
+            choice = _m._ask_approval(
+                f"  run (contains possible secret {secret!r}): {command[:120]}? "
+                f"[Y/n/esc] ", allow_hint=None)
         if choice == "esc":
             from ._approval import _EscToChat
             raise _EscToChat(f"run: {command}")
@@ -701,8 +703,10 @@ def run_bash(command: str, timeout: int | None = None,
                         f"{', '.join(clobber[:3])}; refused in a background "
                         "sub-agent — let the parent run it")
             import nx as _m
-            choice = _m._ask_approval(
-                clobber_guard_message(clobber), allow_hint=None)
+            from ._approval import _paused_spinner
+            with _paused_spinner():
+                choice = _m._ask_approval(
+                    clobber_guard_message(clobber), allow_hint=None)
             if choice == "esc":
                 from ._approval import _EscToChat
                 raise _EscToChat(f"run: {command}")

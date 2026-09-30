@@ -22,6 +22,7 @@ approval prompt back to the chat input.
 import difflib
 import re
 import sys
+from contextlib import contextmanager
 from typing import Optional
 
 from ._ansi import DIM, RESET, C, raw_mode
@@ -160,6 +161,24 @@ def _apply_approval(kind: Optional[str], level: Optional[str] = None, *, update_
 # drop the user back to the chat input so they can add more guidance."
 class _EscToChat(Exception):
     pass
+
+
+@contextmanager
+def _paused_spinner():
+    """Pause the active tool spinner (if any) around direct-to-stdout prompts
+    so its periodic CLEAR_LINE redraws don't erase the prompt. Callers that
+    bypass _confirm (the secret/clobber guards in run_bash) wrap their
+    _ask_approval in this; _confirm inlines the same pause/resume."""
+    sp = st._ACTIVE_SPINNER
+    paused = False
+    try:
+        if sp is not None:
+            sp.stop()
+            paused = True
+        yield
+    finally:
+        if paused:
+            sp.start()
 
 
 def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:

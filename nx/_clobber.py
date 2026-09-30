@@ -93,4 +93,4 @@ def clobber_guard_message(targets: list[str]) -> str:
     names = ", ".join(targets[:3]) + ("…" if len(targets) > 3 else "")
     return (
         f"  TRUNCATES existing file(s): {names}. Their current contents will "
-        f"be replaced (no backup taken). Run anyway? [y/N/esc] ")
+        f"be replaced (no backup taken). Run anyway? [Y/n/esc] ")
