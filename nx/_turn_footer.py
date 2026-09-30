@@ -187,6 +187,10 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
                          parser: Optional[Any] = None, quiet: bool = False) -> None:
     """Render the per-turn stats footer.
 
+    A turn whose only visible output was collapsed reasoning (no prose, no
+    tool calls) renders a dim divider + `(step: reasoning)` label above the
+    footer, so a run of such steps doesn't read as bare stacked footers.
+
     Prefers llama.cpp `timings` (server-measured, real tok/s) when present;
     falls back to the standard streaming `usage` object (OpenAI/Z.ai/vLLM)
     divided by the client-side generation window (parser.gen_window(): the
@@ -201,6 +205,12 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     """
     if quiet:
         return
+    # Reasoning-only step (no prose, no tool calls, collapsed reasoning): a
+    # dim divider + label so consecutive bare footers read as distinct steps.
+    if (parser is not None and parser.reasoning_only_chars > 0 and not text.strip()
+            and not tcs and streamed_chars == 0):
+        print(f"{DIM}  {'─' * 46}{RESET}")
+        print(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args
     # repairs applied + corrective retries — so the knobs are tunable in
     # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
