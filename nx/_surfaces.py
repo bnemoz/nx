@@ -114,7 +114,7 @@ def steer_status_line() -> str:
 # /tabs — live dashboard
 # --------------------------------------------------------------------------
 
-_TABS_ROWS = 14  # how many tail lines the dashboard shows per repaint
+_DONE_KEEP = 4  # newest finished bg jobs shown below the live ones
 
 
 def _surfaces_snapshot() -> list[dict]:
@@ -132,16 +132,24 @@ def _surfaces_snapshot() -> list[dict]:
     }]
     try:
         for job in _m.list_bg_jobs():
-            rows.append({**job, "kind": "bg", "id": f"bg-{job['pid']}",
-                         "alive": job.get("alive", False)})
+            alive = job.get("alive", False)
+            rows.append({"instruction": job.get("command") or job.get("instruction") or "",
+                         "status": "running" if alive else "finished",
+                         "tail": job.get("tail") or "", **job,
+                         "kind": "bg", "id": f"bg-{job['pid']}", "alive": alive})
     except Exception:
         pass
     try:
         for ag in _m.list_async_agents():
-            rows.append({**ag, "kind": "agent", "id": ag["id"],
+            rows.append({"instruction": "", "tail": "", **ag,
+                         "kind": "agent", "id": ag["id"],
                          "alive": ag.get("alive", False)})
     except Exception:
         pass
+    # finished bg jobs accumulate across the session; keep the newest few so
+    # the dashboard stays a live view (full history remains under /bg).
+    done = [r for r in rows if not r.get("alive") and r["kind"] != "main"]
+    rows = [r for r in rows if r.get("alive") or r["kind"] == "main"] + done[:_DONE_KEEP]
     return rows
 
 
@@ -178,8 +186,9 @@ def run_tabs_dashboard() -> None:
         width = _term_cols()
         lines = [f"{C.ACCENT}tabs{RESET}{DIM} — live surfaces · r refresh · q back{RESET}"]
         for r in rows:
-            head = f"  {_glyph(r['alive'], r['status'])} {r['kind']:<5} {r['id']:<18} " \
-                   f"{r.get('status', ''):<8}"
+            status = r.get("status") or "—"
+            head = f"  {_glyph(r.get('alive', False), status)} {r['kind']:<5} {r['id']:<18} " \
+                   f"{status:<8}"
             head += _pad(head, width)
             lines.append(head)
             instr = " ".join(str(r.get("instruction", "")).split())
