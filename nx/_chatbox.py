@@ -46,6 +46,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/cost", "session usage + per-source cost scoreboard"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
     ("/bg", "list background run_bash jobs and sub-agents, or /bg kill <pid>"),
+    ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T"),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)"),
     ("/sessions", "list recent sessions, or show one in full"),
     ("/export", "write the current session to a markdown file"),
@@ -992,6 +993,13 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 elif c == "\x0c":
                     finish()
                     return "/clear"
+                elif c == "\x14":
+                    # Ctrl+T -> /tabs live dashboard. Same single-byte
+                    # shorthand pattern as Ctrl+S (raw_mode clears IXON, so
+                    # the byte reaches the editor instead of the terminal's
+                    # flow control).
+                    finish()
+                    return "/tabs"
                 elif c == "\x13":
                     # Ctrl+S -> /compress. raw_mode clears IXON, so the
                     # terminal hands the byte over instead of using it as

@@ -23,4 +23,5 @@ TURN_CONTEXT_OVERRUN = "context_overrun"  # 400: prompt exceeded the context win
 TURN_LENGTH_CUT = "length_cut"  # finish_reason=length: the model's response budget ran out mid-stream — auto-continue it
 TURN_TIMED_OUT = "timed_out"  # mid-stream timeout after the step-retry ladder was exhausted — a real failure, scored as one
 TURN_TIMED_OUT_RETRY = "timed_out_retry"  # mid-stream timeout with ladder left — the loop backs off and re-opens the same request
+TURN_STEER = "steer"  # 0.105.0: the user typed a steering note mid-turn — inject it and keep the turn alive
 TRUNCATION_MARKER = "\n\n[Truncated by token limit before completion.]"

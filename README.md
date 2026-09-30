@@ -573,6 +573,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/undo` | revert the last write/edit/delete (LIFO; `--list` shows pending checkpoints). Since 0.47 the stack persists across crashes/restarts — per session under `~/.nx/undo/<session-id>.json` (the legacy shared `~/.nx/undo.json` only when no session id is known; 0.103.0) — and one tool call always costs one press — re-writing the same file or re-deleting a pending file updates its entry instead of stacking a duplicate. `/reset` clears it |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
 | `/bg [kill <pid>]` | list background `run_bash` jobs, or kill one |
+| `/tabs` | live dashboard of running surfaces: main turn, bg jobs, sub-agents (Ctrl+T); type mid-turn to steer |
 | `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |
 | `/todo` | show the model's current `todo_write` list |
@@ -586,7 +587,7 @@ Run `/help` in the REPL for the full list. The essentials:
 In the REPL input box:
 
 - **F1** opens `/help`, **Ctrl+L** runs `/clear`, **Ctrl+Q** runs `/exit`,
-  **Ctrl+S** runs `/compress` (single-byte encoding; raw mode disables
+  **Ctrl+S** runs `/compress`, **Ctrl+T** opens `/tabs` (single-byte encoding; raw mode disables
   IXON, so the terminal doesn't swallow it as the output-flow stop — the
   old **Ctrl+Alt+C** was byte-split into Esc + Ctrl-C by some terminals
   and quit the REPL instead)

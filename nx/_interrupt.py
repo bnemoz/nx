@@ -65,6 +65,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _state as st
+from ._ansi import DIM, RESET
 from ._env import _env_float
 from ._subagent_tls import _subagent_ctx
 from ._tty import (
@@ -208,7 +209,15 @@ def _run_armed_session(fd: int, old: Any) -> bool:
                 _INTERRUPT_RESTORED.set()  # dying — unblock main's wait
                 return False
             if c != b"\x1b":
-                continue  # discard anything that isn't Esc
+                # 0.105.0 steering: while a turn is active, printable input is
+                # no longer discarded — it accumulates as a capture buffer and
+                # Enter queues it as a steering note (nx/_surfaces.py). The
+                # turn loop injects it at its next step boundary. Esc keeps
+                # its interrupt meaning below; other bytes (Ctrl+C etc.) are
+                # left to the terminal/ISIG as before.
+                if st._TURN_ACTIVE and _INTERRUPT_CAPTURE_REDIRECT.is_set():
+                    _capture_steering_byte(fd, c)
+                continue
             # Could be bare Esc OR the lead byte of an escape sequence
             # (arrow keys, Home/End, bracketed paste, etc.). Wait up to 50ms
             # for more bytes; if none arrive, it's a bare Esc.
@@ -241,6 +250,37 @@ def _run_armed_session(fd: int, old: Any) -> bool:
         # never captures our raw-mode attrs as its "old" state.
         _INTERRUPT_RESTORED.set()
     return True
+
+
+def _capture_steering_byte(fd: int, c: bytes) -> None:
+    """Fold one printable (or backspace/Enter) byte into the steering capture.
+
+    Enter (\r) commits the buffer as a queued steering note; backspace edits
+    it; printable bytes append. Echoes minimally (dim) so the user sees the
+    line they are building without disturbing the streamed output above.
+    Kept tiny and exception-safe: it runs on the watcher thread between chunks
+    and must never break generation."""
+    from ._surfaces import queue_steering, set_steer_partial, steer_partial
+    try:
+        if c in (b"\r", b"\n"):
+            line = steer_partial()
+            if line.strip():
+                queue_steering(line)
+                sys.stdout.write(f"\r{DIM}  ▸ steered: {line.strip()[:60]}{RESET}\n")
+                sys.stdout.flush()
+            set_steer_partial("")
+            return
+        if c in (b"\x7f", b"\x08"):
+            set_steer_partial(steer_partial()[:-1])
+            return
+        try:
+            ch = c.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        if ch >= " ":
+            set_steer_partial(steer_partial() + ch)
+    except Exception:
+        pass
 
 
 def _select_stdin_or_wake(fd: int, timeout: float) -> int | None:

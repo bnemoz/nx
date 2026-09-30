@@ -46,6 +46,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>]", "list/kill background bash jobs"),
+    ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T; type mid-turn to steer"),
     ("/yolo", "toggle yolo mode (disable all approval prompts)"),
     ("/approval [level]", "show/set approval level (session-only)"),
     ("/approval set-default <level>", "persist the default approval mode to ~/.env"),

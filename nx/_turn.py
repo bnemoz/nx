@@ -905,6 +905,11 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         # live at 0.103.8 — an async agent reported "done" carrying only an
         # interim note). That is a turn-budget death, not a settled finish:
         # report "cap" so the sub-agent wrapper stamps the answer partial.
+        # 0.105.0 steering: lines typed mid-turn (captured by the interrupt
+        # watcher) drain at the step boundary — BEFORE the TURN_DONE return
+        # below, so a note queued while the model was finishing still lands.
+        from ._surfaces import inject_steering
+        _steered = inject_steering(messages)
         if status == TURN_DONE and was_forced and sub_loop \
                 and not any(m.get("role") == "assistant"
                             and isinstance(m.get("content"), str) and m["content"].strip()
@@ -914,6 +919,14 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             # A settled turn: whatever posture produced it works. The next
             # stall, if any, re-derives the escalation from its own evidence.
             st._STALL_FORCE_NATIVE = False
+            if _steered and not sub_loop and steps + 1 < max_turns:
+                # 0.105.0: the user steered while the model was finishing —
+                # the note is already in `messages`; keep the turn alive so
+                # the adjustment is applied rather than left unread.
+                if not _subagent_quiet():
+                    print(f"{DIM}  ▸ steering applied — continuing turn{RESET}")
+                steps += 1
+                continue
             if not _subagent_active() and not _batch_active():
                 # Only the parent loop fires NX_VERIFY_CMD — concurrent
                 # sub-agents or batch-task threads hitting this line together

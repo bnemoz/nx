@@ -396,7 +396,12 @@ TOOLS: list[dict[str, Any]] = [
 
 # Read-only sub-agent tool (spawn_agent): schema appended below, machinery in
 # nx/_subagent.py. _active_tools() filters it out unless NX_SUBAGENTS=1.
-from ._subagent import SUBAGENT_TOOL, spawn_agent
+from ._subagent import SUBAGENT_TOOL, spawn_agent, list_async_agents  # noqa: F401
+from ._surfaces import (  # noqa: F401 — steering + /tabs surface (0.105.0)
+    queue_steering, drain_steering, steer_pending, inject_steering,
+    steer_status_line, run_tabs_dashboard, tabs_print_fallback,
+    set_steer_partial, steer_partial,
+)
 
 # Plan-mode machinery (schema/body): the plan_edit tool plus the gate the
 # mutating tools cross while a plan is active. See nx/_plan.py.

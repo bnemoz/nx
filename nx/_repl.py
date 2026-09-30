@@ -79,6 +79,22 @@ def _banner() -> str:
 
 CommandHandler = Callable[[str, _ReplState], "str | None"]
 
+def _cmd_tabs(user: str, state: _ReplState) -> None:
+    """Live dashboard of every running surface: main turn, background bash
+    jobs, async sub-agents. Interactive (raw-key) on a tty; one-shot print
+    otherwise. Steering: lines typed during a turn are queued and injected at
+    the next step boundary (nx/_surfaces.py)."""
+    import sys as _sys
+    import nx as _m
+    if _sys.stdin.isatty() and _sys.stdout.isatty():
+        try:
+            _m.run_tabs_dashboard()
+            return
+        except (OSError, ValueError):
+            pass  # no usable tty fd — fall through to the plain print
+    _m.tabs_print_fallback()
+
+
 _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/quit": _cmd_quit,
     "/exit": _cmd_quit,
@@ -119,6 +135,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/wip": _cmd_wip,
     "/plan": _cmd_plan,
     "/verify": _cmd_verify,
+    "/tabs": _cmd_tabs,
 }
 
 
