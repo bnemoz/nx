@@ -55,7 +55,7 @@ def _setup(tmp_path, monkeypatch):
     nx.NX_SUBAGENT_SYNC_INLINE = 0
     monkeypatch.setattr(S, "_run_sync_agent_body",
                         lambda instruction, max_turns, tier="read", scope=None,
-                        worktree=None: "ok")
+                        worktree=None, job_id=None: "ok")
 
 
 # --- path rewriting ---------------------------------------------------------
@@ -206,7 +206,7 @@ def test_async_worker_carries_tier_and_creates_worktree(tmp_path, monkeypatch):
     captured = {}
 
     def fake_body(instruction, max_turns, tier="read", scope=None,
-                  worktree=None):
+                  worktree=None, job_id=None):
         captured.update(tier=tier, scope=scope, worktree=worktree)
         return "all done"
 
@@ -231,7 +231,7 @@ def test_async_worker_read_tier_no_worktree(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(S, "_run_sync_agent_body",
                         lambda instruction, max_turns, tier="read", scope=None,
-                        worktree=None: captured.update(tier=tier) or "done")
+                        worktree=None, job_id=None: captured.update(tier=tier) or "done")
     S._run_async_agent("job-r", "look", 10, tier="read")
     assert captured["tier"] == "read"
 

@@ -905,11 +905,31 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
         # live at 0.103.8 — an async agent reported "done" carrying only an
         # interim note). That is a turn-budget death, not a settled finish:
         # report "cap" so the sub-agent wrapper stamps the answer partial.
-        # 0.105.0 steering: lines typed mid-turn (captured by the interrupt
-        # watcher) drain at the step boundary — BEFORE the TURN_DONE return
+        # 0.105.0 steering, 0.106.0 per-agent queues: lines typed mid-turn
+        # (captured by the interrupt watcher for the main turn, /tabs for an
+        # agent) drain at the step boundary — BEFORE the TURN_DONE return
         # below, so a note queued while the model was finishing still lands.
+        # The queue is resolved per-thread: an agent loop (TLS ctx carries its
+        # job_id) drains only its own queue and can never steal a parent
+        # steering line; the main loop drains the process-global one.
         from ._surfaces import inject_steering
-        _steered = inject_steering(messages)
+        from ._subagent_tls import _subagent_ctx as _steer_ctx
+        _steer_agent = (getattr(_steer_ctx(), "job_id", None)
+                        if _steer_ctx() is not None else None)
+        _steered = inject_steering(messages, agent=_steer_agent)
+        if _steered and _steer_agent is not None:
+            # Stamp the job record so the completion note tells the parent
+            # its answer reflects mid-run user adjustments.
+            try:
+                from ._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+                with _ASYNC_LOCK:
+                    rec = _ASYNC_AGENTS.get(_steer_agent)
+                    if rec is not None:
+                        rec["steered"] = (rec.get("steered") or 0) + len(
+                            [m for m in messages if m.get("role") == "user"
+                             and str(m.get("content", "")).startswith("[Steering note")])
+            except Exception:  # noqa: BLE001 — breadcrumb is best-effort
+                pass
         if status == TURN_DONE and was_forced and sub_loop \
                 and not any(m.get("role") == "assistant"
                             and isinstance(m.get("content"), str) and m["content"].strip()
@@ -919,12 +939,17 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             # A settled turn: whatever posture produced it works. The next
             # stall, if any, re-derives the escalation from its own evidence.
             st._STALL_FORCE_NATIVE = False
-            if _steered and not sub_loop and steps + 1 < max_turns:
-                # 0.105.0: the user steered while the model was finishing —
-                # the note is already in `messages`; keep the turn alive so
-                # the adjustment is applied rather than left unread.
+            if _steered and steps + 1 < max_turns:
+                # 0.105.0 (main) / 0.106.0 (agents): the user steered while
+                # the model was finishing — the note is already in `messages`;
+                # keep the turn alive so the adjustment is applied rather
+                # than left unread. For an agent this extra turn still
+                # respects the sub-loop's forced-final ladder (the branch
+                # above decides posture on the next iteration).
                 if not _subagent_quiet():
                     print(f"{DIM}  ▸ steering applied — continuing turn{RESET}")
+                elif _steer_agent is not None:
+                    print(f"{DIM}  ▸ agent {_steer_agent} steered — continuing{RESET}")
                 steps += 1
                 continue
             if not _subagent_active() and not _batch_active():

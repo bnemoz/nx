@@ -478,7 +478,8 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                            "agent ran in the shared tree")
     try:
         answer = _run_sync_agent_body(instruction, max_turns, tier=tier,
-                                      scope=scope, worktree=worktree)
+                                      scope=scope, worktree=worktree,
+                                      job_id=job_id)
         # The unwrapped body: the worker does its OWN report write + [Runtime
         # note] staging below; _run_sync_agent's head+path tool-result wrapper
         # is for the parent's synchronous tool call only. The body turns most
@@ -536,6 +537,7 @@ def _stage_subagent_answer(job_id: str) -> None:
         rec["announced"] = True
         status, answer = rec.get("status", "done"), rec.get("answer") or ""
         report = rec.get("report")
+        steered = rec.get("steered") or 0
         # Swarm P3: once the note is built AND the full answer is on disk
         # (`report`), the RAM copy is redundant — up to
         # NX_SUBAGENT_MAX_FINISHED=20 whole answers held forever otherwise.
@@ -573,6 +575,17 @@ def _stage_subagent_answer(job_id: str) -> None:
                 " FAILED — " + answer[:600] + "\n" + \
                 "Retry the task inline (async=false) if it still matters.]"
         _notices.set_(_PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
+        if steered:
+            # 0.106.0: the user steered this agent mid-run from /tabs — tell
+            # the parent so it reads the answer in that light (the agent's
+            # report already folded the notes into its own transcript).
+            s_note = (f"[Runtime note: you steered sub-agent {job_id} "
+                      f"{steered} time{'s' if steered != 1 else ''} while it "
+                      "ran (mid-course adjustments queued from /tabs); its "
+                      "report reflects them.]")
+            prev2 = _notices.get(_PENDING_NOTICE_KEY)
+            _notices.set_(_PENDING_NOTICE_KEY,
+                          f"{prev2}\n{s_note}" if prev2 else s_note)
         # Swarm P3: the full answer is on disk (report), so retaining the
         # whole body in the job record is pure RSS - up to
         # NX_SUBAGENT_MAX_FINISHED=20 records x whole answers. Keep a bounded
@@ -721,7 +734,8 @@ def _lean_result(answer, job_id, instruction):
 
 def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                          scope: "list[str] | None" = None,
-                         worktree: "str | None" = None) -> str:
+                         worktree: "str | None" = None,
+                         job_id: "str | None" = None) -> str:
     """The actual foreground sub-loop (wrapped by _run_sync_agent, which adds
     the report-file + head/path staging shared with the async path).
     `worktree` (0.97.0): when set, write-tier calls are rewritten into that
@@ -768,7 +782,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     table = _write_tier_dispatch() if write else _read_only_dispatch()
     prev_ctx = _subagent_ctx()
     ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
-                           worktree=worktree)
+                           worktree=worktree, job_id=job_id)
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
     _SUBAGENT_TLS.ctx = ctx

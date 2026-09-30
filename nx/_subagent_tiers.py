@@ -55,11 +55,12 @@ class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
-                 "worktree")
+                 "worktree", "job_id")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False, scope: "list[str] | None" = None,
-                 worktree: "str | None" = None) -> None:
+                 worktree: "str | None" = None,
+                 job_id: "str | None" = None) -> None:
         self.table = table
         self.active = True
         self.write = write  # write tier (NX_SUBAGENT_WRITE=1): write tools resolve
@@ -78,6 +79,10 @@ class _SubagentContext:
         # or None to inherit the parent's active source/model. Pinned by
         # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
         self.model_target = None
+        # Job id for an async worker (0.106.0): lets the turn loop resolve this
+        # thread's per-agent steering queue and stamp steer breadcrumbs on the
+        # job record. None for foreground/parent loops.
+        self.job_id = job_id
 
 
 def _subagent_table() -> dict[str, Any] | None:

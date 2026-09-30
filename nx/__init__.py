@@ -401,6 +401,7 @@ from ._surfaces import (  # noqa: F401 — steering + /tabs surface (0.105.0)
     queue_steering, drain_steering, steer_pending, inject_steering,
     steer_status_line, run_tabs_dashboard, tabs_print_fallback,
     set_steer_partial, steer_partial,
+    queue_agent_steering, drain_agent_steering, agent_steering_pending,
 )
 
 # Plan-mode machinery (schema/body): the plan_edit tool plus the gate the

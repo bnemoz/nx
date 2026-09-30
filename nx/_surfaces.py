@@ -36,6 +36,11 @@ from ._ansi import DIM, RESET, C
 _STEER_LOCK = threading.Lock()
 # FIFO of queued steering lines; deque for O(1) popleft from the drain.
 _STEER_QUEUE: deque[str] = deque()
+# Per-agent queues, keyed by job id (0.106.0): /tabs routes a steered line to
+# one running agent; the agent's turn loop drains its own queue at step
+# boundaries via its TLS context (which carries job_id). Main-turn steering
+# (typed while the model streams) keeps using the module-global deque above.
+_AGENT_QUEUES: dict[str, deque[str]] = {}
 # Monotonic count of lines ever queued — lets the chatbox hint cheaply.
 _STEER_TOTAL = 0
 # The watcher's in-progress capture (chars typed, no Enter yet). Kept here so
@@ -43,15 +48,50 @@ _STEER_TOTAL = 0
 _STEER_PARTIAL = ""
 
 
-def queue_steering(text: str) -> None:
-    """Queue one line of user steering for the running/next turn."""
+def queue_steering(text: str, agent: str | None = None) -> None:
+    """Queue one line of user steering. agent=None targets the main turn;
+    otherwise it targets the running sub-agent with that job id."""
     global _STEER_TOTAL
     text = text.strip()
     if not text:
         return
     with _STEER_LOCK:
-        _STEER_QUEUE.append(text)
+        if agent:
+            _AGENT_QUEUES.setdefault(agent, deque()).append(text)
+        else:
+            _STEER_QUEUE.append(text)
         _STEER_TOTAL += 1
+
+
+def queue_agent_steering(agent: str, text: str) -> bool:
+    """Steer one running agent. Returns False (and queues nothing) when the
+    job id is unknown or the agent is no longer running — the /tabs UI turns
+    that into an inline message instead of silently eating the line."""
+    from ._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+    with _ASYNC_LOCK:
+        rec = _ASYNC_AGENTS.get(agent)
+        alive = rec is not None and rec.get("status") == "running"
+    if not alive:
+        return False
+    queue_steering(text, agent=agent)
+    return True
+
+
+def drain_agent_steering(agent: str) -> list[str]:
+    """Take all queued steering lines for one agent (oldest first)."""
+    with _STEER_LOCK:
+        q = _AGENT_QUEUES.get(agent)
+        if not q:
+            return []
+        out = list(q)
+        q.clear()
+    return out
+
+
+def agent_steering_pending(agent: str) -> int:
+    with _STEER_LOCK:
+        q = _AGENT_QUEUES.get(agent)
+        return len(q) if q else 0
 
 
 def set_steer_partial(text: str) -> None:
@@ -84,14 +124,17 @@ STEER_WRAP = ("[Steering note: the user typed this while your turn was "
               "adjustment, not a new task]")
 
 
-def inject_steering(messages: list) -> bool:
-    """Drain the queue into `messages` as user turns. True if anything landed.
+def inject_steering(messages: list, agent: str | None = None) -> bool:
+    """Drain steering into `messages` as user turns. True if anything landed.
 
-    Called from _run_model_turn_loop's step boundaries. Each line becomes one
-    user message so the model sees the adjustment as a distinct instruction
-    with its own position in the history (same shape the Esc-redirect path
-    appends in model_turn)."""
-    lines = drain_steering()
+    Called from _run_model_turn_loop's step boundaries. With agent=None the
+    main turn's queue drains; with a job id the named agent's queue drains
+    (the turn loop passes its TLS context's job id, so an agent can never
+    steal a parent steering line — the pre-0.106.0 race). Each line becomes
+    one user message so the model sees the adjustment as a distinct
+    instruction with its own position in the history (same shape the
+    Esc-redirect path appends in model_turn)."""
+    lines = drain_agent_steering(agent) if agent else drain_steering()
     for line in lines:
         messages.append({"role": "user",
                          "content": f"{STEER_WRAP}\n{line}"})
@@ -169,34 +212,48 @@ def _tail_lines(tail: str, n: int = 6) -> list[str]:
 
 
 def run_tabs_dashboard() -> None:
-    """Interactive /tabs view (tty only): raw-key loop, r repaints, q quits.
+    """Interactive /tabs view (tty only): raw-key loop.
 
+    Keys: ↑/↓ (or j/k) select a row · Enter opens the steer prompt on a
+    selected live agent · r repaints · q/Esc/Ctrl-C back to the prompt.
     Inline (no alternate screen), same repaint discipline as the chatbox:
-    clear exactly the rows drawn last frame. Ctrl-C/EOF propagate to the REPL
-    handler, which just returns to the prompt."""
+    clear exactly the rows drawn last frame. A steer prompt is a raw-mode
+    line editor (printable + backspace, Enter commits) — arrows/paste are
+    not supported here by design; this is a one-line nudge, not a chat."""
     fd = sys.stdin.fileno()
     from ._tty import read_byte, wait_ready
     from ._ansi import raw_mode
 
     drawn = 0
+    sel = 0        # selected row index into the last snapshot
+    rows: list[dict] = []
+    notice = ""    # transient inline feedback (steer accepted/refused)
 
-    def render(first: bool = False) -> None:
-        nonlocal drawn
+    def render(first: bool = False, extra: list[str] | None = None) -> None:
+        nonlocal drawn, rows, sel
         rows = _surfaces_snapshot()
+        sel = min(sel, max(0, len(rows) - 1))
         width = _term_cols()
-        lines = [f"{C.ACCENT}tabs{RESET}{DIM} — live surfaces · r refresh · q back{RESET}"]
-        for r in rows:
+        lines = [f"{C.ACCENT}tabs{RESET}{DIM} — live surfaces · ↑/↓ select · "
+                 f"Enter steer agent · r refresh · q back{RESET}"]
+        for i, r in enumerate(rows):
             status = r.get("status") or "—"
-            head = f"  {_glyph(r.get('alive', False), status)} {r['kind']:<5} {r['id']:<18} " \
-                   f"{status:<8}"
-            head += _pad(head, width)
+            marker = "›" if i == sel else " "
+            head = f"{marker} {_glyph(r.get('alive', False), status)} {r['kind']:<5} " \
+                   f"{r['id']:<18} {status:<8}"
             lines.append(head)
             instr = " ".join(str(r.get("instruction", "")).split())
             if instr:
                 lines.append(f"{DIM}    {instr[:width - 6]}{RESET}")
             for tl in _tail_lines(r.get("tail") or ""):
                 lines.append(f"{DIM}    │ {tl[:width - 8]}{RESET}")
-        # clear previous frame, then draw
+            pend = agent_steering_pending(r["id"]) if r["kind"] == "agent" else 0
+            if pend:
+                lines.append(f"{C.WARNING}    ▸ {pend} steering line"
+                             f"{'s' if pend != 1 else ''} queued{RESET}")
+        if notice:
+            lines.append(f"{C.WARNING}{notice}{RESET}")
+        lines.extend(extra or [])
         out = ""
         if not first:
             out = f"\x1b[{drawn}A\r" if drawn else ""
@@ -206,6 +263,40 @@ def run_tabs_dashboard() -> None:
         sys.stdout.flush()
         drawn = len(lines)
 
+    def steer_prompt(agent_id: str) -> None:
+        """Raw-mode one-line editor; Enter queues the note for the agent."""
+        nonlocal notice
+        buf = ""
+        cursor = f"{DIM}steer {agent_id} ›{RESET} "
+        while True:
+            frame = f"\r\x1b[K{cursor}{buf}"
+            sys.stdout.write(frame)
+            sys.stdout.flush()
+            if not wait_ready(fd, 0.5):
+                continue
+            c = read_byte(fd)
+            if c in (b"\r", b"\n"):
+                if buf.strip():
+                    ok = queue_agent_steering(agent_id, buf)
+                    notice = (f"  ▸ steered {agent_id}: {buf.strip()[:50]}"
+                              if ok else
+                              f"  ✗ {agent_id} is not running — line dropped")
+                else:
+                    notice = ""
+                return
+            if c in (b"\x03", b"\x04", b"\x1b", b"q"):
+                notice = ""
+                return
+            if c in (b"\x7f", b"\x08"):
+                buf = buf[:-1]
+                continue
+            try:
+                ch = c.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if ch >= " ":
+                buf += ch
+
     with raw_mode(fd):
         render(first=True)
         try:
@@ -214,9 +305,41 @@ def run_tabs_dashboard() -> None:
                     render()
                     continue
                 c = read_byte(fd)
-                if c in (b"q", b"\x03", b"\x04", b"\x1b"):
+                if c in (b"q", b"\x03", b"\x04"):
                     break
+                if c == b"\x1b":
+                    # bare Esc quits; arrow sequences move the selection
+                    if not wait_ready(fd, 0.05):
+                        break
+                    seq = read_byte(fd)
+                    if seq == b"[":
+                        arrow = read_byte(fd)
+                        if arrow == b"A":
+                            sel = max(0, sel - 1)
+                        elif arrow == b"B":
+                            sel = min(max(0, len(rows) - 1), sel + 1)
+                    render()
+                    continue
+                if c in (b"j",):
+                    sel = min(max(0, len(rows) - 1), sel + 1)
+                    render()
+                    continue
+                if c in (b"k",):
+                    sel = max(0, sel - 1)
+                    render()
+                    continue
+                if c == b"\r" or c == b"\n":
+                    if rows and sel < len(rows) and rows[sel]["kind"] == "agent":
+                        if rows[sel].get("alive"):
+                            steer_prompt(rows[sel]["id"])
+                        else:
+                            notice = f"  ✗ {rows[sel]['id']} is not running"
+                    elif rows and sel < len(rows):
+                        notice = "  ✗ only sub-agents accept steering (select an agent row)"
+                    render()
+                    continue
                 # r or any key: fall through to repaint
+                notice = ""
                 render()
         finally:
             sys.stdout.write(f"\x1b[{drawn}A\x1b[J" if drawn else "")
@@ -226,10 +349,6 @@ def run_tabs_dashboard() -> None:
 def _term_cols() -> int:
     import shutil
     return max(40, shutil.get_terminal_size((80, 24)).columns)
-
-
-def _pad(s: str, width: int) -> str:
-    return ""  # rows are left-aligned; trailing pad unneeded on tty
 
 
 def tabs_print_fallback() -> None:
