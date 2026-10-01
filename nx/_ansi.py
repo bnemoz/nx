@@ -135,7 +135,8 @@ _PALETTE_KEYS: tuple[str, ...] = (
 # Semantic roles used across the codebase, each backed by one of the twelve
 # palette hues above by default. Centralizing the role→hue mapping here means
 # a new theme only has to supply the twelve palette hexes (above) — it never
-# needs to know about roles. Each role can also be overridden independently
+# needs to know about roles (several roles may share a hue). Each role can
+# also be overridden independently
 # via `NX_<ROLE>_COLOR` (see _parse_color_override), e.g. NX_TEXT_COLOR=green,
 # NX_STATUS_BAR_COLOR=ffaa00, NX_REASONING_TEXT_COLOR=gray.
 ROLE_DEFAULTS: dict[str, str] = {
@@ -145,6 +146,7 @@ ROLE_DEFAULTS: dict[str, str] = {
     "TOOL_OUTPUT": "magenta",  # tool/bash result body lines
     "ACCENT": "blue",          # borders, model name, chatbox prompt
     "MEMORY": "purple",        # memory tool calls (memory_search/write/delete)
+    "SUBAGENT": "teal",        # spawn_agent tool call boxes (delegated work)
     "LABEL": "orange",         # source name / session id badges
     "TODO": "orange",          # todo_write tool output (distinct from TOOL_OUTPUT)
     "SUCCESS": "green",        # yolo/auto-approve/allow indicators
@@ -203,6 +205,7 @@ class _Colors:
     TOOL_OUTPUT: str
     ACCENT: str
     MEMORY: str
+    SUBAGENT: str
     LABEL: str
     TODO: str
     SUCCESS: str

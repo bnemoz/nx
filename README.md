@@ -439,7 +439,8 @@ trailing note cannot fold away your last real tool result.
 
 Each theme supplies twelve palette hues — `cyan`, `green`, `yellow`, `red`,
 `magenta`, `gray`, `blue`, `orange`, `purple`, `teal`, `pink`, and `brown` —
-that eleven semantic roles draw from. All twelve slots are used: the roles take
+that eleven semantic roles draw from — plus a twelfth, `SUBAGENT`, which shares
+the `teal` hue. All twelve slots are used: the roles take
 the original eight, and the say-panel's markdown + code rendering maps the
 rest (purple bullets/numbers, teal table borders, brown link URLs and
 docstrings, pink decorators):
@@ -452,6 +453,7 @@ docstrings, pink decorators):
 | `TOOL_OUTPUT` | magenta | tool/bash result body lines |
 | `ACCENT` | blue | borders, model name, chatbox prompt |
 | `MEMORY` | purple | memory tool calls (`memory_search`/`memory_write`/`memory_delete`/`recall_lessons`) — box rail and header |
+| `SUBAGENT` | teal | `spawn_agent` tool call boxes — delegated sub-agent work |
 | `LABEL` | orange | source name / session id badges |
 | `TODO` | orange | `todo_write` list items — **pending** items; **done** items use `SUCCESS` (green), **in_progress** items use `WARNING` (yellow) |
 | `SUCCESS` | green | yolo/auto-approve/allow indicators |

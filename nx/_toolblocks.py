@@ -49,11 +49,19 @@ _MEMORY_TOOLS = frozenset({"memory_search", "memory_write", "memory_delete"})
 _DELETED_TOOLS = frozenset({"recall_lessons"})
 
 
+# Tools whose call boxes render in the SUBAGENT role color instead of ACCENT,
+# so delegated (sub-agent) work stands apart from ordinary tool calls.
+_SUBAGENT_TOOLS = frozenset({"spawn_agent"})
+
+
 def tool_accent(name: str) -> str:
     """The rail/border color for one tool call's box: C.RED for the
-    deletion-accent tools, C.MEMORY for the memory tools, C.ACCENT otherwise."""
+    deletion-accent tools, C.MEMORY for the memory tools, C.SUBAGENT for
+    spawn_agent, C.ACCENT otherwise."""
     if name in _DELETED_TOOLS:
         return C.RED
+    if name in _SUBAGENT_TOOLS:
+        return C.SUBAGENT
     return C.MEMORY if name in _MEMORY_TOOLS else C.ACCENT
 
 
