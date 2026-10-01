@@ -197,8 +197,27 @@ def create_worktree(job_id: str) -> tuple[str | None, str | None]:
 
 def remove_worktree(path: str) -> None:
     """Best-effort cleanup after the agent's loop ends (the parent may still
-    want the tree, so only the registry link is dropped by callers)."""
+    want the tree, so only the registry link is dropped by callers).
+
+    0.107.0: a dirty agent tree is never destroyed — a slow-but-alive sibling
+    past the sweep TTL (or any crashed worker) keeps its uncommitted work.
+    The dirty tree is renamed aside (path-dirty) so contents survive for
+    manual recovery and a fresh agent can claim the name; a clean or
+    already-gone tree is removed as before."""
     if not path or not os.path.isdir(path):
+        return
+    dirty = False
+    try:
+        d = subprocess.run(["git", "-C", path, "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=15)
+        dirty = d.returncode == 0 and bool(d.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if dirty:
+        try:
+            os.rename(path, path.rstrip(os.sep) + "-dirty")
+        except OSError:
+            pass
         return
     try:
         subprocess.run(["git", "worktree", "remove", "--force", path],

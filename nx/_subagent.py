@@ -153,6 +153,12 @@ SUBAGENT_TOOL = {"type": "function", "function": {
     }, "required": ["instruction"]},
 }}
 
+class _SpawnRefused(Exception):
+    """A spawn whose preconditions failed (e.g. worktree isolation was
+    requested but creation failed). Finalized as an ERROR note to the
+    parent, never a silent fallback into the shared tree."""
+
+
 # Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
 # sub-agent loop (TLS handles per-agent state; this only guards the globals).
 _SPAWN_LOCK = threading.Lock()
@@ -460,22 +466,48 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     it waits on forever."""
     # Per-agent worktree (0.97.0): a write-tier agent with
     # NX_SUBAGENT_WORKTREE=1 edits/verifies/commits in its own checkout so a
-    # headless swarm never tramples the parent's tree or a sibling's. Failure
-    # to create one is NOT fatal — the agent falls back to the shared tree
-    # (scope gates still apply), and the report says so.
+    # headless swarm never tramples the parent's tree or a sibling's. 0.107.0:
+    # when isolation was ASKED for, a failed worktree is now fatal to the
+    # spawn — silently falling back to the shared tree put concurrent write
+    # agents into a last-writer-wins race (the file-claim protocol only
+    # narrows that; isolation is the real fence). A run without
+    # NX_SUBAGENT_WORKTREE is unchanged (shared tree, scope gates apply).
     worktree = None
     wt_note = None
-    if tier in ("write", "implement"):
-        from ._worktree import (_worktree_enabled, create_worktree,
-                               sweep_stale_worktrees)
-        if _worktree_enabled():
-            # reaping (0.103.7): a crashed process leaves nx-wt-agent-* dirs
-            # behind; every spawn reaps the stale ones before claiming a name
-            sweep_stale_worktrees()
-            worktree, err = create_worktree(job_id)
-            if worktree is None:
-                wt_note = (f"worktree isolation unavailable ({err}) — the "
-                           "agent ran in the shared tree")
+    try:
+        if tier in ("write", "implement"):
+            from ._worktree import (_worktree_enabled, create_worktree,
+                                    sweep_stale_worktrees)
+            if _worktree_enabled():
+                # reaping (0.103.7): a crashed process leaves nx-wt-agent-* dirs
+                # behind; every spawn reaps the stale ones before claiming a name
+                sweep_stale_worktrees()
+                worktree, err = create_worktree(job_id)
+                if worktree is None:
+                    yield_error = (
+                        f"worktree isolation failed ({err}) — refusing "
+                        "to run a write-tier agent in the shared tree; "
+                        "fix the worktree error, clear "
+                        "NX_SUBAGENT_WORKTREE, or add a scope and run "
+                        "without isolation")
+                    raise _SpawnRefused(yield_error)
+    except _SpawnRefused as e:
+        # A refused spawn is finalized like any failed job: one ERROR note to
+        # the parent, never a dangling running record or a dead thread.
+        answer = f"ERROR: sub-agent refused: {e}"
+        status = "error"
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(job_id)
+            if rec is not None:
+                rec["answer"] = answer
+                rec["status"] = status
+                rec["finished"] = time.time()
+        try:
+            _write_agent_report(job_id, instruction, status, answer)
+        except Exception:  # noqa: BLE001 — the note below matters more
+            pass
+        _stage_subagent_answer(job_id)
+        return
     try:
         answer = _run_sync_agent_body(instruction, max_turns, tier=tier,
                                       scope=scope, worktree=worktree,

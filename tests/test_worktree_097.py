@@ -236,7 +236,7 @@ def test_async_worker_read_tier_no_worktree(tmp_path, monkeypatch):
     assert captured["tier"] == "read"
 
 
-def test_async_worker_worktree_failure_is_nonfatal(tmp_path, monkeypatch):
+def test_async_worker_worktree_failure_is_refused(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     st.PROJECT_ROOT_IS_GIT = False  # no repo: creation fails
     monkeypatch.setattr(nx, "NX_SUBAGENT_WORKTREE", 1, raising=False)
@@ -246,8 +246,11 @@ def test_async_worker_worktree_failure_is_nonfatal(tmp_path, monkeypatch):
                                 "instruction": "do it", "announced": False}
     S._run_async_agent("job-f", "do it", 10, tier="write")
     rec = S._ASYNC_AGENTS["job-f"]
-    assert rec["status"] == "done"  # the agent still ran, in the shared tree
-    assert "worktree isolation unavailable" in rec["answer"]
+    # 0.107.0: when isolation was requested, a failed worktree is fatal to the
+    # spawn — no silent fallback into the shared-tree last-writer-wins race.
+    assert rec["status"] == "error"
+    assert "worktree isolation failed" in rec["answer"]
+    assert "ERROR: sub-agent refused" in rec["answer"]
 
 
 def test_spawn_agent_async_passes_tier(tmp_path, monkeypatch):
