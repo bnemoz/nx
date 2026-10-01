@@ -89,10 +89,26 @@ def _staleness_error(path: str) -> str | None:
     return staleness_error(path)
 
 
+def _claim_error(path: str) -> str | None:
+    """Cross-process file-claim refusal (nx/_fileclaim.py): another live agent
+    (a different nx process/loop) holds this file — refuse rather than race it.
+    Fails open: any store/claim failure returns None (the edit proceeds)."""
+    from . import _fileclaim
+    ok, holder = _fileclaim.claim_file(path, _fileclaim.owner_id())
+    if ok:
+        return None
+    return (f"ERROR: {path} is currently claimed by another agent ({holder}) "
+            "— refusing to edit; coordinate with the holder or wait for the "
+            "claim to expire")
+
+
 def write_file(path: str, content: str, **_: Any) -> str:
     stale = _staleness_error(path)
     if stale:
         return stale
+    claim = _claim_error(path)
+    if claim:
+        return claim
     try:
         before, before_mtime = _read_with_mtime(path)
     except (FileNotFoundError, IsADirectoryError):
@@ -194,6 +210,9 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     stale = _staleness_error(path)
     if stale:
         return stale
+    claim = _claim_error(path)
+    if claim:
+        return claim
     ws_fallback_used = False
     garble_note = ""
     if old_lines:
@@ -334,6 +353,9 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     stale = _staleness_error(path)
     if stale:
         return stale
+    claim = _claim_error(path)
+    if claim:
+        return claim
     if not isinstance(edits, list) or not edits:
         return "ERROR: `edits` must be a non-empty list of {old, new} objects"
     garble_notes: list[str] = []
@@ -393,6 +415,9 @@ def delete_file(path: str, **_: Any) -> str:
     stale = _staleness_error(path)
     if stale:
         return stale
+    claim = _claim_error(path)
+    if claim:
+        return claim
     existed = os.path.exists(path)
     if not existed:
         return f"ERROR: {path} does not exist"
@@ -493,6 +518,19 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     action = f"sed_edit {len(changes)} file(s), {total} replacement(s): " + ", ".join(f for f, _, _, _, _ in changes)
     if not _confirm(action, preview="\n".join(previews)):
         return "DENIED by user"
+    # Per-file claims (spec): a claimed file is dropped from the batch, the
+    # rest still apply — refused just that file, never all of them.
+    refusals: list[str] = []
+    kept: list[tuple[str, str, str, int, float | None]] = []
+    for change in changes:
+        refusal = _claim_error(change[0])
+        if refusal:
+            refusals.append(refusal)
+        else:
+            kept.append(change)
+    if refusals and not kept:
+        return "\n".join(refusals)
+    changes = kept
     stale = []
     for f, _src, _new_src, _n, mtime in changes:
         try:

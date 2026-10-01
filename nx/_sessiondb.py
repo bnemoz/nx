@@ -196,6 +196,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "session_id TEXT PRIMARY KEY,"
         "chain_len INTEGER NOT NULL,"
         "updated_at REAL)")
+    # Cross-process file-claim protocol (nx/_fileclaim.py): one row per claimed
+    # file, keyed by path so two processes contend on a single PRIMARY KEY.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_claims("
+        "path TEXT PRIMARY KEY,"
+        "owner_id TEXT NOT NULL,"
+        "pid INTEGER NOT NULL,"
+        "claimed_at REAL)")
     conn.commit()
 
 
