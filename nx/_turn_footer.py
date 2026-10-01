@@ -207,7 +207,8 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         return
     # Reasoning-only step (no prose, no tool calls, collapsed reasoning): a
     # dim divider + label so consecutive bare footers read as distinct steps.
-    if (parser is not None and parser.reasoning_only_chars > 0 and not text.strip()
+    if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
+            and not text.strip()
             and not tcs and streamed_chars == 0):
         print(f"{DIM}  {'─' * 46}{RESET}")
         print(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
