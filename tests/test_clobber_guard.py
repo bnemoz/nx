@@ -93,6 +93,30 @@ def test_kill_switch():
         del os.environ["NX_CLOBBER_GUARD"]
 
 
+def test_log_and_temp_extensions_are_exempt():
+    p = _seed("run.log")
+    assert clobber_targets("cmd > " + p) == []
+    assert _redirect_targets("cmd > " + p) == [p]  # still a target, just exempt
+
+
+def test_log_extension_opt_out():
+    p = _seed("run.log")
+    os.environ["NX_CLOBBER_LOG_EXTENSIONS"] = "0"
+    try:
+        assert clobber_targets("cmd > " + p) == [p]
+    finally:
+        del os.environ["NX_CLOBBER_LOG_EXTENSIONS"]
+
+
+def test_lock_and_dotfiles_are_never_exempt():
+    p = _seed("bench.lock")
+    d = _seed(".myapp.env")
+    assert clobber_targets("cmd > " + p) == [p]
+    assert clobber_targets("cmd > " + d) == [p and d]
+    k = _seed("server.pem")
+    assert clobber_targets("cmd > " + k) == [k]
+
+
 def test_dedup():
     p = _seed()
     assert clobber_targets("cat > " + p + " && cat > " + p) == [p]

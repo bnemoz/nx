@@ -28,6 +28,11 @@ Scope discipline (mirrors the secret guard):
   prompting there would train the user to mash Y.
 - Dotfiles are not special-cased: the scan is content-blind. A populated
   ~/.env and a populated notes.txt deserve the same protection.
+- Known-log and ephemeral extensions (.log, .tmp, .out, .swp, .pid, .pyc,
+  .o, .so, ...) are exempt: the model legitimately rewrites run logs every
+  session, and prompting there trains the user to mash Y. An explicit
+  NX_CLOBBER_LOG_EXTENSIONS=0 restores the guard for them; dotfiles and
+  lock-like names are never exempt.
 - Deterministic, never raises, one regex pass. ``NX_CLOBBER_GUARD=0``
   disables it for environments that find it noisy.
 """
@@ -50,6 +55,20 @@ _REDIR_RE = re.compile(
 
 # FD-duplication forms (2>&1) and append (>>) are not truncations.
 _DUP_RE = re.compile(r"^\d*>>&?$")
+
+# Extensions that are logs or build/ephemeral artifacts. The model
+# legitimately truncates these every session (rerunning a benchmark
+# rewrites its run log), so prompting trains the user to mash Y.
+# NX_CLOBBER_LOG_EXTENSIONS=0 restores the guard for them.
+_LOG_EXTENSIONS = frozenset(
+    {".log", ".tmp", ".out", ".err", ".swp", ".cache",
+     ".pyc", ".pyo", ".o", ".so", ".a", ".obj", ".d"}
+)
+
+# Names whose loss is real (locks, env, credentials) — never exempt.
+_NEVER_EXEMPT_RE = re.compile(
+    r"(^|/)(\.[^/]*|[^/]*\.(lock|env|pem|key))$|env$|cred", re.I
+)
 
 
 def _redirect_targets(command: str) -> list[str]:
@@ -82,8 +101,13 @@ def clobber_targets(command: str) -> list[str]:
             st = os.stat(target)
         except OSError:
             continue  # doesn't exist / not statable — creating it is fine
-        if st.st_size > 0 and target not in hits:
-            hits.append(target)
+        if st.st_size == 0 or target in hits:
+            continue
+        if (_env_int("NX_CLOBBER_LOG_EXTENSIONS", 1)
+                and os.path.splitext(target)[1].lower() in _LOG_EXTENSIONS
+                and not _NEVER_EXEMPT_RE.search(target)):
+            continue
+        hits.append(target)
     return hits
 
 
