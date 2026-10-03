@@ -88,7 +88,9 @@ def search_lessons(query: str, limit: int | None = None,
             "ORDER BY rank LIMIT ?",
             (query, limit if limit > 0 else -1)).fetchall()
     except Exception:
+        conn.close()
         return []  # bad FTS syntax / no FTS5 / locked store → degrade
+    conn.close()
     root = None
     if scope == "project":
         _root = getattr(st, "PROJECT_ROOT", None)

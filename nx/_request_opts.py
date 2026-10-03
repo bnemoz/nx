@@ -62,7 +62,11 @@ def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
     return max(floor, min(requested, room))
 
 
-_grammar_cache = {}  # tool-name tuple -> extra_body dict, built lazily/once per tool set
+# tool-name tuple -> extra_body dict, built lazily/once per tool set. Bounded
+# (0.108.4): the key is every tool name in the request, so a swarm churning
+# sub-agent tool sets could grow it without limit — cap at 128, drop-oldest.
+_GRAMMAR_CACHE_CAP = 128
+_grammar_cache: dict[tuple[str | None, ...], Any] = {}
 
 # 0.30.0: /toolcalls text|native|auto — the escalation ladder's rung PAST the
 # breaker. Once native tool-calling is confirmed, _grammar_extra_body() stops
@@ -126,6 +130,8 @@ def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | 
             return None
     key = tuple(t.get("function", {}).get("name") for t in tools)
     if key not in _grammar_cache:
+        if len(_grammar_cache) >= _GRAMMAR_CACHE_CAP:
+            _grammar_cache.pop(next(iter(_grammar_cache)))
         grammar, trigger = build_tool_call_grammar(tools)
         _grammar_cache[key] = None if grammar is None else {
             "grammar": grammar,

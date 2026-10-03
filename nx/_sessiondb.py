@@ -36,7 +36,7 @@ import os
 import random
 import sqlite3
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from ._env import _env_int
 from ._logging import _log_event
@@ -794,45 +794,51 @@ def all_ids() -> set[str]:
         conn.close()
 
 
-def iter_rows() -> list[tuple[str, Optional[dict[str, Any]]]]:
-    """(session_id, parsed transcript) for every row — the live-set scan
-    (image sha256s) and pruning read the whole store in one query. A
-    corrupt blob yields (sid, None) so the caller can fall back."""
+def iter_rows() -> Iterator[tuple[str, Optional[dict[str, Any]]]]:
+    """Yield (session_id, parsed transcript) for every row — the live-set scan
+    (image sha256s) and pruning read the whole store. A corrupt blob yields
+    (sid, None) so the caller can fall back.
+
+    0.108.5: a generator streaming fetchmany(64) rows instead of one
+    fetchall + parse-everything list. The old shape materialized EVERY
+    session's transcript (blobs + parsed dicts) in memory at once — a single
+    big session in the store pushed the whole-store scan to multiple GB of
+    RSS (the RAM-stress finding), and it ran on the session-save writer
+    thread where nothing could shed it. Peak cost is now one row + its
+    event materialization."""
     conn = _open()
     if conn is None:
-        return []
+        return
     try:
-        rows = conn.execute("SELECT session_id, data FROM sessions").fetchall()
-        chains = {r[0] for r in conn.execute(
-            "SELECT session_id FROM session_chain")}
-    except sqlite3.Error:
-        return []
+        try:
+            chains = {r[0] for r in conn.execute(
+                "SELECT session_id FROM session_chain")}
+            cur = conn.execute("SELECT session_id, data FROM sessions")
+            while True:
+                rows = cur.fetchmany(64)
+                if not rows:
+                    break
+                for sid, blob in rows:
+                    data = _row_to_data(sid, blob)
+                    if sid in chains:
+                        # Event-log-backed: materialize messages from the
+                        # events so the live-set sees appended-but-not-yet-
+                        # cached turns. Same connection — conn.execute makes
+                        # its own cursor, so the outer one stays valid.
+                        try:
+                            events = _read_events(conn, sid)
+                        except sqlite3.Error:
+                            events = None
+                        if events is not None:
+                            base = dict(data or {})
+                            base["id"] = sid
+                            base["messages"] = events
+                            data = base
+                    yield sid, data
+        except sqlite3.Error:
+            return
     finally:
         conn.close()
-    out: list[tuple[str, Optional[dict[str, Any]]]] = []
-    for sid, blob in rows:
-        data = _row_to_data(sid, blob)
-        if sid in chains:
-            # Event-log-backed: materialize messages from the events so the
-            # live-set sees appended-but-not-yet-cached turns.
-            try:
-                conn2 = _open()
-                if conn2 is not None:
-                    try:
-                        events = _read_events(conn2, sid)
-                    finally:
-                        conn2.close()
-                else:
-                    events = None
-            except sqlite3.Error:
-                events = None
-            if events is not None:
-                base = dict(data or {})
-                base["id"] = sid
-                base["messages"] = events
-                data = base
-        out.append((sid, data))
-    return out
 
 
 def prune_stale() -> int:

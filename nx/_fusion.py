@@ -97,7 +97,16 @@ def _canonical_key(path: str) -> str:
 
 
 class _FileQueue:
-    """Per-path serialization for fused mutation+command sequences."""
+    """Per-path serialization for fused mutation+command sequences.
+
+    Bounded (0.108.4): one lock per distinct path, and a swarm touching many
+    paths could grow the table without limit. Stale locks are safe to drop —
+    an eviction while another thread holds the lock just means the next caller
+    for that path gets a fresh lock and serializes against it separately, so
+    the cap only trims never-currently-contended paths (checked before insert).
+    """
+
+    _CAP = 256
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
@@ -108,6 +117,8 @@ class _FileQueue:
         with self._guard:
             lk = self._locks.get(key)
             if lk is None:
+                if len(self._locks) >= self._CAP:
+                    self._locks.pop(next(iter(self._locks)))
                 lk = threading.Lock()
                 self._locks[key] = lk
         return lk
