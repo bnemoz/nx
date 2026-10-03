@@ -63,6 +63,10 @@ Every change to `nx/` or `tests/` also passes `uv run ruff check .` (hard gate) 
 
 Recent commits use short imperative subjects, commonly `fix: ...` for corrections (for example, `fix: preserve dropped tool tail during compression`). Keep commits narrowly scoped. Pull requests should explain the user-visible change, testing performed, and any configuration/documentation impact; link related issues when available. Include terminal screenshots only for UI or rendering changes.
 
+## Project Tools
+
+`.nx/tools/docupathic.py` wraps the `docupathic` research-corpus CLI (BM25 search, get, describe, status). When `NX_PROJECT_TOOLS=1`, discover the exact schemas with `search_project_tools` before first use, then invoke them via `call_project_tool` — do not ask the user to run these, and prefer them over re-deriving searches with `run_bash`. Structured queries (counts, filters, joins) go through the built-in `duckdb` tool against `<root>/docupathic.duckdb`.
+
 ## Configuration & Documentation
 
 Use environment variables rather than adding a config-file format. Give new tunables an `NX_*` name, a safe default, and a README entry. New slash commands must be implemented in the appropriate `_repl*`/`_sessions_cmd` module (`nx/_repl.py`, `nx/_repl_settings_cmds.py`, `nx/_sessions_cmd.py`), registered in `_REPL_COMMANDS`, added to `_chatbox.py` completion data, and documented in the README.
