@@ -181,6 +181,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # mode — the bodies live in the real `fts_body` table and the FTS
     # index holds only the inverted index, not its own content copy.
     _ensure_fts_schema(conn)
+    # 0.108.6: per-session image sha set, maintained on every write so the
+    # sidecar-GC live-set scan never has to parse transcript blobs.
+    _ensure_shas_column(conn)
     # Append-only event log (0.104.x): the authoritative transcript lives in
     # per-message rows; the sessions.data blob becomes a lagging cache (only
     # rebuilt on merge/compaction/fork/migration). session_chain is the
@@ -314,7 +317,8 @@ def migrate_files(force: bool = False) -> int:
                     conn.execute(
                         "INSERT OR REPLACE INTO sessions"
                         " (session_id, data, updated_at, revision, title,"
-                        "  cwd, model, source) VALUES (?,?,?,?,?,?,?,?)",
+                        "  cwd, model, source, image_shas)"
+                        " VALUES (?,?,?,?,?,?,?,?,?)",
                         _data_to_row(sid, data))
                 except sqlite3.Error:
                     continue
@@ -368,7 +372,8 @@ def _import_legacy_shards(conn: sqlite3.Connection, d: str,
                 conn.execute(
                     "INSERT OR REPLACE INTO sessions"
                     " (session_id, data, updated_at, revision, title,"
-                    "  cwd, model, source) VALUES (?,?,?,?,?,?,?,?)",
+                    "  cwd, model, source, image_shas)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
                     _data_to_row(sid, data))
             except sqlite3.Error:
                 continue
@@ -389,6 +394,28 @@ def _ensure_migrated() -> None:
         pass  # never raise into a save/load path
 
 
+def _ensure_shas_column(conn: sqlite3.Connection) -> None:
+    """Add the sessions.image_shas column to a pre-0.108.6 store (rows read
+    as NULL and fall back to parsing, same as before the column existed)."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        if "image_shas" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN image_shas TEXT")
+    except sqlite3.Error:
+        pass  # the NULL fallback still serves the scan
+
+
+def _shas_of(data: dict[str, Any]) -> Optional[str]:
+    """The sorted image shas referenced by `data`'s messages, as a JSON list
+    string — the indexed form of the sidecar-GC live-set."""
+    try:
+        from ._images import _collect_message_image_refs
+        shas = _collect_message_image_refs(data.get("messages") or [])
+        return json.dumps(sorted(shas)) if shas else None
+    except Exception:
+        return None
+
+
 def _data_to_row(session_id: str, data: dict[str, Any]) -> tuple:
     return (
         session_id,
@@ -399,6 +426,7 @@ def _data_to_row(session_id: str, data: dict[str, Any]) -> tuple:
         data.get("cwd"),
         data.get("model"),
         data.get("source"),
+        _shas_of(data),
     )
 
 
@@ -465,15 +493,22 @@ def load_session(session_id: str) -> Optional[dict[str, Any]]:
 
 def _session_meta(session_id: str) -> dict[str, Any]:
     """Cheap metadata-only view (title/description/cwd/...) for the save
-    path's FTS refresh — a JSON parse of the one blob, no event-log reads
-    (the caller already holds the authoritative merged message list)."""
+    path's FTS refresh.
+
+    0.108.6: title comes from the indexed column; description still lives
+    only inside the blob, so the blob is read with substring() extraction
+    of the one field instead of a full json.loads — a 200MB legacy blob
+    used to be parsed (twice: blob + decoder objects) on every indexed
+    save just to reach `description`. Falls back to a full parse when the
+    substring probe can't find the field (escaped keys, non-ASCII edge
+    cases); the fallback is correctness-safe, only slow."""
     _ensure_migrated()
     conn = _open()
     if conn is None:
         return {}
     try:
         row = conn.execute(
-            "SELECT data FROM sessions WHERE session_id = ?",
+            "SELECT title, data FROM sessions WHERE session_id = ?",
             (session_id,)).fetchone()
     except sqlite3.Error:
         return {}
@@ -481,7 +516,22 @@ def _session_meta(session_id: str) -> dict[str, Any]:
         conn.close()
     if not row:
         return {}
-    return _row_to_data(session_id, row[0]) or {}
+    desc: Optional[str] = None
+    blob = row[1] or ""
+    k = '"description":'
+    p = blob.find(k)
+    if p >= 0:
+        rest = blob[p + len(k):].lstrip()
+        if rest[:1] == '"':
+            # JSON string: unescape the minimal set; fall back to a full
+            # parse if any backslash appears (conservative, never lossy)
+            end = rest.find('"', 1)
+            if end > 0 and "\\" not in rest[1:end]:
+                desc = rest[1:end]
+    if desc is None:
+        parsed = _row_to_data(session_id, blob)
+        return parsed or {}
+    return {"id": session_id, "title": row[0], "description": desc}
 
 
 # --- event log helpers ------------------------------------------------------
@@ -596,7 +646,7 @@ def _store_session_txn(
                 conn.execute(
                     "INSERT OR REPLACE INTO sessions"
                     " (session_id, data, updated_at, revision, title, cwd,"
-                    "  model, source) VALUES (?,?,?,?,?,?,?,?)",
+                    "  model, source, image_shas) VALUES (?,?,?,?,?,?,?,?,?)",
                     _data_to_row(session_id, data))
 
             # Shared tail: chain upsert + indexed meta columns. On a rebuild
@@ -622,6 +672,25 @@ def _store_session_txn(
                 conn.execute(
                     f"UPDATE sessions SET {', '.join(sets)}"
                     " WHERE session_id = ?", vals)
+            if fast:
+                # 0.108.6: keep the indexed sha set current even when the blob
+                # cache is deliberately stale — a union with the old value
+                # stays correct (events are append-only; a sha once referenced
+                # by a committed event stays referenced until the GC deletes
+                # that sidecar, which only happens when it is in the live-set).
+                try:
+                    new_shas = _shas_of({"messages": messages})
+                    old = conn.execute(
+                        "SELECT image_shas FROM sessions WHERE session_id = ?",
+                        (session_id,)).fetchone()
+                    both = set(json.loads(old[0])) if old and old[0] else set()
+                    if new_shas:
+                        both |= set(json.loads(new_shas))
+                    conn.execute(
+                        "UPDATE sessions SET image_shas = ? WHERE session_id = ?",
+                        (json.dumps(sorted(both)) if both else None, session_id))
+                except (sqlite3.Error, ValueError, TypeError):
+                    pass  # scan falls back to parsing
             conn.commit()
             return merged
         except Exception:
@@ -805,7 +874,11 @@ def iter_rows() -> Iterator[tuple[str, Optional[dict[str, Any]]]]:
     big session in the store pushed the whole-store scan to multiple GB of
     RSS (the RAM-stress finding), and it ran on the session-save writer
     thread where nothing could shed it. Peak cost is now one row + its
-    event materialization."""
+    event materialization.
+
+    0.108.6: image_live_shas() is the whole-store scan's real consumer; the
+    per-row parse here exists only for its NULL-column fallback and the
+    pruning/listing callers."""
     conn = _open()
     if conn is None:
         return
@@ -872,6 +945,75 @@ def prune_stale() -> int:
         return 0
     finally:
         conn.close()
+
+
+def image_live_shas() -> tuple[set[str], set[str]]:
+    """(live sha set, covered session ids) for the sidecar GC, read from the
+    indexed `image_shas` column — one cheap column scan, no transcript
+    parsing (0.108.6: the old iter_rows()-based scan peaked at ~1.5 GB RSS
+    because every row's blob + event log was materialized just to collect
+    image_ref parts).
+
+    Rows with a NULL column (pre-0.108.6 writes, legacy stubs) fall back to
+    parsing just those transcripts via iter_rows(); a corrupt/unreadable row
+    contributes nothing, exactly as before. sqlite3.Error degrades to
+    ({}, set()) — the caller's 60s sidecar age grace covers the miss."""
+    conn = _open()
+    if conn is None:
+        return set(), set()
+    live: set[str] = set()
+    covered: set[str] = set()
+    null_rows: list[str] = []
+    try:
+        for sid, shas in conn.execute(
+                "SELECT session_id, image_shas FROM sessions"):
+            covered.add(sid)
+            if not shas:
+                null_rows.append(sid)
+                continue
+            try:
+                live |= set(json.loads(shas))
+            except (ValueError, TypeError):
+                null_rows.append(sid)
+    except sqlite3.Error:
+        return set(), set()
+    finally:
+        conn.close()
+    if null_rows:
+        # Parse only the rows the column can't answer — a pre-0.108.6 store
+        # upgrades lazily as sessions are saved. Each target is read with
+        # its own single-row SELECT (load_session-like), never a whole-table
+        # cursor: a store with a few permanent NULLs (legacy rows never
+        # re-saved, listing stubs) must not drag every big blob past the
+        # parser on every sweep just to reach its 20 targets.
+        conn = _open()
+        if conn is not None:
+            try:
+                for sid in null_rows:
+                    row = conn.execute(
+                        "SELECT data FROM sessions WHERE session_id = ?",
+                        (sid,)).fetchone()
+                    if not row:
+                        covered.discard(sid)  # no row: let the file fallback try
+                        continue
+                    data = _row_to_data(sid, row[0])
+                    if data is None:
+                        covered.discard(sid)  # unreadable: file fallback
+                        continue
+                    live |= _shas_live(data)
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+    return live, covered
+
+
+def _shas_live(data: dict[str, Any]) -> set[str]:
+    try:
+        from ._images import _collect_message_image_refs
+        return _collect_message_image_refs(data.get("messages") or [])
+    except Exception:
+        return set()
 
 
 def retention_sweep(conn: Optional[sqlite3.Connection] = None) -> dict[str, int]:

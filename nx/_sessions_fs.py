@@ -546,13 +546,14 @@ def _scan_session_image_refs() -> set[str]:
     covered: set[str] = set()  # ids whose row gave us a trustworthy sha256s
     try:
         from . import _sessiondb
-        for sid, data in _sessiondb.iter_rows():
-            covered.add(sid)
-            if not data:
-                continue  # corrupt blob: fall back to the mirror file below
-            live |= _collect_message_image_refs(data.get("messages") or [])
+        # 0.108.6: the indexed image_shas column answers the scan with one
+        # cheap query; per-row transcript parsing (up to the full store
+        # materialized) only for rows the column can't answer yet.
+        live, covered = _sessiondb.image_live_shas()
+        return live | _scan_session_image_files(covered)
     except Exception:
         covered = set()
+        live = set()
     # Anything the store could not answer (corrupt blob) falls back to
     # parsing the legacy mirror file, when one still exists.
     try:
@@ -572,6 +573,30 @@ def _scan_session_image_refs() -> set[str]:
         except (OSError, json.JSONDecodeError, ValueError):
             continue
     return live
+
+
+def _scan_session_image_files(covered: set[str]) -> set[str]:
+    """Image refs found in legacy mirror files whose session id the store
+    could not cover (no row / unreadable row). Split out of the store scan
+    at 0.108.6 so the happy path (every row indexed) skips the listdir."""
+    out: set[str] = set()
+    try:
+        names = [n for n in os.listdir(_sessions_dir()) if n.endswith(".json")]
+    except OSError:
+        return out
+    for name in names:
+        sid = name[:-len(".json")]
+        if sid in covered:
+            continue
+        try:
+            with open(os.path.join(_sessions_dir(), name), encoding="utf-8") as f:
+                data = json.load(f)
+            msgs = data.get("messages") if isinstance(data, dict) else None
+            if isinstance(msgs, list):
+                out |= _collect_message_image_refs(msgs)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+    return out
 
 
 def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
