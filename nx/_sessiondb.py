@@ -579,17 +579,15 @@ def _store_session_txn(
             now = time.time()
             from ._sessions_fs import _merge_session_messages
             chain_len = _read_chain(conn, session_id)
+            # 0.108.6: only read + parse the lagging blob when a rebuild can
+            # actually need `existing` (its metadata/merge base). A fast
+            # append (the per-turn common case) never reads it — that was a
+            # full blob fetch + json.loads of the whole transcript on every
+            # save, discarded immediately after.
             row = conn.execute(
-                "SELECT data, revision FROM sessions WHERE session_id = ?",
+                "SELECT revision FROM sessions WHERE session_id = ?",
                 (session_id,)).fetchone()
-            existing: dict[str, Any] = {}
-            if row:
-                parsed = _row_to_data(session_id, row[0])
-                if parsed:
-                    existing = parsed
-            # the indexed revision is the live counter (the blob cache is
-            # stale between rebuilds)
-            live_revision = int(row[1] or 0) if row else 0
+            live_revision = int(row[0] or 0) if row else 0
 
             fast = False
             if (not force_rebuild and chain_len is not None
@@ -603,6 +601,16 @@ def _store_session_txn(
                         fast = json.loads(tail[0]) == messages[chain_len - 1]
                     except (ValueError, TypeError):
                         fast = False
+
+            existing: dict[str, Any] = {}
+            if not fast:
+                row = conn.execute(
+                    "SELECT data FROM sessions WHERE session_id = ?",
+                    (session_id,)).fetchone()
+                if row:
+                    parsed = _row_to_data(session_id, row[0])
+                    if parsed:
+                        existing = parsed
 
             if fast:
                 # Fast append: new events only; the data blob is a lagging

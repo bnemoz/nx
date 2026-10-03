@@ -142,8 +142,14 @@ def _log_event(direction: str, payload: Any) -> None:
         stub = {k: v for k, v in payload.items()
                 if not isinstance(v, (list, dict))} if isinstance(payload, dict) else {}
         if isinstance(payload, dict):
-            # keep byte-sizes so the stub is still useful for debugging
-            stub["_logged_bytes"] = {k: len(str(v)) for k, v in payload.items()
-                                     if isinstance(v, (list, dict))}
+            # keep byte-sizes so the stub is still useful for debugging.
+            # 0.108.6: lists/dicts are sized structurally, NOT via str(v) —
+            # that repr'ed the whole transcript + tool schemas on every
+            # model call even with NX_LOG_REQUESTS=0 (transient, but a
+            # full-prompt copy on the hot path).
+            stub["_logged_bytes"] = {
+                k: (len(v) if isinstance(v, (list, dict, str)) else -1)
+                for k, v in payload.items() if isinstance(v, (list, dict))
+            }
         payload = {"_stub": True, **stub}
     _llog.write(json.dumps({"ts": time.time(), "dir": direction, "data": payload}) + "\n")
