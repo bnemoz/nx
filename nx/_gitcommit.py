@@ -36,7 +36,7 @@ def _git(repo: str, args: list[str], timeout: int,
     return proc.stdout, None
 
 
-def _stage_index(repo: str) -> str:
+def _stage_index(repo: str) -> tuple[str, str | None]:
     """A private temp GIT_INDEX_FILE seeded from the repo's real index.
 
     Staging runs against this copy, so the preview/secret-scan/denied-commit
@@ -44,7 +44,12 @@ def _stage_index(repo: str) -> str:
     user's own git commands) can't have its WIP swept into our staging, and a
     denial leaves THEIR index untouched. The real index is only ever written
     by the final `git commit` itself, which reads the tree from this index.
+
+    Returns (temp index path, HEAD hash at seed time). The hash is our
+    preflight anchor: if HEAD moves before we commit, the commit would
+    silently parent onto someone else's new tip (see _head_moved below).
     """
+    head = _head_hash(repo)
     fd, idx = tempfile.mkstemp(prefix=".nx-index-", dir=os.path.join(repo, ".git"))
     os.close(fd)
     env_seed = dict(os.environ, GIT_INDEX_FILE=idx)
@@ -53,7 +58,15 @@ def _stage_index(repo: str) -> str:
                        env=env_seed, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         pass  # fresh empty index still stages correctly below
-    return idx
+    return idx, head
+
+
+def _head_hash(repo: str) -> str | None:
+    """Current HEAD commit hash, or None (unborn HEAD / git unavailable)."""
+    out, err = _git(repo, ["rev-parse", "HEAD"], 15)
+    if err:
+        return None
+    return (out or "").strip() or None
 
 
 def _git_env(index_file: str) -> dict[str, str]:
@@ -96,9 +109,9 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
                 "paths, or \".\" for every change); use git_diff first to review")
     timeout = _env_timeout()
     file_list = files.split()
-    idx = _stage_index(repo)
+    idx, head = _stage_index(repo)
     try:
-        return _git_commit_with_index(repo, file_list, message, timeout, idx)
+        return _git_commit_with_index(repo, file_list, message, timeout, idx, head)
     finally:
         try:
             os.unlink(idx)
@@ -107,7 +120,7 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
 
 
 def _git_commit_with_index(repo: str, file_list: list[str], message: str,
-                           timeout: int, idx: str) -> str:
+                           timeout: int, idx: str, head: str | None = None) -> str:
     from ._bash_jobs import _confirm  # lazy: avoid an import cycle at module load
     env = _git_env(idx)
     out, err = _git(repo, ["add", "--", *file_list], timeout, env=env)
@@ -134,11 +147,40 @@ def _git_commit_with_index(repo: str, file_list: list[str], message: str,
         # session's work was ever swept in.
         return ("DENIED by user — commit not made; the working tree is "
                 "unchanged (git_diff staged=true reviews the shared index)")
+    # Preflight (HEAD-moved guard): another session (or the user) may have
+    # committed between _stage_index's read-tree and now. Committing on top of
+    # the old anchor would silently parent onto the new tip — refuse instead
+    # and name what landed, so the model re-inspects and retries deliberately.
+    # `git commit` below still reads the tree from our private index, so a
+    # refusal leaves the shared index untouched (the caller's unlink cleans up).
+    cur = _head_hash(repo)
+    if head is not None and cur is not None and cur != head:
+        return _head_moved(repo, head, cur, timeout)
     out, err = _git(repo, ["commit", "-m", message.strip()], timeout, env=env)
     if err:
         return err
     _sync_shared_index(repo, file_list, timeout)
     return (f"[git_commit] {short}\n{(out or '').strip()}")
+
+
+def _head_moved(repo: str, old: str, new: str, timeout: int) -> str:
+    """Refusal text for a HEAD that moved between staging and commit.
+
+    Names the commits that landed in old..new (brief), so the model can see
+    whose work it would have parented onto and re-inspect/retry.
+    """
+    out, err = _git(repo, ["log", "--oneline", f"{old}..{new}"], timeout)
+    landed = ""
+    if not err and (out or "").strip():
+        lines = out.strip().splitlines()
+        brief = "; ".join(lines[:5])
+        if len(lines) > 5:
+            brief += f"; … (+{len(lines) - 5} more)"
+        landed = f" — landed here: {brief}"
+    return (f"REFUSED: HEAD moved from {old[:12]} to {new[:12]} while you were "
+            f"staging{landed}. Another session committed first; nothing was "
+            "committed and the shared index is untouched. Re-inspect (git_log, "
+            "git_diff) and retry the commit against the new HEAD.")
 
 
 def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:

@@ -669,6 +669,7 @@ def run_bash(command: str, timeout: int | None = None,
     # actually run.
     command = prefer_ripgrep(command)
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
+    staged = None
     if secret is not None:
         from ._subagent import _subagent_quiet
         if _subagent_quiet():
@@ -712,7 +713,35 @@ def run_bash(command: str, timeout: int | None = None,
                 raise _EscToChat(f"run: {command}")
             if choice != "y":
                 return "DENIED by user"
-    if not secret and clobber is None and not _confirm(f"run: {command}"):
+        # Git-index guard: a raw `git add`/`git commit`/`git reset`/… while the
+        # SHARED index holds staged entries sweeps whatever is staged — maybe
+        # ANOTHER session's work — into its own result (the incident a private
+        # GIT_INDEX_FILE in git_commit prevents). Same shape as the clobber
+        # guard above: its own prompt even in YOLO, refuse in a quiet
+        # sub-agent. NX_GIT_INDEX_GUARD=0 disables.
+        from ._clobber import git_index_guard, git_index_guard_message
+        staged = git_index_guard(command, cwd=_cwd) or None
+        if staged:
+            from ._subagent import _subagent_quiet
+            if _subagent_quiet():
+                return (f"ERROR: command mutates the git index while "
+                        f"{', '.join(staged[:3])} "
+                        f"{'is' if len(staged) == 1 else 'are'} staged in the "
+                        "shared index (possibly another session's work); "
+                        "refused in a background sub-agent — let the parent "
+                        "run it")
+            import nx as _m
+            from ._approval import _paused_spinner
+            with _paused_spinner():
+                choice = _m._ask_approval(
+                    git_index_guard_message(command, staged), allow_hint=None)
+            if choice == "esc":
+                from ._approval import _EscToChat
+                raise _EscToChat(f"run: {command}")
+            if choice != "y":
+                return "DENIED by user"
+    if (not secret and clobber is None and staged is None
+            and not _confirm(f"run: {command}")):
         return "DENIED by user"
     if timeout is None:
         timeout = _env_int("NX_BASH_POLL_SECONDS", 3)
