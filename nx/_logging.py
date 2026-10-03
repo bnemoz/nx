@@ -49,27 +49,36 @@ class _AsyncLogWriter:
         self._max_bytes = max_bytes
         # Bounded (swarm P4): the writer is one line-buffered daemon thread;
         # if it falls behind N streaming agents, an unbounded queue is an
-        # unbounded RAM backlog. drop-oldest past 4096 lines (~tens of MB of
-        # worst-case lines): diagnostics degrade, the agents never block.
-        self._queue: queue.Queue[str] = queue.Queue(maxsize=4096)
+        # unbounded RAM backlog. Bounded twice: 1024 lines AND 64 MB of queued
+        # bytes, drop-oldest on either — a 100K-token prompt serializes to
+        # ~400 KB per req line, so a line-only cap could still park ~1 GB in
+        # a swarm whose agents outpace the single writer thread.
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=1024)
+        self._max_queued_bytes = 64 * 1024 * 1024
+        self._queued_bytes = 0
         self._thread = threading.Thread(target=self._run, daemon=True,
                                          name="nx-log-writer")
         self._thread.start()
 
     def write(self, line: str) -> None:
+        must_drop = self._queue.full() or (
+            self._queued_bytes + len(line)) > self._max_queued_bytes
+        if must_drop:
+            # Drop-oldest until the new line fits under both caps: the
+            # freshest diagnostics matter, and the agents never block.
+            while self._queue.qsize() > 1 or (
+                    self._queued_bytes + len(line)) > self._max_queued_bytes:
+                try:
+                    dropped = self._queue.get_nowait()
+                    self._queued_bytes -= len(dropped)
+                    self._queue.task_done()
+                except queue.Empty:
+                    break
         try:
             self._queue.put_nowait(line)
+            self._queued_bytes += len(line)
         except queue.Full:
-            # Drop-oldest, keep the new line: the freshest diagnostics matter.
-            try:
-                self._queue.get_nowait()
-                self._queue.task_done()
-            except (queue.Empty, ValueError):
-                pass
-            try:
-                self._queue.put_nowait(line)
-            except queue.Full:
-                pass
+            pass
 
     def flush(self) -> None:
         """Block until every currently queued line has been written. Called

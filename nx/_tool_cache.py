@@ -301,6 +301,14 @@ def cache_touch(cache: dict, key: Any) -> None:
             cache[key] = cache.pop(key)
 
 
+def _entry_cost(e: _CacheEntry) -> int:
+    """RAM cost of an entry: the result plus its tree_stamp (a search entry's
+    stamp holds up to NX_TOOL_CACHE_TREE_FILES "name:mtime" tokens — hundreds
+    of KB per entry, unmetered before 0.108.3, so a search-heavy swarm could
+    blow the byte cap several times over)."""
+    return len(e.result or "") + len(getattr(e, "tree_stamp", None) or "")
+
+
 def bound_cache(cache: dict) -> None:
     """Evict oldest entries until both caps hold. Always leaves at least one
     entry, so a single oversize result is still cacheable (and re-readable)."""
@@ -309,12 +317,12 @@ def bound_cache(cache: dict) -> None:
         for key in list(cache)[: len(cache) - max_entries]:
             del cache[key]
     if max_bytes:
-        total = sum(len(e.result or "") for e in cache.values())
+        total = sum(_entry_cost(e) for e in cache.values())
         for key in list(cache):
             if total <= max_bytes or len(cache) <= 1:
                 break
             entry = cache.pop(key)
-            total -= len(entry.result or "")
+            total -= _entry_cost(entry)
 
 
 def drop_changed_entries(cache: dict, full_tree_walk: bool | None = None) -> None:
