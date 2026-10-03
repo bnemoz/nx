@@ -11,11 +11,19 @@ Design rules (pinned by tests/test_file_claims.py):
   * no module-level sqlite3.Connection — a fresh `_open()` per call;
   * paths resolved at call time (env read at call time, no import-time freeze).
 
-Liveness: an existing row blocks a *different* owner only while its pid is
-alive AND it hasn't aged past `NX_FILE_CLAIM_TTL` seconds (default 3600; `0`
-disables expiry). A dead pid or an expired row is reclaimed in place. A live
-row held by the SAME owner is refreshed (heartbeat) and returns ok, so several
-write tools in one process/loop re-claim cleanly.
+Liveness: an existing row blocks a *different* owner only while (a) its pid is
+alive, (b) it hasn't aged past `NX_FILE_CLAIM_TTL` seconds (default 3600; `0`
+disables expiry), AND (c) it was claimed from the SAME working directory as
+this process. A dead pid, an expired row, or a row taken from another repo (a
+different `os.getcwd()` — e.g. an nx session working in an unrelated folder on
+this host) is reclaimed in place: claims are repo-scoped, never host-wide.
+A live row held by the SAME owner is refreshed (heartbeat) and returns ok, so
+several write tools in one process/loop re-claim cleanly.
+
+Scoping: `cwd` is `os.getcwd()` at claim time (call-time, like everything
+else here), normalized with realpath. Rows written before the column existed
+carry NULL, which reads as "another repo": they stop blocking and the next
+writer reclaims them (see `_sessiondb._ensure_file_claims_cwd`).
 
 Identity: `owner_id` is `<NX session id>:<thread ident>`. SESSION_ID alone is
 too coarse (every tool in a session shares it) and the per-agent TLS ctx is
@@ -45,6 +53,30 @@ def _claims_enabled() -> bool:
 def _ttl() -> int:
     """Seconds a claim stays valid without a heartbeat; 0 = never expires."""
     return _env_int("NX_FILE_CLAIM_TTL", DEFAULT_TTL)
+
+
+def _cwd() -> str:
+    """This process's working directory at call time, realpath-normalized so a
+    symlinked path or trailing slash doesn't fork one repo into two claim
+    scopes. Empty when the cwd is unreadable (deleted) — see _same_repo."""
+    try:
+        return os.path.realpath(os.getcwd())
+    except OSError:
+        return ""
+
+
+def _same_repo(holder_cwd: object) -> bool:
+    """True when a row's recorded cwd belongs to this process's repo.
+
+    A foreign cwd (and a pre-migration NULL row, which records nothing) is
+    NOT this repo, so it never blocks — claim_file reclaims it the same way it
+    reclaims a dead or expired holder. When our own cwd can't be read we keep
+    the old host-wide behavior (block) rather than silently reclaiming rows we
+    can't prove are foreign."""
+    mine = _cwd()
+    if not mine:
+        return True
+    return str(holder_cwd or "") == mine
 
 
 def owner_id() -> str:
@@ -81,9 +113,9 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
     """Atomically claim `path` for `owner_id`.
 
     Returns (True, None) when the claim is held (fresh, refreshed-heartbeat, or
-    reclaimed from a dead/expired holder), or (False, holder_desc) when a live
-    holder with a DIFFERENT owner_id holds it. Never raises: a store that can't
-    serve the call fails open (True, None).
+    reclaimed from a dead/expired/other-repo holder), or (False, holder_desc)
+    when a live holder in THIS repo with a DIFFERENT owner_id holds it. Never
+    raises: a store that can't serve the call fails open (True, None).
     """
     if not path or not _claims_enabled():
         return (True, None)
@@ -94,11 +126,13 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
     ttl = _ttl()
     now = time.time()
     pid = os.getpid()
+    cwd = _cwd()
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT owner_id, pid, claimed_at FROM file_claims WHERE path = ?",
+                "SELECT owner_id, pid, claimed_at, cwd FROM file_claims"
+                " WHERE path = ?",
                 (path,)).fetchone()
             result: tuple[bool, str | None]
             if row is not None:
@@ -106,26 +140,30 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                 holder_pid = row[1]
                 claimed_at = row[2] or 0.0
                 expired = ttl > 0 and (now - claimed_at) > ttl
-                if _pid_alive(holder_pid) and not expired:
+                if (_pid_alive(holder_pid) and not expired
+                        and _same_repo(row[3])):
                     if holder_owner == owner_id:
                         # Same owner: heartbeat-refresh, stay held.
                         conn.execute(
-                            "UPDATE file_claims SET claimed_at = ? WHERE path = ?",
+                            "UPDATE file_claims SET claimed_at = ?"
+                            " WHERE path = ?",
                             (now, path))
                         result = (True, None)
                     else:
                         result = (False, _holder_desc(holder_owner, holder_pid))
                 else:
-                    # Dead pid or expired: reclaim in place.
+                    # Dead pid, expired, or another repo's claim: reclaim here.
                     conn.execute("DELETE FROM file_claims WHERE path = ?", (path,))
                     conn.execute(
-                        "INSERT INTO file_claims(path, owner_id, pid, claimed_at)"
-                        " VALUES (?,?,?,?)", (path, owner_id, pid, now))
+                        "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"
+                        " cwd) VALUES (?,?,?,?,?)",
+                        (path, owner_id, pid, now, cwd))
                     result = (True, None)
             else:
                 conn.execute(
-                    "INSERT INTO file_claims(path, owner_id, pid, claimed_at)"
-                    " VALUES (?,?,?,?)", (path, owner_id, pid, now))
+                    "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"
+                    " cwd) VALUES (?,?,?,?,?)",
+                    (path, owner_id, pid, now, cwd))
                 result = (True, None)
             conn.commit()
             return result

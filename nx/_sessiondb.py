@@ -198,13 +198,40 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "updated_at REAL)")
     # Cross-process file-claim protocol (nx/_fileclaim.py): one row per claimed
     # file, keyed by path so two processes contend on a single PRIMARY KEY.
+    # `cwd` is the claiming process's working directory — a claim only guards
+    # the repo it was taken from (see _fileclaim's liveness rules).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_claims("
         "path TEXT PRIMARY KEY,"
         "owner_id TEXT NOT NULL,"
         "pid INTEGER NOT NULL,"
-        "claimed_at REAL)")
+        "claimed_at REAL,"
+        "cwd TEXT)")
+    _ensure_file_claims_cwd(conn)
     conn.commit()
+
+
+def _ensure_file_claims_cwd(conn: sqlite3.Connection) -> None:
+    """Add the `file_claims.cwd` column to a store created before claims were
+    scoped by working directory.
+
+    The column shipped after `file_claims` did, so an existing DB has no
+    `cwd`: `ALTER TABLE ADD COLUMN` is the entire migration (SQLite backfills
+    NULL for existing rows, and _fileclaim treats a NULL/foreign cwd as
+    "not this repo" — such a row stops blocking and the next writer reclaims
+    it in place). Idempotent via table_info; any failure just leaves the old
+    table shape, and claim_file's own `except` fails open (the edit proceeds)
+    on the missing column rather than raising into a write tool."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(file_claims)")}
+    except sqlite3.Error:
+        return
+    if not cols or "cwd" in cols:
+        return
+    try:
+        conn.execute("ALTER TABLE file_claims ADD COLUMN cwd TEXT")
+    except sqlite3.OperationalError:
+        pass  # duplicate column or a contended store: degrade, never raise
 
 
 def _open() -> Optional[sqlite3.Connection]:

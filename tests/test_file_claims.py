@@ -2,12 +2,15 @@
 """nx/_fileclaim.py: the cross-process file-claim protocol.
 
 Pins: claim ok; cross-owner refusal; expired-row reclaim; dead-pid reclaim;
+other-repo (different cwd) reclaim — claims are repo-scoped, not host-wide;
+the pre-migration NULL-cwd row; the cwd column's ALTER TABLE migration;
 `NX_FILE_CLAIMS=0` no-op (no rows, always ok); `NX_FILE_CLAIM_TTL=0` never
 expires; same-owner heartbeat refresh; release_for; and the write-tool wiring
 (two write tools in one process re-claim the same file cleanly; a foreign
 holder refuses).
 """
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -54,19 +57,25 @@ def _rows():
     assert conn is not None
     try:
         return conn.execute(
-            "SELECT path, owner_id, pid, claimed_at FROM file_claims").fetchall()
+            "SELECT path, owner_id, pid, claimed_at, cwd"
+            " FROM file_claims").fetchall()
     finally:
         conn.close()
 
 
-def _insert(path, owner, pid, claimed_at):
+def _insert(path, owner, pid, claimed_at, cwd=None):
+    """Plant a row directly. `cwd` defaults to THIS process's cwd, i.e. a claim
+    taken from the same repo (the one that blocks); pass a cwd of your own to
+    stage another repo's holder."""
     conn = db._open()
     assert conn is not None
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "INSERT OR REPLACE INTO file_claims(path, owner_id, pid, claimed_at)"
-            " VALUES (?,?,?,?)", (path, owner, pid, claimed_at))
+            "INSERT OR REPLACE INTO file_claims"
+            "(path, owner_id, pid, claimed_at, cwd) VALUES (?,?,?,?,?)",
+            (path, owner, pid, claimed_at,
+             fc._cwd() if cwd is None else cwd))
         conn.commit()
     finally:
         conn.close()
@@ -95,6 +104,7 @@ def test_claim_ok_when_no_row(tmp_path):
     rows = _rows()
     assert len(rows) == 1 and rows[0][0] == p and rows[0][1] == "owner-1"
     assert rows[0][2] == os.getpid()
+    assert rows[0][4] == fc._cwd()  # the claim records this repo's scope
 
 
 def test_cross_owner_refused_while_pid_alive(tmp_path):
@@ -143,6 +153,75 @@ def test_dead_pid_is_reclaimed(tmp_path):
     ok, holder = fc.claim_file(p, "me")
     assert ok and holder is None
     assert _rows()[0][1] == "me"
+
+
+# --- repo scoping (cwd) ------------------------------------------------------
+
+def test_other_repo_claim_does_not_block(tmp_path):
+    """The regression: a live nx process working in ANOTHER folder must not
+    refuse an edit here. A different-cwd row is treated like a dead/expired
+    holder — reclaimed in place."""
+    p = str(tmp_path / "q.txt")
+    _insert(p, "other-repo-owner", os.getpid(), time.time(),
+            cwd=os.path.join(_tmp, "some-other-repo"))
+    ok, holder = fc.claim_file(p, "me")
+    assert ok and holder is None
+    row = _rows()[0]
+    assert row[1] == "me"                      # reclaimed in place
+    assert row[4] == fc._cwd()                 # re-scoped to this repo
+    # and the reclaimed claim now DOES block a different owner in this repo
+    ok, holder = fc.claim_file(p, "other")
+    assert ok is False and "me" in holder
+
+
+def test_pre_migration_null_cwd_row_does_not_block(tmp_path):
+    """Rows written before the cwd column existed carry NULL, which reads as
+    "not this repo": they stop blocking and the next writer reclaims them."""
+    p = str(tmp_path / "r.txt")
+    _insert(p, "legacy-owner", os.getpid(), time.time(), cwd=None)
+    conn = db._open()
+    assert conn is not None
+    try:
+        conn.execute("UPDATE file_claims SET cwd = NULL WHERE path = ?", (p,))
+        conn.commit()
+    finally:
+        conn.close()
+    assert _rows()[0][4] is None
+    ok, holder = fc.claim_file(p, "me")
+    assert ok and holder is None
+    assert _rows()[0][1] == "me"
+
+
+def test_same_repo_row_still_blocks(tmp_path):
+    """Scope is the cwd, not the file's location: a live same-cwd foreign owner
+    refuses even when the file itself lives elsewhere."""
+    p = str(tmp_path / "s.txt")
+    _insert(p, "same-repo-owner", os.getpid(), time.time(), cwd=fc._cwd())
+    ok, holder = fc.claim_file(p, "me")
+    assert ok is False and "same-repo-owner" in holder
+
+
+def test_cwd_column_migrated_into_a_legacy_store(tmp_path):
+    """An existing DB's file_claims has no `cwd`; _ensure_schema adds it via
+    ALTER TABLE and keeps the rows."""
+    legacy = os.path.join(_tmp, "legacy.sqlite")
+    conn = sqlite3.connect(legacy)
+    try:
+        conn.execute(
+            "CREATE TABLE file_claims(path TEXT PRIMARY KEY,"
+            " owner_id TEXT NOT NULL, pid INTEGER NOT NULL, claimed_at REAL)")
+        conn.execute(
+            "INSERT INTO file_claims VALUES ('/x', 'old-owner', 1, 2.0)")
+        conn.commit()
+        db._ensure_schema(conn)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(file_claims)")]
+        assert "cwd" in cols
+        row = conn.execute(
+            "SELECT owner_id, cwd FROM file_claims WHERE path = '/x'").fetchone()
+        assert row == ("old-owner", None)  # backfilled NULL, row preserved
+        db._ensure_schema(conn)  # idempotent — a second pass must not raise
+    finally:
+        conn.close()
 
 
 # --- NX_FILE_CLAIMS=0 --------------------------------------------------------
