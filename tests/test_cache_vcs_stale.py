@@ -13,7 +13,6 @@ import importlib
 import os
 import subprocess
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
@@ -76,6 +75,42 @@ def _count_calls(monkeypatch, nx, tool):
     return calls
 
 
+def _git_dir(path) -> str:
+    """The effective git dir for *path*. In a linked worktree `.git` is a
+    `gitdir: …` pointer file rather than a directory."""
+    git = os.path.join(str(path), ".git")
+    if os.path.isfile(git):
+        with open(git) as fh:
+            line = fh.readline().strip()
+        if line.startswith("gitdir:"):
+            target = line[len("gitdir:"):].strip()
+            git = target if os.path.isabs(target) else os.path.join(str(path), target)
+    return git
+
+
+# Offset used to force an mtime onto a different tick than the stored one.
+# 10s clears the coarsest granularity any real filesystem uses (FAT records
+# mtime with 2s resolution, HFS+ with 1s), so the value cannot be truncated
+# back onto the tick the entry already stored — which is why the smaller sleeps
+# these tests used to take were not enough on such a mount.
+_MTIME_BUMP_NS = 10_000_000_000
+
+
+def _force_stamp_move(path) -> None:
+    """Move .git/HEAD's mtime to a different tick than the one the cache stored.
+
+    HEAD is always part of git_state_stamp, so bumping it changes the stamp for
+    sure. Only used as a fallback when a real git write landed inside a single
+    mtime tick of the stored stamp (a filesystem coarser-grained than the sleep
+    these tests used to take): the old 200x5ms poll loop waited on a condition
+    such a clock may never satisfy, while the assert after it still had to hold,
+    which is exactly how these flaked. Driving the mtime with os.utime removes
+    the clock-granularity dependency."""
+    head = os.path.join(_git_dir(path), "HEAD")
+    t = os.stat(head).st_mtime_ns - _MTIME_BUMP_NS
+    os.utime(head, ns=(t, t))
+
+
 def test_write_file_invalidates_cached_git_status(nx_fresh, monkeypatch):
     """Cached git_status must not survive a write_file: the entry is keyed on
     the repo root dir, whose mtime never moves, so only explicit invalidation
@@ -133,12 +168,12 @@ def test_git_stamp_detects_commit_behind_cache(nx_fresh):
     assert entry.git_stamp is not None, "git_status entry stored without a stamp"
     assert cache_valid(entry), "freshly stored entry should be valid"
 
-    time.sleep(0.01)
     _git(repo, "commit", "--allow-empty", "-m", "external")
-    for _ in range(200):
-        if git_state_stamp(str(repo)) != entry.git_stamp:
-            break
-        time.sleep(0.005)
+    # the commit moves a watched mtime on a fine-grained clock; if the fs wrote
+    # it in the same tick as the stored stamp, force it forward instead of
+    # polling for a change that may never arrive
+    if git_state_stamp(str(repo)) == entry.git_stamp:
+        _force_stamp_move(repo)
     assert git_state_stamp(str(repo)) != entry.git_stamp, "test void: stamp did not move"
     assert not cache_valid(entry), "stamp unchanged across a commit"
 
@@ -186,8 +221,12 @@ def test_git_state_stamp_unit(nx_fresh, monkeypatch):
     sub.mkdir(parents=True)
     assert git_state_stamp(str(sub)) == stamp
 
-    time.sleep(0.01)
-    os.utime(os.path.join(str(repo), ".git", "HEAD"))
+    # drive HEAD's mtime to a different tick than the one `stamp` recorded (a
+    # bare os.utime() stamps "now", which a coarse-granularity filesystem may
+    # already have used for `stamp`)
+    head = os.path.join(str(repo), ".git", "HEAD")
+    t = os.stat(head).st_mtime_ns - _MTIME_BUMP_NS
+    os.utime(head, ns=(t, t))
     assert git_state_stamp(str(repo)) != stamp
     # ORIG_HEAD doesn't exist in a fresh repo and is reported as "-"
     assert "ORIG_HEAD:-" in git_state_stamp(str(repo))
@@ -208,12 +247,9 @@ def test_git_state_stamp_worktree(nx_fresh):
         f"worktree stamp not resolved through the gitdir pointer: {stamp!r}"
     )
 
-    time.sleep(0.01)
     _git(wt, "commit", "--allow-empty", "-m", "wt-commit")
-    for _ in range(200):
-        if git_state_stamp(str(wt)) != stamp:
-            break
-        time.sleep(0.005)
+    if git_state_stamp(str(wt)) == stamp:
+        _force_stamp_move(wt)
     assert git_state_stamp(str(wt)) != stamp, "commit in a worktree did not move the stamp"
 
 

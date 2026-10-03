@@ -482,6 +482,15 @@ def test_quiet_turn_does_not_strand_parent_restore_wait():
     saved_wait = os.environ.get("NX_INTERRUPT_RESTORE_WAIT")
     os.environ["NX_INTERRUPT_RESTORE_WAIT"] = "1.0"
 
+    # Warm the say-panel render path (rich.markdown pulls in markdown_it, a
+    # 66-file import worth ~2.4s cold) so the timed window below measures only
+    # the interrupt machinery — the old 3.0s bound flaked when that import
+    # landed mid-window on a cold cache.
+    try:
+        import rich.markdown  # noqa: F401
+    except ImportError:
+        pass
+
     q_go, q_done = threading.Event(), threading.Event()
     released = [False]
 

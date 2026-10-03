@@ -533,10 +533,15 @@ def test_poller_raises_due_flag():
     m.st._PENDING_SUBAGENT_NOTICE = "note"
     try:
         _autowake.ensure_poller()
-        deadline = time.time() + 5
+        deadline = time.time() + 30
         while not m.st._WAKE_DUE and time.time() < deadline:
             time.sleep(0.02)
-        assert m.st._WAKE_DUE is True, "poller must raise _WAKE_DUE"
+        assert m.st._WAKE_DUE is True, (
+            "poll timed out after 30s: the wake poller never raised _WAKE_DUE "
+            f"(armed={m.st._WAKE_ARMED!r}, pending="
+            f"{m.st._PENDING_SUBAGENT_NOTICE!r}, "
+            f"poll_seconds={os.environ.get('NX_WAKE_POLL_SECONDS')!r})"
+        )
     finally:
         m.st._PENDING_SUBAGENT_NOTICE = None
         m.st._WAKE_DUE = False

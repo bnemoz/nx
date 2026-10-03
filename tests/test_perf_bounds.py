@@ -225,9 +225,13 @@ def test_search_files_hit_is_invalidated_by_a_subdirectory_change(nx_fresh):
     key = _tool_cache_key("search_files", {"pattern": "needle", "path": str(tmp)})
     assert key in nx._state._TOOL_RESULT_CACHE
 
-    # a new file appears in the subdirectory (no run_bash, no edit tool)
+    # a new file appears in the subdirectory (no run_bash, no edit tool);
+    # stamp it with an explicitly later mtime so the tree-stamp comparison
+    # doesn't depend on filesystem clock granularity under the sleep
     time.sleep(0.01)
-    (sub / "two.txt").write_text("needle again\n")
+    new_file = sub / "two.txt"
+    new_file.write_text("needle again\n")
+    os.utime(new_file, ns=(time.time_ns() + 10_000_000,) * 2)
     second = run_tool("search_files", {"pattern": "needle", "path": str(tmp)})
     assert "two.txt" in second, "stale search hit survived a subdirectory change"
 
@@ -262,6 +266,7 @@ def test_external_edit_of_second_path_invalidates_without_a_tool(nx_fresh):
     assert "B1" in first
     time.sleep(0.01)
     b.write_text("B2\n")
+    os.utime(b, ns=(time.time_ns() + 10_000_000,) * 2)
     second = run_tool("read_file", {"path": [str(a), str(b)]})
     assert "B2" in second, "stale multi-path hit served after an external edit"
 
@@ -327,17 +332,28 @@ def test_session_save_cost_ratio_50_to_300_messages(nx_fresh, monkeypatch):
             msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 900})
         return msgs
 
-    def best_of(msgs, sid):
+    def samples_of(msgs, sid, n=5):
+        """Warm once, then collect n timed writes (unfiltered — the caller
+        interleaves the two sizes so load hits both equally)."""
         _sessions_fs._write_session(sid, msgs)  # create + warm
-        samples = []
-        for _ in range(5):
+        out = []
+        for _ in range(n):
             t0 = time.perf_counter()
             _sessions_fs._write_session(sid, msgs)
-            samples.append(time.perf_counter() - t0)
-        return min(samples)
+            out.append(time.perf_counter() - t0)
+        return out
 
-    small = best_of(mk(25), "ratio-small")
-    big = best_of(mk(150), "ratio-big")
+    small_msgs, big_msgs = mk(25), mk(150)
+    # Interleave small/big rounds instead of timing one size fully before the
+    # other: a loaded box (xdist siblings, thermal drift) used to inflate the
+    # sequentially-timed small sample ~3x (1.1ms vs 0.3ms typical), which
+    # inflated the ratio with no code regression. With interleaving, load hits
+    # both sizes in the same round and min() per size keeps the robust pair.
+    small_s, big_s = [], []
+    for _ in range(5):
+        small_s += samples_of(small_msgs, "ratio-small", n=1)
+        big_s += samples_of(big_msgs, "ratio-big", n=1)
+    small, big = min(small_s), min(big_s)
     ratio = big / max(small, 1e-6)
     # 6x the messages is ~2.1x the cost in practice: per-save fixed costs
     # (lock, open, index) dominate the small sample, and the marginal

@@ -45,6 +45,13 @@ def sleeps(monkeypatch):
     return seen
 
 
+# Ceiling for cross-thread waits (join / Event.wait / lock acquire). These wait
+# on a daemon thread that only has to be *scheduled* -- not to hit a latency
+# budget -- so a loaded box may need far more than a few seconds. Nothing below
+# asserts how fast a thread wakes, only that it eventually finishes.
+_WAIT = 30.0
+
+
 def _always_failing_client(counter):
     def handler(request):
         counter["n"] += 1
@@ -126,7 +133,7 @@ def test_abort_is_per_thread(sleeps, capsys):
     def worker():
         def handler(request):
             gate.set()
-            release.wait(5)
+            release.wait(_WAIT)
             return httpx.Response(500, json={"error": {"message": "down"}})
         c = OpenAI(base_url="http://test/v1", api_key="sk-test",
                    transport=httpx.MockTransport(handler))
@@ -138,7 +145,7 @@ def test_abort_is_per_thread(sleeps, capsys):
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    assert gate.wait(5)
+    assert gate.wait(_WAIT), "worker never sent its first request"
     try:
         calls = {"n": 0}
         with pytest.raises(APIError):             # main thread retries normally
@@ -147,7 +154,8 @@ def test_abort_is_per_thread(sleeps, capsys):
         assert "retrying 1/2" in capsys.readouterr().err
     finally:
         release.set()
-        t.join(5)
+        t.join(_WAIT)
+    assert not t.is_alive(), "worker did not finish within the wait ceiling"
     assert len(main_errs) == 1 and isinstance(main_errs[0], APIError)
 
 
@@ -197,21 +205,24 @@ def test_switch_during_probe_backoff_releases_the_probe_lock(monkeypatch):
 
     t = threading.Thread(target=held_probe, daemon=True, name="nx-old-probe")
     t.start()
-    assert stuck.wait(5)
-    deadline = time.time() + 5
-    while calls["n"] < 1 and time.time() < deadline:
+    assert stuck.wait(_WAIT), "old probe never entered its request loop"
+    deadline = time.monotonic() + _WAIT
+    while calls["n"] < 1 and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert calls["n"] >= 1                        # probe is in (or at) backoff
+    assert calls["n"] >= 1, (
+        f"old probe never sent a request within {_WAIT:.0f}s "
+        f"(calls={calls['n']})")            # probe is in (or at) backoff
 
     # The probe holds the lock; the user switches source mid-backoff.
     st.SOURCES["other"] = st.ACTIVE
     st.SOURCE_ORDER.append("other")
     assert switch_source("other") is True
 
-    t.join(5)                 # one 1.5s sleep remains; then the abort lands
-    assert not t.is_alive()
+    t.join(_WAIT)                 # one 1.5s sleep remains; then the abort lands
+    assert not t.is_alive(), (
+        "old probe did not abort within the wait ceiling after the switch")
     assert calls["n"] == 1    # no further attempts against the dead endpoint
-    acquired = STARTUP_PROBE_LOCK.acquire(timeout=2)
+    acquired = STARTUP_PROBE_LOCK.acquire(timeout=_WAIT)
     assert acquired, "aborted probe still holds STARTUP_PROBE_LOCK"
     STARTUP_PROBE_LOCK.release()
 

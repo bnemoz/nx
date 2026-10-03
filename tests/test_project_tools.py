@@ -5,6 +5,10 @@ import json
 
 
 def _manifest(tmp_path, entries):
+    # _manifest_path() prefers nx._state.PROJECT_ROOT over the cwd; pin it to
+    # the tmp tree so a repo-level .nx/tools manifest can't shadow the fixture.
+    import nx._state as _state
+    _state.PROJECT_ROOT = tmp_path
     tools = tmp_path / ".nx" / "tools"
     tools.mkdir(parents=True)
     (tools / "manifest.json").write_text(json.dumps(entries), encoding="utf-8")

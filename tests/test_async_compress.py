@@ -88,9 +88,30 @@ def _msgs():
     return out
 
 
+# Generous ceiling for "wait until the daemon fold finishes" polls: the fold
+# runs on its own thread and a loaded box can starve it well past a tight
+# deadline even though the code is correct. Nothing here asserts a latency
+# bound on the *background* fold (only that the caller returns quickly), so
+# this ceiling is deliberately loose.
+_FOLD_WAIT = 30.0
+
+
 def _reset():
     with c._FOLD_LOCK:
         c._ASYNC_FOLD.clear()
+
+
+def _wait_fold_done(rec, timeout=_FOLD_WAIT):
+    """Poll ``rec['done']`` until the fold finishes or ``timeout`` expires.
+    Returns True iff it finished. A False return is reported by the caller with
+    this poll-timeout wording plus the record state, so a genuine stall is
+    distinguishable from load-induced slowness."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if rec.get("done"):
+            return True
+        time.sleep(0.01)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +140,7 @@ fired = m._maybe_autocompress(msgs, prompt_tokens=9000)
 elapsed = time.monotonic() - t0
 assert fired is False, "async fold in flight → not applied yet"
 assert elapsed < 0.3, f"start must not block on the fold (took {elapsed:.2f}s)"
-assert started.wait(1.0), "fold must run in the background"
+assert started.wait(_FOLD_WAIT), "fold must run in the background"
 assert calls and calls[0] is not msgs, "fold must run over a snapshot, not the live list"
 m.compress = _real
 _reset()
@@ -132,13 +153,12 @@ c._LAST_DISCARD.clear()
 m.compress = lambda messages, **kw: _stub_compress(messages, **kw)
 msgs = _msgs()
 m._maybe_autocompress(msgs, prompt_tokens=9000)          # starts the fold
-deadline = time.monotonic() + 2.0
-while time.monotonic() < deadline:
-    with c._FOLD_LOCK:
-        rec = c._ASYNC_FOLD.get("rec")
-    if rec and rec.get("done"):
-        break
-    time.sleep(0.01)
+with c._FOLD_LOCK:
+    rec = c._ASYNC_FOLD.get("rec")
+assert rec is not None, "fold record was never installed"
+assert _wait_fold_done(rec), (
+    f"background fold poll timed out after {_FOLD_WAIT:.0f}s "
+    f"(done={rec.get('done')!r}, ok={rec.get('ok')!r})")
 assert m._maybe_autocompress(msgs, prompt_tokens=9100) is True, "finished fold applies"
 assert any(x.get("role") == "user" and "Compressed context" in str(x.get("content"))
            for x in msgs), "digest turn spliced into the live list"
@@ -154,13 +174,12 @@ m.compress = lambda messages, **kw: _stub_compress(messages, **kw)
 msgs = _msgs()
 m._maybe_autocompress(msgs, prompt_tokens=9000)          # starts the fold
 msgs.append({"role": "user", "content": "new work while folding"})  # region changes
-deadline = time.monotonic() + 2.0
-while time.monotonic() < deadline:
-    with c._FOLD_LOCK:
-        rec = c._ASYNC_FOLD.get("rec")
-    if rec and rec.get("done"):
-        break
-    time.sleep(0.01)
+with c._FOLD_LOCK:
+    rec = c._ASYNC_FOLD.get("rec")
+assert rec is not None, "fold record was never installed"
+assert _wait_fold_done(rec), (
+    f"background fold poll timed out after {_FOLD_WAIT:.0f}s "
+    f"(done={rec.get('done')!r}, ok={rec.get('ok')!r})")
 # The next check sees a fingerprint mismatch → discard → sync fold over the
 # live list (the stub succeeds) → True overall.
 assert m._maybe_autocompress(msgs, prompt_tokens=9100) is True
@@ -191,11 +210,9 @@ with c._FOLD_LOCK:
     rec = c._ASYNC_FOLD.get("rec")
 assert rec is not None and not rec.get("done"), "A still in flight"
 gate.set()
-deadline = time.monotonic() + 2.0
-while time.monotonic() < deadline:
-    if rec.get("done"):
-        break
-    time.sleep(0.01)
+assert _wait_fold_done(rec), (
+    f"fold A poll timed out after {_FOLD_WAIT:.0f}s "
+    f"(done={rec.get('done')!r}, ok={rec.get('ok')!r})")
 assert rec.get("done"), "fold A finished"
 _reset()
 c._LAST_DISCARD.clear()
@@ -237,7 +254,7 @@ release = threading.Event()
 
 
 def _gated_compress(messages, **kw):
-    release.wait(2.0)
+    release.wait(_FOLD_WAIT)
     return _stub_compress(messages, **kw)
 
 
@@ -253,7 +270,7 @@ def _releaser():
 
 
 threading.Thread(target=_releaser, daemon=True).start()
-assert m._collect_async_fold(msgs, wait=1.5) is True, "wait>0 joins the fold"
+assert m._collect_async_fold(msgs, wait=_FOLD_WAIT) is True, "wait>0 joins the fold"
 assert time.monotonic() - t0 >= 0.25, "genuinely waited for the worker"
 m.compress = _real
 _reset()

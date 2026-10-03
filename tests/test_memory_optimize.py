@@ -14,7 +14,7 @@ test, same reason as test_memory_tools.py: it is a shared module global).
 import os
 import sys
 import tempfile
-import time
+import threading
 
 _PLAN = [""]   # mutable cell: the fake client reads the current run's plan
 
@@ -1048,6 +1048,10 @@ def test_optimize_merges_run_concurrently():
             f"MERGE {names[2]} + {names[3]} => Second merged\n"
             f"RETIRE {names[4]}\n")
     state = {"in_flight": 0, "peak": 0, "merge_calls": 0}
+    # Barrier, not sleep: both merge workers must be inside create() at once
+    # before either returns, so the overlap is proven deterministically (a
+    # serial pool deadlocks the barrier → BrokenBarrierError, also a proof).
+    merge_barrier = threading.Barrier(2, timeout=10)
 
     class _Completions:
         @staticmethod
@@ -1058,7 +1062,10 @@ def test_optimize_merges_run_concurrently():
                 state["peak"] = max(state["peak"], state["in_flight"])
                 state["merge_calls"] += 1
                 try:
-                    time.sleep(0.15)          # widen the overlap window
+                    merge_barrier.wait()
+                    return _Resp("# Merged\n\nbody\n")
+                except threading.BrokenBarrierError:
+                    state["broken_barrier"] = True
                     return _Resp("# Merged\n\nbody\n")
                 finally:
                     state["in_flight"] -= 1
@@ -1077,6 +1084,7 @@ def test_optimize_merges_run_concurrently():
         opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
     assert state["merge_calls"] == 2, state
     assert state["peak"] > 1, state                # merges actually overlapped
+    assert not state.get("broken_barrier"), state  # workers were never both in flight
     assert state["peak"] <= opt._MERGE_WORKERS_CAP, state
     assert any("2 at a time" in ln for ln in lines), lines
     # Every group's result still landed through the shared writer, and the
@@ -1090,6 +1098,7 @@ def test_merge_workers_env_caps_concurrency():
     oversized value is clamped to the number of merges actually planned.
     Each run gets its own fresh store (a run consumes the notes it merges)."""
     state = {"in_flight": 0, "peak": 0, "merge_calls": 0}
+    merge_barrier = threading.Barrier(2, timeout=10)
 
     class _Completions:
         @staticmethod
@@ -1100,7 +1109,10 @@ def test_merge_workers_env_caps_concurrency():
                 state["peak"] = max(state["peak"], state["in_flight"])
                 state["merge_calls"] += 1
                 try:
-                    time.sleep(0.1)
+                    merge_barrier.wait()
+                    return _Resp("# Merged\n\nbody\n")
+                except threading.BrokenBarrierError:
+                    state["broken_barrier"] = True
                     return _Resp("# Merged\n\nbody\n")
                 finally:
                     state["in_flight"] -= 1
@@ -1120,7 +1132,9 @@ def test_merge_workers_env_caps_concurrency():
         names = sorted(os.path.basename(p) for p in paths)
         _PLAN[0] = (f"MERGE {names[0]} + {names[1]} => First merged\n"
                     f"MERGE {names[2]} + {names[3]} => Second merged\n")
-        state.update({"in_flight": 0, "peak": 0, "merge_calls": 0})
+        state.update({"in_flight": 0, "peak": 0, "merge_calls": 0,
+                      "broken_barrier": False})
+        merge_barrier.reset()  # a broken barrier from the previous pass stays broken
         _install_client(_ConcClient())
         _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
         _env("NX_MEMORY_OPTIMIZE_MERGE_WORKERS", workers)
@@ -1129,8 +1143,10 @@ def test_merge_workers_env_caps_concurrency():
         assert state["merge_calls"] == 2, (workers, state)
         if workers == 1:
             assert state["peak"] == 1, state           # serial: one at a time
+            assert state.get("broken_barrier"), state  # the barrier proved no overlap
         else:
             assert state["peak"] == 2, state           # clamped to the plan size
+            assert not state.get("broken_barrier"), state
 
 
 def test_merge_worker_crash_does_not_kill_the_run():

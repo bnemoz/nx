@@ -77,6 +77,32 @@ def _drain(nx):
     return note
 
 
+def _wait_for(pred, what, deadline_s=30.0):
+    """Poll `pred` until it returns a truthy value, up to `deadline_s`.
+
+    These tests only assert that events EVENTUALLY arrive (not latency), so
+    the deadline is generous — a failure under load means the mechanism is
+    broken, not that 5s was too short. On expiry, raise with the observed
+    state so the failure is diagnosable.
+    """
+    deadline = time.time() + deadline_s
+    result = pred()
+    while not result and time.time() < deadline:
+        time.sleep(0.02)
+        result = pred()
+    if not result:
+        from nx._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+        with _ASYNC_LOCK:
+            agents = {k: dict(v) for k, v in _ASYNC_AGENTS.items()}
+        from nx import _state as st
+        raise AssertionError(
+            f"poll timed out after {deadline_s}s waiting for {what}; "
+            f"observed state: agents={agents!r} "
+            f"pending_notice={getattr(st, '_PENDING_SUBAGENT_NOTICE', None)!r}"
+        )
+    return result
+
+
 def test_async_returns_job_id_and_announces_on_later_turn(nx_fresh, monkeypatch):
     from nx import _dispatch
     from nx._subagent import spawn_agent, list_async_agents
@@ -104,14 +130,8 @@ def test_async_returns_job_id_and_announces_on_later_turn(nx_fresh, monkeypatch)
     assert len(agents) == 1 and agents[0]["alive"] and agents[0]["status"] == "running"
     release.set()
     # wait for the worker to finish and stage its note
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note is not None and "findings: X is in nx/_x.py" in note
+    note = _wait_for(lambda: _drain(nx_fresh), "agent's staged runtime note")
+    assert "findings: X is in nx/_x.py" in note
     assert note.startswith("[Runtime note: background sub-agent agent-")
     # done, announced, never re-staged
     agents = list_async_agents()
@@ -164,14 +184,8 @@ def test_failed_agent_still_announces_exactly_once(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", boom)
     result = spawn_agent("long task", async_=True)
     assert result.startswith("[background sub-agent] job agent-")
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note and "FAILED" in note and "model socket exploded" in note
+    note = _wait_for(lambda: _drain(nx_fresh), "failed agent's runtime note")
+    assert "FAILED" in note and "model socket exploded" in note
     assert _drain(nx_fresh) is None  # one note, not two
 
 
@@ -258,14 +272,10 @@ def test_async_worker_is_quiet_and_never_swaps_yolo(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     out = spawn_agent("q", async_=True)
     assert out.startswith("[background sub-agent] job agent-")
-    deadline = time.time() + 5
-    while time.time() < deadline and "quiet" not in seen:
-        time.sleep(0.02)
+    _wait_for(lambda: "quiet" in seen, "worker loop to record quiet/yolo state")
     assert seen.get("quiet") is True          # worker runs quiet
     assert seen.get("yolo_during") is False   # no process-global YOLO swap
-    deadline = time.time() + 5
-    while time.time() < deadline and _drain(nx_fresh) is None:
-        time.sleep(0.02)
+    _wait_for(lambda: _drain(nx_fresh) is not None, "worker's staged runtime note")
     assert st.YOLO is False                   # parent posture untouched after
 
 
@@ -325,9 +335,7 @@ def test_bg_after_async_finish_shows_done_status(nx_fresh, monkeypatch, capsys):
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("count things", async_=True)
-    deadline = time.time() + 5
-    while time.time() < deadline and _drain(nx_fresh) is None:
-        time.sleep(0.02)
+    _wait_for(lambda: _drain(nx_fresh) is not None, "agent's staged runtime note")
     _cmd_bg("/bg", None)
     out = capsys.readouterr().out
     assert "done" in out and "agent-" in out and "count things" in out
@@ -342,7 +350,7 @@ def test_bg_lists_async_agents(nx_fresh, monkeypatch, capsys):
         }
         _ASYNC_AGENTS["agent-2-bbbbbb"] = {
             "instruction": "count the tests", "status": "done",
-            "answer": "42 tests", "started": time.time() + 1, "announced": True,
+            "answer": "42 tests", "started": time.time() - 100, "announced": True,
         }
     from nx._repl_settings_cmds import _cmd_bg
     _cmd_bg("/bg", None)
@@ -369,14 +377,14 @@ def test_concurrent_async_agents_merge_into_one_note(nx_fresh, monkeypatch):
     spawn_agent("task A", async_=True)
     spawn_agent("task B", async_=True)
     gate.wait(timeout=5)  # both agents are past their turn loops
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note and "task A" in note and "task B" in note:
-            break
-        time.sleep(0.02)
-    assert note and "ans:task A" in note and "ans:task B" in note
+    note = _wait_for(
+        lambda: next(
+            (n for n in [_drain(nx_fresh)] if n and "task A" in n and "task B" in n),
+            None,
+        ),
+        "merged note announcing both agents",
+    )
+    assert "ans:task A" in note and "ans:task B" in note
     assert note.count("[Runtime note: background sub-agent") == 2
 
 
@@ -396,14 +404,8 @@ def test_spawn_defaults_to_background(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_ASYNC", 1)
     out = spawn_agent("what changed?")  # no async kwarg
     assert out.startswith("[background sub-agent] job agent-")
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note and "findings" in note
+    note = _wait_for(lambda: _drain(nx_fresh), "agent's staged runtime note")
+    assert "findings" in note
 
 
 def test_explicit_async_false_stays_foreground(nx_fresh, monkeypatch):
@@ -451,14 +453,7 @@ def test_finished_agent_writes_report_and_note_carries_path(nx_fresh, monkeypatc
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     out = spawn_agent("big investigation", async_=True)
     jid = out.split("job ")[1].split("\n")[0]
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note is not None
+    note = _wait_for(lambda: _drain(nx_fresh), "report-note for the long answer")
     assert long_answer.strip() not in note  # full answer is NOT in context
     assert note.count(long_answer[:20]) <= 1  # head appears at most once
     assert "Full report: " in note
@@ -486,14 +481,7 @@ def test_partial_agent_is_not_announced_as_finished(nx_fresh, monkeypatch, capsy
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     out = spawn_agent("sweep the repo", async_=True)
     jid = out.split("job ")[1].split("\n")[0]
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note is not None
+    note = _wait_for(lambda: _drain(nx_fresh), "partial agent's runtime note")
     assert "PARTIAL" in note and "stopped early" in note
     assert "finished. Its answer" not in note
     report = os.path.join(_agents_report_dir(), jid + ".md")
@@ -524,14 +512,8 @@ def test_failed_agent_writes_error_report(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", boom)
     out = spawn_agent("doomed task", async_=True)
     jid = out.split("job ")[1].split("\n")[0]
-    deadline = time.time() + 5
-    note = None
-    while time.time() < deadline:
-        note = _drain(nx_fresh)
-        if note:
-            break
-        time.sleep(0.02)
-    assert note and "FAILED" in note
+    note = _wait_for(lambda: _drain(nx_fresh), "failed agent's runtime note")
+    assert "FAILED" in note
     report = os.path.join(_agents_report_dir(), jid + ".md")
     body = open(report, encoding="utf-8").read()
     assert "- status: error" in body
@@ -550,7 +532,7 @@ def test_bg_lists_report_path(nx_fresh, monkeypatch, capsys):
         }
         _ASYNC_AGENTS["agent-2-dddddd"] = {
             "instruction": "still running", "status": "running",
-            "answer": None, "started": time.time() + 1, "announced": False,
+            "answer": None, "started": time.time() - 100, "announced": False,
         }
     _cmd_bg("/bg", None)
     out = capsys.readouterr().out

@@ -74,7 +74,7 @@ class _AsyncPusher:
                     req = urllib.request.Request(
                         url, data=data,
                         headers={"Content-Type": "application/json"})
-                    urllib.request.urlopen(req, timeout=1.5)
+                    _urlopen(req, timeout=1.5)
             except Exception:
                 # Dashboard down / wrong port / not running — stop trying so we
                 # never add latency to the REPL on every turn.
@@ -88,6 +88,13 @@ class _AsyncPusher:
 
 
 _pusher = _AsyncPusher()
+
+
+def _urlopen(req, timeout=None):
+    """Module-local indirection over urllib.request.urlopen so tests (and the
+    disabled-latch path) can stub the network without mutating the shared
+    stdlib module object — a process-global any other thread can read."""
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 class UsageDelta(TypedDict):

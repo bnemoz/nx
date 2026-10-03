@@ -11,7 +11,6 @@ import importlib
 import json
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
@@ -37,6 +36,14 @@ def nx_fresh(tmp_path, monkeypatch):
     nx._state._PENDING_BACKGROUND_NOTICE = None
     for k in ("NX_HOME", "NX_SESSIONS_DIR"):
         os.environ.pop(k, None)
+
+
+# Offset used to force an mtime onto a different tick than the cached one. 10s
+# clears the coarsest mtime granularity any real filesystem uses (FAT records
+# 2s, HFS+ 1s), so the value cannot be truncated back onto the tick the entry
+# already stored — 10ms sleeps could (and did) get rounded away on such a mount.
+# Going backwards keeps the file out of the future.
+_MTIME_BUMP_NS = 10_000_000_000
 
 
 def _stat_calls(monkeypatch, nx, counter):
@@ -69,15 +76,17 @@ def test_bash_keeps_unchanged_entries_drops_changed(nx_fresh):
     change_key = _tool_cache_key("read_file", {"path": str(change)})
     assert keep_key in st._TOOL_RESULT_CACHE and change_key in st._TOOL_RESULT_CACHE
 
-    # change.txt changes on disk "behind nx's back" (editor-like write); wait
-    # out filesystem timestamp granularity so the mtime really differs
-    time.sleep(0.01)
-    change.write_text("after\n")
+    # change.txt changes on disk "behind nx's back" (editor-like write). Pin
+    # the new mtime with os.utime instead of sleeping past the filesystem's
+    # timestamp granularity: on a coarse-mtime fs the rewrite can land in the
+    # same mtime tick as the original, so the old sleep + 200x5ms poll reached
+    # its precondition by luck. Setting the value explicitly removes the clock
+    # dependency entirely.
     entry = st._TOOL_RESULT_CACHE[_tool_cache_key("read_file", {"path": str(change)})]
-    for _ in range(200):
-        if os.stat(str(change)).st_mtime_ns != entry.mtime_ns:
-            break
-        time.sleep(0.005)
+    old_ns = entry.mtime_ns
+    change.write_text("after\n")
+    bumped = old_ns - _MTIME_BUMP_NS
+    os.utime(str(change), ns=(bumped, bumped))
     assert os.stat(str(change)).st_mtime_ns != entry.mtime_ns, "test void: mtime did not change"
 
     # a trivial bash call drops ONLY the changed entry, not the whole cache
@@ -141,12 +150,14 @@ def test_mtime_change_invalidates_even_without_bash(nx_fresh):
 
     first = run_tool("read_file", {"path": str(f)})
     assert "v1" in first
-    time.sleep(0.01)
+    old_ns = os.stat(str(f)).st_mtime_ns
     f.write_text("v2\n")
-    for _ in range(200):
-        if os.stat(str(f)).st_mtime_ns > 0:
-            break
-        time.sleep(0.005)
+    # force the mtime past the stored value with os.utime rather than sleeping:
+    # a sleep can't guarantee a different mtime on a coarse-granularity
+    # filesystem, and the poll loop this replaces asserted `st_mtime_ns > 0`,
+    # which was vacuously true (it never proved the mtime had moved)
+    bumped = old_ns - _MTIME_BUMP_NS
+    os.utime(str(f), ns=(bumped, bumped))
     second = run_tool("read_file", {"path": str(f)})
     assert "v2" in second, "stale cache entry served after external edit"
 

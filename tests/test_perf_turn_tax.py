@@ -66,9 +66,14 @@ def test_async_pusher_posts_and_self_disables():
         def __exit__(self, *a):
             return False
 
-    orig = mm.urllib.request.urlopen
+    orig = mm._urlopen
+    orig_singleton_disabled = mm._pusher._disabled
     try:
-        mm.urllib.request.urlopen = lambda req, timeout=None: (
+        # The module-level singleton's daemon worker keeps running across
+        # tests; anything still queued in it would be POSTed into this test's
+        # stub and pollute `seen`. Park it for the duration.
+        mm._pusher._disabled = True
+        mm._urlopen = lambda req, timeout=None: (
             seen.append(req) or _Resp())
         pusher = mm._AsyncPusher()
         owner = type("O", (), {"_push_disabled": False})()
@@ -80,7 +85,7 @@ def test_async_pusher_posts_and_self_disables():
         # Now make it fail — the pusher latches off and marks its owner.
         def boom(req, timeout=None):
             raise OSError("dashboard down")
-        mm.urllib.request.urlopen = boom
+        mm._urlopen = boom
         pusher.submit("http://x/push", {"a": 2}, owner)
         pusher._q.join()
         assert pusher.disabled, "pusher did not latch off after a failure"
@@ -89,7 +94,8 @@ def test_async_pusher_posts_and_self_disables():
         pusher.submit("http://x/push", {"a": 3}, owner)
         assert pusher._q.qsize() == 0
     finally:
-        mm.urllib.request.urlopen = orig
+        mm._urlopen = orig
+        mm._pusher._disabled = orig_singleton_disabled
     print("PASS — async pusher delivers, then self-disables on failure")
 
 
