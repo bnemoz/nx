@@ -83,6 +83,28 @@ atexit.register(shutil.rmtree, _worker_home, ignore_errors=True)
 _SAFE_NX["NX_HOME"] = _worker_home
 _SAFE_NX["NX_SESSION_LOCK"] = "0"
 
+# 4. TEMP-DIR REAPER — ~100 test modules do `tempfile.mkdtemp(prefix="nx-test-…")`
+# at module scope and never clean up; each of the thousands of suite runs this
+# machine has seen leaked a directory per module per xdist worker (80k /tmp/nx-*
+# dirs when finally noticed). Wrap mkdtemp so every dir any test process creates
+# is registered here and rmrf'd at interpreter exit (runs once per xdist worker,
+# which is exactly the process boundary that owns the dirs).
+_real_mkdtemp = tempfile.mkdtemp
+_mkdtmp_registry: list[str] = []
+
+def _tracking_mkdtemp(*a, **kw):
+    d = _real_mkdtemp(*a, **kw)
+    _mkdtmp_registry.append(d)
+    return d
+
+tempfile.mkdtemp = _tracking_mkdtemp
+
+def _sweep_registered_tmpdirs():
+    for d in _mkdtmp_registry:
+        shutil.rmtree(d, ignore_errors=True)
+
+atexit.register(_sweep_registered_tmpdirs)
+
 
 def _scrub_env():
     """Drop every NX_* var, then lay down the safe baseline."""
