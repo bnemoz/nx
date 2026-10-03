@@ -56,6 +56,65 @@ def _rss_mb() -> float | None:
     return None
 
 
+def _peak_rss_mb() -> float | None:
+    """Lifetime peak RSS of this process (ru_maxrss; children excluded)."""
+    if resource is None:
+        return None
+    maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports ru_maxrss in KB, macOS in bytes.
+    return maxrss / 1024 if sys_is_linux() else maxrss / (1024 * 1024)
+
+
+def _tree_rss_mb() -> dict[str, float | None] | None:
+    """RSS of this process plus all its descendants, via /proc (Linux only).
+
+    Spawns (shells, test runners, helper tools) are separate processes with
+    their own RSS; a system monitor that "shows nx" usually aggregates them,
+    so the tree total is the number that matches what the user sees.
+    """
+    if not sys_is_linux():
+        return None
+    try:
+        ppid: dict[int, int] = {}
+        rss: dict[int, int] = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    parts = f.read().rsplit(")", 1)[-1].split()
+                    ppid[pid] = int(parts[1])  # ppid: first field after comm
+                with open(f"/proc/{pid}/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rss[pid] = int(line.split()[1])
+                            break
+            except (OSError, ValueError, IndexError):
+                continue
+        # collect descendants of self by walking up from every pid
+        tree: set[int] = {os.getpid()}
+        for pid in ppid:
+            seen: set[int] = set()
+            cur = pid
+            while cur > 0 and cur not in tree and cur not in seen:
+                seen.add(cur)
+                cur = ppid.get(cur, 0)
+            if cur in tree:
+                tree |= seen
+        if len(tree) <= 1:
+            return None  # no children — the self RSS is the whole story
+        self_mb = _rss_mb() or 0.0
+        other = sum(rss[p] for p in tree if p != os.getpid() and p in rss)
+        return {
+            "self_mb": self_mb,
+            "tree_mb": (other / 1024) + self_mb,
+            "count": len(tree) - 1,
+        }
+    except OSError:
+        return None
+
+
 def sys_is_linux() -> bool:
     return platform.system() == "Linux"
 
@@ -66,4 +125,6 @@ def process_stats(interval: float = 0.2) -> dict[str, int | float | None]:
         "pid": os.getpid(),
         "cpu_percent": _sample_cpu_percent(interval),
         "rss_mb": _rss_mb(),
+        "peak_rss_mb": _peak_rss_mb(),
+        "tree": _tree_rss_mb(),
     }

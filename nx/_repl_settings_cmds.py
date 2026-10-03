@@ -295,7 +295,16 @@ def _cmd_resources(user: str, state: _ReplState) -> None:
     stats = process_stats()
     rss = stats["rss_mb"]
     rss_s = f"{rss:.1f} MB" if rss is not None else "n/a"
-    print(f"{DIM}  pid {stats['pid']} · cpu {stats['cpu_percent']:.1f}% · rss {rss_s}{RESET}")
+    peak = stats["peak_rss_mb"]
+    peak_s = f" · peak {peak:.1f} MB" if peak is not None else ""
+    tree = stats["tree"]
+    tree_s = ""
+    if tree:
+        tree_s = f" · tree {tree['tree_mb']:.1f} MB ({tree['count']} children)"
+    print(
+        f"{DIM}  pid {stats['pid']} · cpu {stats['cpu_percent']:.1f}%"
+        f" · rss {rss_s}{peak_s}{tree_s}{RESET}"
+    )
 
 
 def _cmd_ctx(user: str, state: _ReplState) -> None:
