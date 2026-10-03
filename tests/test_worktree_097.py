@@ -211,6 +211,9 @@ def test_async_worker_carries_tier_and_creates_worktree(tmp_path, monkeypatch):
         return "all done"
 
     monkeypatch.setattr(S, "_run_sync_agent_body", fake_body)
+    # the outcome check (0.108.7) would rightly call this prose-only (no edits
+    # in the fresh worktree); fake a positive edit outcome for this test.
+    monkeypatch.setattr(S, "_agent_made_edits", lambda tree, base: True)
     S._ASYNC_AGENTS["job-wt"] = {"status": "running", "answer": None,
                                  "instruction": "do it", "announced": False}
     S._run_async_agent("job-wt", "do it", 10, tier="implement",

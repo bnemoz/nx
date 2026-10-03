@@ -441,7 +441,12 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
                 status = f"{C.ERROR}{a['status']}{RESET}"
             instr = a["instruction"]
             instr = instr if len(instr) <= 60 else instr[:59] + "…"
-            print(f"  {DIM}{a['id']:>12}{RESET}  {status:<18}  {instr}")
+            # 0.108.7: live turn progress so a recon death-spiral (turns
+            # approaching the cap with nothing written) is visible mid-run.
+            prog = ""
+            if a.get("max_turns"):
+                prog = f"  {DIM}[{a.get('turns', 0)}/{a['max_turns']} turns]{RESET}"
+            print(f"  {DIM}{a['id']:>12}{RESET}  {status:<18}  {instr}{prog}")
             if a["tail"]:
                 print(f"           {DIM}└ {a['tail']}{RESET}")
             if a.get("report"):

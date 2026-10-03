@@ -439,6 +439,9 @@ def list_async_agents() -> list[dict[str, Any]]:
             "status": status,
             "tail": answer[-160:] if answer else "",
             "report": rec.get("report"),
+            "turns": rec.get("turns") or 0,
+            "max_turns": rec.get("max_turns") or 0,
+            "tier": rec.get("tier") or "read",
         })
     return out
 
@@ -474,6 +477,13 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     # NX_SUBAGENT_WORKTREE is unchanged (shared tree, scope gates apply).
     worktree = None
     wt_note = None
+    # Outcome check base (0.108.x): for a write-tier agent we snapshot the
+    # tree's HEAD before the loop; after it, "no edits" = empty `git status
+    # --porcelain` AND an unmoved HEAD. This catches the seen-live failure
+    # where a turn-capped implementer's forced-final turn produces a plan as
+    # prose — a self-report indistinguishable from a completion report.
+    outcome_tree = None
+    outcome_base = None
     try:
         if tier in ("write", "implement"):
             from ._worktree import (_worktree_enabled, create_worktree,
@@ -491,6 +501,16 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                         "NX_SUBAGENT_WORKTREE, or add a scope and run "
                         "without isolation")
                     raise _SpawnRefused(yield_error)
+            else:
+                # Shared-tree write agent: verify against the repo. HEAD is a
+                # safe baseline here: a parent commit landing mid-run only
+                # moves it (failing open to "edits made"), never fakes a
+                # partial.
+                outcome_tree = st.PROJECT_ROOT or os.getcwd()
+                outcome_base = _git_head(outcome_tree)
+            if worktree:
+                outcome_tree = worktree
+                outcome_base = _git_head(worktree)
     except _SpawnRefused as e:
         # A refused spawn is finalized like any failed job: one ERROR note to
         # the parent, never a dangling running record or a dead thread.
@@ -524,6 +544,17 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
         status = _answer_completion(answer)
         if status == "error" and not answer.startswith("ERROR: sub-agent failed"):
             status = "done"  # duplicate-refusal style errors keep the old handling
+        # 0.108.x outcome check: a write/implement agent that reports "done"
+        # but left no edits (and, with a worktree, moved no HEAD) did not
+        # finish — its answer is a plan. Downgrade to partial so the parent
+        # gets the PARTIAL note, not a completion report.
+        if tier in ("write", "implement") and status == "done" and \
+                not _agent_made_edits(outcome_tree, outcome_base):
+            status = "partial"
+            answer += ("\n\n[No edits were found in the tree when this agent "
+                       "finished — its answer is a plan, not a completed "
+                       "change. Re-delegate with the plan baked in, or run "
+                       "it inline (async:false) if it still matters.]")
     except Exception as e:  # noqa: BLE001 — a failed agent is a note, not a crash
         answer = f"{type(e).__name__}: {e}"
         status = "error"
@@ -570,6 +601,9 @@ def _stage_subagent_answer(job_id: str) -> None:
         status, answer = rec.get("status", "done"), rec.get("answer") or ""
         report = rec.get("report")
         steered = rec.get("steered") or 0
+        turns = rec.get("turns") or 0
+        max_turns = rec.get("max_turns") or 0
+        spent = f" after {turns}/{max_turns} turns" if max_turns else ""
         # Swarm P3: once the note is built AND the full answer is on disk
         # (`report`), the RAM copy is redundant — up to
         # NX_SUBAGENT_MAX_FINISHED=20 whole answers held forever otherwise.
@@ -584,7 +618,7 @@ def _stage_subagent_answer(job_id: str) -> None:
             where = ""
             if report:
                 where = "\nFull report: " + report + " — read_file it for the rest."
-            note = ("[Runtime note: background sub-agent " + job_id +
+            note = ("[Runtime note: background sub-agent " + job_id + spent +
                     " hit its turn/token budget and stopped early — this is a " +
                     "PARTIAL answer, verify before relying on it:\n" +
                     cut + more + where + "]")
@@ -594,7 +628,7 @@ def _stage_subagent_answer(job_id: str) -> None:
             report_line = ""
             if report:
                 report_line = "\nFull report: " + report + " — read_file it for the rest."
-            note = ("[Runtime note: background sub-agent " + job_id +
+            note = ("[Runtime note: background sub-agent " + job_id + spent +
                     " finished. Its answer:\n" + head + marker + report_line + "]")
         elif answer.startswith("ERROR: an identical async agent"):
             # duplicate-in-flight refusal: nothing ran, nothing to wait for —
@@ -643,6 +677,12 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
             "instruction": instruction,
             "status": "queued" if queued else "running",
             "answer": None, "started": time.time(), "announced": False,
+            "max_turns": max_turns, "tier": tier,
+            # Progress (0.108.7): _progress_step in _run_sync_agent_body keeps
+            # `turns` current for /bg and the finish notes; an agent burning
+            # its whole budget on reconnaissance is visible as turns
+            # approaching max_turns long before it finalizes.
+            "turns": 0,
         }
         if queued:
             _ASYNC_QUEUED.append(job_id)
@@ -719,6 +759,45 @@ def _sync_inline() -> bool:
         return bool(int(_m.NX_SUBAGENT_SYNC_INLINE))
     except (AttributeError, TypeError, ValueError):
         return bool(_env_int("NX_SUBAGENT_SYNC_INLINE", 0))
+
+
+def _git_head(tree: str) -> str | None:
+    """SHA of the tree's HEAD, or None (non-git tree / git failure)."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", tree, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = (r.stdout or "").strip()
+    return out if r.returncode == 0 and out else None
+
+
+def _agent_made_edits(tree: "str | None", base_head: "str | None") -> bool:
+    """Did a write-tier agent leave any change in `tree`?
+
+    True when the working tree is dirty (`git status --porcelain` non-empty)
+    or — when a per-agent HEAD baseline was captured (worktree mode) — HEAD
+    moved. A clean tree on an unmoved HEAD means the agent produced prose,
+    not a change. A missing tree or git failure returns True (fail open:
+    never downgrade an agent's report on our own tooling error)."""
+    if not tree:
+        return True
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", tree, "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return True
+        if (r.stdout or "").strip():
+            return True
+        if base_head is not None:
+            return _git_head(tree) != base_head
+        # Shared tree, no baseline: an agent that committed everything can
+        # leave porcelain empty; without a baseline we cannot know — fail open.
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return True
 
 
 def _answer_completion(answer: str) -> str:
@@ -857,13 +936,22 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
 
     def _progress_step() -> None:
         _steps[0] += 1
-        note_progress(f"agent turn {_steps[0]}/{max_turns}")
+        # Progress for BOTH delivery paths (0.108.7): quiet/async agents don't
+        # own the terminal, but their turn count still lands in the job record
+        # so /bg and the finish notes can show `turn N/M` while it runs.
+        if ctx.job_id:
+            with _ASYNC_LOCK:
+                rec = _ASYNC_AGENTS.get(ctx.job_id)
+                if rec is not None:
+                    rec["turns"] = _steps[0]
+        if not quiet:
+            note_progress(f"agent turn {_steps[0]}/{max_turns}")
 
     try:
         summary = _m._run_model_turn_loop(
             messages,
             max_turns_override=max_turns,
-            on_step=(None if quiet else _progress_step),
+            on_step=_progress_step,
         )
     except Exception as e:  # noqa: BLE001 — a failed subagent is a tool error, not a crash
         return f"ERROR: sub-agent failed: {type(e).__name__}: {e}"
