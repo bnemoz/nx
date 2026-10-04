@@ -205,11 +205,15 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     """
     if quiet:
         return
-    # Reasoning-only step (no prose, no tool calls, collapsed reasoning): a
-    # dim divider + label so consecutive bare footers read as distinct steps.
+    # Step with no prose (collapsed reasoning, possibly a tool call whose
+    # block renders after this footer, or whose output is collapsed): a dim
+    # divider + label so consecutive bare footers read as distinct steps.
+    # Only prose disqualifies — `streamed_chars` counts tool-call args and
+    # `tcs` is set by any tool-call delta, so a think→tool-call step with
+    # collapsed reasoning used to slip past both guards and render as a bare
+    # footer with nothing above it.
     if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
-            and not text.strip()
-            and not tcs and streamed_chars == 0):
+            and not text.strip()):
         print(f"{DIM}  {'─' * 46}{RESET}")
         print(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args

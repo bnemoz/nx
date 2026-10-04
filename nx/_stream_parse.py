@@ -382,7 +382,11 @@ class StreamParser:
             elif st.REASONING_VISIBLE:
                 print(f"{C.REASONING_TEXT}{rc}{RESET}", end="", flush=True)
             self.reasoning_parts.append(rc)
-        if not self.content and not self.tcs:
+        # Accumulate while there is no prose, even once tool-call deltas have
+        # arrived (glm-style interleaved think blocks land after the first
+        # tool-call delta). Real prose disqualifies: the footer's divider is
+        # for steps with nothing visible above it.
+        if not self.content:
             self.reasoning_only_chars += len(rc)
             if self.reasoning_only_start is None:
                 self.reasoning_only_start = time.time()
@@ -453,6 +457,9 @@ class StreamParser:
             self.content.append(chunk)
             self._content_len += len(chunk)
             self.streamed_chars += len(chunk)
+            # Real prose landed: it disqualifies the step from reasoning-only
+            # accounting (footer divider, stall cutter).
+            self.reasoning_only_chars = 0
             # PF-04: strip ANSI once per chunk, not once per rendered frame —
             # the clean mirror is what every render reads.
             clean = strip_ansi_for_display(chunk)
