@@ -217,3 +217,88 @@ def test_run_tool_dispatch_allows_inside(tmp_path, monkeypatch, _fence_env):
     out = _nx.run_tool("write_file", {"path": str(_fence_env / "in.py"), "content": "x"})
     assert out.startswith("wrote")  # run_tool appends its py_compile verdict
     assert called
+
+
+# --- the run_bash surface (heuristic backstop layer) --------------------------
+
+def test_bash_redirection_outside_refused(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"echo hi > {tmp_path / 'out.txt'}").startswith("ERROR: write fence:")
+
+
+def test_bash_redirection_inside_allowed(_fence_env):
+    assert _fence.check_bash_write_fence("echo hi > in.txt") == ""
+
+
+def test_bash_append_outside_refused(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"echo hi >> {tmp_path / 'out.txt'}").startswith("ERROR: write fence:")
+
+
+def test_bash_tee_outside_refused(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"cat a | tee {tmp_path / 'out.txt'}").startswith("ERROR: write fence:")
+
+
+def test_bash_python_heredoc_write_outside_refused(_fence_env, tmp_path):
+    """The incident shape: fenced structured tools, edit re-routed through a
+    python here-doc."""
+    cmd = ("python3 - <<'EOF'\n"
+           f"p = '{tmp_path / 'coherence.rs'}'\n"
+           "open(p, 'w').write('x')\n"
+           "EOF")
+    assert _fence.check_bash_write_fence(cmd).startswith("ERROR: write fence:")
+
+
+def test_bash_python_heredoc_write_inside_allowed(_fence_env):
+    cmd = ("python3 - <<'EOF'\n"
+           "open('in.rs', 'w').write('x')\n"
+           "EOF")
+    assert _fence.check_bash_write_fence(cmd) == ""
+
+
+def test_bash_cp_mv_outside_refused(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"cp a {tmp_path / 'b'}").startswith("ERROR: write fence:")
+    assert _fence.check_bash_write_fence(
+        f"mv a {tmp_path / 'b'}").startswith("ERROR: write fence:")
+
+
+def test_bash_heredoc_redirected_outside_refused(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"cat <<'EOF' > {tmp_path / 'out.rs'}\nhello\nEOF"
+    ).startswith("ERROR: write fence:")
+
+
+def test_bash_shell_variable_target_refused(_fence_env):
+    # An unresolvable destination must refuse, not guess inside.
+    assert _fence.check_bash_write_fence(
+        "echo hi > $SOMEWHERE/out.txt").startswith("ERROR: write fence:")
+
+
+def test_bash_denied_target_refused(_fence_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("NX_WRITE_ROOTS", os.path.expanduser("~"))
+    assert _fence.check_bash_write_fence("echo x > ~/.bashrc").startswith(
+        "ERROR: write fence:")
+
+
+def test_bash_fence_layer_disabled(_fence_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("NX_BASH_FENCE", "0")
+    assert _fence.check_bash_write_fence(
+        f"echo hi > {tmp_path / 'out.txt'}") == ""
+
+
+def test_bash_read_only_command_allowed(_fence_env):
+    for cmd in ("grep -r pattern src/", "ls -la", "git status",
+                "rg foo | head -20", "cat a b c"):
+        assert _fence.check_bash_write_fence(cmd) == ""
+
+
+def test_run_tool_dispatch_bash_refused_outside(tmp_path, monkeypatch, _fence_env):
+    """End-to-end: run_bash's rewrite attempt dies in run_tool before approval."""
+    called = []
+    monkeypatch.setitem(_nx.DISPATCH, "run_bash", lambda **a: called.append(a) or "ran")
+    monkeypatch.setattr(_nx, "_confirm", lambda *a, **k: True, raising=False)
+    out = _nx.run_tool("run_bash", {"command": f"echo hi > {tmp_path / 'x.txt'}"})
+    assert out.startswith("ERROR: write fence:")
+    assert not called

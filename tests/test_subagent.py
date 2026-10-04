@@ -255,7 +255,10 @@ def test_subagent_bash_tier_dispatch(nx_fresh, monkeypatch):
                     "mkdir d", "find . -delete"):
             out = _dispatch.run_tool("run_bash", {"command": bad})
             assert out.startswith("ERROR"), (bad, out)
-            assert "read-only" in out
+        # the redirection case now dies at the write fence before the
+        # read-only allowlist is reached (the fence layer runs first in
+        # run_tool); the rest still come from the allowlist itself
+        assert "read-only" in _dispatch.run_tool("run_bash", {"command": "mkdir d"})
         assert ran == ["grep -rn spawn nx/", "ps aux"]  # nothing else reached bash
         messages.append({"role": "assistant", "content": "bash-tier ok"})
         return nx_fresh.TURN_DONE

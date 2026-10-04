@@ -24,6 +24,7 @@ Env:
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from . import _state as st
@@ -38,12 +39,16 @@ _TOOL_PATH_TOOLS = ("write_file", "edit_file", "multi_edit", "delete_file")
 #     so fence each matched file plus the literal (pre-expansion) arg.
 #   apply_patch: `diff` headers name files relative to `path`; also fence
 #     each extracted +++/--- target joined against the patch base.
-#   run_bash: no path args to fence; the fence would need a full shell
-#     parser and produce either bypasses or false refusals. The sandbox tier
-#     (P3-1) is the correct future layer for it — one important consequence:
-#     a model can reach ANY path with run_bash. The classifier plus approval
-#     remain the protection for shell; the fence covers the structured write
-#     tools where a deterministic check is actually possible.
+#   run_bash: no `path` args, but shell is still a write surface — a model
+#     routed a refused edit through `python3 - <<'EOF' ... open(p,'w') ... EOF`
+#     in the wild. A full shell parser still isn't worth it, but the common
+#     rewrite shapes are scannable: _bash_write_candidates() covers
+#     redirections, tee, write-capable binaries, and interpreted-language
+#     file-mutation calls. Deliberately heuristic — anything it can't see it
+#     doesn't fence, so it stays a backstop behind the classifier/approval,
+#     not a sandbox (P3-1). NX_BASH_FENCE=0 disables just this layer.
+_BASH_FENCE_ENV = "NX_BASH_FENCE"
+
 _SHELL_ONLY = "run_bash"
 
 def _writable_roots() -> list[str]:
@@ -201,5 +206,133 @@ def check_write_fence(name: str, args: dict[str, Any]) -> str:
             " link's target is what gets modified. Ask the user to perform this"
             " write themselves, or add the target directory via NX_WRITE_ROOTS"
             " if it is genuinely meant to be writable."
+        )
+    return ""
+
+
+# --- the bash surface ---------------------------------------------------------
+
+# Write-capable binaries scanned for a positional destination argument. Not
+# exhaustive: unknown binaries and exotic flags are exactly the false
+# negatives a backstop accepts.
+_BASH_WRITE_BINS = frozenset((
+    "tee", "cp", "mv", "install", "rsync", "ln", "truncate", "dd",
+    "tar", "unzip", "wget", "curl", "git",
+))
+
+# Interpreted-language file-mutation calls, scanned as text over the whole
+# command (here-doc bodies included — the incident shape). Only the
+# destination argument of each is fenced.
+_BASH_PY_WRITE_RES = (
+    re.compile(r"""open\s*\(\s*([^,()]+?)\s*,\s*["'][wax+]"""),
+    re.compile(r"""\.write_(?:text|bytes)\s*\(\s*([^,()]+?)\s*[,)]"""),
+)
+# A shell variable in a candidate path ($VAR, ${VAR}) means we cannot know
+# where it lands: refuse rather than guess.
+_BASH_VAR_RE = re.compile(r"\$\{?\w")
+
+
+def _bash_write_candidates(command: str) -> list[str]:
+    """Heuristic scan for paths a bash command may write to. Over-inclusive
+    on the shapes it knows; unrecognized shapes (eval'd strings, subshell
+    gymnastics, unknown binaries) yield nothing — backstop, not sandbox."""
+    cands: list[str] = []
+
+    def add(raw: str) -> None:
+        raw = raw.strip().strip("'\"")
+        if raw and raw not in cands:
+            cands.append(raw)
+
+    # 1. redirections: > file, >> file, 2> file, &> file, <> file.
+    for m in re.finditer(r"\d?>+\s*(\S+)", command):
+        add(m.group(1))
+
+    # 2. here-doc / inline interpreted-language write calls
+    #    (python3 - <<'EOF' ... open(p,'w') ... EOF).
+    for rx in _BASH_PY_WRITE_RES:
+        for m in rx.finditer(command):
+            add(m.group(1))
+
+    # 3. write-capable binaries. Commands are split on [;|&] so each segment
+    #    is judged on its own argv rather than leaking into the next one.
+    for seg in re.split(r"[;|&]", command):
+        toks = seg.split()
+        if not toks:
+            continue
+        bin_ = toks[0].rsplit("/", 1)[-1]
+        args_ = toks[1:]
+        if bin_ == "dd":
+            for tok in args_:
+                if tok.startswith("of="):
+                    add(tok[3:])
+            continue
+        if bin_ == "git":
+            # `git config --file <p>` names its own target
+            for i, tok in enumerate(args_):
+                if tok in ("--file", "-f") and i + 1 < len(args_):
+                    add(args_[i + 1])
+            continue
+        if bin_ not in _BASH_WRITE_BINS:
+            continue
+        # wget/curl -o / -O name their own target; the rest take the output
+        # as the last non-flag positional in the common forms — the only
+        # claim this scanner makes.
+        if bin_ in ("wget", "curl"):
+            for i, tok in enumerate(args_):
+                if tok in ("-o", "-O", "--output", "--output-document") and i + 1 < len(args_):
+                    add(args_[i + 1])
+                elif tok.startswith("-o") and len(tok) > 2:
+                    add(tok[2:])
+            continue
+        positional = [t for t in args_ if not t.startswith("-")]
+        if positional:
+            add(positional[-1])
+    return cands
+
+
+def check_bash_write_fence(command: str) -> str:
+    """The fence verdict for a bash command: "" = allow, else the refusal.
+
+    Backstop layer for run_bash (the structured tools are fenced exactly in
+    check_write_fence; shell gets the heuristic scan). Never raises, never
+    prompts, never calls the model. Called from run_tool() before run_bash's
+    body, so the refusal means no part of the command ran.
+    """
+    if not _env_int("NX_WRITE_FENCE", 1) or not _env_int(_BASH_FENCE_ENV, 1):
+        return ""
+    roots = _writable_roots()
+    outside: list[str] = []
+    for raw in _bash_write_candidates(command):
+        # A bare identifier from an interpreted-language call (open(p, 'w')
+        # yields "p", the variable name) resolves to nothing predictable:
+        # refuse, the same rule as a shell variable.
+        if not ("/" in raw or "." in raw or raw.startswith("~")):
+            outside.append(raw)
+            continue
+        expanded = os.path.expanduser(raw)
+        if not os.path.isabs(expanded):
+            # run_bash executes in the project root (or the tool's _cwd);
+            # resolve relative destinations there, not against nx's cwd.
+            expanded = os.path.join(roots[0], expanded)
+        real = os.path.realpath(expanded)
+        if _denied_target(real):
+            return (
+                "ERROR: write fence: bash command would write through "
+                + raw + ", which lands in a protected location (credential"
+                " dir / shell rc / key material). Ask the user to perform"
+                " this write themselves."
+            )
+        if _BASH_VAR_RE.search(raw) or not _under_any(real, roots):
+            outside.append(raw)
+    if outside:
+        return (
+            "ERROR: write fence: bash command writes to "
+            + ", ".join(sorted(set(outside)))
+            + ", which resolves outside every writable root (project root "
+            + roots[0] + (", plus NX_WRITE_ROOTS" if len(roots) > 2 else "")
+            + "; session home is always writable). No part of the command ran."
+            " Write inside the project, add a root via NX_WRITE_ROOTS (colon-"
+            "separated, ~ expands), or set NX_WRITE_FENCE=0 (or"
+            " NX_BASH_FENCE=0 for this layer only) to disable the fence."
         )
     return ""

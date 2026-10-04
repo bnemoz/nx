@@ -267,6 +267,14 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     fence = check_write_fence(name, args)
     if fence:
         return fence
+    # run_bash has no path args but is still a write surface; the heuristic
+    # scan catches the common rewrite shapes (redirections, tee, here-doc
+    # file writes) that would otherwise route around the fence above.
+    if name == "run_bash":
+        from ._fence import check_bash_write_fence
+        fence = check_bash_write_fence(str(args.get("command", "")))
+        if fence:
+            return fence
     # User/org pre-hook (NX_PRE_TOOL_HOOK): JSON {tool,args} on stdin; non-zero
     # exit vetoes the call. Checked before any cache/approval machinery so a
     # policy can block even cached reads — and (since 0.29.5) AFTER arg repair,
