@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Callable
 
-from ._ansi import DIM, BOLD, RESET, C
+from ._ansi import DIM, BOLD, RESET, C, CLEAR_LINE
 from ._mentions import expand_at_mentions
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from ._compress import _maybe_autocompress
@@ -337,6 +337,19 @@ def _repl() -> None:
                 on_step=lambda meta=None: _save_current(state, meta, update_index=False),
             )
         except KeyboardInterrupt:
+            # ^C during generation can land between the spinner's last frame
+            # and the `finally` that wipes its line (or skip the wait
+            # entirely): the "thinking · esc to interrupt" bar would survive
+            # in scrollback above the next prompt. Force-wipe it before the
+            # chatbox paints, so the interrupt leaves a clean line.
+            _ts = st._TURN_SPINNER
+            st._TURN_SPINNER = None
+            if _ts is not None:
+                try:
+                    _ts.stop()
+                except Exception:
+                    sys.stdout.write(CLEAR_LINE)
+                    sys.stdout.flush()
             print(f"{DIM}  ^C interrupted{RESET}")
             state.session_dirty = True
             _save_current(state)

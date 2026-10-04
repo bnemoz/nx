@@ -144,6 +144,10 @@ PROJECT_ROOT_IS_GIT: bool = False
 # Set by run_tool() while a tool body is executing; read by _confirm() to
 # pause/resume the spinner around approval prompts / risk-classifier calls.
 _ACTIVE_SPINNER: Any | None = None
+# Set by model_turn() while the pre-first-token "thinking" spinner animates;
+# read by the REPL's ^C handler to force-wipe the line a ^C racing the render
+# thread would otherwise leave painted above the chatbox.
+_TURN_SPINNER: Any | None = None
 # Progress sink for headless frontends (0.95.0): when set, note_progress()
 # forwards its text here INSTEAD of only onto the spinner. The Telegram
 # gateway installs one so a sub-agent's `agent turn n/m` notes reach the

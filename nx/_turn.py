@@ -386,6 +386,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     spinner = LifeSpinner(label=spinner_label)
     if not quiet:
         spinner.start()
+        # Registered so a ^C racing the render thread's last frame can be
+        # force-wiped before the chatbox paints its box (see repl.py's
+        # KeyboardInterrupt handler) — otherwise the spinner line survives
+        # into the scrollback above the next prompt.
+        st._TURN_SPINNER = spinner
     # Go through the top-level package (not a bare same-module reference) so
     # a test that monkeypatches `nx.open_stream` (to avoid a real model
     # round-trip) takes effect.
@@ -404,10 +409,12 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     except Exception:
         if not quiet:
             spinner.stop()
+        st._TURN_SPINNER = None
         raise
     if stream is None:
         if not quiet:
             spinner.stop()
+        st._TURN_SPINNER = None
         if st._LAST_CONTEXT_OVERRUN:
             # Recoverable: _run_model_turn_loop() folds the older turns into a
             # summary and re-runs this turn. Not an error line — say what is
@@ -487,6 +494,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             # first byte in: kill the spinner, let the real output take this line
             if spinner._t is not None:
                 spinner.stop()
+                st._TURN_SPINNER = None
             if parser.process(chunk):
                 # A collapse (leaked-token or repetition) was detected —
                 # parser.loop_cut is already set; close the stream and stop.
@@ -508,6 +516,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     finally:
         if not quiet:
             spinner.stop()
+            st._TURN_SPINNER = None  # a ^C racing this wipe re-stops safely (idempotent)
         parser.clear_tool_status()
         # Safety net: interrupted/errored/collapsed breaks may leave the Live
         # display still open (the mode-transition sites above only stop it on
