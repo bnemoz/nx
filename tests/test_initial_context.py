@@ -111,7 +111,12 @@ import nx as m  # noqa: E402
 # replacing the shorter prose block. The measured floor is 4740 tokens with
 # chars/3.5; BUDGET_TOKENS rises 4800→5200 to record deliberate headroom for
 # this load-bearing policy and keep the prompt budget from landing on the cap.
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5200)  # hard: recorded, justified
+# 0.109.0: the SYSTEM prompt now tells the model the write fence exists and
+# that a fence refusal means "ask, don't reroute" — the model escaped a fence
+# refusal through a python here-doc in the wild, and the prompt is the layer
+# that stops it trying. ~310 chars (~88 tok by chars/3.5); BUDGET_TOKENS rises
+# 5200→5320 by that deliberate, verifiable cost.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5320)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

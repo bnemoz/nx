@@ -540,6 +540,14 @@ Minimalism:
 
 Every write/edit/bash call prompts the user for approval (reads never do), so batch
 related edits into one multi_edit; "DENIED by user" means stop and ask, not retry.
+A hard write fence also applies: writes must land inside a writable root (the
+project root, the session home, plus NX_WRITE_ROOTS dirs) and never through
+credential/shell-config paths. run_bash is scanned too — a command whose
+redirections, tee/cp/mv-style targets, or here-doc file writes land outside the
+roots is refused before it runs. An "ERROR: write fence" refusal means the
+location is off-limits: ask the user to widen NX_WRITE_ROOTS or perform the
+write themselves. Do NOT route the write through another tool or shell trick —
+that is the one thing the fence exists to stop.
 
 No native tool calls? Emit text-protocol call exactly:
 <tool_call><name>read_file</name><arguments><path>foo.py</path></arguments></tool_call>

@@ -22,7 +22,7 @@ Most agent harnesses burn 20K-50K+ tokens of system prompt and tool schemas
 before your first message even lands — a large slice of a modern context
 window spent before you've typed anything, and paid on *every turn*.
 
-nx holds the floor under a **hard, recorded budget of ~5K tokens** (5200): a
+nx holds the floor under a **hard, recorded budget of ~5K tokens** (5320): a
 `SYSTEM` prompt plus the always-on tool schemas, and nothing else. That is
 roomy enough for genuinely descriptive schemas — every argument the model can
 pass is documented, tools name each other, and self-healing behavior is
@@ -344,7 +344,7 @@ line per action.
 | `NX_OVERFLOW_EVICT_MIN_CHARS` / `NX_OVERFLOW_EVICT_MAX` | tier-2 spill eviction: the smallest tool result worth replacing with a head/tail + spill-path note mid-run (default 4000 chars) and the per-fold cap on how many are evicted (default 8). Pinned turns are never evicted |
 | `NX_TOKENS_MARGIN` / `NX_MIN_COMPLETION_TOKENS` | when the source's context window is known (probed at startup), every request's `max_tokens` is clamped to `window - prompt_estimate - margin` (default margin 2048) instead of sending the flat `NX_MAX_TOKENS` — on small-window local models this stops the request itself from causing the context 400 and the manufactured length cuts; clamped values are floored at `NX_MIN_COMPLETION_TOKENS` (default 256). An unknown window leaves requests untouched |
 | `NX_TOKENIZE_PREFLIGHT` | `1` (default) sizes the prompt for that clamp with the server's exact `/tokenize` endpoint on local sources (never a remote round-trip); `0` uses the chars/4 estimate only |
-| `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 5200, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
+| `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 5320, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
 | `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
 | `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
 | `NX_MEMORY_FTS` | `1` (default) keeps a trigram FTS5 index per memories dir (`.memindex.sqlite`, a self-healing cache reconciled by mtime on every search) so `memory_search` answers from the index instead of reading every note; `0` always runs the plain substring scan. The index only widens recall a little (whitespace folding between query characters) and never changes ranking or the result cap; a sqlite build without FTS5 falls back silently |
