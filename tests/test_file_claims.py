@@ -102,9 +102,9 @@ def test_claim_ok_when_no_row(tmp_path):
     ok, holder = fc.claim_file(p, "owner-1")
     assert ok and holder is None
     rows = _rows()
-    assert len(rows) == 1 and rows[0][0] == p and rows[0][1] == "owner-1"
+    assert len(rows) == 1 and rows[0][0] == os.path.realpath(p) and rows[0][1] == "owner-1"
     assert rows[0][2] == os.getpid()
-    assert rows[0][4] == fc._cwd()  # the claim records this repo's scope
+    assert rows[0][4] == fc._cwd()  # outside any repo -> scope falls back to cwd
 
 
 def test_cross_owner_refused_while_pid_alive(tmp_path):
@@ -153,6 +153,49 @@ def test_dead_pid_is_reclaimed(tmp_path):
     ok, holder = fc.claim_file(p, "me")
     assert ok and holder is None
     assert _rows()[0][1] == "me"
+
+
+# --- path normalization + file-scoped repo scoping (0.110.0) -----------------
+
+def test_relative_and_absolute_paths_share_one_row(tmp_path, monkeypatch):
+    """The 0.110.0 false-block: a session in a PARENT folder claimed
+    'SHMForge/x.py' (relative), a session inside SHMForge used the absolute
+    path — two rows for one real file. realpath-normalized, one row."""
+    f = tmp_path / "real.txt"
+    f.write_text("x")
+    monkeypatch.chdir(tmp_path)
+    assert fc.claim_file("real.txt", "relative-speller")[0]
+    rows = _rows()
+    assert len(rows) == 1 and rows[0][0] == str(f)
+    # the absolute spelling of the same file from the same cwd hits that row
+    ok, holder = fc.claim_file(str(f), "me")
+    assert ok is False and "relative-speller" in holder
+    assert len(_rows()) == 1  # no second row for the same file
+
+
+def test_parent_folder_claim_does_not_block_the_owning_repo(tmp_path):
+    """A session sitting in the PARENT of two repos claims a file in one of
+    them; its claim is scoped to that file's repo, not to the parent, so a
+    different-owner claim in an UNRELATED repo (or the parent itself, outside
+    any repo) is not blocked."""
+    repos = tmp_path / "Projects"
+    a = repos / "RepoA"; b = repos / "RepoB"
+    (a / ".git").mkdir(parents=True); (b / ".git").mkdir(parents=True)
+    fa = a / "x.py"; fa.write_text("x")
+    os.chdir(repos)  # the parent — not a repo
+    try:
+        assert fc.claim_file("RepoA/x.py", "parent-sitter")[0]
+        row = _rows()[0]
+        assert row[4] == str(a)  # scoped to RepoA, not the Projects parent
+        # a different owner claiming a RepoB file is NOT blocked by RepoA's row
+        fb = b / "y.py"; fb.write_text("y")
+        ok, holder = fc.claim_file(str(fb), "repo-b-worker")
+        assert ok and holder is None
+        # ...but the same RepoA file IS blocked for another owner
+        ok, holder = fc.claim_file(str(fa), "repo-a-worker")
+        assert ok is False and "parent-sitter" in holder
+    finally:
+        os.chdir(_tmp)
 
 
 # --- repo scoping (cwd) ------------------------------------------------------
