@@ -266,7 +266,12 @@ class _WakePoller(threading.Thread):
             if st._WAKE_DUE:
                 continue  # already raised; the REPL clears it
             try:
-                if wake_due():
+                if wake_due() and not st._TURN_ACTIVE:
+                    # Re-check _TURN_ACTIVE after wake_due() returns: the sweep
+                    # it ran can take longer than the turn that just started
+                    # (it listdirs + json-loads + log-tails EVERY job), and a
+                    # flag decided by a pre-turn snapshot must not fire a
+                    # phantom wake at the post-turn prompt (0.109.5).
                     st._WAKE_DUE = True
             except Exception:
                 pass  # a wake poll must never take the REPL down

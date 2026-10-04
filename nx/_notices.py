@@ -96,6 +96,19 @@ def pop_notice_ctx(fr: NoticeFrame) -> None:
         for name in SLOTS:
             if fr.slots[name] == fr.seed[name]:
                 continue  # untouched here — keep whatever the parent has
+            if name == "_BG_NOTICE_SEEN":
+                # The seen-set is shared with the wake poller thread (which
+                # has no frame and writes the module store): marks made while
+                # this frame ran must survive the fold-back, so MERGE sets
+                # instead of overwriting with this frame's stale copy. The
+                # overwrite erased them, the next sweep re-staged the same
+                # "pid N exited" note, and each re-announcement woke another
+                # "Nothing pending" turn — repeating for as long as the
+                # session ran (0.109.5).
+                merged = set(fr.slots[name] or set())
+                merged.update(prev.slots[name] or set())
+                prev.slots[name] = merged
+                continue
             prev.slots[name] = fr.slots[name]
     else:
         for name in SLOTS:

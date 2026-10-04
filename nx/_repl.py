@@ -293,6 +293,14 @@ def _repl() -> None:
         user = "" if wake else user.strip()
         if wake:
             st._WAKE_DUE = False
+            # The flag is advisory: a poller that decided mid-turn (its
+            # wake_due() sweep overlapped the turn) can set it long after the
+            # turn's own first-tool flush delivered the note. Re-verify before
+            # spending a whole model turn on it — a stale sentinel is dropped
+            # silently instead of printing the banner and answering "Nothing
+            # pending" (0.109.5).
+            if not _m._autowake.wake_due():
+                continue
             user = _m._autowake.WAKE_INSTRUCTION
             print(f"{DIM}  ▸ background job finished — auto-continuing{RESET}")
         if not user and not wake:
