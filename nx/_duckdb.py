@@ -129,13 +129,15 @@ def duckdb_query(sql: str, database: str = "", format: str = "box",
                     "`database` to query files directly (read_parquet/"
                     "read_csv/read_json) or create it first")
         argv.append(db)
-    # SQL rides a temp file: `-init`-free, no quoting/injection surface, and
+    # SQL rides a temp file passed with -f: no quoting/injection surface, and
     # multi-statement scripts (a CTE plus a follow-up SELECT) work as-is.
+    # (-f is required since DuckDB 1.5.x — a positional file is opened as a
+    # DATABASE there, which fails with "not a valid DuckDB database file".)
     fd, sql_path = tempfile.mkstemp(prefix="nx-duckdb-", suffix=".sql")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(sql if sql.endswith("\n") else sql + "\n")
-        argv.append(sql_path)
+        argv += ["-f", sql_path]
         if not _is_read_only(sql):
             from ._bash_jobs import _confirm  # lazy: avoid an import cycle
             first = sql.strip().splitlines()[0][:120]

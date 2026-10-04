@@ -239,13 +239,15 @@ def _bash_write_candidates(command: str) -> list[str]:
     cands: list[str] = []
 
     def add(raw: str) -> None:
-        raw = raw.strip().strip("'\"")
+        raw = raw.strip().strip("'\"").rstrip(";")
         if raw and raw not in cands:
             cands.append(raw)
 
     # 1. redirections: > file, >> file, 2> file, &> file, <> file.
+    #    &1/&2 are fd-dup targets, not files.
     for m in re.finditer(r"\d?>+\s*(\S+)", command):
-        add(m.group(1))
+        if not re.fullmatch(r"&[12]", m.group(1)):
+            add(m.group(1))
 
     # 2. here-doc / inline interpreted-language write calls
     #    (python3 - <<'EOF' ... open(p,'w') ... EOF).
@@ -303,6 +305,8 @@ def check_bash_write_fence(command: str) -> str:
     roots = _writable_roots()
     outside: list[str] = []
     for raw in _bash_write_candidates(command):
+        if raw in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+            continue
         # A bare identifier from an interpreted-language call (open(p, 'w')
         # yields "p", the variable name) resolves to nothing predictable:
         # refuse, the same rule as a shell variable.
