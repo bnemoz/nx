@@ -176,11 +176,17 @@ def _scope_check(path: str) -> str | None:
 
 
 def _normalize_tier(tier: Any) -> str:
-    """Map the `tier` argument (and the legacy NX_SUBAGENT_WRITE flag) to one
-    of read/write/implement. Empty string = invalid (caller refuses); None
-    falls back to the env-derived default."""
+    """Map the `tier` argument to one of read/write/implement. Empty string =
+    invalid (caller refuses); None = "read" — the schema's documented default.
+
+    0.110.1: None used to fall back to the NX_SUBAGENT_WRITE env flag, silently
+    upgrading an omitted tier to "write". That broke the schema's "'read'
+    (default)" contract, and since 0.107.0 a write tier + NX_SUBAGENT_WORKTREE=1
+    + a non-git project root is a REFUSED spawn — so a plain read investigation
+    from a non-git cwd died on "worktree isolation failed". NX_SUBAGENT_WRITE=1
+    now only gates explicit write/implement requests (checked in spawn_agent)."""
     if tier is None:
-        return "write" if _write_tier_enabled() else "read"
+        return "read"
     v = str(tier).strip().lower()
     return v if v in ("read", "write", "implement") else ""
 

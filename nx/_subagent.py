@@ -1029,7 +1029,8 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     t = _normalize_tier(extra.pop("tier", tier))
     if not t:
         return ("ERROR: tier must be one of read/write/implement "
-                "(or omit it — NX_SUBAGENT_WRITE=1 defaults to write)")
+                "(or omit it — the default is read; NX_SUBAGENT_WRITE=1 only "
+                "permits an explicit write/implement tier)")
     # The default is a FLOOR, not just the omitted-value fallback (see the note
     # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
     # and pass a small max_turns for a broad sweep, then the agent dies mid-

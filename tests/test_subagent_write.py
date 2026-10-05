@@ -140,7 +140,7 @@ def test_write_tier_on_offers_and_wraps(nx_fresh, monkeypatch, tmp_path):
         return nx_fresh.TURN_DONE
 
     monkeypatch.setattr(nx_fresh, "model_turn", fake_turn)
-    assert spawn_agent("write a file") == "wrote it"
+    assert spawn_agent("write a file", tier="write") == "wrote it"
     assert (tmp_path / "w.txt").read_text() == "hi"
 
 
@@ -167,7 +167,7 @@ def test_write_tier_edit_denied_by_parent_confirm(nx_fresh, monkeypatch, tmp_pat
         return nx_fresh.TURN_DONE
 
     monkeypatch.setattr(nx_fresh, "model_turn", fake_turn)
-    assert spawn_agent("try to edit") == "denied"
+    assert spawn_agent("try to edit", tier="write") == "denied"
     assert (tmp_path / "f.txt").read_text() == "alpha\n"
 
 
@@ -298,7 +298,7 @@ def test_write_tier_yolo_inherited_not_forced(nx_fresh, monkeypatch, tmp_path):
     monkeypatch.setattr(nx_fresh, "model_turn", fake_turn)
     st.YOLO, st.APPROVE_LEVEL = False, "medium"
     try:
-        spawn_agent("q")
+        spawn_agent("q", tier="write")
         assert seen["yolo"] is False
         assert st.YOLO is False and st.APPROVE_LEVEL == "medium"  # restored
     finally:

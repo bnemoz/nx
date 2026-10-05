@@ -27,7 +27,7 @@ def _setup(tmp_path, monkeypatch):
 
 def test_normalize_tier(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
-    assert _normalize_tier(None) == "write"      # env default
+    assert _normalize_tier(None) == "read"       # 0.110.1: schema default, not env
     assert _normalize_tier("read") == "read"
     assert _normalize_tier(" IMPLEMENT ") == "implement"
     assert _normalize_tier("bogus") == ""
