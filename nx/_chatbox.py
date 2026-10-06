@@ -791,7 +791,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         for _ in range(max(0, total_rows - cursor_line)):
             sys.stdout.write("\x1b[1B\x1b[2K")
         sys.stdout.write("\x1b[2K\x1b[J")
-        for _ in range(max(0, total_rows - 1)):
+        # The final up-walk must reach the frame's TOP row (cursor_row -
+        # cursor_line), so it clears total_rows rows, not total_rows - 1 --
+        # one short left the stale `╭─` border stranded above every repaint.
+        for _ in range(max(0, total_rows)):
             sys.stdout.write("\x1b[1A\x1b[2K")
         sys.stdout.flush()
 
