@@ -85,6 +85,85 @@ def test_valid_launcher_output_still_writes_map(nx_fresh, monkeypatch):
     assert data["log_path"] == log_path
     assert data["command"] == "echo hi"
     assert data["owner_pid"] == os.getpid()
+    assert data["cwd"] == os.getcwd()  # the launch dir, for the /bg all view
+
+
+# --- list_bg_jobs is scoped to THIS process (bg-logs is machine-shared) -------
+
+def _write_map(bg_dir, pid, *, owner, command="sleep 600", started=None,
+               with_cwd=True):
+    """Forge a bg-pid-<pid>.map the way _run_bash writes one."""
+    log = os.path.join(bg_dir, f"bg-{pid}.log")
+    with open(log, "w") as f:
+        f.write("fake output\n")
+    data = {"log_path": log, "command": command,
+            "started": started if started is not None else 1.0}
+    if owner is not None:
+        data["owner_pid"] = owner
+        if with_cwd:
+            data["cwd"] = "/tmp/foreign-project"
+    with open(os.path.join(bg_dir, f"bg-pid-{pid}.map"), "w") as f:
+        json.dump(data, f)
+    return log
+
+
+def test_list_bg_jobs_hides_foreign_owner_by_default(nx_fresh):
+    nx, _ = nx_fresh
+    bg = _bg_dir(nx)
+    _write_map(bg, 41001, owner=os.getpid() + 987654)   # another nx process
+    mine = _write_map(bg, 41002, owner=os.getpid())     # this process
+    pids = [j["pid"] for j in nx.list_bg_jobs()]
+    assert pids == ["41002"]
+    assert nx.list_bg_jobs()[0]["log_path"] == mine
+
+
+def test_list_bg_jobs_mine_only_false_shows_everything(nx_fresh):
+    nx, _ = nx_fresh
+    bg = _bg_dir(nx)
+    _write_map(bg, 41001, owner=os.getpid() + 987654)
+    _write_map(bg, 41002, owner=os.getpid())
+    pids = {j["pid"] for j in nx.list_bg_jobs(mine_only=False)}
+    assert pids == {"41001", "41002"}
+
+
+def test_list_bg_jobs_legacy_map_without_owner_is_foreign(nx_fresh):
+    """Maps written before owner_pid existed have no owner to match — with
+    mine_only they are treated as foreign (deliberately no liveness
+    fallback: the filter is exactly process-based)."""
+    nx, _ = nx_fresh
+    bg = _bg_dir(nx)
+    _write_map(bg, 41003, owner=None)
+    assert nx.list_bg_jobs() == []
+    legacy = nx.list_bg_jobs(mine_only=False)
+    assert [j["pid"] for j in legacy] == ["41003"]
+    assert legacy[0]["owner_pid"] is None
+
+
+def test_bg_kill_refuses_foreign_pid_and_points_at_bg_all(nx_fresh, capsys):
+    from nx._repl_settings_cmds import _cmd_bg
+    nx, _ = nx_fresh
+    bg = _bg_dir(nx)
+    _write_map(bg, 41004, owner=os.getpid() + 987654)
+    _cmd_bg("/bg kill 41004", None)
+    out = capsys.readouterr().out
+    assert "another session" in out and "/bg all" in out
+
+
+def test_bg_all_lists_foreign_jobs_labelled(nx_fresh, capsys):
+    from nx._repl_settings_cmds import _cmd_bg
+    nx, _ = nx_fresh
+    bg = _bg_dir(nx)
+    _write_map(bg, 41005, owner=os.getpid() + 987654, command="other-project-build")
+    _write_map(bg, 41006, owner=os.getpid(), command="my-build")
+    _cmd_bg("/bg", None)
+    out = capsys.readouterr().out
+    assert "my-build" in out and "41006" in out
+    assert "other-project-build" not in out  # default view is session-scoped
+    _cmd_bg("/bg all", None)
+    out = capsys.readouterr().out
+    assert "other-project-build" in out and "41005" in out and "my-build" in out
+    assert "EVERY nx session" in out  # says so in the output
+    assert "/tmp/foreign-project" in out  # cwd shown for foreign jobs
 
 
 # --- no substring fallback: a pid without a map file has no log ---------------

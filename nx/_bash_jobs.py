@@ -226,7 +226,11 @@ def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
                 json.dump({"log_path": log_path, "command": command,
                            "started": time.time(),
                            "pid_start_time": _pid_start_time(pid),
-                           "owner_pid": os.getpid()}, f)
+                           "owner_pid": os.getpid(),
+                           # the launch directory: bg-logs is shared by every
+                           # session on the machine, so a dashboard that ever
+                           # lists foreign jobs needs to say where they run
+                           "cwd": os.getcwd()}, f)
         except OSError:
             pass
     return pid, log_path
@@ -311,14 +315,25 @@ def _pid_is_alive(pid: int, expected_start_time: str | None = None) -> bool:
         return False
 
 
-def list_bg_jobs() -> list[dict[str, Any]]:
+def list_bg_jobs(mine_only: bool = True) -> list[dict[str, Any]]:
     """Scan ``bg-logs/bg-pid-*.map`` files and return a dashboard-ready list.
 
     Each entry: {"pid", "alive", "command", "started", "log_path", "tail"}.
     Sorted newest-first. Used by the ``/bg`` REPL command.
+
+    ``bg-logs`` is shared by EVERY nx session on the machine, so the default
+    ``mine_only=True`` keeps a session's view (and ``/bg kill``'s pid set)
+    scoped to the jobs this process launched — the same ``owner_pid`` filter
+    the completion sweep applies (_bg_completions). A map written before the
+    owner was recorded has no owner to match and is therefore foreign: with
+    ``mine_only`` it is skipped, deliberately with no liveness fallback — the
+    filter is exactly process-based, so it can never resurrect another
+    session's job. Callers that genuinely want the machine-wide view (``/bg
+    all``) pass ``mine_only=False``.
     """
     bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
     jobs = []
+    mine = os.getpid()
     try:
         names = [n for n in os.listdir(bg_dir) if n.startswith("bg-pid-") and n.endswith(".map")]
     except OSError:
@@ -330,6 +345,8 @@ def list_bg_jobs() -> list[dict[str, Any]]:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
+        if mine_only and data.get("owner_pid") != mine:
+            continue  # another session's job (or an owner-less legacy map)
         pid = name[len("bg-pid-"):-len(".map")]
         try:
             pid_i = int(pid)
@@ -344,6 +361,7 @@ def list_bg_jobs() -> list[dict[str, Any]]:
             "started": data.get("started"),
             "log_path": log_path,
             "owner_pid": data.get("owner_pid"),
+            "cwd": data.get("cwd", ""),
             "tail": _tail_last_line(log_path) if log_path else "",
         })
     jobs.sort(key=lambda j: j.get("started") or 0, reverse=True)

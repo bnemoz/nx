@@ -581,7 +581,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/verify [cmd\|off\|run]` | show/set/clear or force-run the post-edit verify command (`NX_VERIFY_CMD`) — when set, every edited `.py` also gets an in-process `ast.parse` whose verdict rides on the edit's own tool result |
 | `/undo` | revert the last write/edit/delete (LIFO; `--list` shows pending checkpoints). Since 0.47 the stack persists across crashes/restarts — per session under `~/.nx/undo/<session-id>.json` (the legacy shared `~/.nx/undo.json` only when no session id is known; 0.103.0) — and one tool call always costs one press — re-writing the same file or re-deleting a pending file updates its entry instead of stacking a duplicate. `/reset` clears it |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
-| `/bg [kill <pid>]` | list background `run_bash` jobs, or kill one |
+| `/bg [kill <pid>\|all]` | list this session's background `run_bash` jobs (and sub-agents), or kill one; `kill` only reaches jobs this session started — `all` lists every nx session's jobs on the machine (read-only, with each job's launch cwd) |
 | `/tabs` | live dashboard of running surfaces: main turn, bg jobs, sub-agents (Ctrl+T); type mid-turn to steer |
 | `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |

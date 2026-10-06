@@ -174,6 +174,8 @@ def _surfaces_snapshot() -> list[dict]:
         "obj": None,
     }]
     try:
+        # mine_only default: the shared bg-logs dir holds every session's
+        # jobs on the machine; /tabs is a per-session dashboard.
         for job in _m.list_bg_jobs():
             alive = job.get("alive", False)
             rows.append({"instruction": job.get("command") or job.get("instruction") or "",

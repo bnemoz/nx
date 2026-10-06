@@ -45,7 +45,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/toolcalls [text|native|auto] [reset [tool]]", "show/set tool-calling mode, or clear the malformed-args breaker streaks"),
     ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
     ("/resources, /resmon", "show CPU%/RSS process stats"),
-    ("/bg [kill <pid>]", "list/kill background bash jobs"),
+    ("/bg [kill <pid>|all]", "list/kill this session's background bash jobs; /bg all lists every session's"),
     ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T; type mid-turn to steer"),
     ("/yolo", "toggle yolo mode (disable all approval prompts)"),
     ("/approval [level]", "show/set approval level (session-only)"),
@@ -409,9 +409,17 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
             print(f"{C.WARNING}  usage: /bg kill <pid>{RESET}")
             return
         target_pid = parts[2]
+        # The killable set is THIS process's jobs only. bg-logs is shared by
+        # every nx session on the machine, so the unfiltered pid set let one
+        # session SIGTERM another session's work.
         known_pids = {j["pid"] for j in list_bg_jobs()}
         if target_pid not in known_pids:
-            print(f"{C.WARNING}  {target_pid} is not a tracked background job (see /bg){RESET}")
+            if target_pid in {j["pid"] for j in list_bg_jobs(mine_only=False)}:
+                print(f"{C.WARNING}  {target_pid} is another session's job — "
+                      f"this session only kills jobs it started "
+                      f"(see /bg all for the machine-wide list){RESET}")
+            else:
+                print(f"{C.WARNING}  {target_pid} is not a tracked background job (see /bg){RESET}")
             return
         try:
             os.kill(int(target_pid), signal.SIGTERM)
@@ -421,7 +429,10 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
         except (ValueError, PermissionError) as e:
             print(f"{C.ERROR}  ✗ {e}{RESET}")
         return
-    jobs = list_bg_jobs()
+    # /bg all | /bg -a — the escape hatch: the machine-wide view, clearly
+    # labelled as such (listing only; kill stays scoped to this session).
+    show_all = len(parts) >= 2 and parts[1] in ("all", "-a")
+    jobs = list_bg_jobs(mine_only=False) if show_all else list_bg_jobs()
     agents = list_async_agents()
     if not jobs and not agents:
         print(f"{DIM}  no background jobs or sub-agents{RESET}")
@@ -454,16 +465,29 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
         print(f"{DIM}  answers arrive as [Runtime note] on a later turn{RESET}")
     if not jobs:
         return
-    print(f"{DIM}  background jobs (newest first):{RESET}")
+    if show_all:
+        print(f"{DIM}  background jobs from EVERY nx session on this machine "
+              f"(newest first; /bg lists only this session's):{RESET}")
+    else:
+        print(f"{DIM}  background jobs (newest first):{RESET}")
+    mine = os.getpid()
     for j in jobs:
         status = f"{C.SUCCESS}running{RESET}" if j["alive"] else f"{DIM}done{RESET}"
+        if show_all and j.get("owner_pid") != mine:
+            status = f"{DIM}other session{RESET}"
         age = _fmt_when(j["started"]) if j["started"] else "?"
         cmd = j["command"]
         cmd = cmd if len(cmd) <= 60 else cmd[:59] + "…"
         print(f"  {DIM}{j['pid']:>7}{RESET}  {status:<18}  {DIM}{age:<10}{RESET}  {cmd}")
+        if show_all and j.get("cwd"):
+            print(f"           {DIM}└ cwd: {j['cwd']}{RESET}")
         if j["tail"]:
             print(f"           {DIM}└ {j['tail']}{RESET}")
-    print(f"{DIM}  /bg kill <pid> to terminate a running job{RESET}")
+    if show_all:
+        print(f"{DIM}  /bg kill only reaches jobs this session started{RESET}")
+    else:
+        print(f"{DIM}  /bg kill <pid> to terminate a running job; "
+              f"/bg all lists every session's{RESET}")
 
 
 def _cmd_yolo(user: str, state: _ReplState) -> None:
