@@ -1,4 +1,4 @@
-"""Advisor-tier sub-agents (0.111.0): the executor consults the parent model
+"""Advisor-tier sub-agents (0.112.0): the executor consults the parent model
 via consult_advisor — a one-shot, no-tools side-call. Covers tier gating, the
 dispatch/tool-schema surface, budget exhaustion, timeout/malformed fallbacks,
 the stop signal, and that the tool never reaches the always-on token floor."""

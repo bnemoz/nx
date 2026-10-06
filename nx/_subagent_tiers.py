@@ -83,7 +83,7 @@ class _SubagentContext:
         # thread's per-agent steering queue and stamp steer breadcrumbs on the
         # job record. None for foreground/parent loops.
         self.job_id = job_id
-        # Advisor-tier consult budget (0.111.0): remaining consult_advisor
+        # Advisor-tier consult budget (0.112.0): remaining consult_advisor
         # calls this agent may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
         self.consults_left = _consult_budget()
         self.advisor = False  # True only for advisor-tier agents
@@ -132,7 +132,7 @@ def _subagent_tools() -> list[dict[str, Any]]:
     if ctx is not None and ctx.write:
         wanted.update(_WRITE_TIER_TOOL_NAMES)
         if ctx.advisor and ctx.consults_left is not None:
-            wanted.add("consult_advisor")  # advisor tier (0.111.0)
+            wanted.add("consult_advisor")  # advisor tier (0.112.0)
     elif ctx is None and _write_tier_enabled():
         # legacy global-table fallback (serial tests/REPL)
         wanted.update(_WRITE_TIER_TOOL_NAMES)
