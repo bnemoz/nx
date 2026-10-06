@@ -277,6 +277,16 @@ def _repl() -> None:
             # drain it here so the documented "exit never loses the last turn"
             # holds even if a later atexit hook calls os._exit().
             _flush_save()
+            # Clean up this session's worktree (0.113.2): an isolated session
+            # that exits with a clean tree leaves nothing behind — remove the
+            # tree AND its nx/session-<sid> branch. Dirty trees are kept
+            # (remove_session_worktree refuses to destroy work).
+            if st.SESSION_WORKTREE:
+                try:
+                    from ._worktree import remove_session_worktree
+                    remove_session_worktree(st.SESSION_WORKTREE)
+                except Exception:
+                    pass
             # Show a grey resume hint so the user can pick up right where they
             # left off without having to run `nx sessions` first.
             if state.session_id:

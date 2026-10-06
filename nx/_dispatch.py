@@ -31,7 +31,7 @@ from ._tool_cache import (
     drop_vcs_entries, store_cacheable_result,
 )
 from ._approval import _EscToChat
-from ._bash_jobs import run_bash, wait_background
+from ._bash_jobs import run_bash, wait_background, kill_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
@@ -76,6 +76,7 @@ from ._bg_completions import (  # noqa: F401 (re-exports)
 DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
     "list_dir": list_dir, "run_bash": run_bash, "wait_background": wait_background,
+    "kill_background": kill_background,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
     "todo_write": todo_write, "apply_patch": apply_patch, "delete_file": delete_file,

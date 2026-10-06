@@ -48,8 +48,8 @@ def test_default_withholds_the_gated_four():
     # and the always-on set is unchanged: one entry per non-gated schema
     all_names = [t["function"]["name"] for t in m.TOOLS]
     assert sorted(names) == sorted(
-        n for n in all_names if n not in ("wait_background", "spawn_agent",
-                                              "read_image", "plan_edit",
+        n for n in all_names if n not in ("wait_background", "kill_background",
+                                              "spawn_agent", "read_image", "plan_edit",
                                               "obs_recall",
                                               "lint_check", "search_project_tools",
                                               "call_project_tool"))  # web_fetch is ON by default (0.71.0), so it stays in names; opt-in project gateways and lint_check are OFF by default

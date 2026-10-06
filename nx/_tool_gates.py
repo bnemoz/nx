@@ -50,6 +50,10 @@ _TOOL_GATES: dict[str, Any] = {
     # The per-gate refusal wording lives in _GATE_REFUSALS below; a gate entry
     # without a refusal falls back to the generic withheld wording.
     "wait_background": lambda: st._SESSION_HAS_BACKGROUNDED,
+    # kill_background (0.113.2): same gate as wait_background — the tool can
+    # only act on jobs THIS session started, so a session where nothing has
+    # backgrounded has nothing to kill and shouldn't pay the schema rent.
+    "kill_background": lambda: st._SESSION_HAS_BACKGROUNDED,
     "spawn_agent": _delegation_enabled,
     "read_image": lambda: (bool(_m_safe().NX_VISION)
                             and st._NATIVE_TOOL_CALLS_CONFIRMED
@@ -87,6 +91,7 @@ _TOOL_GATES: dict[str, Any] = {
 # in _unknown_tool_error.
 _GATE_REFUSALS: dict[str, str] = {
     "wait_background": "(no command has backgrounded yet — nothing to wait on). run_bash returns a '[background] PID' line when a command needs waiting on; read_file that log path in the meantime.",
+    "kill_background": "(no command has backgrounded yet in this session — nothing to kill, and the tool only reaches jobs this session started).",
     "read_image": "(NX_VISION is off, native tool calls are not confirmed on this source, or NX_TOOL_FLOOR_SLIM=1 withholds it this session). Describe images by other means or ask the user to paste the relevant details.",
     "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/list_dir.",
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
