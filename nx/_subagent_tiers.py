@@ -55,7 +55,7 @@ class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
-                 "worktree", "job_id")
+                 "worktree", "job_id", "consults_left", "advisor")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False, scope: "list[str] | None" = None,
@@ -83,6 +83,10 @@ class _SubagentContext:
         # thread's per-agent steering queue and stamp steer breadcrumbs on the
         # job record. None for foreground/parent loops.
         self.job_id = job_id
+        # Advisor-tier consult budget (0.111.0): remaining consult_advisor
+        # calls this agent may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
+        self.consults_left = _consult_budget()
+        self.advisor = False  # True only for advisor-tier agents
 
 
 def _subagent_table() -> dict[str, Any] | None:
@@ -127,10 +131,37 @@ def _subagent_tools() -> list[dict[str, Any]]:
     ctx = _subagent_ctx()
     if ctx is not None and ctx.write:
         wanted.update(_WRITE_TIER_TOOL_NAMES)
+        if ctx.advisor and ctx.consults_left is not None:
+            wanted.add("consult_advisor")  # advisor tier (0.111.0)
     elif ctx is None and _write_tier_enabled():
         # legacy global-table fallback (serial tests/REPL)
         wanted.update(_WRITE_TIER_TOOL_NAMES)
-    return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
+    tools = [t for t in _m.TOOLS if t["function"]["name"] in wanted]
+    if ctx is not None and ctx.advisor and ctx.consults_left is not None:
+        tools.append(CONSULT_ADVISOR_TOOL)
+    return tools
+
+
+# Schema for the advisor-tier consult tool. Deliberately NOT in the parent
+# TOOLS list: it exists only in the advisor dispatch table, so it costs zero
+# tokens on the per-turn floor (the always-on budget in
+# tests/test_initial_context.py must not move).
+CONSULT_ADVISOR_TOOL = {"type": "function", "function": {
+    "name": "consult_advisor",
+    "description": "Ask the parent model (your advisor) to decide something you "
+        "cannot resolve yourself — an ambiguous requirement, a fork with real "
+        "tradeoffs, or a repeated failure. One-shot: the advisor replies with a "
+        "decision and guidance; it has no tools and never sees your transcript, "
+        "so put the needed context in context_digest. Budget-limited (default 3 "
+        "per agent); when it is exhausted, unavailable, or its answer is "
+        "unusable, take the conservative option, log it under '## Deviations' "
+        "in implementation-notes.md, and continue without consulting.",
+    "parameters": {"type": "object", "properties": {
+        "question": {"type": "string", "description": "The specific decision you cannot make, stated so it can be answered in one or two sentences."},
+        "options": {"type": "array", "items": {"type": "string"}, "description": "2-3 candidate paths, each with its main tradeoff."},
+        "context_digest": {"type": "string", "description": "Compact context the advisor needs: your instruction, current plan, turns spent, and the relevant findings so far. The advisor cannot see anything else."},
+    }, "required": ["question"]},
+}}
 
 
 def _read_only_dispatch() -> dict[str, Any]:
@@ -156,6 +187,111 @@ def _write_tier_dispatch() -> dict[str, Any]:
     return table
 
 
+def _advisor_tier_dispatch() -> dict[str, Any]:
+    """Dispatch table for an advisor-tier sub-agent: the write-tier table
+    (the executor must be able to edit and maintain implementation-notes.md)
+    plus consult_advisor, the round-trip to the parent model."""
+    table = _write_tier_dispatch()
+    table["consult_advisor"] = _consult_advisor
+    return table
+
+
+# Consult budget/timeout, resolved per-call from env so tests can flip them.
+def _consult_budget() -> int:
+    return max(0, _env_int("NX_SUBAGENT_CONSULT_BUDGET", 3))
+
+
+def _consult_timeout() -> int:
+    return max(1, _env_int("NX_SUBAGENT_CONSULT_TIMEOUT", 60))
+
+
+def _consult_advisor(**args: Any) -> str:
+    """The advisor-tier executor's round-trip to the parent model. One-shot,
+    no-tools side-call (ADVISOR_SYSTEM prompt), exactly like _risk's
+    classifier call — never the parent turn loop, never the user. Returns a
+    compact decision+guidance string; on timeout/malformed/exhausted budget
+    returns an ERROR string telling the executor to take the conservative
+    option and log a deviation (its own failure mode, not a hard stop)."""
+    import json as _json
+    import time as _time
+    ctx = _subagent_ctx()
+    if ctx is None:
+        return "ERROR: consult_advisor used outside a sub-agent"
+    budget = ctx.consults_left
+    if budget <= 0:
+        return ("ERROR: advisor consult budget exhausted — take the "
+                "conservative option, log it under '## Deviations' in "
+                "implementation-notes.md, and continue without consulting")
+    ctx.consults_left = budget - 1
+    from ._prompts import ADVISOR_SYSTEM
+    if st.client is None or st.MODEL is None:
+        return ("ERROR: no active model source — take the conservative "
+                "option and log it under '## Deviations'")
+    question = str(args.get("question") or "").strip()
+    options = args.get("options")
+    digest = str(args.get("context_digest") or "").strip()
+    if not question:
+        return "ERROR: consult_advisor requires question"
+    opts = ""
+    if isinstance(options, list) and options:
+        opts = "\n".join(f"- {o}" for o in options if str(o).strip())
+    user = (f"Question: {question}\n\nOptions:\n{opts or '(none given)'}\n\n"
+            f"Context: {digest or '(none given)'}")
+    payload = [{"role": "system", "content": ADVISOR_SYSTEM},
+               {"role": "user", "content": user}]
+    deadline = _time.monotonic() + _consult_timeout()
+    from ._openai_client import APIConnectionError
+    last_err = ""
+    # One parse retry — same ladder philosophy as _risk._assess_risk, but
+    # cheaper: an advisor fallback is a logged deviation, not a gate.
+    for _attempt in range(2):
+        resp = None
+        while _time.monotonic() < deadline:
+            try:
+                resp = st.client.chat.completions.create(
+                    model=st.MODEL, messages=payload, stream=False,
+                    timeout=max(1, int(deadline - _time.monotonic())),
+                    **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
+            except APIConnectionError:
+                _time.sleep(1)
+            # A reply that only arrives after the deadline is a timeout too —
+            # discard it and fall back rather than acting on stale guidance.
+            if resp is not None and _time.monotonic() >= deadline:
+                resp = None
+            if resp is not None:
+                break
+        if resp is None:
+            return ("ERROR: advisor did not answer in time — take the "
+                    "conservative option and log it under '## Deviations'")
+        text = (resp.choices[0].message.content or "").strip()
+        try:
+            from ._metrics import _record_api_call
+            _record_api_call(resp,
+                             fallback_chars=len(text),
+                             fallback_prompt_chars=lambda: sum(
+                                 len(str(m.get("content") or "")) for m in payload))
+        except Exception:
+            pass
+        try:
+            obj = _json.loads(text)
+            decision = str(obj.get("decision") or "").strip()
+            guidance = str(obj.get("guidance") or "").strip()
+            stop = bool(obj.get("stop"))
+            if decision or stop:
+                out = f"[advisor] decision: {decision or 'STOP — halt and report back'}"
+                if guidance:
+                    out += f"\n[advisor] guidance: {guidance}"
+                if stop:
+                    out += ("\n[advisor] STOP requested: wrap up now — record state "
+                            "in implementation-notes.md and report back to the parent")
+                return out
+            last_err = "advisor reply missing decision"
+        except (_json.JSONDecodeError, AttributeError, TypeError):
+            last_err = f"unparseable advisor reply: {text[:200]}"
+    return (f"ERROR: advisor reply unusable ({last_err}) — take the "
+            "conservative option and log it under '## Deviations'")
+
+
 def _scope_check(path: str) -> str | None:
     """Refusal message when `path` falls outside the CURRENT thread's sub-agent
     scope, or None when allowed (no scope set, or any glob matches). Matched
@@ -176,8 +312,9 @@ def _scope_check(path: str) -> str | None:
 
 
 def _normalize_tier(tier: Any) -> str:
-    """Map the `tier` argument to one of read/write/implement. Empty string =
-    invalid (caller refuses); None = "read" — the schema's documented default.
+    """Map the `tier` argument to one of read/write/implement/advisor. Empty
+    string = invalid (caller refuses); None = "read" — the schema's documented
+    default.
 
     0.110.1: None used to fall back to the NX_SUBAGENT_WRITE env flag, silently
     upgrading an omitted tier to "write". That broke the schema's "'read'
@@ -188,7 +325,7 @@ def _normalize_tier(tier: Any) -> str:
     if tier is None:
         return "read"
     v = str(tier).strip().lower()
-    return v if v in ("read", "write", "implement") else ""
+    return v if v in ("read", "write", "implement", "advisor") else ""
 
 
 def _write_tier_wrapper(name: str):

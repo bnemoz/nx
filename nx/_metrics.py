@@ -230,8 +230,8 @@ def _record_usage(
 
 def _record_api_call(
     resp: Any,
-    fallback_chars: int = 0,
-    fallback_prompt_chars: int = 0,
+    fallback_chars: int | Callable[[], int] = 0,
+    fallback_prompt_chars: int | Callable[[], int] = 0,
 ) -> None:
     """_record_usage for a non-streaming response object: takes the usage off
     `resp` (falling back to the chars//4 estimate, flagged `estimated`, when

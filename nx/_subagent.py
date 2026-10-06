@@ -92,6 +92,10 @@ from ._subagent_bash import (  # noqa: F401 (re-exports)
 
 from ._prompts import (  # prompt registry (re-exported)
     SUBAGENT_SYSTEM, SUBAGENT_WRITE_SYSTEM, SUBAGENT_IMPLEMENT_SYSTEM,
+    ADVISOR_EXEC_SYSTEM,
+)
+from ._subagent_tiers import (
+    _advisor_tier_dispatch,
 )
 
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
@@ -148,7 +152,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement agents; both are FLOORS: a smaller request is raised to them; ceiling 500). Omit it for broad work — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Leave unset (background, the default): job id now, answer arrives as a [Runtime note] on a later turn. false = foreground: it blocks the ENTIRE REPL — every other call in the turn and all user interaction — until the agent finishes, which for a real investigation is tens of minutes. Only pass false for a short, must-have-now answer."},
-        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. In the background (async, the default) they require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement", "advisor"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. 'advisor': an EXECUTOR that runs the task end-to-end with the parent model as an on-call advisor — it consults the advisor (consult_advisor tool) when a decision exceeds its judgment, keeps implementation-notes.md with a Plan and a Deviations log, and takes the conservative option on any advisor timeout/refusal (needs NX_SUBAGENT_WRITE=1). In the background (async, the default) write/implement/advisor tiers require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. With NX_SUBAGENT_WORKTREE=1 parallel write agents are safe even without scopes (each works in its own checkout) — scope is then about reviewability: keep each agent's diff focused on one concern so its report is easy to merge and judge."},
     }, "required": ["instruction"]},
 }}
@@ -860,7 +864,8 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
     # Write tiers (write/implement): opt-in (NX_SUBAGENT_WRITE=1) and refused
     # from inside another sub-agent (only the parent holds the approval gate).
-    write = tier in ("write", "implement")
+    write = tier in ("write", "implement", "advisor")
+    advisor = tier == "advisor"
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
@@ -873,7 +878,8 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # A sub-loop inherits this thread's quiet mode (an async agent's own
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
-    system = (SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
+    system = (ADVISOR_EXEC_SYSTEM if advisor
+              else SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
               else SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content":
@@ -890,10 +896,12 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # concurrent sibling's run_tool("spawn_agent") would see this thread's
     # restricted table mid-flight and refuse itself. The global stays a
     # manual, serial-only fallback for tests.
-    table = _write_tier_dispatch() if write else _read_only_dispatch()
+    table = (_advisor_tier_dispatch() if advisor
+             else _write_tier_dispatch() if write else _read_only_dispatch())
     prev_ctx = _subagent_ctx()
     ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
                            worktree=worktree, job_id=job_id)
+    ctx.advisor = advisor
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
     _SUBAGENT_TLS.ctx = ctx
@@ -1055,9 +1063,9 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         async_ = raw_async
     t = _normalize_tier(extra.pop("tier", tier))
     if not t:
-        return ("ERROR: tier must be one of read/write/implement "
+        return ("ERROR: tier must be one of read/write/implement/advisor "
                 "(or omit it — the default is read; NX_SUBAGENT_WRITE=1 only "
-                "permits an explicit write/implement tier)")
+                "permits an explicit write/implement/advisor tier)")
     # The default is a FLOOR, not just the omitted-value fallback (see the note
     # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
     # and pass a small max_turns for a broad sweep, then the agent dies mid-
@@ -1079,8 +1087,8 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         max_turns = _floor
     # Explicit read-tier request wins over the env default even when
     # NX_SUBAGENT_WRITE=1; write/implement tiers require the env opt-in.
-    if t in ("write", "implement") and not _write_tier_enabled():
-        return ("ERROR: write/implement tier requires NX_SUBAGENT_WRITE=1 "
+    if t in ("write", "implement", "advisor") and not _write_tier_enabled():
+        return ("ERROR: write/implement/advisor tier requires NX_SUBAGENT_WRITE=1 "
                 "(set it in the environment or config, then re-spawn)")
     scope = extra.pop("scope", scope)
     if scope is not None:
@@ -1112,7 +1120,7 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         # st.YOLO holds, so a yolo headless run CAN host background writers
         # honestly — the user opted out of approval entirely. Refuse only when
         # the posture could not approve a quiet write.
-        if t in ("write", "implement") and not st.YOLO:
+        if t in ("write", "implement", "advisor") and not st.YOLO:
             # Don't burn a turn on a refusal when a foreground spawn works:
             # downgrade to foreground (same contract the error message told
             # the model to use) instead of erroring out.
