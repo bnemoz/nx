@@ -203,6 +203,10 @@ _PENDING_BACKGROUND_NOTICE: str | None = None
 _CONSECUTIVE_EDITS: int = 0
 _MULTI_EDIT_NUDGED: bool = False
 _PENDING_MULTI_EDIT_NOTICE: str | None = None
+# One-shot yolo async:false nudge (see _subagent._maybe_nudge_yolo_async):
+# declared here so the st.X assignments in _dispatch.py resolve for ty.
+_YOLO_ASYNC_NUDGED: bool = False
+_PENDING_YOLO_ASYNC_NOTICE: str | None = None
 
 # --- delegation (spawn_agent) nudge -------------------------------------------
 # How many consecutive self-performed exploration calls (read_file/list_dir/
@@ -420,6 +424,7 @@ _NOTICE_DEFAULTS: dict[str, Any] = {
     "_PENDING_SUBAGENT_NOTICE": None,
     "_BG_NOTICE_SEEN": None,
     "_PENDING_VERIFY_NOTICE": None,
+    "_PENDING_YOLO_ASYNC_NOTICE": None,
 }
 
 # --- post-edit verification (NX_VERIFY_CMD) ------------------------------------

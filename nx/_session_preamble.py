@@ -117,6 +117,20 @@ BACKGROUND_GUIDANCE = (
     "not a command failure — check the command's own logs before retrying.]"
 )
 
+# Fourth instance of the same one-shot pattern: a YOLO session that passed
+# async:false on a write-tier spawn. The session-start delegation note is
+# built once, so a session that STARTED in yolo already heard the right
+# contract — this catches the model that passes explicit foreground anyway
+# (stale training prior) and, since it fires on the act itself, also covers a
+# mid-session /yolo toggle whose note is stale. NX_SUBAGENT_ASYNC=0 (a
+# legitimate user default) never fires it: only an explicit async:false does.
+YOLO_ASYNC_GUIDANCE = (
+    "[Runtime note: this session runs in yolo mode — background (async) "
+    "write-tier sub-agents are permitted and run concurrently; async:false is "
+    "only needed when you must have the answer this turn. Prefer omitting "
+    "async and spawning independent write agents in one turn.]"
+)
+
 # Same pattern as BACKGROUND_GUIDANCE above: paid once, only in sessions where
 # it's relevant. Fires the first time _CONSECUTIVE_EDITS hits
 # _MULTI_EDIT_NUDGE_THRESHOLD, to steer away from the observed failure mode of

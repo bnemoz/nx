@@ -95,7 +95,8 @@ def arm_wake() -> None:
 def _pending_notice_slots() -> tuple[str, ...]:
     return ("_PENDING_BACKGROUND_NOTICE", "_PENDING_BG_COMPLETION_NOTICE",
             "_PENDING_SUBAGENT_NOTICE", "_PENDING_MULTI_EDIT_NOTICE",
-            "_PENDING_VERIFY_NOTICE", "_PENDING_DELEGATION_NOTICE")
+            "_PENDING_VERIFY_NOTICE", "_PENDING_DELEGATION_NOTICE",
+            "_PENDING_YOLO_ASYNC_NOTICE")
 
 
 def _any_pending_notice() -> bool:

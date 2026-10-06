@@ -40,11 +40,40 @@ DELEGATION_GUIDANCE = (
     "async=false runs it in the foreground instead.]"
 )
 
+# The second write-tier bullet's background-mode sentence, chosen at note
+# BUILD time by the live yolo posture (st.YOLO, fixed during nx package init
+# from --yolo/--approval/NX_APPROVAL). The note is injected once at session
+# start, so a yolo session must hear that background write agents ARE
+# permitted — the pessimistic default wording makes yolo models pass
+# async:false everywhere and serialize work that should fan out concurrently.
+_WRITE_BG_YOLO = (
+    "This session runs in yolo mode: background (async, the default) write "
+    "agents ARE permitted — spawn independent write agents in one turn so "
+    "they run concurrently; use async:false only when you need the answer "
+    "this turn."
+)
+_WRITE_BG_NON_YOLO = (
+    "Background (async, the default) write agents work only in yolo mode; "
+    "without yolo pass async=false so approval prompts can show."
+)
+
+
+def _write_bg_sentence() -> str:
+    """The background-mode sentence for THIS session, resolved from the live
+    st.YOLO (getattr-default: a conftest rewind can drop names from _state's
+    dict)."""
+    from . import _state as st
+    if bool(getattr(st, "YOLO", False)):
+        return _WRITE_BG_YOLO
+    return _WRITE_BG_NON_YOLO
+
+
 # Appended to DELEGATION_GUIDANCE when this session authorizes write-capable
 # sub-agents (NX_SUBAGENT_WRITE=1): names the tiers, the scope discipline, and
-# the background-mode rule (yolo required; foreground otherwise), so the model
+# the background-mode rule (yolo-aware at note build time), so the model
 # can delegate implementation — not just investigation — without guessing at
-# the contract.
+# the contract. A %-template: _load_delegation_note() fills the background-
+# mode sentence from the LIVE posture at note time, not import time.
 WRITE_TIER_GUIDANCE = (
     "- This session authorizes write-capable sub-agents: pass tier='write' "
     "(plain edits) or 'implement' (adds the implementer discipline prompt: "
@@ -52,8 +81,7 @@ WRITE_TIER_GUIDANCE = (
     "failures, stop and report rather than churn).\n"
     "- Write/implement agents SHOULD carry scope (path globs like "
     "['nx/_turn*.py']); disjoint scopes are what makes parallel implementers "
-    "safe. Background (async, the default) write agents work only in yolo "
-    "mode; without yolo pass async=false so approval prompts can show.\n"
+    "safe. %s\n"
     "- With NX_SUBAGENT_WORKTREE=1 each write-tier agent gets its own git "
     "worktree (its paths, test runs and commits land there, never the shared "
     "tree), so parallel write agents are safe even with overlapping scopes; "
@@ -98,7 +126,7 @@ def _load_delegation_note() -> dict[str, str] | None:
         return None
     text = DELEGATION_GUIDANCE
     if _write_authorized():
-        text = text[:-1] + "\n" + WRITE_TIER_GUIDANCE
+        text = text[:-1] + "\n" + (WRITE_TIER_GUIDANCE % _write_bg_sentence())
     return {"role": "user", "content": text}
 
 

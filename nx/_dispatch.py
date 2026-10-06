@@ -64,6 +64,7 @@ from ._breaker import (  # noqa: F401 (re-exports)
 )
 from ._session_preamble import (  # noqa: F401 (re-exports)
     BACKGROUND_GUIDANCE, DELEGATION_STREAK_NOTICE, MULTI_EDIT_GUIDANCE,
+    YOLO_ASYNC_GUIDANCE,
     _DELEGATION_NUDGE_THRESHOLD, _MULTI_EDIT_NUDGE_THRESHOLD, _initial_messages,
     _messages_show_prior_backgrounding, _messages_show_prior_delegation_nudge,
     _messages_show_prior_multi_edit_nudge,
@@ -118,6 +119,8 @@ st._CONSECUTIVE_EDITS = 0  # count of back-to-back successful edit_file calls (a
 st._MULTI_EDIT_NUDGED = False  # flips True once the batching nudge has fired this session — see run_tool()
 st._PENDING_MULTI_EDIT_NOTICE = None  # set by run_tool() on that nudge; flushed once by model_turn (see _flush_pending_background_notice)
 st._PENDING_DELEGATION_NOTICE = None  # ditto (delegation streak nudge)
+st._YOLO_ASYNC_NUDGED = False  # flips True once the yolo async:false nudge has fired — see _subagent.spawn_agent()
+st._PENDING_YOLO_ASYNC_NOTICE = None  # ditto (yolo async:false nudge)
 
 # Swarm (P2): the two staged notices above plus _PENDING_BG_COMPLETION_NOTICE,
 # _PENDING_SUBAGENT_NOTICE, _PENDING_VERIFY_NOTICE, _BG_SCAN_DONE and

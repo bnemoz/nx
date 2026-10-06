@@ -148,7 +148,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement agents; both are FLOORS: a smaller request is raised to them; ceiling 500). Omit it for broad work — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Leave unset (background, the default): job id now, answer arrives as a [Runtime note] on a later turn. false = foreground: it blocks the ENTIRE REPL — every other call in the turn and all user interaction — until the agent finishes, which for a real investigation is tens of minutes. Only pass false for a short, must-have-now answer."},
-        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. In the background (async, the default) they require a yolo session (--yolo); without yolo they are refused — pass async:false so the approval prompt can be shown. With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. In the background (async, the default) they require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. With NX_SUBAGENT_WORKTREE=1 parallel write agents are safe even without scopes (each works in its own checkout) — scope is then about reviewability: keep each agent's diff focused on one concern so its report is easy to merge and judge."},
     }, "required": ["instruction"]},
 }}
@@ -1001,6 +1001,33 @@ def _async_default() -> bool:
         return bool(_env_int("NX_SUBAGENT_ASYNC", 1))
 
 
+def _maybe_nudge_yolo_async(tier: Any, explicit_async: Any) -> None:
+    """One-shot [Runtime note] when a YOLO session explicitly passes
+    async:false on a write-tier spawn. The session-start delegation note is
+    built once, so it can go stale after a mid-session /yolo toggle — and
+    models carry a 'background writers are refused' prior from other tools
+    anyway — so the anti-pattern itself re-teaches the contract. Fires ONLY on
+    an explicit foreground request: NX_SUBAGENT_ASYNC=0 is a legitimate user
+    default and must not nag. Mirrors _MULTI_EDIT_NUDGED's fire-once flag
+    (getattr-default: a conftest rewind can drop names from _state's dict)."""
+    from ._session_preamble import YOLO_ASYNC_GUIDANCE
+    if getattr(st, "_YOLO_ASYNC_NUDGED", False):
+        return
+    if tier not in ("write", "implement") or not st.YOLO:
+        return
+    # explicit_async is not None ⇒ the MODEL chose foreground (bool or
+    # "false"/"0" string); want_async False here means the request was
+    # explicitly non-background, not merely defaulted.
+    want = explicit_async is True or (
+        isinstance(explicit_async, str)
+        and explicit_async.strip().lower() in ("1", "true", "yes", "on"))
+    if explicit_async is None or want:
+        return
+    st._YOLO_ASYNC_NUDGED = True
+    from . import _notices
+    _notices.set_("_PENDING_YOLO_ASYNC_NOTICE", YOLO_ASYNC_GUIDANCE)
+
+
 def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
                 tier: Any = None, scope: Any = None, **extra: Any) -> str:
     """Run a sub-agent on `instruction`; return its final answer. Read-only by
@@ -1067,10 +1094,15 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     # NX_SUBAGENT_ASYNC (background by default since 0.18.8). An explicit
     # false - bool or "false"/"0" string - must WIN over the knob: it is the
     # documented foreground escape hatch.
+    # The model's EXPLICIT async choice (None = omitted), captured before the
+    # NX_SUBAGENT_ASYNC default fills it in: the nudge below must fire only on
+    # a deliberate async:false, never on the user's own foreground default.
+    explicit_async = async_
     if async_ is None:
         async_ = _async_default()
     want_async = async_ is True or (
         isinstance(async_, str) and async_.strip().lower() in ("1", "true", "yes", "on"))
+    _maybe_nudge_yolo_async(t, explicit_async)
     if want_async:
         # EXPLICIT refusal, never a silent downgrade or silent auto-denial:
         # a detached thread cannot show the approval prompt a write-tier

@@ -87,7 +87,7 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     # streak notice is staged by run_tool(); NX_VERIFY_CMD's outcome by
     # _dispatch._scan_background_completions.
     for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
-                  "_PENDING_DELEGATION_NOTICE"):
+                  "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE"):
         _text = _notices.get(_slot)
         if _text:
             messages.append({"role": "user", "content": _text})
