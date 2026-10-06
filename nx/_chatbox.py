@@ -29,7 +29,7 @@ import unicodedata
 from typing import Callable, cast
 
 from . import _state as st
-from ._ansi import DIM, RESET, C, THEMES, raw_mode
+from ._ansi import DIM, RESET, C, THEMES, raw_mode, strip_ansi_for_display
 from ._tty import read_byte, wait_ready
 
 # (command, description) — kept in sync with the README "Commands" table.
@@ -584,11 +584,23 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
     rendered_lines = 0
     cursor_line = 0
     last_width: int | None = None  # column count of the last painted frame
+    # Physical row count of the last painted frame, and each painted line's
+    # visible width. Repaint/erase arithmetic runs in PHYSICAL terminal rows,
+    # but a logical line wraps to ceil(width / columns) rows — so after a
+    # resize the old frame's true height must be recomputed from these
+    # widths at the new column count, or the erase leaves surplus wrapped
+    # rows behind (orphaned frames stacking in scrollback, one per resize).
+    rendered_rows = 0
+    line_widths: list[int] = []
     current_matches: list[tuple[str, str]] = []
     current_kind: str | None = None
     current_at_start: int | None = None
     sel_idx = 0
     win_top = 0  # first rendered row of a scrolling dropdown (see render)
+
+    def _frame_rows(widths: list[int], cols: int) -> int:
+        """Physical terminal rows a frame with these per-line widths wraps to."""
+        return sum(max(1, -(-w // max(1, cols))) for w in widths)
 
     def move_up(n: int) -> str:
         return f"\x1b[{n}A" if n > 0 else ""
@@ -653,7 +665,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         current_at_start = at_start
 
     def render() -> None:
-        nonlocal rendered_lines, cursor_line, sel_idx, win_top, last_width
+        nonlocal rendered_lines, rendered_rows, line_widths, cursor_line, \
+            sel_idx, win_top, last_width
         width = shutil.get_terminal_size((80, 24)).columns
         if last_width is not None and width != last_width:
             # The terminal was resized (maximized/windowed): the previously
@@ -724,7 +737,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         if more_below:
             lines.append(f"{DIM}  ···{RESET}")
 
-        redraw_rows = max(rendered_lines, len(lines))
+        # Physical rows the CURRENT frame wraps to at this width, used as the
+        # repaint extent (so a frame that grew rows from a narrower width is
+        # fully cleared) and, after the write, as the next erase's truth.
+        phys_rows = _frame_rows(
+            [_str_width(strip_ansi_for_display(ln)) for ln in lines], width)
+        redraw_rows = max(rendered_rows, phys_rows)
         out = "\r" + move_up(cursor_line)
         for i in range(redraw_rows):
             out += "\x1b[2K"
@@ -749,6 +767,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             sys.stdout.write(out)
             sys.stdout.flush()
             rendered_lines = len(lines)
+            rendered_rows = phys_rows
+            line_widths = [_str_width(strip_ansi_for_display(ln)) for ln in lines]
             cursor_line = cur_vrow + 1
         finally:
             if hasattr(signal, "pthread_sigmask") and threading.current_thread() \
@@ -759,13 +779,19 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         """Erase the previously painted chatbox rows. After a resize the old
         frame has re-wrapped to the new width, so simply re-anchoring below it
         would leave the stale frame stuck in view (one orphaned box stacked
-        per resize). Clear the rows we know we painted, then clear upward for
-        rows the reflow may have pulled above our anchor."""
+        per resize). The frame's true physical extent is recomputed at the
+        current column count from the recorded per-line widths — narrowing
+        the terminal wraps every line FURTHER, so the frame can occupy more
+        rows than when it was painted. Clear down past that recomputed
+        bottom, then clear upward through the whole recomputed height."""
+        cols = shutil.get_terminal_size((80, 24)).columns
+        total_rows = _frame_rows(line_widths, cols) \
+            if len(line_widths) == rendered_lines else rendered_lines
         sys.stdout.write("\r")
-        for _ in range(max(0, rendered_lines - cursor_line)):
+        for _ in range(max(0, total_rows - cursor_line)):
             sys.stdout.write("\x1b[1B\x1b[2K")
-        sys.stdout.write("\x1b[2K")
-        for _ in range(max(0, rendered_lines - 1)):
+        sys.stdout.write("\x1b[2K\x1b[J")
+        for _ in range(max(0, total_rows - 1)):
             sys.stdout.write("\x1b[1A\x1b[2K")
         sys.stdout.flush()
 
@@ -777,14 +803,16 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         frame into scrollback. Resetting the bookkeeping to 'nothing rendered,
         cursor at column 0 of a fresh line' makes the next render a plain
         first-frame paint from wherever the cursor physically is."""
-        nonlocal rendered_lines, cursor_line
+        nonlocal rendered_lines, rendered_rows, line_widths, cursor_line
         sys.stdout.write("\n")
         sys.stdout.flush()
         rendered_lines = 0
+        rendered_rows = 0
+        line_widths = []
         cursor_line = 0
 
     def finish() -> None:
-        sys.stdout.write("\r" + move_down((rendered_lines - 1) - cursor_line) + "\n")
+        sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line) + "\n")
         sys.stdout.write("\x1b[?25h\x1b[?2004l")
         sys.stdout.flush()
 
