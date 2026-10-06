@@ -4,18 +4,36 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.113.1"
+version = "0.113.2"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Nishant Mishra" }]
 requires-python = ">=3.9"
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
 ]
 dependencies = [
     "httpx",
     "rich",
 ]
+
+[project.urls]
+Homepage = "https://github.com/nmishra93/nx"
+Repository = "https://github.com/nmishra93/nx"
+Issues = "https://github.com/nmishra93/nx/issues"
 
 [project.optional-dependencies]
 # PDF mentions work out of the box via mupdf-tools/poppler-utils/tesseract on
