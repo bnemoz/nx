@@ -676,7 +676,12 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             # frame draws over the wrong rows and doubles the box.
             last_width = width
             erase_stale_frame()
-            resync_cursor()
+            # `erase_stale_frame()` leaves the cursor on the old frame's top
+            # row.  Keep that exact anchor for the replacement frame: unlike
+            # the interrupt path, there is no unknown output to get below.
+            # Advancing a line here made each resize paint below the cleared
+            # frame, eventually leaving a ladder of stale borders behind.
+            resync_cursor(advance=False)
         last_width = width
         box_w = max(20, width - 2)
         inner_w = max(1, box_w - 2)
@@ -798,7 +803,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             sys.stdout.write("\x1b[1A\x1b[2K")
         sys.stdout.flush()
 
-    def resync_cursor() -> None:
+    def resync_cursor(*, advance: bool = True) -> None:
         """Re-anchor the repaint origin after an interrupt. A SIGINT that
         lands mid-render (or mid-stream output) leaves the terminal cursor at
         an arbitrary row while `rendered_lines`/`cursor_line` still hold stale
@@ -807,8 +812,9 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         cursor at column 0 of a fresh line' makes the next render a plain
         first-frame paint from wherever the cursor physically is."""
         nonlocal rendered_lines, rendered_rows, line_widths, cursor_line
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        if advance:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         rendered_lines = 0
         rendered_rows = 0
         line_widths = []
