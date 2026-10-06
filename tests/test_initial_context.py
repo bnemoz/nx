@@ -124,6 +124,12 @@ import nx as m  # noqa: E402
 # concurrency refusal). Net +51 tok (5120→5171): the descriptions were also
 # rephrased/tightened rather than taking the moved text verbatim. Budget
 # stays 5320 — headroom absorbs it.
+# 0.113.0: web_fetch promoted tier-2 → tier-1 (schema joins TOOLS whenever
+# NX_WEBFETCH != 0): it is exactly the tool a session needs on turn 1 (the
+# outside world), and search_tools discovery cost a round-trip precisely
+# then. The schema grew ~30 chars (revalidation/robots line). Measured floor
+# rises by ~180 tok; BUDGET_TOKENS stays 5320 — headroom absorbs it (the
+# floor was 5171 after 0.111.0).
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5320)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 

@@ -61,10 +61,12 @@ _TOOL_GATES: dict[str, Any] = {
     # otherwise — nothing to recall). P10: the gate reads the env at call
     # time (via _obs.obs_enabled) instead of the import-time mirror.
     "obs_recall": lambda: _obs_enabled(),
-    # web_fetch (0.70.0): keyless DuckDuckGo-lite search + page fetch. Tier-2
-    # (0 schema tokens until a session needs the outside world) — surfaced by
-    # search_tools; NX_WEBFETCH=0 disables the tool entirely (offline hosts).
-    "web_fetch": lambda: bool(getattr(_m_safe(), "NX_WEBFETCH", 0)),
+    # web_fetch (0.70.0 tier-2 -> tier-1 always-on in 0.113.0): keyless
+    # DuckDuckGo-lite search + page fetch, promoted because it is exactly the
+    # tool a session needs on turn 1 (the outside world) and search_tools
+    # discovery cost a round-trip exactly then. Not listed in _TOOL_GATES at
+    # all — the schema is only appended to TOOLS when NX_WEBFETCH != 0, so
+    # NX_WEBFETCH=0 (offline hosts) removes it from the catalog entirely.
     # duckdb (0.87.0, always-on by design): NX_TOOL_FLOOR_SLIM=1 demotes it
     # to tier-2 for swarms — a member rarely analyzes data on turn 1, and
     # ~310 tok ×N agents of rent is the point of the slimming knob.
@@ -89,7 +91,6 @@ _GATE_REFUSALS: dict[str, str] = {
     "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/list_dir.",
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
     "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
-    "web_fetch": "(NX_WEBFETCH is off, or the gate has not opened). Work from local files, or ask the user to paste the relevant page/search results.",
     "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
     "duckdb": "(NX_TOOL_FLOOR_SLIM=1 — the SQL tool is tier-2 in this session to keep the shared floor small). Ask search_tools for its schema, or shell out to the duckdb CLI with run_bash.",
     "search_project_tools": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",

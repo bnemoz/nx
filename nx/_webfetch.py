@@ -1,7 +1,7 @@
-"""web_fetch (0.70.0; default-on + persistent cache in 0.71.0): keyless, free
-web access — no paid API.
+"""web_fetch (0.70.0; persistent cache 0.71.0; tier-1 always-on in 0.113.0):
+keyless, free web access — no paid API.
 
-Two actions in one tier-2 tool:
+Two actions in one tier-1 tool:
 
 - ``query=``  DuckDuckGo *lite* HTML search (html.duckduckgo.com/html/): a
   human-shaped GET of a page meant for browsers, parsed with the stdlib. No
@@ -15,10 +15,16 @@ Two actions in one tier-2 tool:
 Courtesy of a free resource is a design constraint, not a nice-to-have:
 every response is cached globally for 7 days (persisted under
 ``<SESSION_HOME>/web-cache/cache.jsonl``, so a fresh session hits the cache
-too), a minimum interval is enforced between requests to duckduckgo.com, a
-small polite User-Agent is sent, and only ``GET`` requests are ever issued.
-Failures fail soft with a message the model can act on (retry later, narrower
-query, different URL) — never an exception into the turn loop.
+too), stale pages are revalidated with ``ETag``/``If-None-Match`` and
+``Last-Modified``/``If-Modified-Since`` (a 304 costs the origin nothing), a
+minimum interval is enforced between requests to duckduckgo.com AND between
+page fetches of the same host, ``robots.txt`` is consulted for page fetches
+(cached per host; a ``Crawl-delay`` widens that host's interval), ``429``/
+``503`` responses put the host on backoff per its ``Retry-After``, a small
+polite (version-accurate) User-Agent is sent, ``GET`` is the only method, and
+parallel calls for the same key share one in-flight fetch. Failures fail soft
+with a message the model can act on (retry later, narrower query, different
+URL) — never an exception into the turn loop.
 """
 from __future__ import annotations
 
@@ -29,22 +35,42 @@ import os
 import re
 import socket
 import tempfile
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from typing import Any
+from urllib.robotparser import RobotFileParser
 
 from ._env import _env_int
 
 WEBFETCH_ENABLED = _env_int("NX_WEBFETCH", 1)
 FETCH_MAX_BYTES = _env_int("NX_WEBFETCH_MAX_BYTES", 20000)
 CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 7 * 24 * 3600)
-# Courtesy floor between requests to duckduckgo.com (search OR the fetch of a
-# page hosted anywhere is NOT throttled — only the search endpoint is, since
-# that's the shared free resource).
-DDG_MIN_INTERVAL_SECS = _env_int("NX_WEBFETCH_SEARCH_INTERVAL", 3.0)
+# Courtesy floor between requests to duckduckgo.com (the shared free
+# resource). Page fetches of arbitrary sites get their own per-host floor
+# (0.113.0) so repeated fetches of one site stay one polite client.
+DDG_MIN_INTERVAL_SECS = float(os.environ.get("NX_WEBFETCH_SEARCH_INTERVAL", "3.0"))
+HOST_MIN_INTERVAL_SECS = float(os.environ.get("NX_WEBFETCH_HOST_INTERVAL", "2.0"))
+_MAX_BACKOFF_SECS = 60.0
+# robots.txt (0.113.0): page fetches honor it; set 0 to opt out.
+ROBOTS_ENABLED = _env_int("NX_WEBFETCH_ROBOTS", 1)
 
-UA = "nx-coding-agent/0.72 (+local CLI; respectful, cached, GET-only)"
+
+def _ua() -> str:
+    """Version-accurate polite UA (0.113.0 — the old hardcoded "0.72" drifted)."""
+    try:
+        from importlib.metadata import version
+        ver = version("nx")
+    except Exception:
+        ver = "unknown"
+    return (f"nx-coding-agent/{ver} (+local CLI; respectful, cached, "
+            "GET-only)")
+
+
+UA = _ua()
 SEARCH_URL = "https://html.duckduckgo.com/html/"
 # SearXNG (self-hosted metasearch) is the PREFERRED search backend (0.72.0):
 # set NX_SEARX_URL to the instance root (e.g. http://localhost:8080) and
@@ -95,6 +121,10 @@ def _url_is_private(url: str) -> bool:
     return _host_is_private(host)
 
 
+class _NotModified(Exception):
+    """Raised by _http_get_bytes when a conditional GET comes back 304."""
+
+
 class _SsrfRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow redirects but re-validate each hop against the SSRF guard —
     without this, a public page can bounce the GET at loopback/RFC1918."""
@@ -107,9 +137,20 @@ class _SsrfRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 # --- session state (module-level on purpose: conftest rewinds nx.* dicts) ---
-_CACHE: dict[str, tuple[float, str]] = {}  # key -> (monotonic ts, text)
+# key -> (monotonic ts, text, etag, last-modified) — the validators (0.113.0)
+# make an expired entry revalidatable instead of garbage past the TTL.
+_CACHE: dict[str, tuple[float, str, str, str]] = {}
 _LAST_SEARCH: list[float] = [0.0]
 _CACHE_LOADED: list[bool] = [False]
+# 0.113.0 politeness state: per-host last-request time, per-host backoff-until
+# (set by a 429/503 + Retry-After), cached robots.txt parsers, and one lock per
+# cache key so parallel calls for the same key share a single fetch.
+_LAST_HOST: dict[str, float] = {}
+_BACKOFF_UNTIL: dict[str, float] = {}
+_ROBOTS: dict[str, object] = {}
+_ROBOTS_FAILED: set[str] = set()
+_INFLIGHT: dict[str, threading.Lock] = {}
+_STATE_LOCK = threading.Lock()
 
 # Web-cache persistence (0.71.0): one JSON object per line
 # {"k", "t" (epoch secs), "v"} under <SESSION_HOME>/web-cache/cache.jsonl.
@@ -140,7 +181,9 @@ def _ensure_cache() -> None:
                     obj = json.loads(line)
                     age = now - float(obj["t"])
                     if 0 <= age < CACHE_TTL_SECS:
-                        _CACHE[obj["k"]] = (time.monotonic() - age, str(obj["v"]))
+                        _CACHE[obj["k"]] = (time.monotonic() - age, str(obj["v"]),
+                                            str(obj.get("e", "")),
+                                            str(obj.get("m", "")))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
     except OSError:
@@ -160,7 +203,8 @@ def _save_cache() -> None:
         except OSError:
             pass
         now = time.time()
-        lines = [json.dumps({"k": k, "t": now - (time.monotonic() - v[0]), "v": v[1]})
+        lines = [json.dumps({"k": k, "t": now - (time.monotonic() - v[0]),
+                             "v": v[1], "e": v[2], "m": v[3]})
                  for k, v in _CACHE.items()]
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -257,14 +301,31 @@ def _http_get(url: str) -> str:
         return resp.read(FETCH_MAX_BYTES * 4).decode(charset, errors="replace")
 
 
-def _http_get_bytes(url: str) -> tuple[bytes, str]:
+def _http_get_bytes(url: str, etag: str = "",
+                    lm: str = "") -> tuple[bytes, str, str, str]:
     """GET with the body as raw bytes plus the declared content type. For PDF
     routing: extracting a PDF as latin-1 text would yield garbage, so the
-    caller must know the content type before decoding."""
-    req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
-    with _OPENER.open(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
-        ctype = (resp.headers.get_content_type() or "").lower()
-        return resp.read(FETCH_MAX_BYTES * 4), ctype
+    caller must know the content type before decoding. ``etag``/``lm`` turn the
+    GET conditional (If-None-Match / If-Modified-Since, 0.113.0): a 304 raises
+    _NotModified so the caller can keep serving its cache — the politest fetch
+    there is, and fresher than a blind long TTL. Returns (body, ctype, etag,
+    last-modified) so the validators can be stored with the cache entry."""
+    headers = {"User-Agent": UA}
+    if etag:
+        headers["If-None-Match"] = etag
+    if lm:
+        headers["If-Modified-Since"] = lm
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with _OPENER.open(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
+            ctype = (resp.headers.get_content_type() or "").lower()
+            return (resp.read(FETCH_MAX_BYTES * 4), ctype,
+                    resp.headers.get("ETag") or "",
+                    resp.headers.get("Last-Modified") or "")
+    except urllib.error.HTTPError as e:
+        if e.code == 304 and (etag or lm):
+            raise _NotModified() from e
+        raise
 
 
 def _pdf_sniff(body: bytes, ctype: str) -> bool:
@@ -275,19 +336,111 @@ def _pdf_sniff(body: bytes, ctype: str) -> bool:
     return body[:5] == b"%PDF-"
 
 
-def _cache_get(key: str) -> str | None:
+def _cache_get(key: str) -> tuple[str, str, str] | None:
+    """(text, etag, last-modified) while fresh, else None."""
     hit = _CACHE.get(key)
     if hit and time.monotonic() - hit[0] < CACHE_TTL_SECS:
-        return hit[1]
+        return hit[1], hit[2], hit[3]
     return None
 
 
-def _cache_put(key: str, value: str) -> None:
+def _cache_stale_entry(key: str) -> tuple[str, str, str] | None:
+    """An EXPIRED entry worth revalidating (0.113.0): (text, etag,
+    last-modified); the validators must be present or a conditional GET is
+    pointless and a plain refetch is simpler."""
+    hit = _CACHE.get(key)
+    if hit and time.monotonic() - hit[0] >= CACHE_TTL_SECS and (hit[2] or hit[3]):
+        return hit[1], hit[2], hit[3]
+    return None
+
+
+def _cache_put(key: str, value: str, etag: str = "", lm: str = "") -> None:
     if len(_CACHE) > 64:  # bounded: drop everything past the TTL is overkill
         oldest = sorted(_CACHE, key=lambda k: _CACHE[k][0])[:-32]
         for k in oldest:
             _CACHE.pop(k, None)
-    _CACHE[key] = (time.monotonic(), value)
+    _CACHE[key] = (time.monotonic(), value, etag, lm)
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _throttle_host(host: str) -> None:
+    """Per-host courtesy floor (0.113.0) plus any outstanding 429/503 backoff.
+    Loopback (the user's own SearXNG, test servers) is exempt."""
+    if not host or host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return
+    now = time.monotonic()
+    wait = max(_LAST_HOST.get(host, 0.0) + HOST_MIN_INTERVAL_SECS - now,
+               _BACKOFF_UNTIL.get(host, 0.0) - now)
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_HOST[host] = time.monotonic()
+
+
+def _backoff_host(host: str, retry_after: str) -> None:
+    try:
+        secs = min(float(retry_after), _MAX_BACKOFF_SECS)
+    except (TypeError, ValueError):
+        secs = 10.0
+    _BACKOFF_UNTIL[host] = max(_BACKOFF_UNTIL.get(host, 0.0),
+                               time.monotonic() + secs)
+
+
+def _robots_allowed(url: str) -> bool:
+    """robots.txt for page fetches (0.113.0): parsers cached per host;
+    unreachable/broken robots.txt means allowed (the standard polite
+    default); loopback and the user's own SearXNG host are exempt. A
+    ``Crawl-delay`` widens that host's fetch interval."""
+    if not ROBOTS_ENABLED or ALLOW_PRIVATE:
+        return True
+    host = _host_of(url)
+    if not host or host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return True
+    if SEARX_URL and host == _host_of(SEARX_URL):
+        return True
+    if host in _ROBOTS_FAILED:
+        return True
+    cached = _ROBOTS.get(host)
+    rp: Any = cached if callable(getattr(cached, "can_fetch", None)) else None
+    if rp is None:
+        fresh = RobotFileParser()
+        try:
+            scheme = urllib.parse.urlsplit(url).scheme or "https"
+            fresh.set_url(f"{scheme}://{host}/robots.txt")
+            fresh.read()  # urllib under the hood; a failure is allowed-by-default
+        except Exception:
+            _ROBOTS_FAILED.add(host)
+            return True
+        _ROBOTS[host] = fresh
+        rp = fresh
+    if not hasattr(rp, "crawl_delay") or not hasattr(rp, "can_fetch"):
+        return True  # unreachable; narrows the Optional for ty
+    try:
+        delay = rp.crawl_delay(UA) or rp.crawl_delay("*")
+        if delay:
+            _LAST_HOST[host] = max(_LAST_HOST.get(host, 0.0),
+                                   time.monotonic() - float(delay))
+    except Exception:
+        pass
+    try:
+        return bool(rp.can_fetch(UA, url))
+    except Exception:
+        return True
+
+
+def _single_flight(key: str, fn):
+    """Run `fn` holding a per-key lock (0.113.0): two parallel web_fetch calls
+    for the same URL share one network fetch instead of doubling the load.
+    `fn` must re-check the cache on entry."""
+    with _STATE_LOCK:
+        lock = _INFLIGHT.setdefault(key, threading.Lock())
+    with lock:
+        return fn()
 
 
 # --- search (DuckDuckGo lite) ------------------------------------------------
@@ -367,10 +520,17 @@ def _web_search(query: str) -> str:
     cache_key = "q:" + query.lower().strip()
     _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:
-        return "[cached] " + hit
+        return "[cached] " + hit[0]
 
-    # SearXNG first (preferred); DDG lite is the fallback.
+    # SearXNG first (preferred); DDG lite is the fallback. A fallback while
+    # NX_SEARX_URL is set usually means the instance is misconfigured (json
+    # format off) or down — say so instead of failing silently (0.113.0).
     searx = _searx_search(query)
+    searx_hint = ""
+    if searx is None and SEARX_URL:
+        searx_hint = (" (note: NX_SEARX_URL is set but the instance returned "
+                      "nothing — check it is up and that settings.yml has "
+                      "search: formats: [html, json])")
     if searx is not None:
         _cache_put(cache_key, searx)
         _save_cache()
@@ -380,11 +540,9 @@ def _web_search(query: str) -> str:
     try:
         body = _http_get(f"{SEARCH_URL}?{qs}")
     except Exception as e:
-        hint = (" (NX_SEARX_URL is set but unreachable — fell back to DuckDuckGo)"
-                if SEARX_URL else "")
-        return (f"ERROR: search failed ({type(e).__name__}){hint}; duckduckgo may be "
-                "rate-limiting — wait a few seconds and retry, or ask the user "
-                "for a URL to fetch directly.")
+        return (f"ERROR: search failed ({type(e).__name__}){searx_hint}; "
+                "duckduckgo may be rate-limiting — wait a few seconds and "
+                "retry, or ask the user for a URL to fetch directly.")
     results = _parse_results(body)
     if not results:
         if "bots use DuckDuckGo" in body:
@@ -420,19 +578,33 @@ def _searx_usable() -> bool:
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
-def _web_fetch_url(url: str) -> str:
-    if not url.startswith(("http://", "https://")):
-        return "ERROR: url must start with http:// or https://"
-    if not ALLOW_PRIVATE and _url_is_private(url):
-        return ("ERROR: refused to fetch a loopback/private-address URL "
-                "(SSRF guard; set NX_WEBFETCH_ALLOW_PRIVATE=1 if the URL is "
-                "deliberately internal).")
-    cache_key = "u:" + url
-    _ensure_cache()
+def _fetch_network(url: str, cache_key: str,
+                   stale: tuple[str, str, str] | None) -> str:
+    """The network leg of a page fetch, under the per-key single-flight lock;
+    re-checks the cache on entry (a parallel call may have just filled it).
+    Handles conditional revalidation of an expired entry and 429/503 backoff."""
     if (hit := _cache_get(cache_key)) is not None:
-        return "[cached] " + hit
+        return "[cached] " + hit[0]
+    host = _host_of(url)
+    etag, lm = (stale[1], stale[2]) if stale else ("", "")
     try:
-        body, ctype = _http_get_bytes(url)
+        _throttle_host(host)
+        body, ctype, etag, lm = _http_get_bytes(url, etag=etag, lm=lm)
+    except _NotModified:
+        # 304: the origin says the cached page is still good — refresh the
+        # timestamp (restarts the TTL) and serve it. No body was transferred.
+        text = stale[0] if stale else ""
+        _cache_put(cache_key, text, etag, lm)
+        _save_cache()
+        return "[cached] " + text
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 503) and host:
+            ra = e.headers.get("Retry-After", "") if e.headers else ""
+            _backoff_host(host, ra)
+            return (f"ERROR: fetch failed (HTTP {e.code}); the host is asking "
+                    "clients to back off — wait a bit before retrying this URL.")
+        return (f"ERROR: fetch failed ({type(e).__name__}); the site may block "
+                "scripts or need a browser — try a different URL or ask the user.")
     except Exception as e:
         return (f"ERROR: fetch failed ({type(e).__name__}); the site may block "
                 "scripts or need a browser — try a different URL or ask the user.")
@@ -455,15 +627,34 @@ def _web_fetch_url(url: str) -> str:
         text = _html_to_text(body.decode("utf-8", errors="replace"))
     if len(text) > FETCH_MAX_BYTES:
         text = text[:FETCH_MAX_BYTES] + f"\n\n[truncated at {FETCH_MAX_BYTES} bytes; fetch a narrower URL for more]"
-    _cache_put(cache_key, text)
+    _cache_put(cache_key, text, etag, lm)
     _save_cache()
     return text
+
+
+def _web_fetch_url(url: str) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "ERROR: url must start with http:// or https://"
+    if not ALLOW_PRIVATE and _url_is_private(url):
+        return ("ERROR: refused to fetch a loopback/private-address URL "
+                "(SSRF guard; set NX_WEBFETCH_ALLOW_PRIVATE=1 if the URL is "
+                "deliberately internal).")
+    if not _robots_allowed(url):
+        return ("ERROR: the site's robots.txt disallows fetching this URL — "
+                "ask the user to fetch it themselves.")
+    cache_key = "u:" + url
+    _ensure_cache()
+    stale = _cache_stale_entry(cache_key)
+    if (hit := _cache_get(cache_key)) is not None:
+        return "[cached] " + hit[0]
+    return _single_flight(cache_key,
+                          lambda: _fetch_network(url, cache_key, stale))
 
 
 # --- tool body ---------------------------------------------------------------
 
 def web_fetch(query: str = "", url: str = "") -> str:
-    """Tool body for the web_fetch tier-2 tool. Exactly one of query/url."""
+    """Tool body for the web_fetch tier-1 tool. Exactly one of query/url."""
     if bool(query) == bool(url):
         return "ERROR: pass exactly one of `query` (DuckDuckGo search) or `url` (fetch a page)"
     return _web_search(query) if query else _web_fetch_url(url)
@@ -473,7 +664,7 @@ WEB_FETCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "Keyless web access, GET-only and rate-limited to stay polite to free endpoints (results are cached globally for 7 days). Pass `query` for a web search (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo-lite) returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
+        "description": "Keyless web access, GET-only and rate-limited to stay polite to free endpoints (results are cached globally for 7 days, stale pages revalidated via ETag/Last-Modified, robots.txt honored). Pass `query` for a web search (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo-lite) returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
         "parameters": {
             "type": "object",
             "properties": {

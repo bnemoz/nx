@@ -490,11 +490,15 @@ TOOLS.append(LINT_CHECK_TOOL)
 
 # web_fetch (schema here, body in nx/_webfetch.py, 0.70.0): keyless web
 # access — DuckDuckGo *lite* HTML search (no API key) and a GET-only page
-# fetch stripped to readable text. Tier-2 gated on NX_WEBFETCH (default ON
-# since 0.71.0); the courtesy constraints (persistent 7-day cache, min search
-# interval, polite UA) live in the module docstring.
+# fetch stripped to readable text. Tier-1 always-on since 0.113.0 (it is the
+# tool a session needs on turn 1); the schema joins TOOLS only when
+# NX_WEBFETCH != 0, so NX_WEBFETCH=0 (fully offline hosts) removes the tool
+# from the catalog entirely — no gate entry needed. The courtesy constraints
+# (persistent 7-day cache, per-host + search intervals, robots.txt, polite UA)
+# live in the module docstring.
 from ._webfetch import WEB_FETCH_TOOL, WEBFETCH_ENABLED
-TOOLS.append(WEB_FETCH_TOOL)
+if WEBFETCH_ENABLED:
+    TOOLS.append(WEB_FETCH_TOOL)
 
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
