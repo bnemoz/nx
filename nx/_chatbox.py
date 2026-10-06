@@ -583,6 +583,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
     h_idx = len(history)
     rendered_lines = 0
     cursor_line = 0
+    last_width: int | None = None  # column count of the last painted frame
     current_matches: list[tuple[str, str]] = []
     current_kind: str | None = None
     current_at_start: int | None = None
@@ -652,8 +653,17 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         current_at_start = at_start
 
     def render() -> None:
-        nonlocal rendered_lines, cursor_line, sel_idx, win_top
+        nonlocal rendered_lines, cursor_line, sel_idx, win_top, last_width
         width = shutil.get_terminal_size((80, 24)).columns
+        if last_width is not None and width != last_width:
+            # The terminal was resized (maximized/windowed): the previously
+            # painted frame re-wrapped to the new width, so the cursor is no
+            # longer where `cursor_line` claims. Re-anchor to a fresh line and
+            # repaint from there (same recovery as the ^C path), or the new
+            # frame draws over the wrong rows and doubles the box.
+            last_width = width
+            resync_cursor()
+        last_width = width
         box_w = max(20, width - 2)
         inner_w = max(1, box_w - 2)
         visual = build_visual(inner_w)
@@ -914,13 +924,20 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 # but a finished background job now ends the wait too. The
                 # typed buffer is stashed and restored after the wake turn,
                 # so the wake never eats half a message.
-                if wake is not None:
-                    if st._WAKE_DUE:
-                        st._WAKE_PREFILL = "\n".join(buf)
-                        finish()
-                        return wake
-                    if not wait_ready(fd, 0.2):
-                        continue
+                if wake is not None and st._WAKE_DUE:
+                    st._WAKE_PREFILL = "\n".join(buf)
+                    finish()
+                    return wake
+                # Poll instead of blocking so a terminal resize repaints the
+                # frame within ~0.2s: each idle tick compares the current
+                # column count against the last painted frame (cheap and
+                # fully portable -- no SIGWINCH, which Windows lacks), and
+                # render() re-anchors when it sees the width changed.
+                if not wait_ready(fd, 0.2):
+                    if last_width is not None and shutil.get_terminal_size(
+                            (80, 24)).columns != last_width:
+                        render()
+                    continue
                 c = _raw_read_key(fd)
                 if c == "\x1b":
                     # Escape sequences can arrive byte-split: anything after
