@@ -61,6 +61,9 @@ This bootstraps `uv` if missing (to `~/.local/bin`, no root needed), installs
 `nx` as a `uv tool` from this repo, and prints how to upgrade later
 (`uv tool upgrade nx`).
 
+On Windows, use the install-from-source form below from PowerShell (nx runs
+in a regular terminal; Windows Terminal or any VT-enabled console works).
+
 ### Install from source
 
 ```bash

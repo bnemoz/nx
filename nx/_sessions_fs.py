@@ -18,7 +18,6 @@ them up lazily via `import nx as _m` rather than binding them at import time
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import json
 import os
 import re
@@ -26,6 +25,7 @@ import threading
 import time
 from typing import Any
 
+from . import _platform
 from . import _state as st
 from ._logging import _log_event
 from ._metrics import _record_usage
@@ -120,15 +120,23 @@ def _exclusive_file_lock(path: str):
     Session saves are a read-modify-write operation, not just an atomic
     replacement. The separate lock file keeps the lock valid while the JSON
     file itself is replaced; the OS releases it if the process exits.
+
+    The locking primitive itself lives in nx/_platform
+    (exclusive_file_lock): flock on POSIX, msvcrt byte-range locking on
+    Windows. It takes the OPEN FILE OBJECT rather than the raw fd — on
+    Windows msvcrt.locking() locks a range of the file object's handle and
+    that object must stay open for the lock's lifetime (the helper normalizes
+    the position to byte 0 itself; this lock file is never written, so the
+    single-byte range covers it). The call is blocking on both platforms, so
+    callers see exactly the old semantics: the with block runs with the lock
+    held, a contended lock waits instead of raising, and lock.close()
+    releases it.
     """
-    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
-    lock = os.fdopen(fd, "a+", encoding="utf-8")
+    lock = open_private(path + ".lock", os.O_CREAT | os.O_RDWR | os.O_APPEND,
+                        text_mode="a+")
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
+        with _platform.exclusive_file_lock(lock):
             yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     finally:
         lock.close()
 

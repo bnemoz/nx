@@ -972,6 +972,32 @@ def _finish_bg_job(log_path: str) -> str:
     return f"[exited]\n{out}"
 
 
+def kill_background(pid: int | str, **_: Any) -> str:
+    """SIGTERM a background job THIS session started (model-facing /bg kill).
+
+    The killable set is deliberately narrow: only PIDs this process launched
+    (via list_bg_jobs(mine_only=True)). bg-logs is shared by every nx session
+    on the machine, so an unfiltered pid would let one session terminate
+    another session's work."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return "[error] kill_background: pid must be the integer PID run_bash returned."
+    known = {j["pid"] for j in list_bg_jobs()}
+    if str(pid) not in known:
+        if str(pid) in {j["pid"] for j in list_bg_jobs(mine_only=False)}:
+            return (f"[error] PID {pid} is another session's job — only jobs "
+                    "this session started can be killed.")
+        return f"[error] PID {pid} is not a tracked background job of this session."
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return f"[error] no such process {pid} (already exited?)."
+    except (PermissionError, OSError) as e:
+        return f"[error] SIGTERM to {pid} failed: {e}"
+    return f"Sent SIGTERM to PID {pid}. Its log remains in bg-logs for the reaper."
+
+
 def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 0, **_: Any) -> str:
     """Wait for a backgrounded command (started by ``run_bash``) to finish.
 
