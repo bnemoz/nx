@@ -116,6 +116,14 @@ import nx as m  # noqa: E402
 # refusal through a python here-doc in the wild, and the prompt is the layer
 # that stops it trying. ~310 chars (~88 tok by chars/3.5); BUDGET_TOKENS rises
 # 5200→5320 by that deliberate, verifiable cost.
+# 0.111.0: per-tool usage guidance (search_files-first, todo_write-first,
+# memory/recall sequencing, duckdb-over-pandas, sub-agent duckdb steering,
+# backgrounding mechanics, multi_edit batching) moved OUT of SYSTEM and INTO
+# the tool descriptions where the model reads it at argument-picking time;
+# SYSTEM keeps only harness facts (approval, write fence, text protocol,
+# concurrency refusal). Net +51 tok (5120→5171): the descriptions were also
+# rephrased/tightened rather than taking the moved text verbatim. Budget
+# stays 5320 — headroom absorbs it.
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5320)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
