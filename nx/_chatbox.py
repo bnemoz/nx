@@ -662,6 +662,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             # repaint from there (same recovery as the ^C path), or the new
             # frame draws over the wrong rows and doubles the box.
             last_width = width
+            erase_stale_frame()
             resync_cursor()
         last_width = width
         box_w = max(20, width - 2)
@@ -753,6 +754,20 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             if hasattr(signal, "pthread_sigmask") and threading.current_thread() \
                     is threading.main_thread():
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, mask)
+
+    def erase_stale_frame() -> None:
+        """Erase the previously painted chatbox rows. After a resize the old
+        frame has re-wrapped to the new width, so simply re-anchoring below it
+        would leave the stale frame stuck in view (one orphaned box stacked
+        per resize). Clear the rows we know we painted, then clear upward for
+        rows the reflow may have pulled above our anchor."""
+        sys.stdout.write("\r")
+        for _ in range(max(0, rendered_lines - cursor_line)):
+            sys.stdout.write("\x1b[1B\x1b[2K")
+        sys.stdout.write("\x1b[2K")
+        for _ in range(max(0, rendered_lines - 1)):
+            sys.stdout.write("\x1b[1A\x1b[2K")
+        sys.stdout.flush()
 
     def resync_cursor() -> None:
         """Re-anchor the repaint origin after an interrupt. A SIGINT that
