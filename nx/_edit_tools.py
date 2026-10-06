@@ -71,6 +71,23 @@ def _atomic_write(path: str, content: str) -> None:
         raise
 
 
+# Single-write size above which the tool result carries a habit nudge (~5K
+# tokens of `content`). Not a limit — large writes sometimes ARE legitimate
+# (fixtures, generated data) — but big monolithic writes are the most common
+# vector for quantized-model corruption, so the model gets told right then,
+# at the moment the habit matters, that scaffold-then-edit is preferred.
+LARGE_WRITE_BYTES = 20_000
+
+
+def _size_note(n_bytes: int, what: str = "write") -> str:
+    if n_bytes <= LARGE_WRITE_BYTES:
+        return ""
+    return (f"\nNOTE: this was a very large single {what} ({n_bytes} bytes). "
+            "Large monolithic writes are error-prone: prefer scaffolding the "
+            "structure with a moderate write_file, then growing it with "
+            "edit_file/multi_edit calls.")
+
+
 def _read_with_mtime(path: str) -> tuple[str, float | None]:
     try:
         mtime = os.stat(path).st_mtime
@@ -122,7 +139,7 @@ def write_file(path: str, content: str, **_: Any) -> str:
     if after_mtime != before_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, content)
-    return f"wrote {len(content)} bytes to {path}"
+    return f"wrote {len(content)} bytes to {path}" + _size_note(len(content))
 
 
 def _apply_line_range(src: str, start: int, end: int, new: str) -> tuple[str, int, int]:
@@ -400,7 +417,8 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, work)
     tail = "\n" + "\n".join(dict.fromkeys(garble_notes)) if garble_notes else ""
-    return f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}{tail}"
+    return (f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}{tail}"
+            + _size_note(len(work), "edit"))
 
 
 def delete_file(path: str, **_: Any) -> str:
