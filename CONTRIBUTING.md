@@ -64,7 +64,7 @@ Any new dropdown-style completion added to the chatbox needs this same
 ## Adding a new tool
 
 Tools (`TOOLS`, `FINAL_ANSWER_TOOL`) are load-bearing on token cost — see
-CLAUDE.md. Beyond the schema itself:
+AGENTS.md. Beyond the schema itself:
 
 - Tool body: read-only tools go in `nx/_tools.py`; state-touching tools
   (anything calling `_confirm()` or touching session/background-process
@@ -116,7 +116,7 @@ CLAUDE.md. Beyond the schema itself:
   interpolation-free at module level (no session state, no env reads in the
   string) — the same byte-stability discipline `_prefix.py` enforces for the
   main `SYSTEM`.
-- **The main `SYSTEM`** stays in `nx/__init__.py` (see CLAUDE.md: it is
+- **The main `SYSTEM`** stays in `nx/__init__.py` (see AGENTS.md: it is
   load-bearing on the per-turn token floor and its exact bytes are pinned as
   the prompt-cache head). Editing it requires re-checking
   `tests/test_initial_context.py` (ledger entry if the floor grows) and — if
@@ -162,7 +162,7 @@ compact form).
 
 ## Adding a new env var
 
-Per CLAUDE.md: env vars, not config files. New tunables:
+Per AGENTS.md: env vars, not config files. New tunables:
 
 - `NX_*` prefix, read via `_env_int`/`_env_float` with a sane default.
 - README entry: mandatory (0.62.0, I-10). `tests/test_env_docs_parity.py`
@@ -198,7 +198,7 @@ capability/thinking/context probes cache on `Source` attributes
   no-tools / no-extra ladder is walked **once** per `(source, model)`, then the
   winning rung is reused (`tests/test_perf_capability_manifest.py`, T-11).
 - Every per-turn HTTP request count is a number we can name; if a change adds
-  one, pin it in a test rather than letting it drift (PERF.md I-9).
+  one, pin it in a test rather than letting it drift (docs/PERF.md I-9).
 
 ## Adding a new persistent store / index file
 
@@ -293,7 +293,7 @@ re-exports, undefined names behind a lazy import, shadowed definitions).
 The suite is fast, but "run everything every time" isn't required — scale the
 verification to what the diff could actually break:
 
-- **Docs/comments only** (README, CONTRIBUTING, CLAUDE.md, docstrings, or code
+- **Docs/comments only** (README, CONTRIBUTING, AGENTS.md, docstrings, or code
   comments with zero token change): no tests. Nothing executes it.
 - **Isolated additions** — a new pure function with no callers, a new private
   module, a new env var read behind `_env_int`/`_env_float` with a default:

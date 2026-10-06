@@ -19,7 +19,7 @@ Design notes:
   side): if NX_SEARX_URL is unset we offer three paths — paste an existing
   instance's URL (probed live with ?format=json so a typo never silently
   degrades search to the DDG fallback), install a fresh loopback-only local
-  instance from source (the SEARXNG_SETUP.md steps, automated: clone, venv,
+  instance from source (the docs/SEARXNG_SETUP.md steps, automated: clone, venv,
   settings.yml, systemd unit), or skip.
 - Everything lands in ~/.env (NX_ENV_FILE override honored, same file
   _load_env_file reads at import) via _set_env_var, and the file is chmod
@@ -99,7 +99,7 @@ def _assert_loopback_bind(settings: str) -> None:
 
 
 def install_local_searx() -> str | None:
-    """Automate the SEARXNG_SETUP.md steps for a fresh local instance: clone
+    """Automate the docs/SEARXNG_SETUP.md steps for a fresh local instance: clone
     the source into ~/.local/share/searxng-src, build a uv venv (with the
     --no-build-isolation workaround for upstream's undeclared build deps;
     setuptools is installed explicitly since uv venvs don't seed it),

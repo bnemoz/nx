@@ -82,7 +82,7 @@ Either way, `uv tool upgrade nx` pulls the latest later on.
 short wizard asks you to paste an API base URL and key, then saves them to
 `~/.env` — next launch just works. It also offers web-search setup: point it
 at an existing SearXNG instance, let it **install a fresh loopback-only one
-for you** (Linux or macOS; automates the SEARXNG_SETUP.md steps — a systemd
+for you** (Linux or macOS; automates the [docs/SEARXNG_SETUP.md](docs/SEARXNG_SETUP.md) steps — a systemd
 user unit on Linux, a LaunchAgent on macOS), or skip.
 Re-run any time with `nx setup`.
 
@@ -1314,7 +1314,7 @@ lower bound — rather than printing a five-digit artifact.
 
 `nx/` is a small package (`__init__.py` + focused submodules like `_turn.py`,
 `_sources.py`, `_repl.py`, `_chatbox.py`) rather than one monolithic file — see
-[`CLAUDE.md`](CLAUDE.md) for the module map and design conventions if you're
+`AGENTS.md` for the module map and design conventions if you're
 extending it, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for the required touch
 points when adding slash commands, tools, or env vars.
 

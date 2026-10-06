@@ -659,7 +659,7 @@ def _cmd_init(user: str, state: _ReplState) -> None:
             return
     prompt = (
         "Explore this codebase (list_dir/read_file as needed — build config, "
-        "entry points, module layout, test setup, existing README/AGENTS.md/CLAUDE.md) "
+        "entry points, module layout, test setup, existing README/AGENTS.md) "
         "and then write_file an AGENTS.md at the project root "
         f"({agents_path}) documenting: what this project is, build/test/run commands, "
         "and architecture notes a coding agent would need working in this repo for the "
