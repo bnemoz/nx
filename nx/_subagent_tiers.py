@@ -56,7 +56,7 @@ class _SubagentContext:
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
                  "worktree", "job_id", "consults_left", "advisor",
-                 "write_calls", "churn_nudged")
+                 "write_calls", "churn_nudged", "churn_escalated")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False, scope: "list[str] | None" = None,
@@ -87,12 +87,14 @@ class _SubagentContext:
         # Advisor-tier consult budget (0.112.0): remaining consult_advisor
         # calls this agent may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
         self.consults_left = _consult_budget()
-        # Write-churn tracking (0.117.0): successful file-mutation calls and
-        # whether the mid-run "start editing" nudge has already fired. A
-        # write/implement agent that burns turns on pure deliberation gets one
-        # in-loop steering note instead of being detected only at completion.
+        # Write-churn tracking (0.117.0/0.118.0): successful file-mutation
+        # calls and whether each mid-run "start editing" nudge has fired. A
+        # write/implement agent that burns turns on pure deliberation gets two
+        # escalating in-loop steering notes instead of being detected only at
+        # completion.
         self.write_calls = 0
         self.churn_nudged = False
+        self.churn_escalated = False
         self.advisor = False  # True only for advisor-tier agents
 
 

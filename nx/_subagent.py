@@ -152,7 +152,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement agents; both are FLOORS: a smaller request is raised to them; ceiling 500). Omit it for broad work — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Leave unset (background, the default): job id now, answer arrives as a [Runtime note] on a later turn. false = foreground: it blocks the ENTIRE REPL — every other call in the turn and all user interaction — until the agent finishes, which for a real investigation is tens of minutes. Only pass false for a short, must-have-now answer."},
-        "tier": {"type": "string", "enum": ["read", "write", "implement", "advisor"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. 'advisor': an EXECUTOR that runs the task end-to-end with the parent model as an on-call advisor — it consults the advisor (consult_advisor tool) when a decision exceeds its judgment, keeps implementation-notes.md with a Plan and a Deviations log, and takes the conservative option on any advisor timeout/refusal (needs NX_SUBAGENT_WRITE=1). In the background (async, the default) write/implement/advisor tiers require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement", "advisor"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. For write/implement tiers, BAKE THE SETTLED DESIGN INTO the instruction (approach, files to touch, what is out of scope): an agent given an open design question will deliberate instead of editing. 'advisor': an EXECUTOR that runs the task end-to-end with the parent model as an on-call advisor — it consults the advisor (consult_advisor tool) when a decision exceeds its judgment, keeps implementation-notes.md with a Plan and a Deviations log, and takes the conservative option on any advisor timeout/refusal (needs NX_SUBAGENT_WRITE=1). In the background (async, the default) write/implement/advisor tiers require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. With NX_SUBAGENT_WORKTREE=1 parallel write agents are safe even without scopes (each works in its own checkout) — scope is then about reviewability: keep each agent's diff focused on one concern so its report is easy to merge and judge."},
     }, "required": ["instruction"]},
 }}
@@ -254,9 +254,9 @@ def _subagent_quiet() -> bool:
 # report is prose with its conclusion up front, not a grep dump).
 _ASYNC_REPORT_CHARS = 600   # inline head of the answer carried in the [Runtime note]
 _ASYNC_REPORT_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
-# Write-churn nudge (0.117.0): a write/implement agent with zero successful
-# file mutations after this many turns gets one steering note telling it to
-# place its first edit (see _progress_step).
+# Write-churn nudges (0.117.0/0.118.0): a write/implement agent with zero
+# successful file mutations gets a soft steering note at N turns and a blunt
+# escalation at 2xN (see _progress_step).
 _CHURN_NUDGE_TURN = _env_int("NX_SUBAGENT_CHURN_NUDGE_TURN", 8)
 
 
@@ -969,22 +969,32 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                     rec["turns"] = _steps[0]
         if not quiet:
             note_progress(f"agent turn {_steps[0]}/{max_turns}")
-        # Write-churn nudge (0.117.0): a write/implement agent N turns in with
-        # zero successful file mutations is deliberating, not implementing —
-        # detected live only here (the _agent_made_edits outcome check fires
-        # post-loop, after all the budget is spent). One steering note into
-        # this agent's messages, once per agent; the loop drains it at the
-        # next step boundary like any user steering line.
-        if write and not ctx.churn_nudged and _steps[0] >= _CHURN_NUDGE_TURN \
-                and ctx.write_calls == 0:
-            ctx.churn_nudged = True
-            messages.append({"role": "user", "content":
-                "[Steering note: you are " + str(_steps[0]) + " turns in with "
-                "no file edits. Stop exploring and place your first edit now; "
-                "record remaining design doubts in the final report instead of "
-                "settling them by reading more code.]"})
-            if not quiet:
-                note_progress(f"write-churn nudge sent (turn {_steps[0]}, no edits yet)")
+        # Write-churn nudges (0.117.0/0.118.0): a write/implement agent N turns
+        # in with zero successful file mutations is deliberating, not
+        # implementing — detected live only here (the _agent_made_edits outcome
+        # check fires post-loop, after all the budget is spent). Two escalating
+        # steering notes into this agent's messages, each once; the loop drains
+        # them at the next step boundary like any user steering line.
+        if write and _steps[0] >= _CHURN_NUDGE_TURN and ctx.write_calls == 0:
+            if not ctx.churn_nudged:
+                ctx.churn_nudged = True
+                messages.append({"role": "user", "content":
+                    "[Steering note: you are " + str(_steps[0]) + " turns in with "
+                    "no file edits. Stop exploring and place your first edit now; "
+                    "record remaining design doubts in the final report instead of "
+                    "settling them by reading more code.]"})
+                if not quiet:
+                    note_progress(f"write-churn nudge sent (turn {_steps[0]}, no edits yet)")
+            elif not ctx.churn_escalated and _steps[0] >= _CHURN_NUDGE_TURN * 2:
+                ctx.churn_escalated = True
+                messages.append({"role": "user", "content":
+                    "[Steering note: " + str(_steps[0]) + " turns, still zero file "
+                    "edits. Your turn budget will expire with nothing written and "
+                    "your report will be marked partial. Choose the simplest "
+                    "defensible change NOW — even a partial first edit beats a "
+                    "complete plan in the report.]"})
+                if not quiet:
+                    note_progress(f"write-churn ESCALATION sent (turn {_steps[0]}, still no edits)")
 
     try:
         summary = _m._run_model_turn_loop(
