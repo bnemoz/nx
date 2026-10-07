@@ -8,6 +8,10 @@ the pre-migration NULL-cwd row; the cwd column's ALTER TABLE migration;
 expires; same-owner heartbeat refresh; release_for; and the write-tool wiring
 (two write tools in one process re-claim the same file cleanly; a foreign
 holder refuses).
+
+0.119.0 adds three pins: the `pid_start_time` PID-reuse guard (and its
+NULL-column back-compat + ALTER TABLE migration), the refusal message naming
+the real TTL remedy, and `release_all_for_pid` on the REPL exit path.
 """
 import os
 import sqlite3
@@ -63,22 +67,37 @@ def _rows():
         conn.close()
 
 
-def _insert(path, owner, pid, claimed_at, cwd=None):
+def _start_times():
+    conn = db._open()
+    assert conn is not None
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT pid_start_time FROM file_claims")]
+    finally:
+        conn.close()
+
+
+def _insert(path, owner, pid, claimed_at, cwd=None, start_time=None):
     """Plant a row directly. `cwd` defaults to THIS process's cwd, i.e. a claim
     taken from the same repo (the one that blocks); pass a cwd of your own to
-    stage another repo's holder."""
+    stage another repo's holder. `start_time` defaults to NULL, i.e. a
+    pre-0.119.0 row (bare pid liveness)."""
     conn = db._open()
     assert conn is not None
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT OR REPLACE INTO file_claims"
-            "(path, owner_id, pid, claimed_at, cwd) VALUES (?,?,?,?,?)",
+            "(path, owner_id, pid, claimed_at, cwd, pid_start_time)"
+            " VALUES (?,?,?,?,?,?)",
             (path, owner, pid, claimed_at,
-             fc._cwd() if cwd is None else cwd))
+             fc._cwd() if cwd is None else cwd, start_time))
         conn.commit()
     finally:
         conn.close()
+
+
+_HAS_PROC = os.path.isdir("/proc") and fc._pid_start_time() is not None
 
 
 # --- identity ----------------------------------------------------------------
@@ -153,6 +172,90 @@ def test_dead_pid_is_reclaimed(tmp_path):
     ok, holder = fc.claim_file(p, "me")
     assert ok and holder is None
     assert _rows()[0][1] == "me"
+
+
+# --- PID-reuse liveness guard (0.119.0) --------------------------------------
+
+def test_claim_records_the_holders_start_time(tmp_path):
+    """A fresh claim stores this process's /proc start-time tick, so a later
+    check can tell a recycled pid from the original holder. On a host without
+    /proc the column is NULL — asserted so the test is meaningful either way."""
+    p = str(tmp_path / "pid1.txt")
+    assert fc.claim_file(p, "me")[0]
+    stored = _start_times()[0]
+    if _HAS_PROC:
+        assert stored and stored == fc._pid_start_time()
+    else:
+        assert stored is None
+
+
+def test_recycled_pid_with_a_different_start_time_is_reclaimed(tmp_path):
+    """The bug: a row from a process that exited, whose pid the OS reused. Bare
+    os.kill(pid, 0) sees the NEW process and reads a dead holder as live,
+    blocking this repo until the TTL. With the recorded start time compared,
+    the row is reclaimed instead."""
+    if not _HAS_PROC:
+        import pytest
+        pytest.skip("no /proc: no start-time guard to exercise (macOS/Windows)")
+    p = str(tmp_path / "pid2.txt")
+    # OUR pid is alive, but the row records a DIFFERENT incarnation of it.
+    _insert(p, "recycled-holder", os.getpid(), time.time(),
+            start_time="999999999")
+    ok, holder = fc.claim_file(p, "me")
+    assert ok is True and holder is None
+    row = _rows()[0]
+    assert row[1] == "me"
+    assert _start_times()[0] == fc._pid_start_time()  # re-stamped here
+
+
+def test_same_start_time_still_blocks(tmp_path):
+    """The guard must not over-reclaim: a live holder whose recorded start time
+    MATCHES its current one is still the original process, so it still blocks."""
+    if not _HAS_PROC:
+        import pytest
+        pytest.skip("no /proc: no start-time guard to exercise (macOS/Windows)")
+    p = str(tmp_path / "pid3.txt")
+    _insert(p, "real-holder", os.getpid(), time.time(),
+            start_time=fc._pid_start_time())
+    ok, holder = fc.claim_file(p, "me")
+    assert ok is False and "real-holder" in holder
+    assert _rows()[0][1] == "real-holder"  # untouched
+
+
+def test_null_start_time_falls_back_to_bare_pid_liveness(tmp_path):
+    """Back-compat: a pre-0.119.0 row has no start time to compare, so it must
+    keep the old behavior — a live pid blocks — rather than being treated as a
+    recycled holder and stolen."""
+    p = str(tmp_path / "pid4.txt")
+    _insert(p, "legacy-holder", os.getpid(), time.time(), start_time=None)
+    ok, holder = fc.claim_file(p, "me")
+    assert ok is False and "legacy-holder" in holder
+    assert _start_times()[0] is None
+
+
+def test_pid_start_time_column_migrated_into_a_legacy_store(tmp_path):
+    """A store created before 0.119.0 has no pid_start_time; _ensure_schema adds
+    it via ALTER TABLE (NULL-backfilled) and preserves the rows."""
+    legacy = os.path.join(_tmp, "legacy-pidstart.sqlite")
+    conn = sqlite3.connect(legacy)
+    try:
+        conn.execute(
+            "CREATE TABLE file_claims(path TEXT PRIMARY KEY,"
+            " owner_id TEXT NOT NULL, pid INTEGER NOT NULL, claimed_at REAL,"
+            " cwd TEXT)")
+        conn.execute(
+            "INSERT INTO file_claims VALUES ('/y', 'old-owner', 1, 2.0, '/repo')")
+        conn.commit()
+        db._ensure_schema(conn)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(file_claims)")]
+        assert "pid_start_time" in cols
+        row = conn.execute(
+            "SELECT owner_id, cwd, pid_start_time FROM file_claims"
+            " WHERE path = '/y'").fetchone()
+        assert row == ("old-owner", "/repo", None)  # NULL, row preserved
+        db._ensure_schema(conn)  # idempotent — a second pass must not raise
+    finally:
+        conn.close()
 
 
 # --- path normalization + file-scoped repo scoping (0.110.0) -----------------
@@ -292,6 +395,45 @@ def test_release_for_missing_owner_is_zero(tmp_path):
     assert fc.release_for("nobody") == 0
 
 
+# --- release_all_for_pid: the session-exit sweep (0.119.0) -------------------
+
+def test_release_all_for_pid_drops_this_pids_rows(tmp_path):
+    """One process runs several event loops, so its claims carry several
+    owner_ids but one pid: the exit sweep keys on the pid and drops them all,
+    leaving another process's rows alone."""
+    a, b, c = (str(tmp_path / n) for n in ("r1.txt", "r2.txt", "r3.txt"))
+    assert fc.claim_file(a, "sess:100")[0]
+    assert fc.claim_file(b, "sess:200")[0]   # a second loop in this process
+    assert fc.claim_file(c, "other-live-hunter")[0]
+    conn = db._open()
+    assert conn is not None
+    try:  # the foreign row is another process's — give it a foreign pid
+        conn.execute("UPDATE file_claims SET pid = ? WHERE path = ?",
+                     (os.getpid() + 100000, c))
+        conn.commit()
+    finally:
+        conn.close()
+    assert fc.release_all_for_pid() == 2
+    assert [r[1] for r in _rows()] == ["other-live-hunter"]
+
+
+def test_release_all_for_pid_is_zero_and_safe_when_empty(tmp_path):
+    assert fc.release_all_for_pid() == 0
+    assert fc.release_all_for_pid(os.getpid()) == 0
+    assert fc.release_all_for_pid("not-a-pid") == 0  # never raises
+
+
+def test_release_all_for_pid_disabled_or_store_down_is_zero(tmp_path, monkeypatch):
+    p = str(tmp_path / "r4.txt")
+    assert fc.claim_file(p, "me")[0]
+    os.environ["NX_FILE_CLAIMS"] = "0"
+    assert fc.release_all_for_pid() == 0
+    assert _rows()[0][1] == "me"  # still there: the disabled run was a no-op
+    os.environ["NX_FILE_CLAIMS"] = "1"
+    monkeypatch.setattr(db, "_open", lambda: None)
+    assert fc.release_all_for_pid() == 0
+
+
 # --- fail-open ---------------------------------------------------------------
 
 def test_store_failure_fails_open(monkeypatch, tmp_path):
@@ -299,6 +441,27 @@ def test_store_failure_fails_open(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "_open", lambda: None)
     assert fc.claim_file(p, "me") == (True, None)
     assert fc.release_for("me") == 0
+
+
+def test_missing_pid_start_time_column_fails_open(monkeypatch, tmp_path):
+    """A store still on the pre-0.119.0 shape (the migration didn't take, e.g. a
+    contended store) must not raise into a write tool: the SELECT fails and
+    claim_file fails OPEN."""
+    p = str(tmp_path / "j2.txt")
+    real_open = db._open
+
+    def _legacy_open():
+        conn = real_open()
+        assert conn is not None
+        conn.execute("DROP TABLE IF EXISTS file_claims")
+        conn.execute(  # rebuild without pid_start_time
+            "CREATE TABLE file_claims(path TEXT PRIMARY KEY,"
+            " owner_id TEXT NOT NULL, pid INTEGER NOT NULL, claimed_at REAL,"
+            " cwd TEXT)")
+        return conn
+
+    monkeypatch.setattr(db, "_open", _legacy_open)
+    assert fc.claim_file(p, "me") == (True, None)
 
 
 # --- write-tool wiring -------------------------------------------------------
@@ -329,6 +492,136 @@ def test_foreign_holder_refuses_write(tmp_path, monkeypatch):
     assert "someone-else" in res
     assert f.read_text() == "v1\n"  # untouched
 
+
+# --- the refusal message names the real remedies (0.119.0) -------------------
+
+def test_refusal_message_names_the_ttl(tmp_path):
+    """There is no steal/force override in the protocol, so the message must not
+    imply one: it names the TTL auto-expiry (the actual remedy) and the
+    dead-holder reclaim."""
+    f = str(tmp_path / "ttl.txt")
+    _insert(f, "someone-else", os.getpid(), time.time())
+    msg = nx._edit_tools._claim_error(f)
+    assert msg is not None
+    assert "3600s" in msg and "NX_FILE_CLAIM_TTL" in msg
+    assert "heartbeat" in msg          # why it expires
+    assert "reclaimed" in msg          # the dead-holder remedy
+    assert "coordinate with the holder" not in msg  # the invented remedy is gone
+
+
+def test_refusal_message_names_a_non_default_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("NX_FILE_CLAIM_TTL", "120")
+    f = str(tmp_path / "ttl2.txt")
+    _insert(f, "someone-else", os.getpid(), time.time())
+    msg = nx._edit_tools._claim_error(f)
+    assert msg is not None and "120s" in msg
+
+
+def test_refusal_message_when_claims_never_expire(tmp_path, monkeypatch):
+    """NX_FILE_CLAIM_TTL=0: the claim never expires by age, and the message must
+    say so instead of quoting a TTL that will not fire."""
+    monkeypatch.setenv("NX_FILE_CLAIM_TTL", "0")
+    f = str(tmp_path / "ttl3.txt")
+    _insert(f, "someone-else", os.getpid(), time.time())
+    msg = nx._edit_tools._claim_error(f)
+    assert msg is not None
+    assert "do not expire" in msg and "expires after" not in msg
+
+
+def test_write_refusal_carries_the_ttl(tmp_path, monkeypatch):
+    """End to end: the string a write tool returns to the model names the TTL,
+    so the model can report a real remedy rather than improvising one."""
+    _yolo(monkeypatch)
+    f = tmp_path / "ttl4.txt"
+    f.write_text("v1\n")
+    _insert(str(f), "someone-else", os.getpid(), time.time())
+    res = nx._edit_tools.write_file(str(f), "v2\n")
+    assert "3600s" in res and "NX_FILE_CLAIM_TTL" in res
+    assert f.read_text() == "v1\n"
+
+
+# --- release on session exit -------------------------------------------------
+
+def test_repl_exit_releases_this_pids_claims(tmp_path, monkeypatch):
+    """The REPL's clean-exit path (EOF/Ctrl-D) must drop this process's claims
+    next to _sessionlock.release(), so a quit doesn't block this repo until the
+    TTL. Drives the real _repl() loop to EOF with the model path stubbed out."""
+    import builtins
+    repl = sys.modules["nx._repl"]
+    f = str(tmp_path / "exit.txt")
+    assert fc.claim_file(f, "me")[0]
+    monkeypatch.setenv("NX_SESSION_LOCK", "0")
+    monkeypatch.setattr(nx._state, "ACTIVE", None)
+    monkeypatch.setattr(nx, "_banner", lambda: "")
+    monkeypatch.setattr(repl, "_initial_messages",
+                        lambda: [{"role": "system", "content": "s"}])
+    monkeypatch.setattr(repl, "_load_input_history", lambda: [])
+    monkeypatch.setattr(repl, "_ensure_ctx_probe", lambda *a, **k: None)
+    monkeypatch.setattr(repl, "_session_id_from_args", lambda: "sess-exit")
+    monkeypatch.setattr(repl, "_flush_save", lambda: None)
+    monkeypatch.setattr(repl, "_save_current", lambda *a, **k: None)
+    monkeypatch.setattr(repl, "begin_exit", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(sys, "argv", ["nx"])
+
+    def _eof(*a, **k):
+        raise EOFError
+
+    monkeypatch.setattr(nx, "read_multiline", _eof)
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: None)
+    nx._repl()
+    assert _rows() == []  # the exit sweep removed this pid's claim
+
+
+def test_quit_path_releases_this_pids_claims(tmp_path, monkeypatch):
+    """`/quit`/`/exit` is the OTHER clean exit (the handler returns "break")
+    and must release too, or quitting that way still leaves rows blocking this
+    repo until the TTL."""
+    import builtins
+    repl = sys.modules["nx._repl"]
+    f = str(tmp_path / "quit.txt")
+    assert fc.claim_file(f, "me")[0]
+    monkeypatch.setenv("NX_SESSION_LOCK", "0")
+    monkeypatch.setattr(nx._state, "ACTIVE", None)
+    monkeypatch.setattr(nx, "_banner", lambda: "")
+    monkeypatch.setattr(repl, "_initial_messages",
+                        lambda: [{"role": "system", "content": "s"}])
+    monkeypatch.setattr(repl, "_load_input_history", lambda: [])
+    monkeypatch.setattr(repl, "_ensure_ctx_probe", lambda *a, **k: None)
+    monkeypatch.setattr(repl, "_session_id_from_args", lambda: "sess-quit")
+    monkeypatch.setattr(sys, "argv", ["nx"])
+    monkeypatch.setattr(nx, "read_multiline", lambda *a, **k: "/quit")
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: None)
+    nx._repl()
+    assert _rows() == []  # the /quit exit released this pid's claim
+
+
+def test_repl_exit_claim_release_never_raises(tmp_path, monkeypatch):
+    """A store that can't serve the sweep must not break the exit path."""
+    import builtins
+    repl = sys.modules["nx._repl"]
+    monkeypatch.setenv("NX_SESSION_LOCK", "0")
+    monkeypatch.setattr(nx._state, "ACTIVE", None)
+    monkeypatch.setattr(nx, "_banner", lambda: "")
+    monkeypatch.setattr(repl, "_initial_messages",
+                        lambda: [{"role": "system", "content": "s"}])
+    monkeypatch.setattr(repl, "_load_input_history", lambda: [])
+    monkeypatch.setattr(repl, "_ensure_ctx_probe", lambda *a, **k: None)
+    monkeypatch.setattr(repl, "_session_id_from_args", lambda: "sess-exit2")
+    monkeypatch.setattr(repl, "_flush_save", lambda: None)
+    monkeypatch.setattr(repl, "_save_current", lambda *a, **k: None)
+    monkeypatch.setattr(repl, "begin_exit", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(sys, "argv", ["nx"])
+    monkeypatch.setattr(nx, "read_multiline",
+                        lambda *a, **k: (_ for _ in ()).throw(EOFError()))
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(fc, "release_all_for_pid", _boom)
+    nx._repl()  # must not propagate
 
 def test_foreign_holder_refuses_edit_and_delete(tmp_path, monkeypatch):
     _yolo(monkeypatch)

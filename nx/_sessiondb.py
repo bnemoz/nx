@@ -196,14 +196,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # file, keyed by path so two processes contend on a single PRIMARY KEY.
     # `cwd` is the claiming process's working directory — a claim only guards
     # the repo it was taken from (see _fileclaim's liveness rules).
+    # `pid_start_time` (0.119.0) is the holder's Linux start-time tick, so a
+    # recycled pid can't read as a live holder.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_claims("
         "path TEXT PRIMARY KEY,"
         "owner_id TEXT NOT NULL,"
         "pid INTEGER NOT NULL,"
         "claimed_at REAL,"
-        "cwd TEXT)")
+        "cwd TEXT,"
+        "pid_start_time TEXT)")
     _ensure_file_claims_cwd(conn)
+    _ensure_file_claims_pid_start_time(conn)
     conn.commit()
 
 
@@ -226,6 +230,29 @@ def _ensure_file_claims_cwd(conn: sqlite3.Connection) -> None:
         return
     try:
         conn.execute("ALTER TABLE file_claims ADD COLUMN cwd TEXT")
+    except sqlite3.OperationalError:
+        pass  # duplicate column or a contended store: degrade, never raise
+
+
+def _ensure_file_claims_pid_start_time(conn: sqlite3.Connection) -> None:
+    """Add the `file_claims.pid_start_time` column to a store created before
+    claims carried a PID-reuse guard (0.119.0).
+
+    Same shape as _ensure_file_claims_cwd: `ALTER TABLE ADD COLUMN` is the whole
+    migration (SQLite backfills NULL), idempotent via table_info, and any
+    failure merely leaves the old table shape — _fileclaim reads a NULL start
+    time as "no guard possible" and falls back to bare pid liveness, so an
+    un-migrated row still blocks a live holder instead of being stolen. The
+    column also keeps its NOT NULL-free shape deliberately: pre-0.119.0 rows
+    have nothing to backfill it with."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(file_claims)")}
+    except sqlite3.Error:
+        return
+    if not cols or "pid_start_time" in cols:
+        return
+    try:
+        conn.execute("ALTER TABLE file_claims ADD COLUMN pid_start_time TEXT")
     except sqlite3.OperationalError:
         pass  # duplicate column or a contended store: degrade, never raise
 

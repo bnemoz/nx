@@ -12,9 +12,12 @@ Design rules (pinned by tests/test_file_claims.py):
   * paths resolved at call time (env read at call time, no import-time freeze).
 
 Liveness: an existing row blocks a *different* owner only while (a) its pid is
-alive, (b) it hasn't aged past `NX_FILE_CLAIM_TTL` seconds (default 3600; `0`
-disables expiry), AND (c) it was claimed from the SAME working directory as
-this process. A dead pid, an expired row, or a row taken from another repo (a
+alive AND is still the process that took the claim (the holder's Linux
+start-time tick is stored per row as `pid_start_time`, so a recycled pid cannot
+read as a live holder; a pre-migration NULL falls back to bare pid liveness),
+(b) it hasn't aged past `NX_FILE_CLAIM_TTL` seconds (default 3600; `0` disables
+expiry), AND (c) it was claimed from the SAME working directory as this
+process. A dead pid, an expired row, or a row taken from another repo (a
 different `os.getcwd()` — e.g. an nx session working in an unrelated folder on
 this host) is reclaimed in place: claims are repo-scoped, never host-wide.
 A live row held by the SAME owner is refreshed (heartbeat) and returns ok, so
@@ -125,24 +128,33 @@ def _holder_desc(owner: str, pid: object) -> str:
     return f"owner {owner}, pid {pid}"
 
 
-def _pid_alive(pid: object) -> bool:
-    """os.kill(pid, 0) semantics: True when the process exists (or exists but is
-    owned by another user — PermissionError means alive, not gone)."""
+def _pid_start_time() -> str | None:
+    """This process's immutable Linux start-time tick (PID-reuse guard), or None
+    where /proc is absent (macOS/Windows) — stored per claim row at claim time
+    and compared at check time. None disables the guard for that row (the
+    pre-0.119.0 behavior: bare pid liveness)."""
+    from ._platform import proc_start_time
+    return proc_start_time(os.getpid())
+
+
+def _pid_alive(pid: object, start_time: object = None) -> bool:
+    """Whether `pid` is alive AND is still the process that took the claim.
+
+    Delegates to `_platform.pid_is_alive` (os.kill(pid, 0) on POSIX, an
+    OpenProcess+GetExitCodeProcess check on Windows, where os.kill(pid, 0) does
+    not exist) with the row's recorded `start_time` as the PID-reuse guard. A
+    NULL/absent start time (pre-migration row, or a host without /proc) falls
+    back to bare pid liveness — with no start time to compare, a live holder
+    must not be read as dead."""
     try:
-        pid = int(pid)  # type: ignore[arg-type]
+        pid_int = int(pid)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return False
-    if pid <= 0:
+    if pid_int <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    from ._platform import pid_is_alive
+    expected = str(start_time) if start_time else None
+    return pid_is_alive(pid_int, expected)
 
 
 def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
@@ -163,13 +175,14 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
     ttl = _ttl()
     now = time.time()
     pid = os.getpid()
+    start_time = _pid_start_time()
     cwd = _file_scope(path)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT owner_id, pid, claimed_at, cwd FROM file_claims"
-                " WHERE path = ?",
+                "SELECT owner_id, pid, claimed_at, cwd, pid_start_time"
+                " FROM file_claims WHERE path = ?",
                 (path,)).fetchone()
             result: tuple[bool, str | None]
             if row is not None:
@@ -177,7 +190,7 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                 holder_pid = row[1]
                 claimed_at = row[2] or 0.0
                 expired = ttl > 0 and (now - claimed_at) > ttl
-                if (_pid_alive(holder_pid) and not expired
+                if (_pid_alive(holder_pid, row[4]) and not expired
                         and _same_scope(row[3], cwd)):
                     if holder_owner == owner_id:
                         # Same owner: heartbeat-refresh, stay held.
@@ -193,14 +206,14 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                     conn.execute("DELETE FROM file_claims WHERE path = ?", (path,))
                     conn.execute(
                         "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"
-                        " cwd) VALUES (?,?,?,?,?)",
-                        (path, owner_id, pid, now, cwd))
+                        " cwd, pid_start_time) VALUES (?,?,?,?,?,?)",
+                        (path, owner_id, pid, now, cwd, start_time))
                     result = (True, None)
             else:
                 conn.execute(
                     "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"
-                    " cwd) VALUES (?,?,?,?,?)",
-                    (path, owner_id, pid, now, cwd))
+                    " cwd, pid_start_time) VALUES (?,?,?,?,?,?)",
+                    (path, owner_id, pid, now, cwd, start_time))
                 result = (True, None)
             conn.commit()
             return result
@@ -209,6 +222,47 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
             raise
     except Exception:
         return (True, None)  # fail open: the edit is never blocked by a DB hiccup
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def release_all_for_pid(pid: int | None = None) -> int:
+    """Drop every claim row whose `pid` column is `pid` (default: this
+    process) — the session-exit sweep called from the REPL right alongside
+    `_sessionlock.release()`.
+
+    `owner_id` is `<NX session id>:<thread ident>`, so on exit there is no
+    single owner string to release: claims are per (session, thread), one for
+    every event loop this process ran. Each such row records this process's pid,
+    so the pid column — not an owner prefix, which would also spare rows left
+    by a previous session in this repo — is the complete and unambiguous key.
+    Returns the number removed (0 on any failure). Never raises."""
+    if not _claims_enabled():
+        return 0
+    try:
+        target = os.getpid() if pid is None else int(pid)
+    except (TypeError, ValueError):
+        return 0
+    from . import _sessiondb
+    conn = _sessiondb._open()
+    if conn is None:
+        return 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "DELETE FROM file_claims WHERE pid = ?", (target,))
+            n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            conn.commit()
+            return n
+        except Exception:
+            conn.rollback()
+            raise
+    except Exception:
+        return 0
     finally:
         try:
             conn.close()

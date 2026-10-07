@@ -109,14 +109,22 @@ def _staleness_error(path: str) -> str | None:
 def _claim_error(path: str) -> str | None:
     """Cross-process file-claim refusal (nx/_fileclaim.py): another live agent
     (a different nx process/loop) holds this file — refuse rather than race it.
-    Fails open: any store/claim failure returns None (the edit proceeds)."""
+    Fails open: any store/claim failure returns None (the edit proceeds).
+
+    The message states the only two remedies that actually exist — the TTL
+    auto-expiry and the dead-holder reclaim on the next attempt. There is no
+    steal/force override in the protocol, so none is advertised."""
     from . import _fileclaim
     ok, holder = _fileclaim.claim_file(path, _fileclaim.owner_id())
     if ok:
         return None
+    ttl = _fileclaim._ttl()
+    expiry = (f"the claim expires after {ttl}s without a heartbeat"
+              " (NX_FILE_CLAIM_TTL)" if ttl > 0
+              else "claims do not expire (NX_FILE_CLAIM_TTL=0)")
     return (f"ERROR: {path} is currently claimed by another agent ({holder}) "
-            "— refusing to edit; coordinate with the holder or wait for the "
-            "claim to expire")
+            f"— refusing to edit; {expiry}, or is reclaimed automatically once "
+            "that process exits")
 
 
 def write_file(path: str, content: str, **_: Any) -> str:

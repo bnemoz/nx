@@ -139,6 +139,22 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
 }
 
 
+def _release_claims_on_exit() -> None:
+    """Drop this process's cross-process file claims (0.119.0) on a clean exit.
+
+    Claims are otherwise released only by another process's liveness/expiry
+    check, so quitting would leave rows blocking this repo for up to
+    NX_FILE_CLAIM_TTL. Both documented clean exits (`/quit` and EOF/Ctrl-D) go
+    through here; the release itself never raises (see
+    `_fileclaim.release_all_for_pid`), and the import is guarded so a broken
+    install can't turn an exit into a traceback."""
+    try:
+        from ._fileclaim import release_all_for_pid
+        release_all_for_pid()
+    except Exception:
+        pass
+
+
 def _repl() -> None:
     """The interactive loop: banner, ctx-probe warm-up, session state
     resolution/resume, then the read → dispatch → run-turn → autosave cycle
@@ -265,6 +281,10 @@ def _repl() -> None:
                 _lock_release()
             except Exception:
                 pass
+            # Release this process's file claims (0.119.0) alongside the repo
+            # lock, for the same reason: a clean exit must not leave rows
+            # blocking this repo until NX_FILE_CLAIM_TTL. Never raises.
+            _release_claims_on_exit()
             # Flush the current session on Ctrl-D / Ctrl-C exit so the last
             # turn isn't lost (matches Hermes's exit-path flush). Cheap exit
             # form first (0.103.28): the final write skips the post-write
@@ -319,6 +339,11 @@ def _repl() -> None:
         handler = _REPL_COMMANDS.get(cmd) if cmd.startswith("/") else None
         if handler is not None:
             if handler(user, state) == "break":
+                # `/quit`/`/exit` is the OTHER clean exit (the `_cmd_quit`
+                # handler signals it with "break"): release this process's file
+                # claims here too, or quitting that way still leaves rows
+                # blocking this repo until NX_FILE_CLAIM_TTL.
+                _release_claims_on_exit()
                 break
             continue
         # Record for recall (skips slash commands and repeats of the very
