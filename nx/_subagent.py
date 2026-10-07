@@ -819,7 +819,9 @@ def _answer_completion(answer: str) -> str:
     foreground result) can say partial honestly."""
     if answer.startswith("ERROR:"):
         return "error"
-    if answer.startswith(("[sub-agent hit its ", "[sub-agent stopped early ")) \
+    if answer.startswith(("[sub-agent hit its ", "[sub-agent stopped early ",
+                          "[sub-agent stopped: ",
+                          "[sub-agent produced no answer ")) \
             or answer.endswith("[Truncated by token limit before completion.]"):
         return "partial"
     return "done"
@@ -1018,6 +1020,33 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
             break
     status = summary.get("status") if isinstance(summary, dict) else "done"
     turns = summary.get("turns", 0) if isinstance(summary, dict) else 0
+    if status == "error":
+        # 0.121.1: the sub-loop died (API error, context overrun, stream
+        # timeout — see _turn.py's TURN_API_ERROR / TURN_CONTEXT_OVERRUN /
+        # TURN_TIMED_OUT branches). Falling through below handed the parent
+        # whatever prose the agent had emitted BEFORE the break as its answer,
+        # and _answer_completion stamped that "done" — a dead agent was
+        # reported as a finished one. Mirror the exception path (which returns
+        # an "ERROR: sub-agent failed: ..." string): keep the last text as
+        # evidence of where it died, but under an explicit failure header, and
+        # stamp the in-band marker so every delivery surface (report file,
+        # [Runtime note], foreground tag) classifies this failed/partial.
+        detail = (str(summary.get("error") or status)
+                  if isinstance(summary, dict) else str(status))
+        marker = f"[sub-agent stopped: {detail} after {turns} turn(s)]"
+        if answer:
+            tail = f"\nLast text before the failure:\n{answer}"
+        else:
+            # No prose at all: the last tool observation is still signal.
+            tail = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "tool" \
+                        and isinstance(msg.get("content"), str) \
+                        and msg["content"].strip():
+                    tail = ("\nLast observation:\n"
+                            + msg["content"].strip()[:2000])
+                    break
+        return f"ERROR: sub-agent failed: {detail}\n{marker}{tail}"
     if not answer:
         # The agent died mid-exploration (hit the cap while its final turn
         # still called a search tool, or the backend never emitted text). The

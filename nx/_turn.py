@@ -171,6 +171,14 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                          else "repetition collapse")
         retry_limit = _subagent_stream_cut_limit(max(0, st.MALFORMED_STREAM_RETRY_LIMIT))
         if malformed_stream_cut_count >= retry_limit:
+            # 0.121.1: background agents run quiet, so this give-up printed
+            # nothing anywhere — the agent surrendered silently. Record it in
+            # the event log (screen behavior unchanged).
+            from ._logging import _log_event
+            _log_event("turn", {"kind": "give_up",
+                                "failure": collapse_type,
+                                "recoveries": malformed_stream_cut_count,
+                                "retry_limit": retry_limit})
             if not quiet:
                 print(f"{C.ERROR}  ✗ {collapse_type} after "
                       f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
@@ -253,6 +261,17 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                   f"{cut_count} stall "
                   f"attempt{'s' if cut_count != 1 else ''} "
                   f"× {loop_detail}; waiting for user input{RESET}")
+        # 0.121.1: this turn ends with nothing produced and the prints above
+        # are gated on `quiet` — on a background agent thread that was a
+        # completely silent surrender. Log it either way (screen behavior
+        # unchanged); `failsafes_disabled` separates the deliberate
+        # benchmark-mode ending from a genuine rescue exhaustion.
+        from ._logging import _log_event
+        _log_event("turn", {"kind": "give_up",
+                            "failure": "reasoning_only_stall",
+                            "attempts": cut_count,
+                            "retry_limit": retry_limit,
+                            "failsafes_disabled": retry_limit == 0})
         return TURN_DONE
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
@@ -583,6 +602,15 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             return TURN_TIMED_OUT
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
+            # 0.121.1: same silent surrender as the collapse path above — a
+            # quiet/background agent used to give up here with no trace at all.
+            from ._logging import _log_event
+            _log_event("turn", {"kind": "give_up",
+                                "failure": "malformed_stream",
+                                "recoveries": malformed_stream_cut_count,
+                                "retry_limit": retry_limit,
+                                "error": (f"{type(stream_error).__name__}: "
+                                          f"{stream_error}")[:300]})
             if not quiet:
                 if parser.mode in ("think", "say"):
                     print()
