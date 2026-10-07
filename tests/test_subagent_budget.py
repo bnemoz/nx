@@ -342,8 +342,9 @@ def test_cap_without_answer_returns_last_observation(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)  # floor (0.36.1)
     out = spawn_agent("q", max_turns=12)
-    assert out.startswith("[sub-agent hit its 12-turn cap before writing an "
-                          "answer; last observation]")
+    assert out.startswith("[sub-agent stopped early after 12/12 turns "
+                          "without an answer")
+    assert "last observation]" in out
     assert "nx/_x.py:42" in out
 
 

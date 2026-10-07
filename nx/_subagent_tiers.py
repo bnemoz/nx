@@ -55,7 +55,8 @@ class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
-                 "worktree", "job_id", "consults_left", "advisor")
+                 "worktree", "job_id", "consults_left", "advisor",
+                 "write_calls", "churn_nudged")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False, scope: "list[str] | None" = None,
@@ -86,6 +87,12 @@ class _SubagentContext:
         # Advisor-tier consult budget (0.112.0): remaining consult_advisor
         # calls this agent may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
         self.consults_left = _consult_budget()
+        # Write-churn tracking (0.117.0): successful file-mutation calls and
+        # whether the mid-run "start editing" nudge has already fired. A
+        # write/implement agent that burns turns on pure deliberation gets one
+        # in-loop steering note instead of being detected only at completion.
+        self.write_calls = 0
+        self.churn_nudged = False
         self.advisor = False  # True only for advisor-tier agents
 
 
@@ -358,9 +365,15 @@ def _write_tier_wrapper(name: str):
         prev_ctx = _SUBAGENT_TLS.ctx
         _SUBAGENT_TLS.ctx = None  # body + _confirm() run as the parent
         try:
-            return body(**args)
+            result = body(**args)
         finally:
             _SUBAGENT_TLS.ctx = prev_ctx
+        # Count successful mutations for the write-churn nudge (a refused or
+        # failed edit is not progress): any result that is not an ERROR/
+        # refusal prefix counts. Cheap string peek, best-effort by design.
+        if isinstance(result, str) and not result.startswith(("ERROR", "REFUSED")):
+            ctx.write_calls += 1
+        return result
 
     _run.__name__ = f"_subagent_write_{name}"
     return _run

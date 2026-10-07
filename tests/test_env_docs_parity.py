@@ -101,6 +101,9 @@ _ALLOWLIST = {
     "NX_OBS_MAX_TRACKED": "internal: bounded in-process obs send counters (default 4096)",
     "NX_OBS_STORE_TTL_DAYS": "internal: obsstore object TTL days (default 7)",
     "NX_OBS_STORE_MAX_MB": "internal: obsstore byte quota MB (default 512, 0=off)",
+    # churn nudge (0.117.0): turns-without-a-write before a write-tier agent
+    # gets the "place your first edit" steering note (default 8):
+    "NX_SUBAGENT_CHURN_NUDGE_TURN": "internal: write-tier churn nudge trigger turns (default 8)",
 }
 
 

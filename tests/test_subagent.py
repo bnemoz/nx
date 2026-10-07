@@ -127,7 +127,7 @@ def test_subagent_empty_answer_and_cap(nx_fresh, monkeypatch):
     # actually honored and the tiny loop reaches the cap quickly.
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_DEFAULT_TURNS", 1)
     out = spawn_agent("summarize", max_turns=2)
-    assert "turn cap" in out and "partial" in out
+    assert "stopped early after 2/2 turns" in out and "partial" in out
 
 
 def test_subagent_rejects_bad_args_and_nested(nx_fresh, monkeypatch):

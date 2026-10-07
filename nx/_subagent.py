@@ -254,6 +254,10 @@ def _subagent_quiet() -> bool:
 # report is prose with its conclusion up front, not a grep dump).
 _ASYNC_REPORT_CHARS = 600   # inline head of the answer carried in the [Runtime note]
 _ASYNC_REPORT_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
+# Write-churn nudge (0.117.0): a write/implement agent with zero successful
+# file mutations after this many turns gets one steering note telling it to
+# place its first edit (see _progress_step).
+_CHURN_NUDGE_TURN = _env_int("NX_SUBAGENT_CHURN_NUDGE_TURN", 8)
 
 
 def _agents_report_dir() -> str:
@@ -815,7 +819,7 @@ def _answer_completion(answer: str) -> str:
     foreground result) can say partial honestly."""
     if answer.startswith("ERROR:"):
         return "error"
-    if answer.startswith("[sub-agent hit its ") \
+    if answer.startswith(("[sub-agent hit its ", "[sub-agent stopped early ")) \
             or answer.endswith("[Truncated by token limit before completion.]"):
         return "partial"
     return "done"
@@ -881,14 +885,25 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     system = (ADVISOR_EXEC_SYSTEM if advisor
               else SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
               else SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM)
+    # Write tiers get an edit-framed budget footer; the read-tier footer is
+    # answer-framed ("spend them answering") — advice that reads as "keep
+    # exploring" to an agent that should be editing (0.117.0 churn fix).
+    budget_note = (
+        "Spend them editing, not exploring: read what you must to place the "
+        "FIRST edit early, batch independent lookups into parallel tool calls "
+        "within one turn, and verify as you go. Do not exhaust the budget "
+        "perfecting a plan. Reserve the final turns for verification and the "
+        "report."
+        if write else
+        "Spend them answering, not exploring: batch independent lookups "
+        "into parallel tool calls within one turn, and wrap up as soon as "
+        "you can support the answer — do not exhaust every lead. Reserve "
+        "the final turn for the answer itself. In your final answer, "
+        "state what you verified and what you did not finish.")
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content":
                  f"{instruction.strip()}\n\n[Budget: at most {max_turns} tool turns. "
-                 "Spend them answering, not exploring: batch independent lookups "
-                 "into parallel tool calls within one turn, and wrap up as soon as "
-                 "you can support the answer — do not exhaust every lead. Reserve "
-                 "the final turn for the answer itself. In your final answer, "
-                 "state what you verified and what you did not finish.]"}]
+                 + budget_note + "]"}]
     # Force the sub-loop through the restricted dispatch table. run_tool() and
     # model_turn() consult the per-thread sub-agent context first (so two
     # concurrent agents never clobber each other's restricted table). The
@@ -954,6 +969,22 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                     rec["turns"] = _steps[0]
         if not quiet:
             note_progress(f"agent turn {_steps[0]}/{max_turns}")
+        # Write-churn nudge (0.117.0): a write/implement agent N turns in with
+        # zero successful file mutations is deliberating, not implementing —
+        # detected live only here (the _agent_made_edits outcome check fires
+        # post-loop, after all the budget is spent). One steering note into
+        # this agent's messages, once per agent; the loop drains it at the
+        # next step boundary like any user steering line.
+        if write and not ctx.churn_nudged and _steps[0] >= _CHURN_NUDGE_TURN \
+                and ctx.write_calls == 0:
+            ctx.churn_nudged = True
+            messages.append({"role": "user", "content":
+                "[Steering note: you are " + str(_steps[0]) + " turns in with "
+                "no file edits. Stop exploring and place your first edit now; "
+                "record remaining design doubts in the final report instead of "
+                "settling them by reading more code.]"})
+            if not quiet:
+                note_progress(f"write-churn nudge sent (turn {_steps[0]}, no edits yet)")
 
     try:
         summary = _m._run_model_turn_loop(
@@ -985,12 +1016,20 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
         for msg in reversed(messages):
             if msg.get("role") == "tool" and isinstance(msg.get("content"), str) \
                     and msg["content"].strip():
-                return (f"[sub-agent hit its {max_turns}-turn cap before writing an "
-                        f"answer; last observation]\n{msg['content'].strip()[:2000]}")
+                return (f"[sub-agent stopped early after {turns}/{max_turns} turns "
+                        f"without an answer (status=cap — turn budget, token "
+                        f"truncation, or empty forced-final turn); last "
+                        f"observation]\n{msg['content'].strip()[:2000]}")
         return (f"[sub-agent produced no answer after {turns} turn(s); "
                 f"status={status} — try a narrower instruction]")
     if status == "cap":
-        return (f"[sub-agent hit its {max_turns}-turn cap; partial answer]\n{answer}")
+        # 0.117.0: report ACTUAL turns spent, not the budget — the loop also
+        # exits "cap" via token truncation and the empty forced-final turn
+        # (_turn.py), so "hit its 250-turn cap" was claiming 250 turns burned
+        # when the agent had stopped at 20. Name the ambiguity instead.
+        return (f"[sub-agent stopped early after {turns}/{max_turns} turns "
+                f"(status=cap — may be the turn budget, a token truncation, or "
+                f"an empty forced-final turn); partial answer]\n{answer}")
     return answer
 
 

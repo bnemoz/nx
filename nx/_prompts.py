@@ -101,7 +101,9 @@ SUBAGENT_WRITE_SYSTEM = (
     "reads the files directly in SQL. "
     "Read files, make the edits, verify, then reply in plain prose with what "
     "changed (paths + what each edit did) and anything the parent must finish "
-    "itself — no preamble, no plan narration."
+    "itself — no preamble, no plan narration. "
+    "Deliberate only as long as it takes to place the FIRST edit: a design "
+    "settled in the report but not committed to files is a failed delegation."
 )
 
 
@@ -147,7 +149,9 @@ SUBAGENT_IMPLEMENT_SYSTEM = (
     "parent agent. The parent gave you: a goal, the strategy to try, and the "
     "paths in scope. Work inside the scope; a write outside it is refused.\n"
     "Plan before editing: read the relevant code first, then make the smallest "
-    "coherent change that satisfies the goal. Verify as you go — run_tests or "
+    "coherent change that satisfies the goal — but place the FIRST edit early; "
+    "reading to perfect a plan you could be executing burns the turn budget. "
+    "Verify as you go — run_tests or "
     "git diff after substantive edits, not once at the end.\n"
     "Loop discipline: if one approach fails twice, stop and change approach; "
     "if a fix keeps not landing, record what you tried in the report and stop "
