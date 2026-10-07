@@ -182,6 +182,51 @@ def test_store_file_private():
     assert mode == 0o600, oct(mode)
 
 
+def test_fts_delete_drops_index_postings():
+    """0.116.1 regression: deleting a session must shrink msgs_fts_data too —
+    the external-content index rows go BEFORE the content rows, or the
+    subselect keys off an empty table and every posting orphans (a full
+    session sweep once left a 500 MB index behind 2 sessions of content)."""
+    _clear()
+    sid = "20250101-120000-ftsd1"
+    db.store_session(sid, [_msg("user", "orphan index probe")], {"title": "x"})
+    db.refresh_fts(sid, [_msg("user", "orphan index probe")], title="x")
+    conn = sqlite3.connect(db._store_path())
+    before = conn.execute(
+        "SELECT SUM(pgsize) FROM dbstat WHERE name = 'msgs_fts_data'"
+    ).fetchone()[0]
+    assert before > 0
+    assert db.delete_session_row(sid) is True
+    after = conn.execute(
+        "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat"
+        " WHERE name = 'msgs_fts_data'").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM msgs_fts").fetchone()[0]
+    # page accounting can keep an empty root page; the postings themselves
+    # must be gone — verify via a MATCH, the consumer's view
+    hit = conn.execute(
+        "SELECT COUNT(*) FROM msgs_fts WHERE msgs_fts MATCH 'probe'"
+    ).fetchone()[0]
+    conn.close()
+    assert n == 0
+    assert hit == 0, "no postings may survive the delete"
+
+
+def test_refresh_fts_rebuild_drops_old_postings():
+    _clear()
+    sid = "20250101-120000-ftsd2"
+    db.store_session(sid, [_msg("user", "long body " * 5000)], {"title": "x"})
+    db.refresh_fts(sid, [_msg("user", "long body " * 5000)], title="x")
+    # rebuild with a much smaller transcript (compaction) — postings shrink
+    db.refresh_fts(sid, [_msg("user", "tiny")], title="x")
+    conn = sqlite3.connect(db._store_path())
+    n = conn.execute("SELECT COUNT(*) FROM msgs_fts").fetchone()[0]
+    orphan = conn.execute(
+        "SELECT COUNT(*) FROM msgs_fts WHERE rowid NOT IN"
+        " (SELECT rowid FROM fts_msgs)").fetchone()[0]
+    conn.close()
+    assert n == 1 and orphan == 0
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

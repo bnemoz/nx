@@ -864,6 +864,19 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                     rebuild = (tail[0] or "") != _body_of(
                         (messages or [])[max_seq])
                 if rebuild:
+                    # 0.116.1: index-first delete — the external-content
+                    # postings must be dropped while fts_msgs rows still
+                    # identify them (same bug _fts_delete_conn had).
+                    stale = [r[0] for r in conn.execute(
+                        "SELECT rowid FROM fts_msgs WHERE sid = ?",
+                        (session_id,))]
+                    try:
+                        for rid in stale:
+                            conn.execute(
+                                "DELETE FROM msgs_fts WHERE rowid = ?",
+                                (rid,))
+                    except sqlite3.OperationalError:
+                        pass  # no FTS5 here
                     conn.execute(
                         "DELETE FROM fts_msgs WHERE sid = ?", (session_id,))
                     rows = [(session_id, i,
@@ -932,19 +945,28 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
 def _fts_delete_conn(conn: sqlite3.Connection, session_id: str) -> None:
     """Delete one session's FTS index rows (per-message + metadata) on the
     caller's connection/transaction. Best-effort: no FTS5 here degrades to
-    deleting the real tables only."""
+    deleting the real tables only.
+
+    0.116.1: the external-content index rows must be deleted BEFORE the
+    content rows — the subselect keys off fts_msgs, so a content-first
+    delete left every posting in msgs_fts_data orphaned forever (a
+    delete-everything session sweep kept a 500 MB index for 2 sessions
+    of content)."""
     try:
+        # capture the indexed rowids while the content rows still exist
+        msg_rowids = [r[0] for r in conn.execute(
+            "SELECT rowid FROM fts_msgs WHERE sid = ?", (session_id,))]
+        meta_rowids = [r[0] for r in conn.execute(
+            "SELECT rowid FROM fts_meta WHERE sid = ?", (session_id,))]
+        try:
+            for rid in msg_rowids:
+                conn.execute("DELETE FROM msgs_fts WHERE rowid = ?", (rid,))
+            for rid in meta_rowids:
+                conn.execute("DELETE FROM meta_fts WHERE rowid = ?", (rid,))
+        except sqlite3.OperationalError:
+            pass  # no FTS5 here — the content deletes below still apply
         conn.execute("DELETE FROM fts_msgs WHERE sid = ?", (session_id,))
         conn.execute("DELETE FROM fts_meta WHERE sid = ?", (session_id,))
-        try:
-            conn.execute(
-                "DELETE FROM msgs_fts WHERE rowid IN"
-                " (SELECT rowid FROM fts_msgs WHERE sid = ?)", (session_id,))
-            conn.execute(
-                "DELETE FROM meta_fts WHERE rowid IN"
-                " (SELECT rowid FROM fts_meta WHERE sid = ?)", (session_id,))
-        except sqlite3.OperationalError:
-            pass  # external-content FTS already dropped its rows
     except sqlite3.OperationalError:
         pass  # no FTS5 here — the transcript rows are what matter
 
