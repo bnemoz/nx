@@ -48,7 +48,7 @@ import os
 import threading
 from typing import Optional
 
-from ._env import _env_float
+from ._env import _env_float, _env_int
 from . import _state as st
 
 # Sentinel the chatbox editor returns when the wake poller fires while the
@@ -71,6 +71,62 @@ WAKE_INSTRUCTION = (
     "result, do the work that was waiting on it, and stop when done. If "
     "nothing needs doing, say so in one line.]"
 )
+
+# The wake-turn instruction for an unattended campaign (0.121.0): pending
+# todos AND this session has delegated implementation to write-tier agents.
+# The plain WAKE_INSTRUCTION's "stop when done" is right for a wake that
+# answers a question; mid-campaign it read as "wrap up after this delivery"
+# and stalled multi-phase plans until the user hand-fed the next "continue".
+CAMPAIGN_WAKE_INSTRUCTION = (
+    "[Auto-continuation: background work finished while the user was away — "
+    "unattended wake {n} of {m}. The completion note is below. You are the "
+    "coordinator of your todo plan, not its implementer: briefly review the "
+    "finished agent's result (read the full report only if the head is not "
+    "enough), update todo_write — mark what completed, set the next item "
+    "in_progress — then spawn the next phase as a BACKGROUND write/implement-"
+    "tier agent (tier='advisor' if the phase has real design forks) with the "
+    "settled design baked into its instruction, and end your turn to let it "
+    "run. Keep your own context light: file edits and test runs belong to the "
+    "agents; you review and merge. Stop spawning — finish current work, "
+    "verify, and leave a summary of what's done, what's untested, and what "
+    "needs the user — when the todo list is complete, when a phase fails in "
+    "a way another agent cannot fix, or when you are within 3 wakes of the "
+    "limit. A typed user message resets the streak.]"
+)
+
+
+def _wake_streak_limit() -> int:
+    """Cap on consecutive unattended wake turns (user typed nothing since the
+    chain started). NX_WAKE_STREAK_LIMIT, default 25; clamped to >= 1 so the
+    guard can't be configured off by accident (NX_WAKE_PROMPT=0 remains the
+    off switch for wakes entirely)."""
+    return max(1, _env_int("NX_WAKE_STREAK_LIMIT", 25))
+
+
+def _campaign_pending() -> bool:
+    """True when a todo plan is mid-flight AND this session has delegated
+    implementation to write-tier agents (st._SPAWNED_WRITE_TIER, set at
+    spawn time). Both are required: todos alone are the model's own working
+    list in an interactive session (the plain wake instruction stays), and
+    the write-tier flag alone is a one-off delegated edit, not a campaign."""
+    todos = getattr(st, "_TODOS", None)
+    if not todos or not any(t.get("status") != "done" for t in todos):
+        return False
+    return bool(getattr(st, "_SPAWNED_WRITE_TIER", False))
+
+
+def wake_instruction() -> str:
+    """The synthetic user message for THIS wake turn: the campaign variant
+    when a plan is mid-flight, the plain one otherwise. The streak is
+    incremented by the REPL before this is called, so n is this wake's
+    1-based index; stamping both n and m lets the model see its own runway
+    without counting turns itself."""
+    if _campaign_pending():
+        return CAMPAIGN_WAKE_INSTRUCTION.format(
+            n=max(1, getattr(st, "_WAKE_STREAK", 1)),
+            m=_wake_streak_limit())
+    return WAKE_INSTRUCTION
+
 
 _POLLER: Optional["_WakePoller"] = None  # the single poller, created lazily
 
@@ -183,6 +239,14 @@ def wake_due() -> bool:
     also calls this) would find it again every 2s. A sweep that comes back
     empty therefore means "nothing left to say" — no wake."""
     if not _wake_enabled() or not getattr(st, "_WAKE_ARMED", False):
+        return False
+    # Chain guard (0.121.0): every other guard here is a LIVENESS guard (it
+    # stops wake-loops with nothing to say); a wake turn that legitimately
+    # spawns new work creates new announced-once jobs, so the chain is
+    # productive-by-construction and never trips them. When nobody is at the
+    # keyboard that chain is unbounded — cap consecutive unattended wakes.
+    # Any user-typed turn resets the streak in _repl.py.
+    if getattr(st, "_WAKE_STREAK", 0) >= _wake_streak_limit():
         return False
     if st._WAKE_DUE:
         return True

@@ -321,6 +321,10 @@ def _repl() -> None:
         # wake turn that never emits a tool call still sees it.
         wake = user is _m.WAKE_INPUT
         user = "" if wake else user.strip()
+        if not wake:
+            # A typed turn is the user taking the wheel — the unattended
+            # chain restarts from 0 (0.121.0).
+            st._WAKE_STREAK = 0
         if wake:
             st._WAKE_DUE = False
             # The flag is advisory: a poller that decided mid-turn (its
@@ -331,7 +335,8 @@ def _repl() -> None:
             # pending" (0.109.5).
             if not _m._autowake.wake_due():
                 continue
-            user = _m._autowake.WAKE_INSTRUCTION
+            st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1
+            user = _m._autowake.wake_instruction()
             print(f"{DIM}  ▸ background job finished — auto-continuing{RESET}")
         if not user and not wake:
             continue

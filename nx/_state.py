@@ -190,6 +190,15 @@ _WAKE_ARMED: bool = False
 _WAKE_DUE: bool = False
 _WAKE_PREFILL: str = ""
 
+# Consecutive unattended auto-continuation turns (0.121.0): incremented on
+# each wake turn, reset to 0 by any user-typed turn. Guards the wake chain
+# when a campaign advances itself while nobody is at the keyboard.
+_WAKE_STREAK = 0
+# True once this session has successfully spawned a write/implement/advisor
+# tier sub-agent (set in _subagent.spawn_agent) — gates the campaign wake
+# instruction.
+_SPAWNED_WRITE_TIER = False
+
 # True for the whole duration of one _run_model_turn_loop() call in the
 # interactive parent. wake_due() refuses to fire mid-turn: a notice that
 # stages while a turn runs is flushed by that turn's own tool-loop machinery.

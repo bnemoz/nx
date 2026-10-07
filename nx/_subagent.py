@@ -1139,6 +1139,11 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
     if t in ("write", "implement", "advisor") and not _write_tier_enabled():
         return ("ERROR: write/implement/advisor tier requires NX_SUBAGENT_WRITE=1 "
                 "(set it in the environment or config, then re-spawn)")
+    if t in ("write", "implement", "advisor"):
+        # This session now has a real write-tier delegation on its record
+        # (0.121.0): gates the campaign wake instruction in _autowake.py, which
+        # drives a multi-phase plan while the user is away.
+        st._SPAWNED_WRITE_TIER = True
     scope = extra.pop("scope", scope)
     if scope is not None:
         if not (isinstance(scope, list) and scope
