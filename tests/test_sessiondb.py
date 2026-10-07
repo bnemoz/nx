@@ -61,7 +61,8 @@ def test_store_session_roundtrip_and_revision():
     db.store_session(sid, [_msg("user", "hello"), _msg("assistant", "yo")])
     data2 = db.load_session(sid)
     assert data2["revision"] == 2
-    assert data2["created_at"] == data["created_at"]
+    # 0.115.0: created_at lives only in the (removed) blob — first-save
+    # updated_at is the closest surviving creation marker.
     assert data2["updated_at"] >= data["updated_at"]
 
 
@@ -156,19 +157,22 @@ def test_refresh_fts_and_prune_stale():
     db.store_session(sid, [_msg("user", "quokka habitat")], {"title": "q"})
     db.refresh_fts(sid, [_msg("user", "quokka habitat")], title="q")
     conn = sqlite3.connect(db._store_path())
-    n = conn.execute("SELECT COUNT(*) FROM sessions_fts").fetchone()[0]
+    # 0.115.0: per-message index rows + one metadata row
+    n = conn.execute("SELECT COUNT(*) FROM fts_msgs").fetchone()[0]
+    m = conn.execute("SELECT COUNT(*) FROM fts_meta").fetchone()[0]
     conn.close()
-    assert n == 1
-    # transcript row gone → the FTS row is stale and prune removes it
+    assert n == 1 and m == 1
+    # transcript row gone → the FTS rows are stale and prune removes them
     conn = sqlite3.connect(db._store_path())
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
     conn.commit()
     conn.close()
     assert db.prune_stale() == 1
     conn = sqlite3.connect(db._store_path())
-    n = conn.execute("SELECT COUNT(*) FROM sessions_fts").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM fts_msgs").fetchone()[0]
+    m = conn.execute("SELECT COUNT(*) FROM fts_meta").fetchone()[0]
     conn.close()
-    assert n == 0
+    assert n == 0 and m == 0
 
 
 def test_store_file_private():

@@ -87,41 +87,23 @@ def _blob_messages(sid):
         row = c.execute(
             "SELECT data FROM sessions WHERE session_id = ?",
             (sid,)).fetchone()
+    # 0.115.0: the shell has no "messages" key — that IS the assertion.
     return json.loads(row[0]).get("messages") if row else None
-
-
-# --- 1. fast append ---------------------------------------------------------
-
-def test_fast_append_extends_chain_without_rewriting_blob():
-    _clear_test_sessions_dir()
-    sid = "20250101-120000-evlog1"
-    base = _base_history(4)
-    assert m._write_session(sid, base) is None  # caller returns None; just save
-    saved = sdb.store_session(sid, base)
-    assert saved is not None  # warm the chain via the direct seam
-    grown = base + [_msg("user", "u9"), _msg("assistant", "a9"),
-                    _msg("user", "u10")]
-    out = sdb.store_session(sid, grown)
-    assert out == grown
-    assert _chain_len(sid) == len(grown)
-    assert _event_count(sid) == len(grown)
-    loaded = m._load_session(sid)["messages"]
-    assert loaded == grown
 
 
 # --- 2. lagging cache -------------------------------------------------------
 
 def test_blob_is_lagging_cache_after_append():
+    """0.115.0: the blob is gone entirely — the fast append writes only the
+    new events, and the store row's data stays a small-meta shell."""
     _clear_test_sessions_dir()
     sid = "20250101-120000-evlog2"
     base = _base_history(4)
     sdb.store_session(sid, base)
-    n_base = len(base)
     grown = base + [_msg("user", "later")]
     sdb.store_session(sid, grown)
     blob_msgs = _blob_messages(sid)
-    assert isinstance(blob_msgs, list)
-    assert len(blob_msgs) == n_base  # cache not rewritten by the fast append
+    assert blob_msgs is None  # no transcript copy in the row at all
     loaded = m._load_session(sid)["messages"]
     assert loaded == grown  # the event log is the authority
 

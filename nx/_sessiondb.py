@@ -97,74 +97,67 @@ _FTS_OLD_MARKER = "session_id UNINDEXED"
 
 
 def _create_external_fts(conn: sqlite3.Connection) -> None:
-    """The external-content FTS pair. The bodies live in the real
-    `fts_body` table (one row per session); the FTS table references them
-    by rowid and stores only the inverted index — no second copy of the
-    text. Created with IF NOT EXISTS, so a call on an up-to-date store is
-    a cheap no-op."""
+    """The 0.115.0 FTS trio. Message bodies live in the real `fts_msgs`
+    table (one row per transcript message); `msgs_fts` references them by
+    rowid and stores only the inverted index — no second copy of the text.
+    `meta_fts` is a tiny per-session index over title/description so a
+    title-only query still matches. Created with IF NOT EXISTS, so a call
+    on an up-to-date store is a cheap no-op."""
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS fts_body("
-        "id INTEGER PRIMARY KEY,"
-        "sid TEXT NOT NULL UNIQUE,"
-        "title TEXT, description TEXT, body TEXT, mtime REAL)")
+        "CREATE TABLE IF NOT EXISTS fts_msgs("
+        "sid TEXT NOT NULL, seq INTEGER NOT NULL,"
+        "role TEXT, body TEXT, mtime REAL)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fts_meta("
+        "sid TEXT PRIMARY KEY, title TEXT, description TEXT, mtime REAL)")
     try:
         conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5("
-            "title, description, body, content='fts_body',"
-            " content_rowid='id')")
+            "CREATE VIRTUAL TABLE IF NOT EXISTS msgs_fts USING fts5("
+            "body, content='fts_msgs', content_rowid='rowid')")
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5("
+            "title, description, content='fts_meta',"
+            " content_rowid='rowid')")
     except sqlite3.OperationalError:
-        pass  # no FTS5 here — fts_body still serves the delete/prune paths
+        pass  # no FTS5 here — fts_msgs still serves the delete/prune paths
 
 
-def _fts_is_external(conn: sqlite3.Connection) -> bool:
+def _fts_is_current(conn: sqlite3.Connection) -> bool:
     try:
         row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name = 'sessions_fts'"
+            "SELECT sql FROM sqlite_master WHERE name = 'msgs_fts'"
         ).fetchone()
     except sqlite3.Error:
         return False
-    return row is not None and "content='fts_body'" in (row[0] or "")
+    return row is not None and "content='fts_msgs'" in (row[0] or "")
 
 
 def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
-    """Create the external-content FTS pair, migrating a legacy standalone
-    sessions_fts (which stored its own copy of every body — ~2x the text
-    plus a fragmented index) in place: rows move to fts_body, the old table
-    is dropped, and the index is rebuilt fresh. One transaction; any error
-    rolls back to the legacy table and search keeps working."""
-    if _fts_is_external(conn):
+    """Create the 0.115.0 per-message FTS pair, migrating a pre-0.115
+    store (external-content sessions_fts over fts_body, or the legacy
+    standalone sessions_fts) in place: the old index tables are dropped
+    and the per-message index is rebuilt lazily by search (see
+    _sessions_search._refresh_index — a blocking backfill of 2.2M events
+    must never run on open). One transaction; any error rolls back to the
+    previous shape and search keeps working."""
+    if _fts_is_current(conn):
         _create_external_fts(conn)
         return
     try:
-        old: list[tuple] = []
-        try:
-            old = conn.execute(
-                "SELECT session_id, title, description, body, mtime"
-                " FROM sessions_fts").fetchall()
-        except sqlite3.OperationalError as e:
-            if "no such table" in str(e):
-                _create_external_fts(conn)  # fresh store — just create
-                return
-            return  # no FTS5 in this build — nothing to migrate or create
         conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("DROP TABLE sessions_fts")
+            for name in ("sessions_fts", "fts_body"):
+                try:
+                    conn.execute(f"DROP TABLE IF EXISTS {name}")
+                except sqlite3.Error:
+                    pass
             _create_external_fts(conn)
-            for sid, title, desc, body, mtime in old:
-                cur = conn.execute(
-                    "INSERT INTO fts_body(sid, title, description, body,"
-                    " mtime) VALUES (?,?,?,?,?)",
-                    (sid, title, desc, body, mtime))
-                conn.execute(
-                    "INSERT INTO sessions_fts(rowid, title, description, body)"
-                    " SELECT id, title, description, body FROM fts_body"
-                    " WHERE id = ?", (cur.lastrowid,))
             conn.commit()
         except Exception:
             conn.rollback()
             raise
     except sqlite3.Error:
-        pass  # keep the legacy table; search degrades but still works
+        pass  # keep whatever shape exists; search degrades but still works
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -453,85 +446,89 @@ def _store_path_exists() -> bool:
 def load_session(session_id: str) -> Optional[dict[str, Any]]:
     """The transcript dict for `session_id`, or None.
 
-    0.104.x: when a session_chain row exists, the messages come from the
-    append-only event log (the authoritative store) while the metadata
-    (title, revision, ...) comes from the blob cache with the live
-    revision/updated_at taken from the indexed columns (the blob cache is
-    stale between rebuilds); a missing blob degrades to a synthesized dict.
-    """
+    0.115.0: the event log is the only transcript copy — messages always
+    come from session_events, metadata from the sessions row's indexed
+    columns. A pre-0.104 session (blob, no events) is inflated from its
+    blob once, lazily, right here."""
     _ensure_migrated()
     conn = _open()
     if conn is None:
         return None
     try:
         row = conn.execute(
-            "SELECT data, revision, updated_at FROM sessions"
-            " WHERE session_id = ?", (session_id,)).fetchone()
-        chain = _read_chain(conn, session_id)
-        events = _read_events(conn, session_id) if chain is not None else None
+            "SELECT data, revision, updated_at, title, cwd, model, source"
+            " FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if not row:
+            return None
+        # Lazy pre-0.104 migration: inflate events from the blob once.
+        ev_count = conn.execute(
+            "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+            (session_id,)).fetchone()[0]
+        if not ev_count and row[0]:
+            parsed = _row_to_data(session_id, row[0])
+            if parsed and parsed.get("messages"):
+                conn.executemany(
+                    "INSERT OR IGNORE INTO session_events(session_id, seq,"
+                    " msg) VALUES (?,?,?)",
+                    [(session_id, i, json.dumps(m, ensure_ascii=False))
+                     for i, m in enumerate(parsed["messages"])])
+                conn.commit()
+        events = _read_events(conn, session_id)
     except sqlite3.Error:
         return None
     finally:
         conn.close()
-    if chain is not None:
-        out = _row_to_data(session_id, row[0]) if row else {}
-        if out is None:
-            out = {}
-        out["id"] = session_id
-        out["messages"] = events or []
-        if row:
-            if row[1] is not None:
-                out["revision"] = int(row[1])
-            if row[2] is not None:
-                out["updated_at"] = float(row[2])
-        out.setdefault("updated_at", 0.0)
-        return out
-    if not row:
-        return None
-    return _row_to_data(session_id, row[0])
+    out: dict[str, Any] = {}
+    if row and row[0]:
+        try:
+            shell = json.loads(row[0])
+        except (ValueError, TypeError):
+            shell = None
+        if isinstance(shell, dict):
+            out = dict(shell)
+    out["id"] = session_id
+    out["messages"] = events
+    if row:
+        if row[1] is not None:
+            out["revision"] = int(row[1])
+        if row[2] is not None:
+            out["updated_at"] = float(row[2])
+        # 0.115.0: metadata lives in the indexed columns (the stored blob is
+        # a small-meta shell); the columns win over any stale shell keys.
+        for k, v in zip(("title", "cwd", "model", "source"), row[3:7]):
+            if v is not None:
+                out[k] = v
+    # 0.115.0: created_at lived only in the removed transcript blob — the
+    # first-save updated_at is the closest surviving creation marker.
+    out.setdefault("created_at", out.get("updated_at", 0.0))
+    out.setdefault("updated_at", 0.0)
+    return out
 
 
 def _session_meta(session_id: str) -> dict[str, Any]:
     """Cheap metadata-only view (title/description/cwd/...) for the save
     path's FTS refresh.
 
-    0.108.6: title comes from the indexed column; description still lives
-    only inside the blob, so the blob is read with substring() extraction
-    of the one field instead of a full json.loads — a 200MB legacy blob
-    used to be parsed (twice: blob + decoder objects) on every indexed
-    save just to reach `description`. Falls back to a full parse when the
-    substring probe can't find the field (escaped keys, non-ASCII edge
-    cases); the fallback is correctness-safe, only slow."""
+    0.115.0: the blob is gone; description lives in the indexed `fts_meta`
+    row (written by refresh_fts) or falls back to nothing — never a blob
+    parse."""
     _ensure_migrated()
     conn = _open()
     if conn is None:
         return {}
     try:
         row = conn.execute(
-            "SELECT title, data FROM sessions WHERE session_id = ?",
-            (session_id,)).fetchone()
+            "SELECT s.title, m.description FROM sessions s"
+            " LEFT JOIN fts_meta m ON m.sid = s.session_id"
+            " WHERE s.session_id = ?", (session_id,)).fetchone()
     except sqlite3.Error:
         return {}
     finally:
         conn.close()
     if not row:
         return {}
-    desc: Optional[str] = None
-    blob = row[1] or ""
-    k = '"description":'
-    p = blob.find(k)
-    if p >= 0:
-        rest = blob[p + len(k):].lstrip()
-        if rest[:1] == '"':
-            # JSON string: unescape the minimal set; fall back to a full
-            # parse if any backslash appears (conservative, never lossy)
-            end = rest.find('"', 1)
-            if end > 0 and "\\" not in rest[1:end]:
-                desc = rest[1:end]
-    if desc is None:
-        parsed = _row_to_data(session_id, blob)
-        return parsed or {}
-    return {"id": session_id, "title": row[0], "description": desc}
+    return {"id": session_id, "title": row[0],
+            "description": row[1]}
 
 
 # --- event log helpers ------------------------------------------------------
@@ -579,11 +576,10 @@ def _store_session_txn(
             now = time.time()
             from ._sessions_fs import _merge_session_messages
             chain_len = _read_chain(conn, session_id)
-            # 0.108.6: only read + parse the lagging blob when a rebuild can
-            # actually need `existing` (its metadata/merge base). A fast
-            # append (the per-turn common case) never reads it — that was a
-            # full blob fetch + json.loads of the whole transcript on every
-            # save, discarded immediately after.
+            # 0.115.0: the blob cache is gone — the event log is the only
+            # transcript copy. A fast append never reads any transcript;
+            # a rebuild reads events (the authoritative copy) as its merge
+            # base. The sessions row holds metadata + indexed columns only.
             row = conn.execute(
                 "SELECT revision FROM sessions WHERE session_id = ?",
                 (session_id,)).fetchone()
@@ -602,19 +598,45 @@ def _store_session_txn(
                     except (ValueError, TypeError):
                         fast = False
 
+            # Small non-transcript meta (todos/plan/wip/metrics) rides in the
+            # shell blob — the event log holds only messages, so this is the
+            # one place per-save state can persist. Cheap: a few short keys.
+            def _shell_blob() -> str:
+                small = {k: v for k, v in (meta or {}).items()
+                         if k not in ("id", "title", "description", "cwd",
+                                      "model", "source", "updated_at",
+                                      "revision", "messages", "created_at")
+                         and v is not None}
+                if not small:
+                    return "{}"
+                return json.dumps(small, ensure_ascii=False)
+
+            shell_blob = _shell_blob()
+
             existing: dict[str, Any] = {}
             if not fast:
-                row = conn.execute(
-                    "SELECT data FROM sessions WHERE session_id = ?",
-                    (session_id,)).fetchone()
-                if row:
-                    parsed = _row_to_data(session_id, row[0])
-                    if parsed:
-                        existing = parsed
+                # Lazy pre-0.104 migration: a session with a data blob but
+                # no events inflates its events from the blob once.
+                if chain_len is None:
+                    ev_rows = conn.execute(
+                        "SELECT COUNT(*) FROM session_events"
+                        " WHERE session_id = ?", (session_id,)).fetchone()
+                    if not ev_rows[0]:
+                        blob_row = conn.execute(
+                            "SELECT data FROM sessions WHERE session_id = ?",
+                            (session_id,)).fetchone()
+                        if blob_row and blob_row[0]:
+                            parsed = _row_to_data(session_id, blob_row[0])
+                            if parsed and parsed.get("messages"):
+                                conn.executemany(
+                                    "INSERT INTO session_events(session_id,"
+                                    " seq, msg) VALUES (?,?,?)",
+                                    [(session_id, i, json.dumps(m, ensure_ascii=False))
+                                     for i, m in enumerate(parsed["messages"])])
 
             if fast:
-                # Fast append: new events only; the data blob is a lagging
-                # cache and is deliberately NOT rewritten.
+                # Fast append: new events only. The sessions row is
+                # metadata + indexed columns; there is no blob to rewrite.
                 for i, m in enumerate(messages[chain_len:], start=chain_len):
                     conn.execute(
                         "INSERT INTO session_events(session_id, seq, msg)"
@@ -624,13 +646,9 @@ def _store_session_txn(
                 merged = list(messages)
             else:
                 # Full rebuild (no chain / compaction / fork / shorter than
-                # chain / tail mismatch / collision retry): merge, collapse
-                # the chain, rewrite the blob cache.
-                if chain_len is not None:
-                    existing_msgs: list[dict[str, Any]] = _read_events(
-                        conn, session_id)
-                else:
-                    existing_msgs = existing.get("messages") or []
+                # chain / tail mismatch / collision retry): merge against
+                # the event log, collapse the chain, rewrite the events.
+                existing_msgs = _read_events(conn, session_id)
                 merged = _merge_session_messages(existing_msgs, messages)
                 conn.execute(
                     "DELETE FROM session_events WHERE session_id = ?",
@@ -651,16 +669,42 @@ def _store_session_txn(
                     for k, v in meta.items():
                         if v is not None:
                             data[k] = v
+                # 0.115.0: metadata + indexed columns only — the transcript
+                # JSON is never written here (the event log is the store).
+                # Small meta (todos/plan/wip/metrics) rides in the shell.
                 conn.execute(
-                    "INSERT OR REPLACE INTO sessions"
-                    " (session_id, data, updated_at, revision, title, cwd,"
-                    "  model, source, image_shas) VALUES (?,?,?,?,?,?,?,?,?)",
-                    _data_to_row(session_id, data))
+                    "INSERT INTO sessions (session_id, data, updated_at,"
+                    " revision, title, cwd, model, source, image_shas)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(session_id) DO UPDATE SET"
+                    " data=excluded.data,"
+                    " updated_at=excluded.updated_at,"
+                    " revision=excluded.revision,"
+                    " title=COALESCE(excluded.title, sessions.title),"
+                    " cwd=COALESCE(excluded.cwd, sessions.cwd),"
+                    " model=COALESCE(excluded.model, sessions.model),"
+                    " source=COALESCE(excluded.source, sessions.source),"
+                    " image_shas=excluded.image_shas",
+                    (session_id, shell_blob,
+                     float((meta or {}).get("updated_at") or now),
+                     live_revision + 1,
+                     (meta or {}).get("title") or existing.get("title"),
+                     (meta or {}).get("cwd") or existing.get("cwd"),
+                     (meta or {}).get("model") or existing.get("model"),
+                     (meta or {}).get("source") or existing.get("source"),
+                     _shas_of({"messages": merged})))
+                # The FTS mirror of a rebuilt transcript is stale at every
+                # seq — drop it; the next indexed save (or the next search's
+                # lazy backfill) rebuilds it.
+                try:
+                    conn.execute(
+                        "DELETE FROM fts_msgs WHERE sid = ?", (session_id,))
+                except sqlite3.OperationalError:
+                    pass  # no FTS5 here
 
-            # Shared tail: chain upsert + indexed meta columns. On a rebuild
-            # the blob INSERT OR REPLACE already set the indexed columns, so
-            # only the chain row is written; on a fast append the blob cache
-            # is stale by design and only the indexed columns are touched.
+            # Shared tail: chain upsert. On a rebuild the sessions upsert
+            # above already set the indexed columns; on a fast append the
+            # UPDATE below touches only the columns the caller supplied.
             conn.execute(
                 "INSERT OR REPLACE INTO session_chain"
                 " (session_id, chain_len, updated_at) VALUES (?,?,?)",
@@ -670,7 +714,8 @@ def _store_session_txn(
                 # the blob cache's values are stale, so defaulting to them
                 # here could regress a title another writer just set.
                 sets = ["updated_at = ?", "revision = COALESCE(revision, 0) + 1"]
-                vals: list[Any] = [now]
+                vals: list[Any] = [
+                    float((meta or {}).get("updated_at") or now)]
                 for col in ("title", "cwd", "model", "source"):
                     v = (meta or {}).get(col)
                     if v is not None:
@@ -680,12 +725,21 @@ def _store_session_txn(
                 conn.execute(
                     f"UPDATE sessions SET {', '.join(sets)}"
                     " WHERE session_id = ?", vals)
+                # Fast path: the shell's small meta must still refresh —
+                # metrics totals and the plan/wip block change every turn.
+                if shell_blob != "{}":
+                    try:
+                        conn.execute(
+                            "UPDATE sessions SET data = ?"
+                            " WHERE session_id = ?", (shell_blob, session_id))
+                    except sqlite3.Error:
+                        pass
             if fast:
-                # 0.108.6: keep the indexed sha set current even when the blob
-                # cache is deliberately stale — a union with the old value
-                # stays correct (events are append-only; a sha once referenced
-                # by a committed event stays referenced until the GC deletes
-                # that sidecar, which only happens when it is in the live-set).
+                # 0.108.6: keep the indexed sha set current — a union with
+                # the old value stays correct (events are append-only; a sha
+                # once referenced by a committed event stays referenced until
+                # the GC deletes that sidecar, which only happens when it is
+                # in the live-set).
                 try:
                     new_shas = _shas_of({"messages": messages})
                     old = conn.execute(
@@ -751,10 +805,21 @@ def store_session(
 def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                 title: str | None = None, description: str | None = None,
                 conn: Optional[sqlite3.Connection] = None) -> None:
-    """Insert/replace one session's FTS body row. Building the body scales
-    with the transcript, so the write path only calls this on indexed saves
-    (update_index=True) — mid-turn autosaves skip it, exactly like the 2.3b
-    design where the FTS body was backfilled lazily by the next search."""
+    """Sync one session's per-message FTS index (0.115.0).
+
+    State-driven, mirroring the events fast path: the indexed row set is
+    compared against the transcript by count and tail content, and only
+    the genuinely new tail is inserted. Building a full body scales with
+    the transcript, so the write path only calls this on indexed saves
+    (update_index=True) — mid-turn autosaves skip it, exactly like the
+    2.3b design where the FTS body was backfilled lazily by the next
+    search.
+
+    A full reindex (session shrank, index gap, tail mismatch — the
+    compaction/fork cases) deletes and rebuilds every row for the sid,
+    same worst case as the pre-0.115 whole-body rewrite; the steady state
+    (turn appended) is O(new messages).
+    """
     own = conn is None
     if own:
         conn = _open()
@@ -762,41 +827,121 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
             return
     try:
         from ._sessions_io import _flatten_message_text
-        parts = []
-        for m in messages or []:
+
+        def _body_of(m: Any) -> str:
             if not isinstance(m, dict):
-                continue
+                return ""
             txt = _flatten_message_text(m)
-            if txt:
-                parts.append(f"[{m.get('role', '?')}] {txt}")
-        body = "\n".join(parts)
+            return f"[{m.get('role', '?')}] {txt}" if txt else ""
+
+        now = time.time()
         with conn:
-            # External-content mode (0.104.x): the body row lives in
-            # fts_body; the FTS row is keyed to it by rowid and must be
-            # deleted/reinserted in step.
             try:
                 row = conn.execute(
-                    "SELECT id FROM fts_body WHERE sid = ?",
-                    (session_id,)).fetchone()
-                if row:
+                    "SELECT COUNT(*), COALESCE(MAX(seq), -1) FROM fts_msgs"
+                    " WHERE sid = ?", (session_id,)).fetchone()
+                cnt, max_seq = int(row[0]), int(row[1])
+                n_msgs = len(messages or [])
+                rebuild = True
+                if cnt == 0:
+                    pass  # fresh index: full insert is the append
+                elif max_seq != cnt - 1:
+                    pass  # gap/corruption: reindex
+                elif max_seq >= n_msgs:
+                    pass  # transcript shrank (compaction): reindex
+                else:
+                    tail = conn.execute(
+                        "SELECT body FROM fts_msgs WHERE sid = ? AND seq = ?",
+                        (session_id, max_seq)).fetchone()
+                    # Same trick as the events fast path: a matching tail
+                    # proves the shared prefix is intact, so rows
+                    # [max_seq+1, n_msgs) are the only additions.
+                    rebuild = (tail[0] or "") != _body_of(
+                        (messages or [])[max_seq])
+                if rebuild:
                     conn.execute(
-                        "DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
+                        "DELETE FROM fts_msgs WHERE sid = ?", (session_id,))
+                    rows = [(session_id, i,
+                             str(m.get("role", "?"))
+                             if isinstance(m, dict) else "?",
+                             _body_of(m), now)
+                            for i, m in enumerate(messages or [])
+                            if _body_of(m)]
+                    conn.executemany(
+                        "INSERT INTO fts_msgs(sid, seq, role, body, mtime)"
+                        " VALUES (?,?,?,?,?)", rows)
+                    # External-content sync: the index must be given the row
+                    # text explicitly (a bare rowid insert indexes nothing).
+                    try:
+                        conn.execute(
+                            "INSERT INTO msgs_fts(rowid, body)"
+                            " SELECT rowid, body FROM fts_msgs WHERE sid = ?",
+                            (session_id,))
+                    except sqlite3.OperationalError:
+                        pass  # no FTS5 here
+                else:
+                    conn.executemany(
+                        "INSERT INTO fts_msgs(sid, seq, role, body, mtime)"
+                        " VALUES (?,?,?,?,?)",
+                        [(session_id, i, str(m.get("role", "?")),
+                          _body_of(m), now)
+                         for i, m in enumerate(messages or [])
+                         if i > max_seq and _body_of(m)])
+                    try:
+                        conn.execute(
+                            "INSERT INTO msgs_fts(rowid, body)"
+                            " SELECT rowid, body FROM fts_msgs"
+                            " WHERE sid = ? AND seq > ?",
+                            (session_id, max_seq))
+                    except sqlite3.OperationalError:
+                        pass  # no FTS5 here
+                # The tiny metadata index is upserted whole — title and
+                # description are two short strings.
+                try:
+                    mrow = conn.execute(
+                        "SELECT rowid FROM fts_meta WHERE sid = ?",
+                        (session_id,)).fetchone()
+                    if mrow:
+                        conn.execute(
+                            "DELETE FROM meta_fts WHERE rowid = ?", (mrow[0],))
+                        conn.execute(
+                            "DELETE FROM fts_meta WHERE sid = ?",
+                            (session_id,))
+                    cur = conn.execute(
+                        "INSERT INTO fts_meta(sid, title, description, mtime)"
+                        " VALUES (?,?,?,?)",
+                        (session_id, title or "", description or "", now))
                     conn.execute(
-                        "DELETE FROM fts_body WHERE id = ?", (row[0],))
-                cur = conn.execute(
-                    "INSERT INTO fts_body (sid, title, description, body,"
-                    " mtime) VALUES (?,?,?,?,?)",
-                    (session_id, title or "", description or "", body,
-                     time.time()))
-                conn.execute(
-                    "INSERT INTO sessions_fts (rowid, title, description,"
-                    " body) SELECT id, title, description, body"
-                    " FROM fts_body WHERE id = ?", (cur.lastrowid,))
+                        "INSERT INTO meta_fts(rowid, title, description)"
+                        " SELECT rowid, title, description FROM fts_meta"
+                        " WHERE rowid = ?", (cur.lastrowid,))
+                except sqlite3.OperationalError:
+                    pass  # no FTS5 here — fts_meta still serves deletes
             except sqlite3.OperationalError:
-                pass  # no FTS5 here — the transcript row is the part that matters
+                pass  # no FTS5 here — the event log is the part that matters
     finally:
         if own:
             conn.close()
+
+
+def _fts_delete_conn(conn: sqlite3.Connection, session_id: str) -> None:
+    """Delete one session's FTS index rows (per-message + metadata) on the
+    caller's connection/transaction. Best-effort: no FTS5 here degrades to
+    deleting the real tables only."""
+    try:
+        conn.execute("DELETE FROM fts_msgs WHERE sid = ?", (session_id,))
+        conn.execute("DELETE FROM fts_meta WHERE sid = ?", (session_id,))
+        try:
+            conn.execute(
+                "DELETE FROM msgs_fts WHERE rowid IN"
+                " (SELECT rowid FROM fts_msgs WHERE sid = ?)", (session_id,))
+            conn.execute(
+                "DELETE FROM meta_fts WHERE rowid IN"
+                " (SELECT rowid FROM fts_meta WHERE sid = ?)", (session_id,))
+        except sqlite3.OperationalError:
+            pass  # external-content FTS already dropped its rows
+    except sqlite3.OperationalError:
+        pass  # no FTS5 here — the transcript rows are what matter
 
 
 def _delete_session_conn(conn: sqlite3.Connection, session_id: str) -> None:
@@ -804,15 +949,7 @@ def _delete_session_conn(conn: sqlite3.Connection, session_id: str) -> None:
     caller's connection. The caller owns the transaction; this never opens or
     closes a connection, so a sweep can reuse one conn for many deletes."""
     conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-    try:
-        row = conn.execute(
-            "SELECT id FROM fts_body WHERE sid = ?",
-            (session_id,)).fetchone()
-        if row:
-            conn.execute("DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
-            conn.execute("DELETE FROM fts_body WHERE id = ?", (row[0],))
-    except sqlite3.OperationalError:
-        pass  # no FTS5 here — the transcript rows are what matter
+    _fts_delete_conn(conn, session_id)
     conn.execute("DELETE FROM session_events WHERE session_id = ?",
                  (session_id,))
     conn.execute("DELETE FROM session_chain WHERE session_id = ?",
@@ -872,49 +1009,50 @@ def all_ids() -> set[str]:
 
 
 def iter_rows() -> Iterator[tuple[str, Optional[dict[str, Any]]]]:
-    """Yield (session_id, parsed transcript) for every row — the live-set scan
-    (image sha256s) and pruning read the whole store. A corrupt blob yields
-    (sid, None) so the caller can fall back.
+    """Yield (session_id, transcript dict) for every row — the listing index
+    builder, the live-set scan fallback, and pruning read the whole store.
 
-    0.108.5: a generator streaming fetchmany(64) rows instead of one
-    fetchall + parse-everything list. The old shape materialized EVERY
-    session's transcript (blobs + parsed dicts) in memory at once — a single
-    big session in the store pushed the whole-store scan to multiple GB of
-    RSS (the RAM-stress finding), and it ran on the session-save writer
-    thread where nothing could shed it. Peak cost is now one row + its
-    event materialization.
-
-    0.108.6: image_live_shas() is the whole-store scan's real consumer; the
-    per-row parse here exists only for its NULL-column fallback and the
-    pruning/listing callers."""
+    0.115.0: metadata comes from the indexed columns (the blob is an empty
+    shell) and messages always come from the event log — a listing never
+    parses a transcript blob. Rows whose events fail to read yield
+    (sid, None) so the caller can fall back."""
     conn = _open()
     if conn is None:
         return
     try:
         try:
-            chains = {r[0] for r in conn.execute(
-                "SELECT session_id FROM session_chain")}
-            cur = conn.execute("SELECT session_id, data FROM sessions")
+            cur = conn.execute(
+                "SELECT session_id, data, updated_at, revision, title, cwd,"
+                " model, source FROM sessions")
             while True:
                 rows = cur.fetchmany(64)
                 if not rows:
                     break
-                for sid, blob in rows:
-                    data = _row_to_data(sid, blob)
-                    if sid in chains:
-                        # Event-log-backed: materialize messages from the
-                        # events so the live-set sees appended-but-not-yet-
-                        # cached turns. Same connection — conn.execute makes
-                        # its own cursor, so the outer one stays valid.
-                        try:
-                            events = _read_events(conn, sid)
-                        except sqlite3.Error:
-                            events = None
-                        if events is not None:
-                            base = dict(data or {})
-                            base["id"] = sid
-                            base["messages"] = events
-                            data = base
+                for sid, blob, updated_at, revision, title, cwd, model, source in rows:
+                    base: dict[str, Any]
+                    if blob:
+                        parsed = _row_to_data(sid, blob)
+                        base = parsed if parsed is not None else {}
+                    else:
+                        base = {}
+                    base["id"] = sid
+                    if revision is not None:
+                        base["revision"] = int(revision)
+                    if updated_at is not None:
+                        base["updated_at"] = float(updated_at)
+                    for k, v in (("title", title), ("cwd", cwd),
+                                 ("model", model), ("source", source)):
+                        if v is not None:
+                            base[k] = v
+                    try:
+                        events = _read_events(conn, sid)
+                    except sqlite3.Error:
+                        events = None
+                    if events is not None:
+                        base["messages"] = events
+                        data: Optional[dict[str, Any]] = base
+                    else:
+                        data = None
                     yield sid, data
         except sqlite3.Error:
             return
@@ -932,22 +1070,19 @@ def prune_stale() -> int:
     try:
         try:
             fts_ids = [r[0] for r in conn.execute(
-                "SELECT sid FROM fts_body").fetchall()]
+                "SELECT sid FROM fts_meta").fetchall()]
+            msg_ids = [r[0] for r in conn.execute(
+                "SELECT DISTINCT sid FROM fts_msgs").fetchall()]
         except sqlite3.OperationalError:
             return 0  # no FTS5 here
         have = {r[0] for r in conn.execute("SELECT session_id FROM sessions")}
-        doomed = [sid for sid in fts_ids if sid not in have]
+        doomed = [sid for sid in set(fts_ids) | set(msg_ids)
+                  if sid not in have]
         if not doomed:
             return 0
         with conn:
             for sid in doomed:
-                row = conn.execute(
-                    "SELECT id FROM fts_body WHERE sid = ?", (sid,)).fetchone()
-                if row:
-                    conn.execute(
-                        "DELETE FROM sessions_fts WHERE rowid = ?", (row[0],))
-                    conn.execute("DELETE FROM fts_body WHERE id = ?",
-                                 (row[0],))
+                _fts_delete_conn(conn, sid)
         return len(doomed)
     except sqlite3.Error:
         return 0

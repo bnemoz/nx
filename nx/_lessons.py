@@ -79,12 +79,17 @@ def search_lessons(query: str, limit: int | None = None,
     except Exception:
         pass  # a failing backfill degrades this call, never raises
     try:
+        # 0.115.0: per-message index — one row per transcript message; rank
+        # the matching messages, group to the best one per session.
         rows = conn.execute(
-            "SELECT fts_body.sid, fts_body.title, sessions.cwd, "
-            "fts_body.body, bm25(sessions_fts) AS rank "
-            "FROM sessions_fts JOIN fts_body ON fts_body.id = sessions_fts.rowid "
-            "JOIN sessions ON sessions.session_id = fts_body.sid "
-            "WHERE sessions_fts MATCH ? "
+            "SELECT fts_msgs.sid,"
+            " COALESCE((SELECT title FROM fts_meta WHERE sid ="
+            "          fts_msgs.sid), sessions.title),"
+            " sessions.cwd, fts_msgs.body, bm25(msgs_fts) AS rank "
+            "FROM msgs_fts JOIN fts_msgs"
+            " ON fts_msgs.rowid = msgs_fts.rowid "
+            "JOIN sessions ON sessions.session_id = fts_msgs.sid "
+            "WHERE msgs_fts MATCH ? "
             "ORDER BY rank LIMIT ?",
             (query, limit if limit > 0 else -1)).fetchall()
     except Exception:
@@ -100,7 +105,11 @@ def search_lessons(query: str, limit: int | None = None,
             except (TypeError, ValueError):
                 root = None
     out = []
+    seen: set[str] = set()
     for sid, title, cwd, body, rank in rows:
+        if sid in seen:
+            continue  # a session's best-ranked message only
+        seen.add(sid)
         if root and os.path.realpath(str(cwd or "")) != root:
             continue
         out.append({

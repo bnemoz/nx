@@ -41,10 +41,10 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5("
-        "session_id UNINDEXED, title, description, body, mtime UNINDEXED)")
-    conn.commit()
+    # 0.115.0: the index schema is owned by _sessiondb (fts_msgs/fts_meta
+    # + external-content FTS). _open_store's caller ensured it already;
+    # nothing standalone to create here anymore.
+    return None
 
 
 def _session_body(data: dict[str, Any]) -> str:
@@ -119,23 +119,23 @@ def _iter_session_files() -> list[tuple[str, float]]:
 
 def _indexed_mtime(conn: sqlite3.Connection, session_id: str) -> Optional[float]:
     row = conn.execute(
-        "SELECT mtime FROM fts_body WHERE sid = ?",
+        "SELECT mtime FROM fts_meta WHERE sid = ?",
         (session_id,)).fetchone()
     return row[0] if row else None
 
 
 def _refresh_index(force: bool = False,
                    conn: Optional[sqlite3.Connection] = None) -> int:
-    """Backfill FTS rows for sessions that have a transcript row but no
-    body yet (indexed saves write the body themselves; legacy imports and
-    autosave-only writes do not). Also drops FTS rows whose transcript row
-    is gone — /sessions <query> must never offer a deleted id.
+    """Backfill per-message FTS rows for sessions that have a transcript
+    row but no index yet (indexed saves write the index themselves; legacy
+    imports, pre-0.115 stores, and autosave-only writes do not). Also
+    drops FTS rows whose transcript row is gone — /sessions <query> must
+    never offer a deleted id.
 
-    0.101.0: no per-file mtimes to compare — freshness is simply "does an
-    FTS row exist for this transcript row". Returns sessions indexed.
-
-    Swarm P11: accepts a caller-owned connection so search_sessions' old
-    open-refresh-close + open-again shape becomes one."""
+    Freshness is simply "does an fts_meta row exist for this transcript
+    row"; the message rows themselves are rebuilt whole by refresh_fts on
+    backfill (the write path's incremental appends keep them current
+    afterwards)."""
     from . import _sessiondb
     own = conn is None
     if own:
@@ -146,42 +146,31 @@ def _refresh_index(force: bool = False,
     try:
         try:
             fts_ids = {r[0] for r in conn.execute(
-                "SELECT sid FROM fts_body").fetchall()}
+                "SELECT sid FROM fts_meta").fetchall()}
         except sqlite3.OperationalError:
             return 0  # no FTS5 here
-        # prune FTS/body rows whose transcript row is gone
+        # prune FTS rows whose transcript row is gone
         have = {r[0] for r in conn.execute(
             "SELECT session_id FROM sessions").fetchall()}
         stale = fts_ids - have
         for sid in stale:
-            row = conn.execute("SELECT id FROM fts_body WHERE sid = ?",
-                               (sid,)).fetchone()
-            if row:
-                conn.execute("DELETE FROM sessions_fts WHERE rowid = ?",
-                             (row[0],))
-                conn.execute("DELETE FROM fts_body WHERE id = ?", (row[0],))
+            _sessiondb._fts_delete_conn(conn, sid)
         if stale:
             conn.commit()
-        # backfill missing bodies from the store itself. 0.103.11: only fetch
-        # transcripts of rows that actually lack an FTS body — iter_rows()
-        # over the whole store (1000+ sessions) costs tens of seconds on
-        # every search even when nothing needs backfilling.
+        # backfill missing sessions from the store itself. Only fetch
+        # transcripts of rows that actually lack an index — a full sweep
+        # costs tens of seconds on a big store even when nothing needs
+        # backfilling.
         missing = [sid for sid in have - fts_ids]
         if missing:
-            qmarks = ",".join("?" * len(missing))
-            for sid, blob in conn.execute(
-                    f"SELECT session_id, data FROM sessions "
-                    f"WHERE session_id IN ({qmarks})", missing).fetchall():
-                # 0.104.0: the blob cache carries no messages once a session
-                # is chain-backed — the event log is the body source.
+            for sid in missing:
                 data = _sessiondb.load_session(sid)
-                if not data:
-                    data = _sessiondb._row_to_data(sid, blob)
                 if not data:
                     continue
                 _sessiondb.refresh_fts(
                     sid, data.get("messages") or [],
-                    title=data.get("title"), description=data.get("description"),
+                    title=data.get("title"),
+                    description=data.get("description"),
                     conn=conn)
                 n += 1
     finally:
@@ -210,25 +199,56 @@ def search_sessions(query: str, limit: int = 20) -> list[dict[str, Any]]:
         except sqlite3.OperationalError:
             return []
         try:
-            rows = conn.execute(
-                "SELECT fts_body.sid, fts_body.title, fts_body.description,"
-                " highlight(sessions_fts, 2, '[[', ']]') "
-                "FROM sessions_fts JOIN fts_body"
-                " ON fts_body.id = sessions_fts.rowid "
-                "WHERE sessions_fts MATCH ? "
-                "ORDER BY rank LIMIT ?", (query, limit)).fetchall()
+            # Per-message hits (0.115.0): rank matching messages, then
+            # group to one row per session with its best snippet.
+            hits = conn.execute(
+                "SELECT fts_msgs.sid, fts_msgs.body"
+                " FROM msgs_fts JOIN fts_msgs"
+                " ON fts_msgs.rowid = msgs_fts.rowid"
+                " WHERE msgs_fts MATCH ?"
+                " ORDER BY rank LIMIT ?", (query, limit * 8)).fetchall()
+            meta_hits = conn.execute(
+                "SELECT fts_meta.sid, fts_meta.title, fts_meta.description,"
+                " NULL"
+                " FROM meta_fts JOIN fts_meta"
+                " ON fts_meta.rowid = meta_fts.rowid"
+                " WHERE meta_fts MATCH ?"
+                " ORDER BY rank LIMIT ?", (query, limit)).fetchall()
         except sqlite3.OperationalError:
             return []  # bad FTS query (operators, quotes) — caller falls back
-        out = []
-        for sid, title, desc, hl in rows:
-            snippet = (hl or "").strip()
-            # trim around the first highlight for display
-            k = snippet.find("[[")
+        order: list[str] = []
+        seen: dict[str, dict[str, Any]] = {}
+        for sid, title, desc, _ in meta_hits:
+            seen[sid] = {"id": sid, "title": title, "description": desc,
+                         "snippet": "", "matched": True}
+            order.append(sid)
+        best_body: dict[str, str] = {}
+        body_order: list[str] = []
+        for sid, body in hits:
+            if sid not in best_body:
+                best_body[sid] = body or ""
+                body_order.append(sid)
+        # body hits outrank title-only hits (they are what the query was for)
+        for sid in body_order:
+            if sid in seen:
+                continue
+            m = conn.execute(
+                "SELECT s.title, x.description FROM sessions s"
+                " LEFT JOIN fts_meta x ON x.sid = s.session_id"
+                " WHERE s.session_id = ?", (sid,)).fetchone()
+            title, desc = (m[0], m[1]) if m else (None, None)
+            snippet = best_body[sid].strip()
+            low = snippet.lower()
+            k = min((low.find(w.lower()) for w in query.split()
+                     if w.lower() in low), default=-1)
             if k > 80:
-                snippet = "…" + snippet[k - 60:]
-            out.append({"id": sid, "title": title, "description": desc,
-                        "snippet": snippet, "matched": True})
-        return out
+                snippet = "…" + snippet[max(0, k - 60):]
+            elif k < 0 and len(snippet) > 140:
+                snippet = snippet[:140]
+            seen[sid] = {"id": sid, "title": title, "description": desc,
+                         "snippet": snippet, "matched": True}
+            order.append(sid)
+        return [seen[sid] for sid in order if sid in seen][:limit]
     finally:
         conn.close()
 
