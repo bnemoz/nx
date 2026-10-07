@@ -55,8 +55,12 @@ CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 7 * 24 * 3600)
 DDG_MIN_INTERVAL_SECS = float(os.environ.get("NX_WEBFETCH_SEARCH_INTERVAL", "3.0"))
 HOST_MIN_INTERVAL_SECS = float(os.environ.get("NX_WEBFETCH_HOST_INTERVAL", "2.0"))
 _MAX_BACKOFF_SECS = 60.0
-# robots.txt (0.113.0): page fetches honor it; set 0 to opt out.
-ROBOTS_ENABLED = _env_int("NX_WEBFETCH_ROBOTS", 1)
+# robots.txt (0.113.0) for page fetches; since 0.120.0 the default is OFF when
+# a self-hosted SearXNG is configured (your own instance implies a trusted
+# setup, and blanket robots refusal blocked most of its results) — ON otherwise
+# (the free DDG endpoints stay polite by default). 1/0 forces it either way.
+ROBOTS_ENABLED = _env_int("NX_WEBFETCH_ROBOTS",
+                          0 if os.environ.get("NX_SEARX_URL") else 1)
 
 
 def _ua() -> str:
@@ -392,7 +396,8 @@ def _backoff_host(host: str, retry_after: str) -> None:
 
 
 def _robots_allowed(url: str) -> bool:
-    """robots.txt for page fetches (0.113.0): parsers cached per host;
+    """robots.txt for page fetches (0.113.0; OFF by default under SearXNG):
+    parsers cached per host;
     unreachable/broken robots.txt means allowed (the standard polite
     default); loopback and the user's own SearXNG host are exempt. A
     ``Crawl-delay`` widens that host's fetch interval."""
