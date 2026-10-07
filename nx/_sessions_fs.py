@@ -18,6 +18,7 @@ them up lazily via `import nx as _m` rather than binding them at import time
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 import re
@@ -433,6 +434,35 @@ def _sweep_due(kind: str) -> bool:
         return True
 
 
+def _gc_textrefs(live: set[str], min_age_s: float = 0.0) -> int:
+    """0.116.0: mirror of _gc_image_sidecars for the _textrefs dir — delete
+    big-text payloads no session references anymore. Best-effort."""
+    d = _textrefs_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    removed = 0
+    now = time.time()
+    for name in names:
+        if not name.endswith(".txt") or name[:-4] in live:
+            continue
+        side = os.path.join(d, name)
+        if min_age_s > 0:
+            try:
+                if now - os.path.getmtime(side) < min_age_s:
+                    continue
+            except OSError:
+                continue
+        try:
+            os.remove(side)
+        except OSError:
+            pass
+        else:
+            removed += 1
+    return removed
+
+
 def _maybe_gc_image_sidecars(merged_messages: list) -> None:
     """Sidecar GC (0.39.0), amortized once per NX_SESSION_SWEEP_INTERVAL
     seconds (default 300) — it stats the whole _images/ dir per save
@@ -441,13 +471,20 @@ def _maybe_gc_image_sidecars(merged_messages: list) -> None:
     concurrent writer's payload gets the same 60s age grace as before.
     Runs whenever image sidecars exist: gating it on NX_SESSION_IMAGES=0
     used to orphan every already-stored payload the moment the rollback
-    flag flipped."""
+    flag flipped. 0.116.0: the _textrefs big-text sidecars ride the same
+    sweep (own live-set scan, same grace)."""
     if not _sweep_due("image_gc"):
         return
     live = _collect_message_image_refs(merged_messages)
     live |= _scan_session_image_refs()
     _gc_image_sidecars(live, min_age_s=60.0)
     _gc_image_quota()
+    try:
+        tlive = _collect_message_text_refs(merged_messages)
+        tlive |= _scan_session_text_refs()
+        _gc_textrefs(tlive, min_age_s=60.0)
+    except Exception:
+        pass  # GC must never break a save
 
 
 def _maybe_gc_obsstore() -> None:
@@ -540,6 +577,36 @@ def _gc_image_quota() -> int:
     return removed
 
 
+def _scan_session_text_refs() -> set[str]:
+    """Every text_ref sha referenced by any stored session — the live-set
+    for _textrefs GC. Scans the event log for ref parts (a cheap LIKE on
+    the JSON marker, amortized behind the sweep gate like the image scan)."""
+    live: set[str] = set()
+    try:
+        from . import _sessiondb
+        conn = _sessiondb._open()
+        if conn is None:
+            return live
+        try:
+            # text_ref parts always carry "sha256"; events JSON-escape the
+            # quotes, so match the escaped form.
+            marker = _sessiondb.TEXT_REF_MARKER
+            for (blob,) in conn.execute(
+                    "SELECT msg FROM session_events"
+                    " WHERE msg LIKE ? LIMIT 200000", (f"%{marker}%",)):
+                try:
+                    m = json.loads(blob)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(m, dict):
+                    live |= _collect_message_text_refs([m])
+        finally:
+            conn.close()
+    except Exception:
+        pass  # the live-set is an optimization; degrade to empty
+    return live
+
+
 def _scan_session_image_refs() -> set[str]:
     """Every image sha referenced by any session file currently on disk —
     the union live-set for sidecar GC.
@@ -607,6 +674,72 @@ def _scan_session_image_files(covered: set[str]) -> set[str]:
     return out
 
 
+TEXT_REF_TYPE = "text_ref"
+
+
+def _textrefs_dir() -> str:
+    """Content-addressed sidecar dir for offloaded big-text payloads
+    (0.116.0) — same 0700/0600 posture as _images."""
+    d = os.path.join(_sessions_dir(), "_textrefs")
+    private_dir(d)
+    return d
+
+
+def _text_ref_min() -> int:
+    return _env_int("NX_SESSION_TEXT_REF_MIN", 65536)
+
+
+def _text_to_ref(text: str) -> dict[str, Any] | None:
+    """One big text payload → a text_ref part (payload into the sidecar).
+    Returns None if the write fails (caller keeps the text inline —
+    fallback, never data loss). Writes are idempotent per sha256."""
+    try:
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        side = os.path.join(_textrefs_dir(), f"{sha}.txt")
+        if not os.path.exists(side):
+            tmp = f"{side}.{os.getpid()}.tmp"
+            fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, side)
+    except (OSError, ValueError):
+        return None
+    return {"type": TEXT_REF_TYPE, "sha256": sha, "bytes": len(text),
+            "str": True,
+            "text": text[:512] + ("…" if len(text) > 512 else "")}
+
+
+def _ref_to_text(ref: dict[str, Any]) -> str | None:
+    """One text_ref part → the full payload, or None when the sidecar file
+    is missing/corrupt (caller keeps the preview — degrade, never lose)."""
+    sha = ref.get("sha256")
+    if not isinstance(sha, str) or not sha:
+        return None
+    if "/" in sha or chr(92) in sha or "." in sha:
+        return None
+    try:
+        with open(os.path.join(_textrefs_dir(), f"{sha}.txt"),
+                  encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _collect_message_text_refs(msgs: list) -> set[str]:
+    """Every sha256 referenced by text_ref parts — the GC live-set."""
+    out: set[str] = set()
+    for m in msgs:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict) and p.get("type") == TEXT_REF_TYPE \
+                        and isinstance(p.get("sha256"), str):
+                    out.add(p["sha256"])
+        elif isinstance(m, dict) and isinstance(m.get("content"), str):
+            continue  # string content is never offloaded
+    return out
+
+
 def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """A deep-copied store-form of `messages`: inline image_url parts become
     image_ref sidecar references. Returns a NEW structure — the caller's live
@@ -618,7 +751,9 @@ def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
     once per unique image, deduped across all sessions by sha256."""
     import copy
     if not _env_int("NX_SESSION_IMAGES", 1):
-        return copy.deepcopy(messages)
+        out = copy.deepcopy(messages)
+        _offload_big_text(out)
+        return out
     # Copy-on-write: a history with no image parts (the overwhelmingly
     # common case) is returned as a shallow list copy sharing the message
     # dicts — nothing below mutates them, so the deepcopy per message is
@@ -628,8 +763,11 @@ def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
         for m in messages if isinstance(m, dict)
         for p in (m.get("content") if isinstance(m.get("content"), list) else ())
     ):
-        return list(messages)
+        out = list(messages)
+        _offload_big_text(out)
+        return out
     out = copy.deepcopy(messages)
+    _offload_big_text(out)
     for m in out:
         c = m.get("content") if isinstance(m, dict) else None
         if not isinstance(c, list):
@@ -654,6 +792,72 @@ def _store_form_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
                     p.update(ref)
     return out
 
+
+def _offload_big_text(messages: list[dict[str, Any]]) -> None:
+    """0.116.0 store-form pass, in place on the COPY _store_form_messages
+    made: any single text payload over NX_SESSION_TEXT_REF_MIN (default
+    64 KB) becomes a text_ref part / ref-bearing content — the payload
+    moves to the content-addressed _textrefs sidecar, the event carries a
+    512-char preview. _load_session rehydrates, so the API/compaction/
+    /tooloutput consumers never see a ref. A sidecar write failure keeps
+    the text inline (fallback, never data loss)."""
+    if not _env_int("NX_SESSION_TEXT_REFS", 1):
+        return
+    threshold = _text_ref_min()
+    if threshold <= 0:
+        return
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            if len(c) > threshold:
+                ref = _text_to_ref(c)
+                if ref is not None:
+                    # the ref rides a parts list; rehydration on load
+                    # restores the plain string for API consumers
+                    m["content"] = [ref]
+        elif isinstance(c, list):
+            for i, p in enumerate(c):
+                if (isinstance(p, dict) and p.get("type") == "text"
+                        and isinstance(p.get("text"), str)
+                        and len(p["text"]) > threshold):
+                    ref = _text_to_ref(p["text"])
+                    if ref is not None:
+                        ref["str"] = False
+                        c[i] = ref
+
+
+def _inflate_text_refs(messages: list[dict[str, Any]]) -> int:
+    """Store → live form on load (mirror of _deserialize_image_parts):
+    text_ref parts become full text again. A missing sidecar degrades that
+    message to its 512-char preview (never loses the rest of the session)."""
+    n = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            for i, p in enumerate(c):
+                if isinstance(p, dict) and p.get("type") == TEXT_REF_TYPE:
+                    full = _ref_to_text(p)
+                    if p.get("str"):
+                        if full is not None:
+                            m["content"] = full
+                            n += 1
+                            break  # content replaced; parts loop is done
+                    else:
+                        c[i] = ({"type": "text", "text": full}
+                                if full is not None else
+                                {"type": "text", "text": p.get("text", "")
+                                 + " [payload missing from session store]"})
+                        n += 1
+        elif isinstance(c, dict) and c.get("type") == TEXT_REF_TYPE:
+            full = _ref_to_text(c)
+            if full is not None:
+                m["content"] = full
+                n += 1
+    return n
 
 def _deserialize_image_parts(messages: list[dict[str, Any]]) -> int:
     """Store → live form on resume: image_ref parts become inline image_url
@@ -693,6 +897,9 @@ def _load_session(session_id: str) -> dict[str, Any] | None:
     if data is None:
         return None
     _prune_empty_assistant_messages(data["messages"])
+    # 0.116.0: text_ref sidecar payloads → full text (mirror of the image
+    # rehydration); a missing sidecar degrades to the 512-char preview.
+    _inflate_text_refs(data["messages"])
     return data
 
 

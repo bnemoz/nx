@@ -409,6 +409,11 @@ def _shas_of(data: dict[str, Any]) -> Optional[str]:
         return None
 
 
+# The unescaped JSON substring every text_ref event contains — the LIKE
+# marker for the GC live-set scan (the escaped form of "type": "text_ref").
+TEXT_REF_MARKER = '"type": "text_ref"'
+
+
 def _data_to_row(session_id: str, data: dict[str, Any]) -> tuple:
     return (
         session_id,
