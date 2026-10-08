@@ -57,6 +57,12 @@ def staleness_error(path: str) -> str | None:
     reads, and when the fence target was never read as text)."""
     if not path:
         return None
+    from ._subagent_tls import _subagent_ctx
+    if _subagent_ctx() is not None:
+        # A sub-agent/batch loop may legitimately act on reads the PARENT made
+        # (its own loop never read the file), so the parent-side mtime anchor
+        # proves nothing here — the promise this docstring already makes.
+        return None
     try:
         rp = os.path.realpath(path)
         mtime = os.stat(rp).st_mtime_ns

@@ -71,6 +71,43 @@ def test_edit_file_stale_refused(tmp_path, monkeypatch):
     assert res.startswith("ERROR:") and "changed on disk" in res
 
 
+def test_subagent_ctx_is_exempt(tmp_path, monkeypatch):
+    """The docstring promises a sub-agent/batch-loop exemption and 0.125.2
+    implements it: a sub-loop may act on reads the PARENT made, so the
+    parent-side mtime anchor proves nothing there."""
+    import nx._staleness as stal
+    from nx._subagent_tls import _SUBAGENT_TLS
+    _fresh(tmp_path, monkeypatch)
+    f = tmp_path / "sub.txt"
+    f.write_text("v1\n")
+    nx._tools.read_file(str(f))
+    os.utime(f, ns=(1_000_000_000_000, 1_000_000_000_000))
+    f.write_text("v2\n")
+    assert (stal.staleness_error(str(f)) or "").startswith("ERROR")  # parent: stale
+    _SUBAGENT_TLS.ctx = object()  # a live sub-agent loop on this thread
+    try:
+        assert stal.staleness_error(str(f)) is None
+    finally:
+        _SUBAGENT_TLS.ctx = None
+
+
+def test_own_write_reanchors_so_the_next_edit_is_not_stale(tmp_path, monkeypatch):
+    """0.125.2: after a successful write the session's OWN write must become
+    the freshness anchor — otherwise the next edit of the same file is refused
+    as "changed on disk" (by nobody but this session)."""
+    import nx._staleness as stal
+    _fresh(tmp_path, monkeypatch)
+    f = tmp_path / "reanchor.txt"
+    f.write_text("one\n")
+    nx._tools.read_file(str(f))
+    assert "wrote" in nx._edit_tools.write_file(str(f), "one two\n")
+    rp = os.path.realpath(str(f))
+    assert stal._LAST_READ_MTIME.get(rp) == os.stat(rp).st_mtime_ns  # re-anchored
+    res = nx._edit_tools.edit_file(str(f), old="two", new="TWO")
+    assert res.startswith("ERROR") is False, res
+    assert f.read_text() == "one TWO\n"
+
+
 def test_bounded_registry_evicts_oldest(tmp_path, monkeypatch):
     stal = _fresh(tmp_path, monkeypatch)
     monkeypatch.setattr(stal, "_max_paths", lambda: 3)

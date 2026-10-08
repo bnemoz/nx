@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 _tmp = tempfile.mkdtemp(prefix="nx-fileclaim-")
@@ -393,6 +394,93 @@ def test_release_for_drops_only_that_owner(tmp_path):
 
 def test_release_for_missing_owner_is_zero(tmp_path):
     assert fc.release_for("nobody") == 0
+
+
+# --- the in-process sub-agent leftover (0.125.2) ------------------------------
+
+def _thread_owner_id() -> str:
+    """`owner_id()` as a WORKER thread computes it — the sub-agent's identity
+    shape (same session id, a different thread ident)."""
+    out: dict[str, str] = {}
+    t = threading.Thread(target=lambda: out.update(o=fc.owner_id()))
+    t.start()
+    t.join()
+    return out["o"]
+
+
+def test_same_process_subagent_leftover_does_not_block_the_parent(tmp_path):
+    """The bug: a sub-agent runs in-process on a daemon thread, so its rows
+    carry THIS pid and a thread ident nobody can name. When it exits without
+    releasing, the parent's next edit was refused with "claimed by another
+    agent" naming its OWN pid, until the TTL expired. Defense in depth: a live
+    same-pid row holding THIS session's owner prefix is reclaimed in place."""
+    st = nx.st
+    st.SESSION_ID = "sess-parent"
+    try:
+        sub_owner = _thread_owner_id()
+        assert sub_owner.startswith("sess-parent:")
+        assert sub_owner != fc.owner_id()  # the parent's tag is its own thread
+        p = str(tmp_path / "sub.txt")
+        _insert(p, sub_owner, os.getpid(), time.time(),
+                start_time=fc._pid_start_time())
+        ok, holder = fc.claim_file(p, fc.owner_id())
+        assert ok and holder is None
+        assert _rows()[0][1] == fc.owner_id()  # reclaimed in place
+    finally:
+        st.SESSION_ID = None
+
+
+def test_other_sessions_same_pid_row_still_blocks(tmp_path):
+    """The reclaim must not over-reach: the same pid with ANOTHER session's
+    owner prefix is still a foreign holder."""
+    st = nx.st
+    st.SESSION_ID = "sess-parent"
+    try:
+        p = str(tmp_path / "other-sess.txt")
+        _insert(p, "sess-other:999", os.getpid(), time.time(),
+                start_time=fc._pid_start_time())
+        ok, holder = fc.claim_file(p, fc.owner_id())
+        assert ok is False and "sess-other:999" in holder
+    finally:
+        st.SESSION_ID = None
+
+
+def test_subagent_body_releases_its_claims_on_completion(tmp_path, monkeypatch):
+    """The primary fix: a write-tier `_run_sync_agent_body`'s `finally` now
+    releases the agent's own claims. Drives the real body on a worker thread
+    with the model loop stubbed; the stub takes a claim exactly as a write tool
+    would. (Only write tiers can hold a claim — the read-only tool table has no
+    mutating tool — so a read sweep skips the release round-trip.)"""
+    import nx._subagent as S
+    st = nx.st
+    for k in ("NX_SUBAGENT_MODEL", "NX_SUBAGENT_SOURCE", "NX_SUBAGENT_MODEL_POOL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(st, "client", object(), raising=False)
+    monkeypatch.setattr(st, "MODEL", "test-model", raising=False)
+    monkeypatch.setattr(st, "YOLO", True, raising=False)
+    monkeypatch.setattr(st, "SESSION_ID", "sess-rel", raising=False)
+    f = str(tmp_path / "rel.txt")
+    seen: dict[str, object] = {}
+
+    def fake_loop(messages, *a, **kw):
+        seen["owner"] = fc.owner_id()          # the agent thread's tag
+        seen["ok"] = fc.claim_file(f, fc.owner_id())[0]
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", fake_loop)
+
+    def _worker():
+        seen["res"] = S._run_sync_agent_body("go", 3, tier="write")
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=30)
+    assert seen.get("ok") is True
+    assert seen.get("res") == "done"
+    assert _rows() == []                        # released on completion
+    # ...so the parent's own claim on the same file succeeds immediately
+    assert fc.claim_file(f, fc.owner_id()) == (True, None)
 
 
 # --- release_all_for_pid: the session-exit sweep (0.119.0) -------------------

@@ -21,7 +21,11 @@ process. A dead pid, an expired row, or a row taken from another repo (a
 different `os.getcwd()` — e.g. an nx session working in an unrelated folder on
 this host) is reclaimed in place: claims are repo-scoped, never host-wide.
 A live row held by the SAME owner is refreshed (heartbeat) and returns ok, so
-several write tools in one process/loop re-claim cleanly.
+several write tools in one process/loop re-claim cleanly. A live row carrying
+THIS pid and THIS session's owner prefix is reclaimed in place too (0.125.2):
+that is an in-process sub-agent's leftover (same process, same session, the
+ident of a worker thread that already exited), and refusing it made the
+parent's next edit report "claimed by another agent" naming its own pid.
 
 Scoping: the scope stored per row is the claimed FILE's owning git repo,
 found by walking up from the file to the nearest enclosing `.git`
@@ -198,6 +202,24 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                             "UPDATE file_claims SET claimed_at = ?"
                             " WHERE path = ?",
                             (now, path))
+                        result = (True, None)
+                    elif str(holder_pid) == str(pid) and str(holder_owner).startswith(
+                            f"{st.SESSION_ID}:"):
+                        # A leftover claim from ANOTHER loop of THIS session in
+                        # THIS process — the signature of an in-process
+                        # sub-agent (its own worker thread, so a different
+                        # thread ident in owner_id, but the parent's pid AND
+                        # the parent's session id) that finished without
+                        # releasing. Refusing here made the parent's next edit
+                        # report "claimed by another agent" naming its OWN
+                        # pid, until the TTL expired. Reclaim in place; a
+                        # different session's tag, or any other process's pid,
+                        # still blocks below.
+                        conn.execute("DELETE FROM file_claims WHERE path = ?", (path,))
+                        conn.execute(
+                            "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"
+                            " cwd, pid_start_time) VALUES (?,?,?,?,?,?)",
+                            (path, owner_id, pid, now, cwd, start_time))
                         result = (True, None)
                     else:
                         result = (False, _holder_desc(holder_owner, holder_pid))

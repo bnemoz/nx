@@ -969,6 +969,13 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     table = (_advisor_tier_dispatch() if advisor
              else _write_tier_dispatch() if write else _read_only_dispatch())
     prev_ctx = _subagent_ctx()
+    # This loop's claim identity, captured BEFORE the agent loop runs: the
+    # write tools take file claims under `<session>:<thread ident>` on THIS
+    # thread (a sub-agent runs in-process, so those rows carry this pid), and
+    # the `finally` below runs on this same thread, so recomputing it there
+    # would be equivalent — capturing here just makes the pairing obvious.
+    from ._fileclaim import owner_id as _claim_owner_id
+    claim_owner = _claim_owner_id()
     ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
                            worktree=worktree, job_id=job_id)
     ctx.advisor = advisor
@@ -1069,6 +1076,21 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     finally:
         if not quiet and parent_spinner is not None:
             parent_spinner.start()
+        if write:
+            # Only write tiers can hold claims (the read-only table has no
+            # mutating tool), so a read sweep skips the store round-trip.
+            try:
+                # Release this agent's file claims (0.125.2): a sub-agent runs
+                # in-process on a daemon thread, so its rows in the SHARED
+                # file_claims table carry this process's pid and a thread
+                # owner_id nobody else can name. Left behind, the parent's next
+                # edit of the same file was refused with "claimed by another
+                # agent" naming its OWN pid until the NX_FILE_CLAIM_TTL (3600s)
+                # expired. Never let a release failure mask the agent's result.
+                from . import _fileclaim
+                _fileclaim.release_for(claim_owner)
+            except Exception:
+                pass
         _SUBAGENT_TLS.ctx = prev_ctx
         with _SPAWN_LOCK:
             st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level

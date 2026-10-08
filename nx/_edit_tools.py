@@ -147,6 +147,8 @@ def write_file(path: str, content: str, **_: Any) -> str:
     if after_mtime != before_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, content)
+    from ._staleness import record_read
+    record_read(path)  # our own write is the new freshness anchor
     return f"wrote {len(content)} bytes to {path}" + _size_note(len(content))
 
 
@@ -277,6 +279,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
         if now_mtime != src_mtime:
             return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
         _atomic_write(path, new_src)
+        from ._staleness import record_read
+        record_read(path)  # our own write is the new freshness anchor
         return (f"edited {path} (replaced lines {start}-{end})\n{_diff_hunk(src, new_src)}"
                 + (f"\n{garble_note}" if garble_note else ""))
     if not isinstance(old, str) or not old:
@@ -325,6 +329,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     if now_mtime != src_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, new_src)
+    from ._staleness import record_read
+    record_read(path)  # our own write is the new freshness anchor
     note = "\n(edit applied whitespace-tolerantly — `old`'s indentation was normalized to match)" if ws_fallback_used else ""
     if garble_note:
         note += f"\n{garble_note}"
@@ -424,6 +430,8 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
     if now_mtime != src_mtime:
         return f"ERROR: {path} changed on disk while awaiting approval; re-read and retry"
     _atomic_write(path, work)
+    from ._staleness import record_read
+    record_read(path)  # our own write is the new freshness anchor
     tail = "\n" + "\n".join(dict.fromkeys(garble_notes)) if garble_notes else ""
     return (f"edited {path} ({len(edits)} edits applied)\n{_diff_hunk(src, work)}{tail}"
             + _size_note(len(work), "edit"))
@@ -578,6 +586,8 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
     for f, src, new_src, _n, _mtime in changes:
         try:
             _atomic_write(f, new_src)
+            from ._staleness import record_read
+            record_read(f)  # our own write is the new freshness anchor
             ok.append((f, src, new_src))
         except OSError:
             pass  # failed file: leave it out of the checkpoint, keep the rest
