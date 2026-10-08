@@ -73,6 +73,10 @@ from . import _state as st
 from ._env import _env_int
 from . import _notices
 from ._progress import note_progress
+from ._subagent_tls import tap_event  # EVENTSURFACE_SPEC Phase 2 writer
+# NOTE: `_eventsink` is imported lazily at its two call sites (register/drop)
+# rather than here — a module-level import adds `nx._eventsink` to the conftest
+# module snapshot, which tests/perf/test_static_budgets.py budgets.
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
 from ._delegation_note import (  # noqa: F401 (re-exports)
@@ -717,6 +721,21 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
             _ASYNC_QUEUED.append(job_id)
             queue_depth = len(_ASYNC_QUEUED)
 
+    # EVENTSURFACE_SPEC §1 (Phase 2): register the job's sink BEFORE the worker
+    # thread starts, so the first stream/tool/status event cannot be lost to a
+    # registration race. Every writer sits behind `sink_for(job_id) is not
+    # None`, so an agent whose dashboard was never opened pays one dict lookup
+    # per render event ("zero cost when unused"). Sync agents deliberately get
+    # NO sink — the parent's own render IS their display.
+    # Best-effort by design: the sink is display-only, so failing to set it up
+    # (or tear it down) must never break the spawn, the worker's cleanup, or the
+    # semaphore release below.
+    try:
+        from . import _eventsink as _es
+        _es.register_sink(job_id)
+    except Exception:  # noqa: BLE001 — see above: display-only, never fatal
+        pass
+
     # A background agent's whole point is that its answer lands later; without
     # this the finish notice would sit staged until the user typed something.
     from ._autowake import arm_wake
@@ -741,6 +760,19 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
                              scope=scope)
         finally:
             _ASYNC_QUIET_SLOTS.quiet = False
+            # EVENTSURFACE_SPEC §1: dropping here — not in _run_async_agent — is
+            # what makes the retained tail COMPLETE. _run_async_agent has
+            # already returned, so the answer, the report and the job record's
+            # final status are all staged by now; a drop placed earlier would
+            # race the staging and retire a short tail. Retain-then-drop is one
+            # _LOCK hold (Phase 1), so a 4 fps /tabs repaint never sees a
+            # half-retired sink. Unknown id (never registered) is a no-op.
+            # Best-effort: a raise here would skip sem.release() below.
+            try:
+                from . import _eventsink as _es
+                _es.drop_sink(job_id)
+            except Exception:  # noqa: BLE001 — display-only, never fatal
+                pass
             if acquired and sem is not None:
                 sem.release()
             # self-locking (0.103.7): pops under the lock, then removes the
@@ -991,6 +1023,12 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                 rec = _ASYNC_AGENTS.get(ctx.job_id)
                 if rec is not None:
                     rec["turns"] = _steps[0]
+        # EVENTSURFACE_SPEC §1(c) status tap: a quiet agent renders nothing of
+        # its own, so "turn N/M + tier" is the only sign of life a /tabs row
+        # gets between tool calls. Unconditional on purpose — for a sync agent
+        # this is one empty-dict check and no sink is ever registered for it;
+        # gating on `quiet` would only make the intent harder to read.
+        tap_event("status", f"turn {_steps[0]}/{max_turns} tier={tier}")
         if not quiet:
             note_progress(f"agent turn {_steps[0]}/{max_turns}")
         # Write-churn nudges (0.117.0/0.118.0): a write/implement agent N turns

@@ -405,6 +405,15 @@ def _repl() -> None:
             print(f"{DIM}  turn failed: {e}{RESET}")
         finally:
             st._TURN_ACTIVE = False
+            # EVENTSURFACE_SPEC guardrail, termination: the /tabs live region
+            # closes at turn end (its own driver — the watcher tick — parks
+            # with the turn).
+            try:
+                from ._surfaces import close_dashboard, maybe_close_if_idle
+                maybe_close_if_idle()
+                close_dashboard()
+            except Exception:
+                pass
         # Auto-save after the turn settles (whether it ended cleanly, hit the
         # step cap, or was escaped). This is the Hermes pattern: persist every
         # turn so a crash / accidental close never loses work.

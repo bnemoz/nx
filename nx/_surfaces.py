@@ -28,6 +28,7 @@ from collections import deque
 
 from . import _state as st
 from ._ansi import DIM, RESET, C
+from ._tty import IS_WINDOWS
 
 # --------------------------------------------------------------------------
 # steering queue
@@ -186,7 +187,21 @@ def _surfaces_snapshot() -> list[dict]:
         pass
     try:
         for ag in _m.list_async_agents():
-            rows.append({"instruction": "", "tail": "", **ag,
+            # EVENTSURFACE_SPEC §2 agent-row tails: a RUNNING agent has no
+            # answer yet, which is why its row used to render an empty tail.
+            # Fall back to the event sink's live ring (6 display lines), and
+            # once the worker's finally drops the sink, `sink_tail` transparently
+            # picks up the retained copy — so the row keeps its last activity
+            # after the agent finishes rather than blanking.
+            # Finished agents with an answer keep the answer tail unchanged
+            # (dense: the report head the user actually reads), so this changes
+            # only what was previously empty. Read-only: tails are pulled from
+            # the sink here; no dashboard/live-mode state is involved.
+            tail = ag.get("tail") or ""
+            if not tail and ag.get("status") == "running":
+                from ._subagent_tls import sink_tail
+                tail = "\n".join(sink_tail(ag.get("id"), 6))
+            rows.append({"instruction": "", **ag, "tail": tail,
                          "kind": "agent", "id": ag["id"],
                          "alive": ag.get("alive", False)})
     except Exception:
@@ -351,6 +366,235 @@ def run_tabs_dashboard() -> None:
 def _term_cols() -> int:
     import shutil
     return max(40, shutil.get_terminal_size((80, 24)).columns)
+
+
+# --------------------------------------------------------------------------
+# live region (EVENTSURFACE_SPEC §2/§3, Phase 3)
+# --------------------------------------------------------------------------
+# A bounded overlay painted BELOW the current render line while a turn runs:
+# same inline repaint idiom run_tabs_dashboard uses (\x1b[{n}A\r\x1b[J), redrawn
+# at ~4 fps from the sink tails + _surfaces_snapshot(). NOT an alternate
+# screen — the main turn's output continues above it.
+
+_WRITE_LOCK = threading.RLock()
+# EVENTSURFACE_SPEC §2 Phase 4 (v1-required): this lock is now also taken by
+# every raw console write in _turn/_stream_parse/_dispatch, so a 4 fps repaint
+# can never interleave with (tear) a parent-turn line while the dashboard is
+# open. Exported through write_lock() so writers import one cheap name instead
+# of reaching for the private global.
+
+
+def write_lock() -> "threading.RLock":
+    """The console write lock: take it around ANY raw terminal write you want
+    serialized against the /tabs live repaint. An RLock, so nested sites in one
+    thread (e.g. a grouped message that wraps its own multi-print block and also
+    uses the per-write helper) re-enter instead of deadlocking.
+
+    Return value, not a contextmanager generator: `with write_lock():` acquires
+    the lock itself, so the helper costs one plain call + one acquire and needs
+    no contextlib machinery on the per-chunk streaming path."""
+    return _WRITE_LOCK
+
+_DASH_LOCK = threading.Lock()
+_DASH_OPEN = False
+_DASH_DISABLED = False   # a repaint crash disables live mode for the session
+_DASH_DRAWN = 0          # rows painted last frame (erase arithmetic)
+
+LIVE_FPS_INTERVAL = 0.25  # 4 fps
+
+
+def _tabs_height() -> int:
+    """NX_TABS_HEIGHT: the live region's max rows. Non-int/absent -> 8,
+    clamped to 1..20."""
+    from ._env import _env_int
+    return max(1, min(20, _env_int("NX_TABS_HEIGHT", 8)))
+
+
+def _vt_supported() -> bool:
+    """Does this terminal handle the ANSI cursor/erase idioms the live region
+    needs? POSIX terminals do when they are real ttys; the Windows console
+    only with VT mode enabled (reuse of the _tty detection: nx enables
+    ENABLE_VIRTUAL_TERMINAL_INPUT for its editor, so a console the editor
+    runs in reports VT-capable; anything else refuses live mode)."""
+    try:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if IS_WINDOWS:
+        # stdout VT output enabled? (the editor enables VT *input* via _tty;
+        # a console that renders our cursor/erase idioms needs the output bit)
+        try:
+            import ctypes
+            mode = ctypes.wintypes.DWORD()
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            h = k32.GetStdHandle(-11)
+            if not k32.GetConsoleMode(h, ctypes.byref(mode)):
+                return False
+            return bool(mode.value & 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        except Exception:
+            return False
+    return True
+
+
+def _agent_styles(rows: list[dict]) -> list[bool]:
+    """Per-row 'run as done' decision over the rows, enforcing the
+    tear-avoidance rule (EVENTSURFACE_SPEC §2): a contiguous block of agent
+    rows — in _ASYNC_AGENTS dict insertion order = spawn order, which is the
+    order _surfaces_snapshot() already emits (no separate sort key) — only
+    flips to done styling when the WHOLE block is terminal, so a finishing
+    agent cannot visually reorder against still-running siblings."""
+    n = len(rows)
+    out = [False] * n
+    i = 0
+    while i < n:
+        if rows[i]["kind"] != "agent":
+            out[i] = True
+            i += 1
+            continue
+        j = i
+        while j < n and rows[j]["kind"] == "agent":
+            j += 1
+        block_terminal = all(not rows[k].get("alive") for k in range(i, j))
+        for k in range(i, j):
+            out[k] = block_terminal
+        i = j
+    return out
+
+
+def _live_frame() -> list[str]:
+    """The ≤ NX_TABS_HEIGHT lines of the live region (no ANSI erase prefix).
+    Agent-row tails come from the event sink (Phase 2's sink_tail)."""
+    from ._subagent_tls import sink_tail
+    rows = _surfaces_snapshot()
+    styles = _agent_styles(rows)
+    height = _tabs_height()
+    lines: list[str] = [f"{C.ACCENT}tabs{RESET}{DIM} — live · ctrl-t closes{RESET}"]
+    width = _term_cols()
+    for i, r in enumerate(rows):
+        if len(lines) >= height:
+            break
+        status = r.get("status") or "—"
+        done_style = styles[i] if r["kind"] == "agent" else True
+        mark = _glyph(r.get("alive", False), status)
+        if not r.get("alive", False) and done_style and status == "done":
+            mark = f"{DIM}○{RESET}"
+        head = f" {mark} {r['kind']:<5} {r['id']:<18} {status:<8}"
+        lines.append(head[:width])
+        instr = " ".join(str(r.get("instruction", "")).split())
+        if instr and len(lines) < height:
+            lines.append(f"{DIM}    {instr[:width - 6]}{RESET}")
+        if len(lines) < height and r["kind"] == "agent":
+            for tl in _tail_lines("\n".join(sink_tail(r["id"], 2)), 2):
+                if len(lines) >= height:
+                    break
+                lines.append(f"{DIM}    │ {tl[:width - 8]}{RESET}")
+    return lines[:height]
+
+
+def _erase_live() -> None:
+    """Erase the painted region, restoring the cursor to the render line."""
+    global _DASH_DRAWN
+    if _DASH_DRAWN:
+        sys.stdout.write(f"\x1b[{_DASH_DRAWN}A\r\x1b[J")
+        sys.stdout.flush()
+        _DASH_DRAWN = 0
+
+
+def repaint_live(force: bool = False) -> None:
+    """One dashboard repaint (the 4 fps tick). No-op when closed or disabled;
+    a crash inside is caught and disables live mode for the session
+    (belt-and-braces vs termios corruption)."""
+    global _DASH_DISABLED, _DASH_DRAWN
+    with _DASH_LOCK:
+        if not _DASH_OPEN or _DASH_DISABLED:
+            return
+    if not _vt_supported():
+        close_dashboard()
+        return
+    try:
+        frame = _live_frame()
+        with _WRITE_LOCK:
+            out = ""
+            if _DASH_DRAWN:
+                out += f"\x1b[{_DASH_DRAWN}A\r\x1b[J"
+            else:
+                out += "\r\x1b[J"
+            out += "\n".join(frame) + "\n"
+            sys.stdout.write(out)
+            sys.stdout.flush()
+            _DASH_DRAWN = len(frame)
+    except Exception:
+        _DASH_DISABLED = True
+        try:
+            close_dashboard()
+        except Exception:
+            pass
+
+
+def repaint_live_tick() -> None:
+    """Ownership-driven repaint hook (EVENTSURFACE_SPEC §2 'Editor
+    ownership'). Turn-loop-owned terminal: called from the armed interrupt
+    watcher's ~100ms poll tick (nx/_interrupt.py). Chatbox-owned: from the
+    chatbox read loop's wait_ready timeout (nx/_chatbox.py). NEVER from an
+    external thread — the caller is always the terminal's single stdin
+    reader/owner."""
+    repaint_live()
+
+
+def open_dashboard() -> bool:
+    """Open the live region. False when refused (off-tty / VT missing /
+    disabled for the session)."""
+    global _DASH_OPEN, _DASH_DRAWN
+    with _DASH_LOCK:
+        if _DASH_DISABLED or not _vt_supported():
+            return False
+        _DASH_OPEN = True
+        _DASH_DRAWN = 0
+    repaint_live()
+    return True
+
+
+def close_dashboard() -> None:
+    """Erase the live region and mark it closed. Idempotent; safe anywhere."""
+    global _DASH_OPEN, _DASH_DRAWN
+    with _DASH_LOCK:
+        was_open = _DASH_OPEN
+        _DASH_OPEN = False
+    if not was_open:
+        return
+    try:
+        _erase_live()
+    except Exception:
+        pass
+
+
+def dashboard_open() -> bool:
+    with _DASH_LOCK:
+        return _DASH_OPEN
+
+
+def dashboard_disabled() -> bool:
+    return _DASH_DISABLED
+
+
+def toggle_dashboard() -> bool:
+    """Ctrl-T: open the live region if closed, close it if open. Returns
+    whether the dashboard is now open."""
+    if dashboard_open():
+        close_dashboard()
+        return False
+    return open_dashboard()
+
+
+def maybe_close_if_idle() -> None:
+    """Termination rule: when the agent set empties (no live bg/agent rows),
+    the dashboard closes itself — nothing left to show."""
+    if not dashboard_open():
+        return
+    rows = _surfaces_snapshot()
+    if not any(r["alive"] for r in rows if r["kind"] != "main"):
+        close_dashboard()
 
 
 def tabs_print_fallback() -> None:

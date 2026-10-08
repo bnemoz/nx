@@ -26,6 +26,11 @@ from ._special_tokens import (
     LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT, _strip_leaked_tokens,
 )
 from ._stream_parse import StreamParser
+# EVENTSURFACE_SPEC §2 Phase 4: raw console writes below take the shared write
+# lock so a 4 fps /tabs repaint cannot tear a turn diagnostic (_surfaces is
+# already loaded by nx/__init__ and imports no turn-layer module — zero new
+# modules in the T-9 conftest snapshot).
+from ._surfaces import write_lock
 from ._text_fallback import (
     parse_text_calls_with_errors,
 )
@@ -140,8 +145,9 @@ def _maybe_arm_native_escalation() -> None:
         return  # user-forced text protocol — respect it, don't override
     st._STALL_FORCE_NATIVE = True
     if not _subagent_quiet():
-        print(f"{DIM}  ↳ retrying with native tool-calling enabled "
-              f"(tool_choice=auto){RESET}")
+        with write_lock():
+            print(f"{DIM}  ↳ retrying with native tool-calling enabled "
+                  f"(tool_choice=auto){RESET}")
 
 
 def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
@@ -180,13 +186,15 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                                 "recoveries": malformed_stream_cut_count,
                                 "retry_limit": retry_limit})
             if not quiet:
-                print(f"{C.ERROR}  ✗ {collapse_type} after "
-                      f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+                with write_lock():
+                    print(f"{C.ERROR}  ✗ {collapse_type} after "
+                          f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
             return TURN_DONE
         if not quiet:
-            print(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
-                  f"output and nudging clean recovery "
-                  f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
+                      f"output and nudging clean recovery "
+                      f"({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         # Do NOT feed the degenerated reasoning/content back — it's spam
         # that would reinforce the collapse on the next turn.  Nudge fresh.
         # Once we've collapsed more than once on the same turn, the repeat is
@@ -240,12 +248,16 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         if quiet:
             pass  # the salvage prints below are terminal noise on an agent thread
         elif salvaged:
-            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
-                  f"showing captured reasoning as a best-effort answer{RESET}")
-            _say_console.print(salvaged)
+            # Message + salvaged reasoning are one visual unit: same lock.
+            # RLock re-entrancy covers the rich Console.print inside.
+            with write_lock():
+                print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
+                      f"showing captured reasoning as a best-effort answer{RESET}")
+                _say_console.print(salvaged)
         else:
-            print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
-                  f"returning to chat input{RESET}")
+            with write_lock():
+                print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
+                      f"returning to chat input{RESET}")
         return TURN_DONE
     if cut_count >= retry_limit:
         if retry_limit == 0:
@@ -254,13 +266,15 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             # produced only reasoning and no action — that's an honest
             # model-capability signal, not a harness rescue scenario.
             if not quiet:
-                print(f"{DIM}  • reasoning-only turn ended naturally "
-                      f"({loop_detail}); failsafes disabled, ending turn{RESET}")
+                with write_lock():
+                    print(f"{DIM}  • reasoning-only turn ended naturally "
+                          f"({loop_detail}); failsafes disabled, ending turn{RESET}")
         elif not quiet:
-            print(f"{C.ERROR}  ✂ REASONING-ONLY RESCUE FAILED — gave up after "
-                  f"{cut_count} stall "
-                  f"attempt{'s' if cut_count != 1 else ''} "
-                  f"× {loop_detail}; waiting for user input{RESET}")
+            with write_lock():
+                print(f"{C.ERROR}  ✂ REASONING-ONLY RESCUE FAILED — gave up after "
+                      f"{cut_count} stall "
+                      f"attempt{'s' if cut_count != 1 else ''} "
+                      f"× {loop_detail}; waiting for user input{RESET}")
         # 0.121.1: this turn ends with nothing produced and the prints above
         # are gated on `quiet` — on a background agent thread that was a
         # completely silent surrender. Log it either way (screen behavior
@@ -302,8 +316,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                               + reasoning_text[-cap:])
         messages.append({"role": "assistant", "content": reasoning_text})
         if not quiet:
-            print(f"{DIM}  ↳ captured {len(reasoning_text)} chars of reasoning "
-                  f"for feedback{RESET}")
+            with write_lock():
+                print(f"{DIM}  ↳ captured {len(reasoning_text)} chars of reasoning "
+                      f"for feedback{RESET}")
 
     # Two-tier recovery:
     #   • First (and any intermediate) stall: nudge the model to ACT —
@@ -318,8 +333,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     is_last_retry = (cut_count == retry_limit - 1)
     if is_last_retry:
         if not quiet:
-            print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; forcing final "
-                  f"answer (attempt {cut_count + 1}/{retry_limit}){RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; forcing final "
+                      f"answer (attempt {cut_count + 1}/{retry_limit}){RESET}")
         if reasoning_text.strip():
             messages.append({"role": "user", "content":
                 "[Runtime note: Your reasoning has been preserved as your "
@@ -338,9 +354,10 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
     wrapup_note = (STALL_WRAPUP_NUDGE
                    if (st._STALL_EPISODE_ACTED and not plan_active()) else None)
     if not quiet:
-        print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; "
-              f"{'nudging to wrap up' if wrapup_note else 'nudging to act'} "
-              f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
+        with write_lock():
+            print(f"{C.WARNING}  ✂ REASONING-ONLY STALL — {cut_msg}; "
+                  f"{'nudging to wrap up' if wrapup_note else 'nudging to act'} "
+                  f"(attempt {cut_count + 1}/{retry_limit}){RESET}")
     _maybe_arm_native_escalation()
     if wrapup_note is not None:
         if reasoning_text.strip():
@@ -439,8 +456,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             # summary and re-runs this turn. Not an error line — say what is
             # happening (once) so a long task doesn't just pause silently.
             if not quiet:
-                print(f"{C.WARNING}  ✂ context window full — compressing and retrying"
-                      f"{RESET}")
+                with write_lock():
+                    print(f"{C.WARNING}  ✂ context window full — compressing and retrying"
+                          f"{RESET}")
             return TURN_CONTEXT_OVERRUN
         if st._LAST_API_ERROR:
             # open_stream() already printed the friendly message; interactive
@@ -561,8 +579,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             _USER_INTERRUPTED.clear()
     dropped_lines = getattr(stream, "dropped_lines", 0)
     if dropped_lines and not quiet:
-        print(f"{C.WARNING}  ⚠ {dropped_lines} malformed SSE frame(s) dropped mid-stream — "
-              f"any tool call in this turn may have truncated arguments{RESET}")
+        with write_lock():
+            print(f"{C.WARNING}  ⚠ {dropped_lines} malformed SSE frame(s) dropped mid-stream — "
+                  f"any tool call in this turn may have truncated arguments{RESET}")
     # Account before every post-stream early return (stream error, user
     # interrupt, collapse/reasoning stall). The previous footer-owned hook
     # silently skipped all of those completed API calls.
@@ -581,24 +600,28 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             # honest TURN_TIMED_OUT.
             if step_retries < _step_retry_limit():
                 if not quiet:
+                    # Whole block = one visual unit (closer + RESET + notice).
+                    # close_think_block re-enters the same RLock: safe.
+                    with write_lock():
+                        if parser.mode in ("think", "say"):
+                            print()
+                        parser.close_think_block()
+                        print(RESET)
+                        delay = _step_backoff_delay(step_retries, None)
+                        print(f"{C.WARNING}  ↻ STREAM TIMEOUT — server stopped delivering chunks; "
+                              f"discarding partial output and retrying "
+                              f"({step_retries + 1}/{_step_retry_limit()} in {delay:.1f}s){RESET}")
+                return TURN_TIMED_OUT_RETRY
+            if not quiet:
+                with write_lock():
                     if parser.mode in ("think", "say"):
                         print()
                     parser.close_think_block()
                     print(RESET)
-                    delay = _step_backoff_delay(step_retries, None)
-                    print(f"{C.WARNING}  ↻ STREAM TIMEOUT — server stopped delivering chunks; "
-                          f"discarding partial output and retrying "
-                          f"({step_retries + 1}/{_step_retry_limit()} in {delay:.1f}s){RESET}")
-                return TURN_TIMED_OUT_RETRY
-            if not quiet:
-                if parser.mode in ("think", "say"):
-                    print()
-                parser.close_think_block()
-                print(RESET)
-                print(f"{C.ERROR}  ✗ STREAM TIMEOUT after {step_retries} "
-                      f"retr{_plural_ies(step_retries)} — server stopped delivering chunks; "
-                      f"the task did NOT complete{RESET}")
-                print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
+                    print(f"{C.ERROR}  ✗ STREAM TIMEOUT after {step_retries} "
+                          f"retr{_plural_ies(step_retries)} — server stopped delivering chunks; "
+                          f"the task did NOT complete{RESET}")
+                    print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
             return TURN_TIMED_OUT
         retry_limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
         if malformed_stream_cut_count >= retry_limit:
@@ -612,17 +635,19 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                                 "error": (f"{type(stream_error).__name__}: "
                                           f"{stream_error}")[:300]})
             if not quiet:
-                if parser.mode in ("think", "say"):
-                    print()
-                parser.close_think_block()
-                print(RESET)
-                print(f"{C.ERROR}  ✗ malformed stream from model/API after "
-                      f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
-                print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
+                with write_lock():
+                    if parser.mode in ("think", "say"):
+                        print()
+                    parser.close_think_block()
+                    print(RESET)
+                    print(f"{C.ERROR}  ✗ malformed stream from model/API after "
+                          f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
+                    print(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
             return TURN_DONE
         if not quiet:
-            print(f"{C.WARNING}  ✂ MALFORMED STREAM — discarded partial output/tool args; "
-                  f"retrying cleanly ({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ✂ MALFORMED STREAM — discarded partial output/tool args; "
+                      f"retrying cleanly ({malformed_stream_cut_count + 1}/{retry_limit}){RESET}")
         _nudge_current_user_turn(
             messages,
             "Your previous streamed response became malformed before it completed. "
@@ -646,8 +671,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 
     if interrupted:
         if not quiet:
-            print(f"{C.WARNING}  ↳ interrupted by user (Esc) after {elapsed:4.1f}s, "
-                  f"{len(parser.content)} chars streamed{RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ↳ interrupted by user (Esc) after {elapsed:4.1f}s, "
+                      f"{len(parser.content)} chars streamed{RESET}")
         # Discard partial content — it's almost certainly a half-formed
         # sentence / tool-call args.
         redirect = st._INTERRUPT_REDIRECT_TEXT.strip()
@@ -713,8 +739,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
 
     if forced_final and text.strip() and "length" in parser.finish_reasons:
         if not quiet:
-            print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
-                  f"with truncation marker{RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ✂ FORCED FINAL ANSWER HIT TOKEN LIMIT — saved partial answer "
+                      f"with truncation marker{RESET}")
         _close_out_partial(messages, text)
         return TURN_DONE
 
@@ -752,17 +779,19 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                 and empty_turn_count < _subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)):
             dangling = _last_is_dangling_tool(messages)
             if not quiet:
-                print(f"{C.WARNING}  ✂ EMPTY TURN — no content and no tool call"
-                      f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
-                      f"; nudging the model to continue "
-                      f"({empty_turn_count + 1}/{_subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)}){RESET}")
+                with write_lock():
+                    print(f"{C.WARNING}  ✂ EMPTY TURN — no content and no tool call"
+                          f"{'; dangling tool result awaits a follow-up' if dangling else ''}"
+                          f"; nudging the model to continue "
+                          f"({empty_turn_count + 1}/{_subagent_scoped_retry(st.EMPTY_TURN_RETRY_LIMIT)}){RESET}")
             _maybe_arm_native_escalation()
             _nudge_current_user_turn(messages, EMPTY_TURN_NUDGE)
             return TURN_EMPTY
         if not forced_final and st.EMPTY_TURN_RETRY_LIMIT > 0:
             if not quiet:
-                print(f"{C.WARNING}  ✂ EMPTY TURN — no content after {empty_turn_count} nudge"
-                      f"{'s' if empty_turn_count != 1 else ''}; forcing a final answer{RESET}")
+                with write_lock():
+                    print(f"{C.WARNING}  ✂ EMPTY TURN — no content after {empty_turn_count} nudge"
+                          f"{'s' if empty_turn_count != 1 else ''}; forcing a final answer{RESET}")
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
             return TURN_FORCE_FINAL
         return TURN_DONE
@@ -788,10 +817,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             and not st._STALL_EPISODE_ACTED
             and not _last_is_dangling_tool(messages)):
         if not quiet:
-            print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
-                  f"intent but made no tool call; nudging to act "
-                  f"(attempt {reasoning_loop_cut_count + 1}/"
-                  f"{_subagent_scoped_retry(st.REASONING_ONLY_RETRY_LIMIT)}){RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ✂ TEXT-ONLY AFTER STALL NUDGE — model described "
+                      f"intent but made no tool call; nudging to act "
+                      f"(attempt {reasoning_loop_cut_count + 1}/"
+                      f"{_subagent_scoped_retry(st.REASONING_ONLY_RETRY_LIMIT)}){RESET}")
         messages.append({"role": "assistant", "content": text})
         _nudge_current_user_turn(
             messages,
@@ -819,15 +849,17 @@ st.MAX_MODEL_TURNS = _env_int("NX_MAX_MODEL_TURNS", 500)
 def _report_length_cut(quiet: bool, used: int, limit: int) -> None:
     """Status line after appending a continuation resume note."""
     if not quiet:
-        print(f"{C.WARNING}  ✂ RESPONSE CUT BY TOKEN LIMIT — continuing ({used}/{limit}){RESET}")
+        with write_lock():
+            print(f"{C.WARNING}  ✂ RESPONSE CUT BY TOKEN LIMIT — continuing ({used}/{limit}){RESET}")
 
 
 def _report_length_exhausted(quiet: bool, used: int) -> None:
     """Status line when the continuation budget ran out and the partial was closed out."""
     if not quiet:
         suffix = "s" if used != 1 else ""
-        print(f"{C.WARNING}  ✂ RESPONSE STILL HIT TOKEN LIMIT after {used} continuation{suffix} "
-              f"— saved partial answer with truncation marker{RESET}")
+        with write_lock():
+            print(f"{C.WARNING}  ✂ RESPONSE STILL HIT TOKEN LIMIT after {used} continuation{suffix} "
+                  f"— saved partial answer with truncation marker{RESET}")
 
 
 def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
@@ -984,9 +1016,11 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
                 # respects the sub-loop's forced-final ladder (the branch
                 # above decides posture on the next iteration).
                 if not _subagent_quiet():
-                    print(f"{DIM}  ▸ steering applied — continuing turn{RESET}")
+                    with write_lock():
+                        print(f"{DIM}  ▸ steering applied — continuing turn{RESET}")
                 elif _steer_agent is not None:
-                    print(f"{DIM}  ▸ agent {_steer_agent} steered — continuing{RESET}")
+                    with write_lock():
+                        print(f"{DIM}  ▸ agent {_steer_agent} steered — continuing{RESET}")
                 steps += 1
                 continue
             if not _subagent_active() and not _batch_active():
@@ -1089,8 +1123,9 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             timed_out_retries += 1
             delay = _step_backoff_delay(timed_out_retries - 1, None)
             if not _subagent_quiet():
-                print(f"{DIM}  ↻ step retry {timed_out_retries}/"
-                      f"{_step_retry_limit()} in {delay:.1f}s…{RESET}")
+                with write_lock():
+                    print(f"{DIM}  ↻ step retry {timed_out_retries}/"
+                          f"{_step_retry_limit()} in {delay:.1f}s…{RESET}")
             if delay > 0:
                 time.sleep(delay)
             continue
@@ -1187,8 +1222,9 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
     # already consumed by the loop above).
     if steps >= max_turns and not force_final:
         if not _subagent_quiet():
-            print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
-                  f"forcing a final answer from current state{RESET}")
+            with write_lock():
+                print(f"{C.WARNING}  ⚂ MODEL TURN LIMIT ({max_turns}) — "
+                      f"forcing a final answer from current state{RESET}")
         if _task_deadline_exceeded():
             return _task_timeout_summary(steps)
         final_status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,

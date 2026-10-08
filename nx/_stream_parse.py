@@ -19,6 +19,9 @@ from rich.console import Console
 from rich.live import Live
 
 from ._rich import themed_markdown
+# EVENTSURFACE_SPEC §1(a): the stream tap lives on the parser's own thread, so
+# it resolves the job id from that thread's sub-agent context (see tap_event).
+from ._subagent_tls import tap_event
 
 from ._ansi import DIM, CLEAR_LINE, C, RESET, strip_ansi_for_display
 from ._special_tokens import (
@@ -26,6 +29,12 @@ from ._special_tokens import (
     _strip_leaked_tokens,
 )
 from ._metrics import _abbr, _precise_abbr
+# EVENTSURFACE_SPEC §2 Phase 4: every raw console write below takes the shared
+# write lock so a 4 fps /tabs repaint cannot tear a streamed line. _surfaces is
+# already in sys.modules by the time this module loads (nx/__init__ imports it
+# first) and imports no turn-layer module, so a module-level import adds zero
+# modules to the T-9 conftest snapshot.
+from ._surfaces import write_lock
 from . import _state as st
 from . import REASONING_ONLY_TIME_LIMIT
 
@@ -202,9 +211,11 @@ class StreamParser:
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
-        sys.stdout.write(CLEAR_LINE + f"{C.ACCENT}  ↳ generating tool call{RESET} "
-                         f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
-        sys.stdout.flush()
+        line = (CLEAR_LINE + f"{C.ACCENT}  ↳ generating tool call{RESET} "
+                f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
+        with write_lock():
+            sys.stdout.write(line)
+            sys.stdout.flush()
         self.tool_status_active = True
         self.last_tool_status = now
 
@@ -258,9 +269,17 @@ class StreamParser:
             self.say_live = None
 
     def clear_tool_status(self) -> None:
+        # EVENTSURFACE_SPEC latent hazard: this is the one CLEAR_LINE write in
+        # the parser with NO quiet check, so a quiet (async-agent) loop would
+        # erase a line it does not own. Dead-safe only because
+        # tool_status_active cannot become true while quiet — that coupling is
+        # an accident of the call sites, not a guarantee, so guard explicitly.
+        if self.quiet:
+            return
         if self.tool_status_active:
-            sys.stdout.write(CLEAR_LINE)
-            sys.stdout.flush()
+            with write_lock():
+                sys.stdout.write(CLEAR_LINE)
+                sys.stdout.flush()
             self.tool_status_active = False
 
     def close_think_block(self) -> None:
@@ -271,13 +290,17 @@ class StreamParser:
             return
         elapsed = time.time() - self.think_start
         dur = _fmt_think_duration(elapsed)
+        # Each closer is one visual unit: locked as a block so a repaint can't
+        # land between the two lines of the visible variant.
         if self.quiet:
             pass  # parse only — the closer line is terminal noise here
         elif st.REASONING_VISIBLE:
-            print()
-            print(f"{DIM}  ────────────── (thought for {dur}){RESET}")
+            with write_lock():
+                print()
+                print(f"{DIM}  ────────────── (thought for {dur}){RESET}")
         else:
-            print(f"{DIM}  (thought for {dur}){RESET}")
+            with write_lock():
+                print(f"{DIM}  (thought for {dur}){RESET}")
         self.think_start = None
 
     def gen_window(self, elapsed_total: float) -> tuple[float, bool]:
@@ -367,9 +390,11 @@ class StreamParser:
             if self.quiet:
                 pass
             elif st.REASONING_VISIBLE:
-                print(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
+                with write_lock():
+                    print(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
             else:
-                print(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
+                with write_lock():
+                    print(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
             self.mode = "think"
         if _LEAKED_SPECIAL_TOKEN_RE.search(rc):
             rc = _strip_leaked_tokens(rc)
@@ -380,7 +405,12 @@ class StreamParser:
             if self.quiet:
                 pass
             elif st.REASONING_VISIBLE:
-                print(f"{C.REASONING_TEXT}{rc}{RESET}", end="", flush=True)
+                # Per-chunk write: the lock wraps only the print, never the
+                # chunk loop — an uncontended RLock acquire is ~100 ns against
+                # chunks arriving every few ms, and holding across chunks
+                # would starve the repaint.
+                with write_lock():
+                    print(f"{C.REASONING_TEXT}{rc}{RESET}", end="", flush=True)
             self.reasoning_parts.append(rc)
         # Accumulate while there is no prose, even once tool-call deltas have
         # arrived (glm-style interleaved think blocks land after the first
@@ -392,18 +422,20 @@ class StreamParser:
                 self.reasoning_only_start = time.time()
         if LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT:
             if not self.quiet:
-                print()
-                print(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
-                      f"special-token chunks; cutting stream now{RESET}")
+                with write_lock():
+                    print()
+                    print(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
+                          f"special-token chunks; cutting stream now{RESET}")
             self.loop_cut = True
             return True
         if (st.REASONING_ONLY_CHAR_LIMIT > 0 and not self.content and not self.tcs
                 and self.reasoning_only_chars >= st.REASONING_ONLY_CHAR_LIMIT):
             if not self.quiet:
-                print()
-                print(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
-                      f"{_abbr(self.reasoning_only_chars)} reasoning chars with no "
-                      f"answer/tool call — cutting stream now{RESET}")
+                with write_lock():
+                    print()
+                    print(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
+                          f"{_abbr(self.reasoning_only_chars)} reasoning chars with no "
+                          f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
             return True
         if (REASONING_ONLY_TIME_LIMIT > 0 and not self.content and not self.tcs
@@ -411,10 +443,11 @@ class StreamParser:
                 and time.time() - self.reasoning_only_start >= REASONING_ONLY_TIME_LIMIT):
             elapsed_reason = time.time() - self.reasoning_only_start
             if not self.quiet:
-                print()
-                print(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
-                      f"{elapsed_reason:.0f}s of reasoning with no "
-                      f"answer/tool call — cutting stream now{RESET}")
+                with write_lock():
+                    print()
+                    print(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
+                          f"{elapsed_reason:.0f}s of reasoning with no "
+                          f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
             return True
         return False
@@ -457,6 +490,13 @@ class StreamParser:
             self.content.append(chunk)
             self._content_len += len(chunk)
             self.streamed_chars += len(chunk)
+            # EVENTSURFACE_SPEC §1(a) stream tap, chokepoint 1 of 2: this is the
+            # one place raw prose is appended unconditionally, so it is where a
+            # quiet agent's delta becomes visible on /tabs. The job id comes
+            # from THIS thread's sub-agent context (tap_event); on the parent
+            # thread there is none and this is one empty-registry check.
+            # Display-only: the sink never enters `messages`.
+            tap_event("stream", chunk)
             # Real prose landed: it disqualifies the step from reasoning-only
             # accounting (footer divider, stall cutter).
             self.reasoning_only_chars = 0
@@ -492,6 +532,17 @@ class StreamParser:
                         self.say_live.update(themed_markdown(self._clean_str))
                         self.last_say_render = now
                         self._last_render_len = self._clean_len
+                        # EVENTSURFACE_SPEC §1(a) names this render site as the
+                        # second chokepoint, and the stream tap above already
+                        # covers every delta that reaches it. Deliberately NOT
+                        # tapping here: this branch re-renders the WHOLE
+                        # accumulated answer (self._clean_str), not a delta, so
+                        # a tap would append the entire answer to the ring once
+                        # per frame — the ring would show the answer N times
+                        # instead of its tail. The delta above is the delta; a
+                        # re-render is not. (Nothing is lost: a quiet agent —
+                        # the only kind with a sink — never reaches this branch,
+                        # since say_live stays None while quiet.)
                 else:
                     tag_idx = self._tag_carry_start + rel
                     # Tag opened mid-stream: commit whatever prose came
@@ -532,8 +583,9 @@ class StreamParser:
                 self.say_live.stop()
                 self.say_live = None
             if not self.quiet:
-                print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
-                      f"discarding degenerated output{RESET}")
+                with write_lock():
+                    print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
+                          f"discarding degenerated output{RESET}")
             self.loop_cut = True
             return True
         return False
@@ -572,4 +624,5 @@ class StreamParser:
         mode/say_live elsewhere."""
         self.close_think_block()
         if not self.quiet:
-            print(RESET)
+            with write_lock():
+                print(RESET)

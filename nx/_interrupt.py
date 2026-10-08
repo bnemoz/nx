@@ -185,6 +185,7 @@ def _run_armed_session(fd: int, old: Any) -> bool:
     Returns True to stay alive (park again), False to exit the watcher thread
     entirely (stdin died / apply failed)."""
     last_fire = 0.0
+    _dash_last = [0.0]  # last live-region repaint (watcher-tick driver)
     try:
         apply_interrupt_mode(fd, old)
     except Exception:
@@ -197,8 +198,24 @@ def _run_armed_session(fd: int, old: Any) -> bool:
             # when it disarms, so we notice immediately instead of after up
             # to 100ms of poll. Re-check the arm flag even when the wake pipe
             # (not stdin) fired.
+            # Phase 3 live-region driver (EVENTSURFACE_SPEC §2/§3), turn-loop-
+            # owned terminal: the watcher IS the tick — each ~100ms poll
+            # iteration that finds nothing to read also repaints the live
+            # region if it is open (4 fps cap via interval). While the chatbox
+            # owns the terminal the watcher is PARKED (hands stdin off), so
+            # this hook cannot fire — the chatbox's own read loop does it.
             ready_fd = _select_stdin_or_wake(fd, 0.1)
             if ready_fd is None:
+                try:
+                    from ._surfaces import repaint_live_tick, dashboard_open, \
+                        LIVE_FPS_INTERVAL
+                    if dashboard_open():
+                        now = time.time()
+                        if now - _dash_last[0] >= LIVE_FPS_INTERVAL:
+                            _dash_last[0] = now
+                            repaint_live_tick()
+                except Exception:
+                    pass
                 continue
             if ready_fd != fd:
                 _drain_wake()
@@ -255,13 +272,21 @@ def _run_armed_session(fd: int, old: Any) -> bool:
 def _capture_steering_byte(fd: int, c: bytes) -> None:
     """Fold one printable (or backspace/Enter) byte into the steering capture.
 
-    Enter (\r) commits the buffer as a queued steering note; backspace edits
-    it; printable bytes append. Echoes minimally (dim) so the user sees the
-    line they are building without disturbing the streamed output above.
-    Kept tiny and exception-safe: it runs on the watcher thread between chunks
-    and must never break generation."""
+    Ctrl-T (\x14) is intercepted FIRST (EVENTSURFACE_SPEC §3): it toggles the
+    /tabs live dashboard instead of becoming steering text — today it used to
+    be silently dropped by the printable check below. The byte is consumed
+    either way. Enter (\r) commits the buffer as a queued steering note;
+    backspace edits it; printable bytes append. Echoes minimally (dim) so the
+    user sees the line they are building without disturbing the streamed
+    output above. Kept tiny and exception-safe: it runs on the watcher thread
+    between chunks and must never break generation."""
     from ._surfaces import queue_steering, set_steer_partial, steer_partial
     try:
+        if c == b"\x14":
+            from ._surfaces import toggle_dashboard, repaint_live_tick
+            toggle_dashboard()
+            repaint_live_tick()  # paint the just-opened region on this tick
+            return
         if c in (b"\r", b"\n"):
             line = steer_partial()
             if line.strip():

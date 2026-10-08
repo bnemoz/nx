@@ -821,6 +821,14 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         cursor_line = 0
 
     def finish() -> None:
+        # Termination (guardrail): erase the live region before the editor
+        # tears its own frame down, so the region doesn't orphan in
+        # scrollback above the next prompt.
+        try:
+            from ._surfaces import close_dashboard
+            close_dashboard()
+        except Exception:
+            pass
         sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line) + "\n")
         sys.stdout.write("\x1b[?25h\x1b[?2004l")
         sys.stdout.flush()
@@ -986,6 +994,18 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 # fully portable -- no SIGWINCH, which Windows lacks), and
                 # render() re-anchors when it sees the width changed.
                 if not wait_ready(fd, 0.2):
+                    # Phase 3 live-region driver (EVENTSURFACE_SPEC §2/§3),
+                    # chatbox-owned terminal: the editor is the sole stdin
+                    # reader, so the live region below the composer repaints
+                    # from THIS idle tick — never from an external thread
+                    # (single-reader invariant, _interrupt.py). ~4 fps capped
+                    # inside repaint_live via the watcher-style interval.
+                    try:
+                        from ._surfaces import dashboard_open, repaint_live_tick
+                        if dashboard_open():
+                            repaint_live_tick()
+                    except Exception:
+                        pass
                     if last_width is not None and shutil.get_terminal_size(
                             (80, 24)).columns != last_width:
                         render()

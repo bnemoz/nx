@@ -31,6 +31,11 @@ from ._tool_cache import (
     drop_vcs_entries, store_cacheable_result,
 )
 from ._approval import _EscToChat
+# EVENTSURFACE_SPEC §2 Phase 4: the tool-box prints below take the shared write
+# lock so a 4 fps /tabs repaint cannot tear a tool box (_surfaces is already
+# loaded by nx/__init__ and imports no dispatch-layer module — zero new modules
+# in the T-9 conftest snapshot).
+from ._surfaces import write_lock
 from ._bash_jobs import run_bash, wait_background, kill_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
 from ._memory_cmd import memory_write, memory_search, memory_delete
@@ -405,6 +410,10 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # the action string inside _confirm stays the standard shape, so allow
     # rules / risk hints match sub-agent and parent writes alike.
     from ._subagent import _subagent_ctx, _subagent_quiet
+    # EVENTSURFACE_SPEC §1(c) tool tap: a quiet loop draws no box, so its /tabs
+    # row is the only place a tool call is visible. tap_event resolves the job
+    # id from this thread's sub-agent context and no-ops with no sink attached.
+    from ._subagent_tls import tap_event
     ctx = _subagent_ctx()
     if ctx is not None and ctx.write and name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
         header = f"{header} (sub-agent)"
@@ -412,6 +421,12 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # and st._ACTIVE_SPINNER all belong to the parent's terminal while this
     # agent runs detached. Results still flow to the agent's own transcript.
     quiet = _subagent_quiet()
+    if quiet:
+        # one line per quiet call; arg_preview is the same compact preview the
+        # box would have shown. The finish line below edits it in place with
+        # ok/error — an OUTCOME only, no result text ever lands in the ring (a
+        # 50 KB run_bash dump belongs in the agent's transcript, not a row).
+        tap_event("tool", f"{name} {arg_preview}")
     # A parallel fan-out worker owns neither the terminal nor a spinner: it
     # records a ToolBlock (nx/_toolblocks) and the dispatching thread draws the
     # group. Without this, N pool threads each printed half a box while N
@@ -428,9 +443,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # the raw-JSON args line would only duplicate it, so it is suppressed.
     if not quiet and not buffered:
         accent = tool_accent(name)
-        print(f"\n{accent}  ┌─ {header}{RESET}")
-        if name != "todo_write":
-            print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
+        # Header + args line are one visual unit of the tool box: one lock.
+        with write_lock():
+            print(f"\n{accent}  ┌─ {header}{RESET}")
+            if name != "todo_write":
+                print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -451,7 +468,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     except _EscToChat:
         # Close the tool box before propagating so it isn't left visually open.
         if not quiet and not buffered:
-            print(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
+            with write_lock():
+                print(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         result = f"ERROR: {type(e).__name__}: {e}"
@@ -459,6 +477,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         if not quiet and not buffered:
             st._ACTIVE_SPINNER = None
             spinner.stop()
+    if quiet:
+        # Finish line for the tool tap above (trivially available: the result
+        # string's own ERROR/DENIED convention, the same test the breaker and
+        # the edit-check below use). Outcome only — never the result body.
+        _ok = not (isinstance(result, str)
+                   and result.startswith(("ERROR", "DENIED")))
+        tap_event("tool", f"{name} {'ok' if _ok else 'error'}")
     # Breaker decay (0.29.9): the tool executed cleanly — one success clears
     # its malformed-args streak (and re-arms a broken tool). Kept after the
     # error fold so an ERROR result does NOT count as the clean dispatch that
@@ -585,17 +610,24 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         disp = render_todos_display().splitlines()
         if len(disp) > 8:
             disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
-        for line in disp:
-            print(f"{accent}  │ {RESET}{line}{RESET}")
+        # Whole box body under one lock: bounded (≤ 9 lines), and the lines are
+        # one visual unit — a repaint between them would tear the todo list.
+        with write_lock():
+            for line in disp:
+                print(f"{accent}  │ {RESET}{line}{RESET}")
     elif st.TOOL_OUTPUT_VISIBLE:
-        for line in preview_lines:
-            print(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+        # Bounded preview (≤ 9 lines): one lock for the box body.
+        with write_lock():
+            for line in preview_lines:
+                print(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     else:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
-        print(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
+        with write_lock():
+            print(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
     if not quiet and not buffered:
-        print(f"{accent}  └─{RESET}")
+        with write_lock():
+            print(f"{accent}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         # git_* results reflect .git/ state, which the root dir's mtime never
         # tracks (commits write under .git/ only) — store_cacheable_result
