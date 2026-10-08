@@ -99,6 +99,25 @@ THEMES: dict[str, dict[str, str]] = {
         "purple": "a44dff", "teal": "3dfcd2", "pink": "ff9ecb",
         "brown": "d9a05b",
     },
+    "ayu-light": {   # ayu light (ayu-theme) — light
+        # authored: yellow #eca944, orange #f2ae49, teal #4cbf99 sit above the
+        # luma-160 legibility band on white; nudged darker in-hue (orange
+        # #d78c16) to keep all twelve inside the band.
+        "cyan": "2ba587", "green": "6d9c00", "yellow": "d18910",
+        "red": "ea6c66", "magenta": "a37acc", "gray": "5c6166",
+        "blue": "399ee6", "orange": "d78c16",
+        "purple": "9e75c7", "teal": "2aa886", "pink": "ed6ea0",
+        "brown": "99703f",
+    },
+    "bluloco-light": {   # bluloco light (uloco) — light
+        # authored: yellow #c5a332 / teal #27618d outside the band; nudged
+        # (yellow #b9992f, teal #296695, red #d52753 -> #db3a63 for 90+).
+        "cyan": "0099e1", "green": "3cbc66", "yellow": "b9992f",
+        "red": "db3a63", "magenta": "ce33c0", "gray": "676a77",
+        "blue": "275fe4", "orange": "df631c",
+        "purple": "823ff1", "teal": "296695", "pink": "ff6480",
+        "brown": "946b3d",
+    },
     "frappe": {   # Catppuccin Frappé — medium-dark
         "cyan": "81c8be", "green": "a6d189", "yellow": "e5c890",
         "red": "e78284", "magenta": "ca9ee6", "gray": "838ba7",
@@ -240,6 +259,8 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
 # background matches T's authored side, else the derived opposite.
 AUTHORED_THEME_LIGHTNESS: dict[str, bool] = {t: False for t in THEMES}
 AUTHORED_THEME_LIGHTNESS["latte"] = True
+AUTHORED_THEME_LIGHTNESS["ayu-light"] = True
+AUTHORED_THEME_LIGHTNESS["bluloco-light"] = True
 
 
 def variant_for(name: str, *, light_bg: bool) -> dict[str, str]:
