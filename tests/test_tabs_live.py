@@ -338,6 +338,54 @@ class TestWriteSerialization(unittest.TestCase):
         for mod in ("_turn.py", "_stream_parse.py", "_dispatch.py"):
             self._source_prints_all_locked(mod)
 
+    def test_stream_parse_live_sites_locked(self):
+        """AST guard: every rich Live interaction site (Live()/update/start/
+        stop on say_live) in _stream_parse.py sits inside a
+        `with write_lock():` block, so a Live frame repaint cannot interleave
+        with the /tabs dashboard repaint."""
+        import ast
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "nx", "_stream_parse.py")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+
+        class Walk(ast.NodeVisitor):
+            def __init__(self):
+                self.depth = 0
+                self.offenders = []
+
+            def visit_With(self, node):
+                locked = any(
+                    isinstance(it.context_expr, ast.Call)
+                    and isinstance(it.context_expr.func, ast.Name)
+                    and it.context_expr.func.id == "write_lock"
+                    for it in node.items)
+                self.depth += 1 if locked else 0
+                self.generic_visit(node)
+                if locked:
+                    self.depth -= 1
+
+            def visit_Call(self, node):
+                f = node.func
+                live = (
+                    # Live(...) construction
+                    (isinstance(f, ast.Name) and f.id == "Live")
+                    # say_live.update / say_live.start / say_live.stop
+                    or (isinstance(f, ast.Attribute)
+                        and f.attr in ("update", "start", "stop")
+                        and isinstance(f.value, ast.Attribute)
+                        and f.value.attr == "say_live"))
+                if live and self.depth == 0:
+                    self.offenders.append(node.lineno)
+                self.generic_visit(node)
+
+        w = Walk()
+        w.visit(tree)
+        self.assertEqual(
+            w.offenders, [],
+            f"_stream_parse.py: Live sites outside `with write_lock()`: "
+            f"lines {w.offenders}")
+
     def test_modules_share_the_surfaces_lock(self):
         """write_lock() is _WRITE_LOCK itself, and the three writer modules
         imported THAT function (one lock, not per-module copies)."""

@@ -227,9 +227,33 @@ def _restore(fspath):
     for _name, _mod in list(sys.modules.items()):
         if not _is_nx(_name):
             continue
+        # A daemon worker thread (subagent tier / worktree prefetch: e.g.
+        # nx._subagent._run_job does a lazy `from ._worktree import ...`) can be
+        # mid-`import nx._worktree` while this runs. Touching a module whose
+        # loader hasn't finished is not safe: importlib's _load_unlocked ends
+        # with an UNGUARDED `module = sys.modules.pop(spec.name)` (cpython 3.12
+        # importlib/_bootstrap.py:946 — the failure-path `del` a few lines above
+        # it does catch KeyError, this one does not), so deleting the entry out
+        # from under that importer makes the thread raise KeyError('nx._worktree'),
+        # which surfaces as PytestUnhandledThreadExceptionWarning. Rewinding a
+        # half-executed module is wrong the same way (it wipes the globals the
+        # body is still executing against). `__spec__._initializing` is True for
+        # exactly that window (set before the sys.modules insert, cleared after
+        # the pop), so skipping these closes the race; they get reaped by the
+        # next restore pass (restore runs before setup and after teardown of
+        # every test, so a lingering module is gone within one test).
+        if getattr(getattr(_mod, "__spec__", None), "_initializing", False):
+            continue
         _snap = _BASELINE_MODS.get(_name)
         if _snap is None:
-            del sys.modules[_name]
+            # Identity check, not pop-by-name: between the list() snapshot above
+            # and here, an importer thread can have replaced this entry with its
+            # own in-flight module (first import finished and was reaped, a
+            # second worker started a fresh one). Popping by name alone would
+            # yank *that* import — the exact KeyError this guard exists to
+            # prevent. `sys.modules.get(_name) is _mod` closes that ABA window.
+            if sys.modules.get(_name) is _mod:
+                sys.modules.pop(_name, None)
             continue
         _d = _mod.__dict__
         for _k in [k for k in _d if k not in _snap]:

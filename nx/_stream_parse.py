@@ -260,13 +260,17 @@ class StreamParser:
         live panel. Must be used instead of a bare `say_live.stop()` whenever
         content may have arrived since the last throttled render."""
         if self.say_live is not None:
-            # PF-04: Live(transient=False) already froze the last frame; only
-            # re-parse the whole answer if content arrived since that render.
-            if self._clean_len != self._last_render_len:
-                self.say_live.update(themed_markdown(self._clean_str))
-                self._last_render_len = self._clean_len
-            self.say_live.stop()
-            self.say_live = None
+            # Live frames must not interleave with a /tabs dashboard repaint:
+            # lock the whole update+stop frame (reentrant RLock — safe when a
+            # caller already holds write_lock).
+            with write_lock():
+                # PF-04: Live(transient=False) already froze the last frame; only
+                # re-parse the whole answer if content arrived since that render.
+                if self._clean_len != self._last_render_len:
+                    self.say_live.update(themed_markdown(self._clean_str))
+                    self._last_render_len = self._clean_len
+                self.say_live.stop()
+                self.say_live = None
 
     def clear_tool_status(self) -> None:
         # EVENTSURFACE_SPEC latent hazard: this is the one CLEAR_LINE write in
@@ -518,9 +522,11 @@ class StreamParser:
                     self._tag_carry = window[-carry_n:]
                     self._tag_carry_start = self._content_len - len(self._tag_carry)
                     if not self.quiet and self.say_live is None:
-                        self.say_live = Live(console=self._say_console,
-                                             refresh_per_second=12, transient=False)
-                        self.say_live.start()
+                        # One lock per complete frame: creation + start together.
+                        with write_lock():
+                            self.say_live = Live(console=self._say_console,
+                                                 refresh_per_second=12, transient=False)
+                            self.say_live.start()
                     now = time.time()
                     # PF-04: raise the throttle with size — 50 ms for the first
                     # ~2 KB, then scaled, so a long answer is not re-parsed at 20 fps.
@@ -529,7 +535,8 @@ class StreamParser:
                         _SAY_MIN_INTERVAL * self._clean_len / _SAY_THROTTLE_SCALE_BYTES)
                     if not self.quiet and self.say_live is not None \
                             and now - self.last_say_render >= interval:
-                        self.say_live.update(themed_markdown(self._clean_str))
+                        with write_lock():
+                            self.say_live.update(themed_markdown(self._clean_str))
                         self.last_say_render = now
                         self._last_render_len = self._clean_len
                         # EVENTSURFACE_SPEC §1(a) names this render site as the
@@ -562,14 +569,17 @@ class StreamParser:
                     # the (tag-free) prefix right before stopping, that stray
                     # partial-opener frame would be the one left on screen.
                     prefix = strip_ansi_for_display("".join(self.content)[:tag_idx])
-                    if not self.quiet and self.say_live is None and prefix.strip():
-                        self.say_live = Live(console=self._say_console,
-                                             refresh_per_second=12, transient=False)
-                        self.say_live.start()
-                    if self.say_live is not None:
-                        self.say_live.update(themed_markdown(prefix))
-                        self.say_live.stop()
-                        self.say_live = None
+                    # One lock per complete frame: creation, final render and
+                    # freeze land as a single locked unit.
+                    with write_lock():
+                        if not self.quiet and self.say_live is None and prefix.strip():
+                            self.say_live = Live(console=self._say_console,
+                                                 refresh_per_second=12, transient=False)
+                            self.say_live.start()
+                        if self.say_live is not None:
+                            self.say_live.update(themed_markdown(prefix))
+                            self.say_live.stop()
+                            self.say_live = None
                     self._live_committed = True
                     self.in_text_tool_tag = True
             if self.in_text_tool_tag:
@@ -580,8 +590,9 @@ class StreamParser:
             kind = ("special-token collapse" if self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
                     else "repetition collapse")
             if self.say_live is not None:
-                self.say_live.stop()
-                self.say_live = None
+                with write_lock():
+                    self.say_live.stop()
+                    self.say_live = None
             if not self.quiet:
                 with write_lock():
                     print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
