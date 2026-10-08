@@ -1,6 +1,7 @@
 """ANSI color/cursor constants and the terminal waiting animation (LifeSpinner)."""
 from __future__ import annotations
 
+import itertools
 import os
 import re
 import sys
@@ -132,6 +133,123 @@ _PALETTE_KEYS: tuple[str, ...] = (
     "purple", "teal", "pink", "brown",
 )
 
+# --- light/dark variants ------------------------------------------------------
+# Every theme gains an automatic opposite-background variant: a dark theme
+# (mocha, dracula, ...) gets a light variant for pale terminals, and the one
+# authored light theme (latte) gets a dark one. The variant is DERIVED from
+# the authored palette, not hand-tuned: mirror each hue's lightness into the
+# band that's legible on the opposite background while keeping its hue family
+# (so "mocha on white" still reads as mocha), nudge saturation up slightly on
+# light backgrounds (white compresses perceived saturation), then push any
+# near-duplicate pair apart in lightness until the twelve slots are as
+# distinguishable as an authored palette's. A user who prefers a hand-tuned
+# look can still pick the authored side explicitly via /theme.
+
+def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
+    """Derive the opposite-background variant of an authored palette."""
+    import colorsys
+    hls: dict[str, list[float]] = {}
+    for k, h in hexes.items():
+        r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        hue, lum_, sat = colorsys.rgb_to_hls(r, g, b)
+        if to_light:
+            # mirror lightness into the 0.22-0.52 band (legible on white);
+            # the 0.92 damp keeps extreme highlights from over-darkening
+            nl = min(0.52, max(0.22, 1.0 - lum_ * 0.92))
+            ns = min(1.0, sat * 1.12)   # white compresses perceived saturation
+        else:
+            nl = min(0.82, max(0.62, 1.0 - lum_ * 0.95))  # legible on near-black
+            ns = sat
+        hls[k] = [hue, nl, ns]
+
+    def rgb(k: str) -> str:
+        r, g, b = colorsys.hls_to_rgb(*hls[k])
+        return "%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+    # Legibility clamp on PERCEIVED luma, not HLS lightness: HLS lightness
+    # doesn't control luma uniformly across hues (a saturated yellow-green at
+    # HLS 0.5 is far brighter than a blue at the same lightness). Walk each
+    # slot into its side's luma window directly.
+    def luma_of(k: str) -> float:
+        h = rgb(k)
+        return sum(w * int(h[i:i + 2], 16) for w, i in
+                   ((0.2126, 0), (0.7152, 2), (0.0722, 4)))
+    for k in hls:
+        if to_light:
+            # walk into the luma window from BOTH directions: mirroring a
+            # very light authored hue lands too dark (mocha yellow), a very
+            # saturated one too bright (gruvbox green)
+            while luma_of(k) < 100 and hls[k][1] < 0.90:
+                hls[k][1] += 0.02
+            while luma_of(k) > 160 and hls[k][1] > 0.10:
+                hls[k][1] -= 0.02
+        else:
+            while luma_of(k) < 100 and hls[k][1] < 0.95:
+                hls[k][1] += 0.02
+            while luma_of(k) > 185 and hls[k][1] > 0.10:
+                hls[k][1] -= 0.02
+    # The lightness walk above can stall below the luma floor for hues whose
+    # luma is dominated by a channel their hue pins low (saturated violet on
+    # the light side, gruvbox's red-dominant brown on the dark side);
+    # desaturating toward gray covers the full luma range as a fixup.
+    for k in hls:
+        while luma_of(k) < 100 and hls[k][2] > 0.05:
+            hls[k][2] -= 0.05
+        while luma_of(k) > 160 and hls[k][2] > 0.05 and to_light:
+            hls[k][2] -= 0.05
+
+    def dist(a: str, b: str) -> float:
+        return sum((int(rgb(a)[i:i + 2], 16) - int(rgb(b)[i:i + 2], 16)) ** 2
+                   for i in (0, 2, 4)) ** 0.5
+
+    # Deterministic separability pass: repeatedly take the closest hue pair
+    # and split them in lightness until the twelve slots are distinct enough
+    # (the authored amethyst palette's own min pair distance is the bar).
+    for _ in range(20):
+        pair = min(itertools.combinations(hls, 2), key=lambda p: dist(*p))
+        if dist(*pair) >= 30:
+            break
+        a, b = pair
+        # split the pair in lightness, clamped to the side's legibility band
+        lo, hi = (0.22, 0.52) if to_light else (0.62, 0.82)
+        if hls[a][1] <= hls[b][1]:
+            hls[a][1] = max(lo, hls[a][1] - 0.045)
+            hls[b][1] = min(hi, hls[b][1] + 0.045)
+        else:
+            hls[a][1] = min(hi, hls[a][1] + 0.045)
+            hls[b][1] = max(lo, hls[b][1] - 0.045)
+        # re-clamp luma: the band clamp alone can still leave a slot outside
+        # its luma window. Prefer walking lightness (usually room on both
+        # sides of the pair), then desaturate as the last resort.
+        for k in (a, b):
+            other = b if k == a else a
+            if luma_of(k) < 100 and hls[k][1] < 0.90 and hls[k][1] <= hls[other][1] + 0.02:
+                while luma_of(k) < 100 and hls[k][1] < 0.90:
+                    hls[k][1] += 0.02
+            while luma_of(k) < 100 and hls[k][2] > 0.05:
+                hls[k][2] -= 0.05
+            while luma_of(k) > (160 if to_light else 185) and hls[k][2] > 0.05:
+                hls[k][2] -= 0.05
+    return {k: rgb(k) for k in hexes}
+
+
+# AUTHORED_THEME_LIGHTNESS: True for themes designed for a light terminal.
+# The natural variant of theme T for a given background is T itself when the
+# background matches T's authored side, else the derived opposite.
+AUTHORED_THEME_LIGHTNESS: dict[str, bool] = {t: False for t in THEMES}
+AUTHORED_THEME_LIGHTNESS["latte"] = True
+
+
+def variant_for(name: str, *, light_bg: bool) -> dict[str, str]:
+    """The palette hexes for `name` rendered for `light_bg` (True = white-ish
+    terminal background): the authored palette itself when that already matches
+    the background, else the derived variant."""
+    hexes = THEMES[name]
+    if AUTHORED_THEME_LIGHTNESS[name] == light_bg:
+        return hexes
+    return _variant_derive(hexes, to_light=light_bg)
+
+
 # Semantic roles used across the codebase, each backed by one of the twelve
 # palette hues above by default. Centralizing the role→hue mapping here means
 # a new theme only has to supply the twelve palette hexes (above) — it never
@@ -214,9 +332,15 @@ class _Colors:
 
     def __init__(self, name: str) -> None:
         self.name = name
+        # None = the terminal background side is unknown; use the authored
+        # palette. True/False (light/dark, set by the luminance probe below or
+        # by a future re-probe) swaps in the derived opposite-side variant.
+        self.light_bg: bool | None = None
         self._apply(THEMES[name])
 
     def _apply(self, hexes: dict[str, str]) -> None:
+        if self.light_bg is not None:
+            hexes = _variant_hexes(self.name, self.light_bg)
         self.CYAN = _rgb(hexes["cyan"])
         self.GREEN = _rgb(hexes["green"])
         self.YELLOW = _rgb(hexes["yellow"])
@@ -246,7 +370,33 @@ if _requested_theme and _requested_theme not in THEMES:
     print(f"nx: unknown NX_THEME {_requested_theme!r} — falling back to {DEFAULT_THEME!r}. "
           f"Available: {avail}", file=sys.stderr)
 
+# Auto-detect the terminal background's lightness and, when the active theme's
+# authored side doesn't match it, apply that theme's derived opposite-side
+# variant (the probes live in nx/_tty.py; explicit NX_THEME always wins; a
+# failed probe keeps the authored palette). C.light_bg also drives _apply().
+
+
+def _variant_hexes(name: str, light_bg: bool) -> dict[str, str]:
+    """Palette hexes for `name` adapted to the terminal background side:
+    the authored palette when its side already matches, else the derived
+    opposite-side variant. One resolution shared by _Colors._apply()."""
+    hexes = THEMES[name]
+    if AUTHORED_THEME_LIGHTNESS[name] == light_bg:
+        return hexes
+    return _variant_derive(hexes, to_light=light_bg)
+
+
 C = _Colors(_requested_theme if _requested_theme in THEMES else DEFAULT_THEME)
+if not _requested_theme:
+    from ._tty import _osc_bg_luminance, _COLORFGBG_LUMINANCE
+    _lum = _osc_bg_luminance()
+    if _lum is None:
+        _lum = _COLORFGBG_LUMINANCE()
+    if _lum is not None:
+        C.light_bg = _lum >= 0.5
+        C._apply(THEMES[C.name])
+        if C.light_bg:
+            DEFAULT_THEME = "latte"  # informational: the light-suited default
 
 
 def set_theme(name: str) -> bool:

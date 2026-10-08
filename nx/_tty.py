@@ -260,6 +260,70 @@ def restore_input_mode(fd: int, old: Any) -> None:
         pass
 
 
+# --------------------------------------------------- terminal bg luminance ---
+# Used by the theme system (_ansi.py): a pale theme on a dark terminal or a
+# dark theme on a light terminal is unreadable, so a light background should
+# auto-select the one light theme (latte) unless the user chose a theme.
+
+def _osc_bg_luminance(timeout: float = 0.05) -> float | None:
+    """Ask the terminal for its background color (OSC 11) and return its
+    relative luminance in [0, 1], or None when the terminal doesn't answer
+    within `timeout` (most don't support the query, and a headless/pipe
+    stdout can't be queried at all). The reply is drained so it never leaks
+    into later input parsing. Only called when no explicit theme is set."""
+    import re as _re
+    if IS_WINDOWS or not sys.stdout.isatty() or not sys.stdin.isatty():
+        return None
+    try:
+        fd = sys.stdin.fileno()
+        import termios as _t
+        old = _t.tcgetattr(fd)
+        new = old[:]
+        new[3] &= ~(_t.ECHO | _t.ICANON)
+        new[6][_t.VMIN] = 0
+        new[6][_t.VTIME] = 0
+        _t.tcsetattr(fd, _t.TCSADRAIN, new)
+        try:
+            sys.stdout.write("\033]11;?\033\\")
+            sys.stdout.flush()
+            buf = b""
+            end = time.time() + timeout
+            while time.time() < end:
+                if not wait_ready(fd, 0.01):
+                    continue
+                buf += os.read(fd, 256)
+                if b"\a" in buf or b"\033\\" in buf:
+                    break
+        finally:
+            _t.tcsetattr(fd, _t.TCSADRAIN, old)
+    except Exception:
+        return None
+    m = _re.search(rb"rgb:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})", buf)
+    if not m:
+        return None
+    def _ch(h: bytes) -> float:
+        v = int(h, 16)
+        # 1-4 hex digits per channel; normalize against the channel's max
+        return v / float((1 << (4 * len(h))) - 1)
+    r, g, b = (_ch(m.group(i)) for i in (1, 2, 3))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _COLORFGBG_LUMINANCE() -> float | None:
+    """Fallback for terminals that don't answer OSC 11 (rxvt and derivatives):
+    read COLORFGBG ('fg;bg' color indices). Only the dark/light split of the
+    background index is recoverable — 0-6/8 are dark, 7/15 and >=9 light.
+    Returns a pseudo-luminance (0.0 dark, 0.9 light) or None when unset."""
+    val = os.environ.get("COLORFGBG")
+    if not val:
+        return None
+    try:
+        bg = int(val.split(";")[-1])
+    except ValueError:
+        return None
+    return 0.9 if bg in (7, 15) or bg >= 9 else 0.0
+
+
 # --------------------------------------------------------------- read_byte ---
 
 def read_byte(fd: int) -> bytes:

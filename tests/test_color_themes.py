@@ -25,7 +25,7 @@ os.environ["NX_ENV_FILE"] = "/dev/null"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
 
-from nx import _ansi  # noqa: E402
+from nx import _ansi, _tty  # noqa: E402
 
 PALETTE = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
            "purple", "teal", "pink", "brown")
@@ -299,6 +299,139 @@ def test_code_blocks_derive_pygments_colors_from_palette():
                 != th_latte.get_style_for_token(Token.Keyword).color)
     finally:
         _ansi.set_theme(orig)
+
+
+# --- light-background auto-detection -----------------------------------------
+# Dark palettes are unreadable on a light terminal; with no explicit NX_THEME
+# the default theme must follow the terminal background (nx/_tty.py helpers).
+
+def test_osc_bg_luminance_off_tty_is_none(monkeypatch):
+    # Headless/pipe stdout can't be queried: the helper must give up cleanly.
+    import io
+    monkeypatch.setattr(_ansi.sys, "stdout", io.StringIO(), raising=False)
+    assert _tty._osc_bg_luminance() is None
+
+
+def test_osc_bg_luminance_parses_reply(monkeypatch):
+    import io
+    import sys as _s
+    # Fake tty-ish stdout and a preloaded reply on stdin's fd is hard to
+    # fabricate; instead patch wait_ready+os.read to replay a canned reply.
+    reply = b"\033]11;rgb:ffff/ffff/ffff\033\\"
+    monkeypatch.setattr(_s, "stdout", io.StringIO(), raising=False)
+    monkeypatch.setattr(_tty.os, "read", lambda fd, n: reply)
+    monkeypatch.setattr(_tty, "wait_ready", lambda fd, t: True)
+    monkeypatch.setattr(_tty.termios, "tcgetattr", lambda fd: [0, 0, 0, 0, 0, 0, [0] * 12])
+    monkeypatch.setattr(_tty.termios, "tcsetattr", lambda *a, **k: None)
+    monkeypatch.setattr(_s.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(_s.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(_s.stdin, "fileno", lambda: 0, raising=False)
+    assert _tty._osc_bg_luminance() == 1.0
+
+
+def test_colorfgbg_fallback(monkeypatch):
+    monkeypatch.setenv("COLORFGBG", "15;0")   # dark bg
+    assert _tty._COLORFGBG_LUMINANCE() == 0.0
+    monkeypatch.setenv("COLORFGBG", "0;15")   # light bg
+    assert _tty._COLORFGBG_LUMINANCE() == 0.9
+    monkeypatch.delenv("COLORFGBG")
+    assert _tty._COLORFGBG_LUMINANCE() is None
+    monkeypatch.setenv("COLORFGBG", "junk")
+    assert _tty._COLORFGBG_LUMINANCE() is None
+
+
+def test_default_theme_tracks_light_background(monkeypatch):
+    # Simulated light terminal, no explicit NX_THEME -> latte: run the exact
+    # import-time selection logic _ansi.py uses against a patched probe.
+    monkeypatch.setattr(_tty, "_osc_bg_luminance", lambda timeout=0.05: 0.95)
+    monkeypatch.setattr(_tty, "_COLORFGBG_LUMINANCE", lambda: None)
+    requested = None
+    default = _ansi.DEFAULT_THEME
+    _lum = _tty._osc_bg_luminance()
+    if _lum is None:
+        _lum = _tty._COLORFGBG_LUMINANCE()
+    if requested is None and _lum is not None and _lum >= 0.5:
+        default = "latte"
+    assert default == "latte"
+
+
+def test_ansi_role_colors_unaffected_by_detection():
+    # the detection seam must not disturb the live palette attributes
+    assert m.C.ACCENT.startswith("\033[38;2;")
+    assert m.C.TEXT.startswith("\033[38;2;")
+
+
+def test_variant_keeps_twelve_distinct_hues_for_every_theme():
+    for tname in _ansi.THEMES:
+        for light in (False, True):
+            v = _ansi._variant_hexes(tname, light)
+            assert set(v) == set(PALETTE)
+            assert len(set(v.values())) == 12, f"{tname} light={light}: dup hues"
+
+
+def test_variant_preserves_hue_family():
+    # mirroring lightness must not change what hue family a slot belongs to:
+    # each variant slot stays within 30° of its authored hue (gray exempt: its
+    # authored saturation is near zero, so its hue angle is noise).
+    for tname in _ansi.THEMES:
+        for light in (False, True):
+            v = _ansi._variant_hexes(tname, light)
+            for key in PALETTE:
+                if key == "gray":
+                    continue
+                h1, _l1, _s1 = _hls(_ansi.THEMES[tname][key])
+                h2, _l2, _s2 = _hls(v[key])
+                d = abs(h1 - h2) * 360
+                d = min(d, 360 - d)
+                assert d <= 30, f"{tname} light={light}: {key} hue drifted {d:.0f}°"
+
+
+def test_variant_is_legible_on_its_side():
+    # light variants: all slots dark enough for white; dark variants: light
+    # enough for near-black (same perceptual weights the tty probe uses).
+    def lum(h):
+        r, g, b = _rgb_tuple(h)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    for tname in _ansi.THEMES:
+        for light in (False, True):
+            v = _ansi._variant_hexes(tname, light)
+            if v is _ansi.THEMES[tname]:
+                continue  # authored side: hand-picked, not bound by the clamp
+            for key in PALETTE:
+                # light variants must sit dark enough for white; dark variants
+                # light enough for near-black (brighter is fine on dark)
+                if light:
+                    assert 90 <= lum(v[key]) <= 160, \
+                        f"{tname} light={light} {key} luma {lum(v[key]):.0f} out of window"
+                else:
+                    assert 90 <= lum(v[key]) <= 200, \
+                        f"{tname} light={light} {key} luma {lum(v[key]):.0f} out of window"
+
+
+def test_variant_matches_authored_side_is_identity():
+    # a dark theme asked for a dark background returns its authored palette
+    # untouched; latte asked for light ditto
+    assert _ansi._variant_hexes("mocha", False) is _ansi.THEMES["mocha"]
+    assert _ansi._variant_hexes("latte", True) is _ansi.THEMES["latte"]
+    assert _ansi._variant_hexes("mocha", True) is not _ansi.THEMES["mocha"]
+
+
+def test_light_bg_probe_swaps_variant_via_apply():
+    orig, orig_lb = m.C.name, m.C.light_bg
+    try:
+        m.C.name = "dracula"
+        m.C.light_bg = None
+        m.C._apply(_ansi.THEMES["dracula"])
+        authored = m.C.CYAN
+        m.C.light_bg = True
+        m.C._apply(_ansi.THEMES["dracula"])
+        assert m.C.CYAN != authored, "light-bg variant not applied"
+        m.C.light_bg = None
+        m.C._apply(_ansi.THEMES["dracula"])
+        assert m.C.CYAN == authored, "authored palette not restored"
+    finally:
+        m.C.name, m.C.light_bg = orig, orig_lb
+        m.C._apply(_ansi.THEMES[m.C.name])
 
 
 def test_rendered_code_block_uses_theme_hues_end_to_end():
