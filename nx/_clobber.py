@@ -242,15 +242,58 @@ def staged_index_paths(cwd: str | None = None) -> list[str]:
     return out
 
 
+def _staged_root(cwd: str | None) -> str | None:
+    """The repo root `staged_index_paths(cwd)`'s paths are relative to (git
+    porcelain reports repo-root-relative paths whatever the cwd), or None when
+    it can't be resolved — then claims compare the raw strings instead."""
+    env = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
+    root = ""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              cwd=cwd or None, capture_output=True, text=True,
+                              timeout=_GIT_STATUS_TIMEOUT, env=env)
+        if proc.returncode == 0:
+            root = proc.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        root = ""
+    try:
+        return os.path.realpath(root or cwd or os.getcwd())
+    except OSError:
+        return None
+
+
+def _staged_pairs(cwd: str | None) -> list[tuple[str, str]]:
+    """`(reported, absolute)` for every shared-index staged path."""
+    root = _staged_root(cwd)
+    return [(p, p if root is None else os.path.join(root, p))
+            for p in staged_index_paths(cwd)]
+
+
+def staged_paths_abs(cwd: str | None = None) -> list[str]:
+    """`staged_index_paths` resolved to absolute paths — the form
+    `_stagedclaim` records claims in, so a path `git status` reported and the
+    same path named absolutely compare equal."""
+    return [abs_p for _p, abs_p in _staged_pairs(cwd)]
+
+
 def git_index_guard(command: str, cwd: str | None = None) -> list[str]:
     """The staged paths at risk if `command` runs NOW: non-empty only when the
     command mutates the git index/commits AND the shared index already holds
-    staged entries. `NX_GIT_INDEX_GUARD=0` disables. A clean index keeps
-    `git add`/`git commit` prompt-free."""
+    staged entries THIS session did not stage itself. `NX_GIT_INDEX_GUARD=0`
+    disables. A clean index keeps `git add`/`git commit` prompt-free, and so
+    does a session's own staged WIP (`_stagedclaim`: what git_commit's shared
+    index sync left behind, or what this session's earlier raw `git add`
+    staged) — only FOREIGN staged paths still prompt. Reported paths are the
+    ones `git status` printed (repo-relative), minus the claimed ones."""
     hit = git_mutating_index_op(command)
     if hit is None or not _env_int("NX_GIT_INDEX_GUARD", 1):
         return []
-    return staged_index_paths(hit[1] or cwd)
+    pairs = _staged_pairs(hit[1] or cwd)
+    if not pairs:
+        return []
+    from ._stagedclaim import claimed_staged
+    claimed = claimed_staged([abs_p for _p, abs_p in pairs])
+    return [p for p, abs_p in pairs if abs_p not in claimed]
 
 
 def git_index_guard_message(command: str, paths: list[str]) -> str:

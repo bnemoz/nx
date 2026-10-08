@@ -233,6 +233,7 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
         for p, h in zip(paths, hashes):
             wt[p] = h
     specs: list[str] = []
+    wip: list[str] = []
     for p in paths:
         mode, blob = by_path[p]
         # No verified worktree blob for this path: writing HEAD's blob would
@@ -243,6 +244,8 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
             continue
         # Worktree differs from HEAD: write the worktree blob (WIP stays
         # staged), not HEAD's (which would unstage it).
+        if whash != blob:
+            wip.append(p)
         specs.append(f"{mode},{whash},{p}")
     if specs:
         # ONE --cacheinfo per spec: git's parser consumes exactly one
@@ -255,6 +258,21 @@ def _sync_shared_index(repo: str, file_list: list[str], timeout: int) -> None:
             args.append("--cacheinfo")
             args.append(spec)
         _git(repo, args, timeout)
+    if wip:
+        _claim_synced_staged(repo, wip)
+
+
+def _claim_synced_staged(repo: str, paths: list[str]) -> None:
+    """Record the paths the sync above LEAVES staged (worktree != HEAD) as
+    THIS session's own staged work, so `_clobber.git_index_guard` no longer
+    prompts this session about its own WIP. Paths the sync left clean are NOT
+    claimed: a later staged entry for one of those came from someone else and
+    must still prompt. Best-effort — a failed claim only costs a prompt."""
+    try:
+        from ._stagedclaim import mark_staged
+        mark_staged(os.path.join(repo, p) for p in paths)
+    except Exception:  # noqa: BLE001 - bookkeeping must never break a commit
+        pass
 
 
 def _env_timeout() -> int:

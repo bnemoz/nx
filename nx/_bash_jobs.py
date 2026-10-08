@@ -767,6 +767,22 @@ def run_bash(command: str, timeout: int | None = None,
     if timeout <= 0:
         timeout = 999999999  # ∞ — wait indefinitely
     max_seconds = _env_int("NX_BASH_MAX_SECONDS", 0)
+    # Staged-path attribution (0.125.0): a raw `git add`/`git commit -a` here
+    # stages work this session OWNS, and every later git op of this session
+    # would otherwise prompt on it. Snapshot the shared index pre-run and claim
+    # whatever the command newly staged, so git_index_guard subtracts it from
+    # then on. Only a mutating op pays the extra `git status`; a command that
+    # gets backgrounded never reaches the claim (conservative: a prompt).
+    claim_cwd: str | None = None
+    pre_staged: set[str] | None = None
+    try:
+        from ._clobber import git_mutating_index_op, staged_paths_abs
+        hit = git_mutating_index_op(command)
+        if hit is not None:
+            claim_cwd = hit[1] or _cwd
+            pre_staged = set(staged_paths_abs(claim_cwd))
+    except Exception:
+        pre_staged = None  # attribution is best-effort; the guard is not
     pid, log_path = _run_bash(command, _cwd=_cwd)
     status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
                        expected_start_time=_find_bg_start_time_for_pid(pid))
@@ -787,7 +803,26 @@ def run_bash(command: str, timeout: int | None = None,
     # the log is about to be deleted, leaving a dead pid + map file that the
     # scan (and the wake poller) would otherwise report once per turn forever.
     _mark_bg_notice_seen(pid)
+    if pre_staged is not None:
+        _claim_newly_staged(pre_staged, claim_cwd)
     return _finish_bg_job(log_path)
+
+
+def _claim_newly_staged(pre: set[str], cwd: str | None) -> None:
+    """Claim the paths a just-finished raw git op NEWLY staged into the shared
+    index (post-run minus pre-run) as this session's own staged work, so
+    `_clobber.git_index_guard` stops prompting about them — and still prompts
+    for any path this session never staged. The diff is what keeps it
+    conservative: staged work that predates the command is never claimed by
+    it, so another session's entry stays attributable. Best-effort."""
+    try:
+        from ._clobber import staged_paths_abs
+        from ._stagedclaim import mark_staged
+        fresh = set(staged_paths_abs(cwd)) - pre
+        if fresh:
+            mark_staged(fresh)
+    except Exception:
+        pass  # bookkeeping must never break the tool result
 
 
 # PIDs this process has handed a watchdog thread (avoid duplicates when the

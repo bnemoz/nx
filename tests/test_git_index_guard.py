@@ -384,5 +384,152 @@ def test_minus_C_target_is_the_index_checked(nx_fresh, repo, tmp_path):
     assert prompts == [] and "[exit 0]" in out2, (prompts, out2)
 
 
+# ---------------------------------------------------------------------------
+# 5. session-scoped staged-path claims (0.125.0): the false-positive fix
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def no_claims():
+    """The claim registry is process-global; start every claim test empty and
+    leave it empty so test order can't leak a claim into another test."""
+    import nx._stagedclaim as sc
+    with sc._LOCK:
+        saved = set(sc._CLAIMED)
+        sc._CLAIMED.clear()
+    yield sc
+    with sc._LOCK:
+        sc._CLAIMED.clear()
+        sc._CLAIMED.update(saved)
+
+
+def test_claimed_paths_are_subtracted_from_the_guard(repo, no_claims):
+    """A path THIS session staged is its own business; a foreign one is not."""
+    sc = no_claims
+    _stage_foreign(repo, "foreign.py")
+    (repo / "mine.py").write_text("m\n", encoding="utf-8")
+    _git(repo, "add", "mine.py")
+    assert git_index_guard("git commit -m mine", cwd=str(repo)) == ["foreign.py",
+                                                                    "mine.py"]
+    sc.mark_staged([str(repo / "mine.py")])
+    assert git_index_guard("git commit -m mine", cwd=str(repo)) == ["foreign.py"]
+    # the message lists ONLY the foreign path
+    msg = git_index_guard_message("git commit -m mine",
+                                  git_index_guard("git commit -m mine",
+                                                  cwd=str(repo)))
+    assert "foreign.py" in msg and "mine.py" not in msg
+
+
+def test_claim_matching_survives_a_subdir_cwd(repo, no_claims):
+    """git status prints repo-root-relative paths whatever the cwd, so the
+    claim (an absolute path) must still match when the guard runs from a
+    subdirectory."""
+    sc = no_claims
+    sub = repo / "pkg"
+    sub.mkdir()
+    (sub / "mod.py").write_text("m\n", encoding="utf-8")
+    _git(repo, "add", "pkg/mod.py")
+    assert git_index_guard("git commit -m mine", cwd=str(sub)) == ["pkg/mod.py"]
+    sc.mark_staged([str(repo / "pkg" / "mod.py")])
+    assert git_index_guard("git commit -m mine", cwd=str(sub)) == []
+
+
+def test_unclaimed_and_unkillable_semantics_hold(repo, no_claims):
+    """The pinned semantics are claim-independent: a non-mutating command and
+    the NX_GIT_INDEX_GUARD=0 kill switch stay silent even with unclaimed work
+    staged, and an empty claim set changes nothing."""
+    _stage_foreign(repo)
+    assert git_index_guard("git status", cwd=str(repo)) == []
+    assert git_index_guard("ls -la", cwd=str(repo)) == []
+    os.environ["NX_GIT_INDEX_GUARD"] = "0"
+    try:
+        assert git_index_guard("git commit -m mine", cwd=str(repo)) == []
+    finally:
+        del os.environ["NX_GIT_INDEX_GUARD"]
+
+
+def test_mark_staged_ignores_failures(no_claims):
+    """Bookkeeping never raises into a commit or a shell run."""
+    sc = no_claims
+    sc.mark_staged([])
+    sc.mark_staged(["", None])  # type: ignore[list-item]
+    assert sc.claimed_staged([]) == set()
+    assert sc.claimed_staged(["", None]) == set()  # type: ignore[list-item]
+
+
+def test_gitcommit_staged_wip_does_not_prompt_this_session(nx_fresh, repo,
+                                                           no_claims):
+    """The reported false positive: `git_commit` stages in a private index,
+    then `_sync_shared_index` re-caches the committed paths — and LEAVES one
+    staged whenever the worktree differs from HEAD at sync time (live WIP,
+    simulated here as an edit landing inside the approval window). The next raw
+    git op of the SAME session must not prompt about that WIP; a path staged by
+    someone else afterwards still prompts, alone in the message."""
+    nx, _tmp = nx_fresh
+    monkey = pytest.MonkeyPatch()
+
+    def confirm_edited(action, preview=None):
+        # the worktree moves AFTER git_commit staged (v1) but before its sync:
+        # HEAD takes v1, the sync re-caches the worktree blob (v2), leaving
+        # wip.py STAGED in the shared index — the residual WIP of the bug
+        (repo / "wip.py").write_text("v2 uncommitted\n", encoding="utf-8")
+        return True
+
+    monkey.setattr(nx._bash_jobs, "_confirm", confirm_edited)
+    (repo / "wip.py").write_text("v1\n", encoding="utf-8")
+    out = nx._gitcommit.git_commit(files="wip.py", message="add wip",
+                                   path=str(repo))
+    assert "[git_commit]" in out, out
+    assert staged_index_paths(str(repo)) == ["wip.py"], "sync left WIP staged"
+
+    prompts = []
+    monkey.setattr(nx, "_ask_approval",
+                   lambda prompt, allow_hint=None: prompts.append(prompt) or "y")
+    monkey.setattr(nx, "_confirm", lambda *a, **k: True)
+    monkey.setattr(nx._bash_jobs, "_confirm", lambda *a, **k: True)
+    try:
+        # a mutating op whose ONLY staged path is this session's own WIP:
+        # no prompt at all (this is the false positive being removed)
+        out2 = nx.run_bash("git add wip.py", timeout=20, _cwd=str(repo))
+        assert prompts == [] and "[exit 0]" in out2, (prompts, out2)
+        assert staged_index_paths(str(repo)) == ["wip.py"]
+        # a foreign staged path arriving afterwards still prompts…
+        _stage_foreign(repo)
+        out3 = nx.run_bash("git commit -m mine", timeout=20, _cwd=str(repo))
+    finally:
+        monkey.undo()
+    assert len(prompts) == 1, prompts
+    assert "foreign.py" in prompts[0] and "wip.py" not in prompts[0]
+    assert "[exit 0]" in out3, out3
+
+
+def test_raw_git_add_then_later_op_does_not_prompt(nx_fresh, repo, no_claims):
+    """run_bash's own `git add foo` is claimed, so a later git op asks about
+    foreign staged work only. `foo` staged BEFORE the add (by someone else)
+    still prompts — the diff, not the command, decides attribution."""
+    nx, _tmp = nx_fresh
+    _stage_foreign(repo)  # present before this session staged anything
+    (repo / "foo.py").write_text("f\n", encoding="utf-8")
+    prompts = []
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(nx, "_ask_approval",
+                   lambda prompt, allow_hint=None: prompts.append(prompt) or "y")
+    monkey.setattr(nx, "_confirm", lambda *a, **k: True)
+    monkey.setattr(nx._bash_jobs, "_confirm", lambda *a, **k: True)
+    try:
+        out = nx.run_bash("git add foo.py", timeout=20, _cwd=str(repo))
+        assert "[exit 0]" in out, out
+        # the pre-existing foreign entry is unclaimed → this add itself prompts
+        assert len(prompts) == 1 and "foreign.py" in prompts[0], prompts
+        assert "foo.py" not in prompts[0]
+        # a LATER mutating op: foo.py is this session's, foreign.py is not
+        prompts.clear()
+        out2 = nx.run_bash("git commit -m mine", timeout=20, _cwd=str(repo))
+    finally:
+        monkey.undo()
+    assert len(prompts) == 1, prompts
+    assert "foreign.py" in prompts[0]
+    assert "foo.py" not in prompts[0]
+    assert "[exit 0]" in out2, out2
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
