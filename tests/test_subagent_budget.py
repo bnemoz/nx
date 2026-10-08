@@ -175,6 +175,7 @@ def test_recovery_retry_clamp_inside_subagent(nx_fresh, monkeypatch):
     assert _subagent_stream_cut_limit(2) == 2
     prev = _subagent_tls_ctx()
     prev_recovery = nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES
+    prev_write_recovery = nx_fresh.NX_SUBAGENT_WRITE_RECOVERY_RETRIES
     try:
         install_ctx(DISPATCH)
         assert _subagent_scoped_retry(3) == 1  # clamped inside a sub-loop
@@ -187,9 +188,22 @@ def test_recovery_retry_clamp_inside_subagent(nx_fresh, monkeypatch):
         nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES = 2
         assert _subagent_scoped_retry(3) == 2
         assert _subagent_stream_cut_limit(2) == 2
+        # Write/implement tiers keep the parent's default (0.121.2): a single
+        # reasoning-only stall forcing the final answer kills a mid-edit agent.
+        nx_fresh._subagent._SUBAGENT_TLS.ctx.tier = "write"
+        assert _subagent_scoped_retry(3) == 3  # parent default, not the clamp
+        nx_fresh._subagent._SUBAGENT_TLS.ctx.tier = "implement"
+        assert _subagent_scoped_retry(3) == 3
+        nx_fresh.NX_SUBAGENT_WRITE_RECOVERY_RETRIES = 5
+        assert _subagent_scoped_retry(3) == 5  # live-flippable knob
+        nx_fresh.NX_SUBAGENT_WRITE_RECOVERY_RETRIES = 0
+        assert _subagent_scoped_retry(3) == 0  # 0 disables for write tiers too
+        nx_fresh.NX_SUBAGENT_WRITE_RECOVERY_RETRIES = -1
+        assert _subagent_scoped_retry(3) == 3  # negative = parent default
     finally:
         restore_ctx(prev)
         nx_fresh._subagent._SUBAGENT_RECOVERY_RETRIES = prev_recovery
+        nx_fresh.NX_SUBAGENT_WRITE_RECOVERY_RETRIES = prev_write_recovery
 
 
 def _subagent_tls_ctx():

@@ -842,6 +842,13 @@ NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
 NX_SUBAGENT_DEFAULT_TURNS = _env_int("NX_SUBAGENT_DEFAULT_TURNS", 100)
 NX_SUBAGENT_MAX_TURNS = _env_int("NX_SUBAGENT_MAX_TURNS", 500)
 NX_SUBAGENT_WRITE_TURNS = _env_int("NX_SUBAGENT_WRITE_TURNS", 250)
+# Recovery-rescue allowance inside a write/implement/advisor-tier sub-loop
+# (0.121.2): write tiers keep the parent's default instead of the read-tier
+# NX_SUBAGENT_RECOVERY_RETRIES clamp — a single reasoning-only stall forcing
+# the final answer kills a mid-edit agent. Kept here like the other
+# NX_SUBAGENT_* knobs so tests/REPL can flip it live.
+NX_SUBAGENT_WRITE_RECOVERY_RETRIES = _env_int(
+    "NX_SUBAGENT_WRITE_RECOVERY_RETRIES", 3)
 # Per-subagent model routing (0.86.0): NX_SUBAGENT_MODEL (alone = same client,
 # different model id) and/or NX_SUBAGENT_SOURCE (that source's client + default
 # model; combined with _MODEL = that source + the named model). Unset → sub-

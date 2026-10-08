@@ -176,6 +176,21 @@ _SPAWN_LOCK = threading.Lock()
 _SUBAGENT_RECOVERY_RETRIES = _env_int("NX_SUBAGENT_RECOVERY_RETRIES", 1)
 
 
+def _subagent_write_recovery_retries() -> int:
+    """Recovery-rescue allowance for write/implement/advisor-tier sub-agents
+    (NX_SUBAGENT_WRITE_RECOVERY_RETRIES, default 3). Mirrors
+    _subagent_write_turns(): top-level module attribute first so tests/REPL
+    can flip it live, env as fallback. Write-tier agents make real edits and
+    verify them, so a single reasoning-only stall forcing the final answer
+    kills the whole task; they keep the parent's default (3) instead of the
+    read-tier clamp. 0 disables the failsafes for write tiers too."""
+    import nx as _m
+    try:
+        return int(_m.NX_SUBAGENT_WRITE_RECOVERY_RETRIES)
+    except (AttributeError, TypeError, ValueError):
+        return _env_int("NX_SUBAGENT_WRITE_RECOVERY_RETRIES", 3)
+
+
 def _subagent_scoped_retry(default: int) -> int:
     """The retry limit THIS thread's loop should use for a stall/empty-turn
     failsafe: the clamp inside a sub-agent, the parent's own setting outside
@@ -185,7 +200,13 @@ def _subagent_scoped_retry(default: int) -> int:
     inside sub-agents too: the clamp narrows budgets, never widens them."""
     if default <= 0:
         return default
-    if _subagent_ctx() is not None and _SUBAGENT_RECOVERY_RETRIES >= 0:
+    ctx = _subagent_ctx()
+    if ctx is None:
+        return default
+    if getattr(ctx, "tier", "read") in ("write", "implement", "advisor"):
+        limit = _subagent_write_recovery_retries()
+        return limit if limit >= 0 else default
+    if _SUBAGENT_RECOVERY_RETRIES >= 0:
         return _SUBAGENT_RECOVERY_RETRIES
     return default
 
@@ -919,6 +940,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
                            worktree=worktree, job_id=job_id)
     ctx.advisor = advisor
+    ctx.tier = tier
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
     _SUBAGENT_TLS.ctx = ctx

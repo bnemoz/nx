@@ -55,7 +55,7 @@ class _SubagentContext:
     """One running sub-agent's restricted-dispatch state (thread-local)."""
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
-                 "worktree", "job_id", "consults_left", "advisor",
+                 "worktree", "job_id", "consults_left", "advisor", "tier",
                  "write_calls", "churn_nudged", "churn_escalated")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
@@ -96,6 +96,10 @@ class _SubagentContext:
         self.churn_nudged = False
         self.churn_escalated = False
         self.advisor = False  # True only for advisor-tier agents
+        # Spawn tier string (0.121.2): "read"/"write"/"implement"/"advisor".
+        # Recovery-budget scoping in _subagent.py uses it to give write-tier
+        # agents a larger rescue allowance than the read-tier clamp.
+        self.tier = "read"
 
 
 def _subagent_table() -> dict[str, Any] | None:
