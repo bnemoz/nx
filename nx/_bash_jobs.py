@@ -731,6 +731,8 @@ def run_bash(command: str, timeout: int | None = None,
                 raise _EscToChat(f"run: {command}")
             if choice != "y":
                 return "DENIED by user"
+            from ._clobberclaim import mark_clobbered
+            mark_clobbered(clobber)  # one Y clears this session's re-asks (0.125.1)
         # Git-index guard: a raw `git add`/`git commit`/`git reset`/… while the
         # SHARED index holds staged entries sweeps whatever is staged — maybe
         # ANOTHER session's work — into its own result (the incident a private

@@ -118,6 +118,13 @@ def clobber_targets(command: str) -> list[str]:
                 and not _NEVER_EXEMPT_RE.search(target)):
             continue
         hits.append(target)
+    if hits:
+        # Subtract what this session's user already approved (0.125.1): without
+        # it the SAME file re-prompts on every later truncation of it — the Y
+    # answered the question once; re-asking trains Y-mashing. Same shape as
+        # the git-index guard's _stagedclaim subtraction.
+        from ._clobberclaim import approved_clobbers
+        hits = [t for t in hits if t not in approved_clobbers(hits)]
     return hits
 
 

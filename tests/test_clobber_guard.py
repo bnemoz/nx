@@ -120,3 +120,49 @@ def test_lock_and_dotfiles_are_never_exempt():
 def test_dedup():
     p = _seed()
     assert clobber_targets("cat > " + p + " && cat > " + p) == [p]
+
+
+def test_session_approval_is_not_re_asked():
+    # 0.125.1: one Y clears this session's re-asks for the SAME file — without
+    # the subtraction the guard re-prompted on every later truncation of it.
+    from nx._clobberclaim import approved_clobbers, mark_clobbered
+    p = _seed()
+    assert clobber_targets("cat > " + p) == [p]
+    mark_clobbered([p])
+    assert approved_clobbers([p]) == {p}
+    assert clobber_targets("cat > " + p) == []
+    assert clobber_targets("cmd > " + p + " 2>&1") == []
+
+
+def test_session_approval_is_path_normalized():
+    from nx._clobberclaim import mark_clobbered
+    p = _seed()
+    mark_clobbered([p])
+    assert clobber_targets("cat > " + os.path.join(_tmp, ".", "f.txt")) == []
+
+
+def test_session_approval_does_not_cover_other_files():
+    from nx._clobberclaim import mark_clobbered
+    mark_clobbered([os.path.join(_tmp, "approved.txt")])
+    p = _seed("other.txt")
+    assert clobber_targets("cat > " + p) == [p]
+
+
+def test_session_approval_is_process_scoped_not_persisted():
+    # In-process only, like _stagedclaim: a fresh interpreter (a fresh nx
+    # session) must still prompt the first time — the claim does not survive
+    # the process that earned it.
+    import subprocess
+    p = _seed("fresh.txt")
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    subprocess.run([sys.executable, "-c",
+                    "import sys; sys.path.insert(0, %r); "
+                    "from nx._clobberclaim import mark_clobbered; "
+                    "mark_clobbered([%r])" % (here, p)], check=True)
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r); "
+         "from nx._clobber import clobber_targets; "
+         "print(clobber_targets('cat > ' + %r))" % (here, p)],
+        capture_output=True, text=True)
+    assert out.stdout.strip() == "[%r]" % p
