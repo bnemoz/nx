@@ -178,10 +178,12 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
         if to_light:
             # walk into the luma window from BOTH directions: mirroring a
             # very light authored hue lands too dark (mocha yellow), a very
-            # saturated one too bright (gruvbox green)
+            # saturated one too bright (gruvbox green). The 118 top (not just
+            # "not too dark") is a contrast requirement: luma 160 is only
+            # ~2.6:1 against white; 118 holds ~4.7:1 (WCAG AA large-text).
             while luma_of(k) < 100 and hls[k][1] < 0.90:
                 hls[k][1] += 0.02
-            while luma_of(k) > 160 and hls[k][1] > 0.10:
+            while luma_of(k) > 118 and hls[k][1] > 0.10:
                 hls[k][1] -= 0.02
         else:
             while luma_of(k) < 100 and hls[k][1] < 0.95:
@@ -195,7 +197,7 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
     for k in hls:
         while luma_of(k) < 100 and hls[k][2] > 0.05:
             hls[k][2] -= 0.05
-        while luma_of(k) > 160 and hls[k][2] > 0.05 and to_light:
+        while luma_of(k) > 118 and hls[k][2] > 0.05 and to_light:
             hls[k][2] -= 0.05
 
     def dist(a: str, b: str) -> float:
@@ -228,7 +230,7 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
                     hls[k][1] += 0.02
             while luma_of(k) < 100 and hls[k][2] > 0.05:
                 hls[k][2] -= 0.05
-            while luma_of(k) > (160 if to_light else 185) and hls[k][2] > 0.05:
+            while luma_of(k) > (118 if to_light else 185) and hls[k][2] > 0.05:
                 hls[k][2] -= 0.05
     return {k: rgb(k) for k in hexes}
 
