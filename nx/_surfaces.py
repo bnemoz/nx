@@ -489,7 +489,21 @@ def _live_frame() -> list[str]:
                 if len(lines) >= height:
                     break
                 lines.append(f"{DIM}    │ {tl[:width - 8]}{RESET}")
-    return lines[:height]
+    lines = lines[:height]
+    # right status rail (SPEC_PANEL.md phase 1): compose `left[:LW] pad │
+    # cell` per line when NX_PANEL/`/panel` is on. Disabled -> the frame is
+    # byte-identical to the pre-panel build (lines returned untouched).
+    from ._panel import panel_enabled, panel_cells, panel_width
+    if not panel_enabled():
+        return lines
+    pw = panel_width()
+    lw = max(1, width - pw - 2)
+    cells = panel_cells(pw, rows)
+    out: list[str] = []
+    for i, ln in enumerate(lines):
+        cell = cells[i] if i < len(cells) else ""
+        out.append(f"{ln[:lw].ljust(lw)}{DIM}│{RESET} {cell}{RESET}")
+    return out
 
 
 def _erase_live() -> None:

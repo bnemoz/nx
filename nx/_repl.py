@@ -95,6 +95,24 @@ def _cmd_tabs(user: str, state: _ReplState) -> None:
     _m.tabs_print_fallback()
 
 
+def _cmd_panel(user: str, state: _ReplState) -> None:
+    """Toggle the right status rail on the /tabs live region (SPEC_PANEL.md
+    phase 1): ctx utilization, bg-job / agent counts, pending steering.
+    The live region opens/closes with the rail so a toggle is visible
+    immediately mid-turn; NX_PANEL=1 defaults it on."""
+    from . import _panel
+    from ._surfaces import close_dashboard, open_dashboard
+    if _panel.panel_enabled():
+        _panel.set_panel_enabled(False)
+        close_dashboard()
+        print(f"{DIM}panel: off (NX_PANEL=1 to default on){RESET}")
+    else:
+        _panel.set_panel_enabled(True)
+        open_dashboard()
+        print(f"{DIM}panel: on — status rail on the live region "
+              f"(NX_PANEL_WIDTH {_panel.panel_width()}){RESET}")
+
+
 _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/quit": _cmd_quit,
     "/exit": _cmd_quit,
@@ -136,6 +154,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/plan": _cmd_plan,
     "/verify": _cmd_verify,
     "/tabs": _cmd_tabs,
+    "/panel": _cmd_panel,
 }
 
 

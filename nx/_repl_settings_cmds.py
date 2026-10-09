@@ -47,6 +47,7 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/resources, /resmon", "show CPU%/RSS process stats"),
     ("/bg [kill <pid>|all]", "list/kill this session's background bash jobs; /bg all lists every session's"),
     ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T; type mid-turn to steer"),
+    ("/panel", "toggle the right status rail on the live region (NX_PANEL=1 to default on)"),
     ("/yolo", "toggle yolo mode (disable all approval prompts)"),
     ("/approval [level]", "show/set approval level (session-only)"),
     ("/approval set-default <level>", "persist the default approval mode to ~/.env"),

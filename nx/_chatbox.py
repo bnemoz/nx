@@ -47,6 +47,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
     ("/bg", "list this session's background run_bash jobs and sub-agents, or /bg kill <pid>; /bg all lists every session's"),
     ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T"),
+    ("/panel", "toggle the right status rail on the live region"),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)"),
     ("/sessions", "list recent sessions, or show one in full"),
     ("/export", "write the current session to a markdown file"),
