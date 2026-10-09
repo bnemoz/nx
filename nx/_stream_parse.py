@@ -114,13 +114,14 @@ def _close_tag_in(text: str) -> bool:
     return any(tag.search(text) for tag in TOOL_CLOSE_TAGS)
 
 
-def _tool_call_progress(tcs: dict[int, dict[str, Any]]) -> str:
+def _tool_call_progress(tcs: dict[int, dict[str, Any]], precise: bool = True) -> str:
     parts = []
     for i in sorted(tcs):
         c = tcs[i]
         name = c["name"] or "tool"
         args_n = len(c["args"])
-        parts.append(f"{name} args {_precise_abbr(args_n)} chars" if args_n else f"{name} ...")
+        abbr = _precise_abbr if precise else _abbr
+        parts.append(f"{name} args {abbr(args_n)} chars" if args_n else f"{name} ...")
     return ", ".join(parts) if parts else "tool call ..."
 
 
@@ -226,7 +227,7 @@ class StreamParser:
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
         text = (f"{C.ACCENT}  ↳ generating tool call{RESET} "
-                f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
+                f"{DIM}{_tool_call_progress(self.tcs, precise=not _console_has_live())}{RESET}")
         with write_lock():
             if _console_has_live():
                 # SPEC_LIVEENGINE.md: while a Live owns the shared console there
@@ -241,7 +242,10 @@ class StreamParser:
                 # line is simply COMMITTED — but only when its CONTENT changed
                 # (call name set, a new call joins, or the args count crosses
                 # an abbr bucket), which for a long streamed args buffer is a
-                # handful of lines instead of one per 0.2s tick.
+                # handful of lines instead of one per 0.2s tick. The abbr is
+                # the COARSE one here (precise=False above): with two-decimal
+                # precision the text changes every ~50-100 streamed chars and
+                # the changed-gate degenerates back into a per-tick staircase.
                 if text != self._last_tool_status_text:
                     cprint(text)
                     self._last_tool_status_text = text
