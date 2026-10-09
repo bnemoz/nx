@@ -163,6 +163,18 @@ def resume_session(session_id: str, state: Any, *, show_transcript: bool = True,
     cwd, cwd_warning = restore_cwd(data)
     if cwd:
         print(f"{DIM}  → cwd {cwd}{RESET}")
+        # A cwd change is a repo change (0.129.0): the startup acquire still
+        # holds the OLD repo's flock on its dedicated fd, the new repo is
+        # unclaimed, and .nx/session.lock still advertises the old session.
+        # Drop and re-claim. No-op when nothing is held (the startup `nx
+        # --resume` path runs before the first acquire, which then covers it).
+        if os.environ.get("NX_SESSION_LOCK", "1") not in ("0", "false", "off"):
+            from ._sessionlock import reacquire as _lock_reacquire
+            from ._approval import _confirm
+            try:
+                _lock_reacquire(ask_confirm=lambda m: _confirm(m))
+            except Exception:
+                pass  # advisory only — never block a resume
     if cwd_warning:
         print(f"{C.WARNING}  ⚠ {cwd_warning}{RESET}")
 

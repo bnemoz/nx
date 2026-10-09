@@ -123,8 +123,16 @@ _HELD: list[int] = []
 _HELD_PATHS: list[str] = []
 
 
-def release() -> None:
-    """Drop any locks this process holds (clean REPL exit / repo switch)."""
+def release(unlink: bool = True) -> None:
+    """Drop any locks this process holds (clean REPL exit / repo switch).
+
+    `unlink=False` (repo switch, 0.129.0): drop OUR flock and fd but leave the
+    files on disk. Between our unlock_fd and our unlink a waiter can win the
+    flock on the same inode; unlinking then deletes the file out from under
+    its NEW holder, so a third process would create a fresh file and lock it
+    while the second still holds an orphaned inode. Leaving the stale
+    session.lock costs one cosmetic wrong "holder" line later; the race
+    costs a silently unenforced lock."""
     while _HELD:
         fd = _HELD.pop()
         path = _HELD_PATHS.pop()
@@ -132,6 +140,8 @@ def release() -> None:
         # LOCK_UN then close; Windows: the close is the release), so there is
         # no separate close here.
         _platform.unlock_fd(fd)
+        if not unlink:
+            continue
         try:
             os.unlink(path)
         except OSError:
@@ -140,3 +150,23 @@ def release() -> None:
             os.unlink(path + ".lock")
         except OSError:
             pass
+
+
+def reacquire(ask_confirm=None) -> bool:
+    """Re-claim the repo lock after a cwd change (/resume into another repo,
+    0.129.0). No-op unless this process already holds a lock — the startup
+    `nx --resume` path runs resume_session BEFORE the first acquire, so _HELD
+    is empty there and the normal startup acquire in _repl.py does the work.
+    Otherwise: drop the OLD repo's lock without unlinking its files (see
+    release), then acquire() against the freshly restored cwd/PROJECT_ROOT.
+    Same contract as acquire: never fatal, degrades open."""
+    if not _HELD:
+        return True
+    try:
+        release(unlink=False)
+    except Exception:
+        pass
+    try:
+        return acquire(ask_confirm=ask_confirm)
+    except Exception:
+        return True  # lock bookkeeping must never block a session

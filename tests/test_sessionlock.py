@@ -81,3 +81,64 @@ def test_release_clears(repo):
         ["flock", "-n", str(rp / ".nx" / "session.lock.lock"), "true"],
         capture_output=True)
     assert r.returncode == 0  # lock released
+
+
+# --- reacquire: the /resume-into-another-repo path (0.129.0) -----------------
+
+def test_reacquire_noop_without_lock(repo):
+    sl, rp = repo
+    assert sl._HELD == []
+    assert sl.reacquire() is True
+    assert not (rp / ".nx" / "session.lock").exists()
+
+
+def test_reacquire_after_chdir(repo, monkeypatch, tmp_path):
+    sl, old = repo
+    assert sl.acquire() is True
+    new = tmp_path / "other-repo"
+    new.mkdir()
+    monkeypatch.chdir(new)
+    import nx
+    nx.st.PROJECT_ROOT = str(new)
+    assert sl.reacquire() is True
+    # The NEW repo now holds the lock, advertising our session.
+    data = json.loads((new / ".nx" / "session.lock").read_text())
+    assert data["session_id"] == nx.st.SESSION_ID
+    r = subprocess.run(
+        ["flock", "-n", str(new / ".nx" / "session.lock.lock"), "true"],
+        capture_output=True)
+    assert r.returncode != 0  # we hold it
+    # The OLD repo's flock is gone (file deliberately left — see release).
+    r = subprocess.run(
+        ["flock", "-n", str(old / ".nx" / "session.lock.lock"), "true"],
+        capture_output=True)
+    assert r.returncode == 0
+
+
+def test_reacquire_contended_declines(repo, tmp_path, monkeypatch):
+    sl, old = repo
+    assert sl.acquire() is True
+    new = tmp_path / "busy-repo"
+    (new / ".nx").mkdir(parents=True)  # the holder's lock file needs its dir
+    monkeypatch.chdir(new)
+    import nx
+    nx.st.PROJECT_ROOT = str(new)
+    holder = subprocess.Popen(
+        ["flock", str(new / ".nx" / "session.lock.lock"), "-c", "sleep 5"])
+    try:
+        # wait until the child actually holds the flock
+        import time
+        for _ in range(50):
+            r = subprocess.run(
+                ["flock", "-n", str(new / ".nx" / "session.lock.lock"), "true"],
+                capture_output=True)
+            if r.returncode != 0:
+                break
+            time.sleep(0.05)
+        # No way to ask → the new repo is declined (matching acquire's
+        # contract: an advisory lock must never fence a session out silently
+        # shared, and the old lock was already dropped by the switch).
+        assert sl.reacquire(ask_confirm=None) is False
+    finally:
+        holder.terminate()
+        holder.wait()
