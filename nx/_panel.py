@@ -47,17 +47,24 @@ def panel_enabled() -> bool:
     """Is the status rail on? NX_PANEL=1/true/yes is the default; `/panel`
     (set_panel_enabled) overrides in-process. Silently off when the terminal
     is too narrow for chat + rail: cols - PW must stay >= 60."""
-    if _OVERRIDE is not None:
-        on = _OVERRIDE
-    else:
-        on = (os.environ.get("NX_PANEL", "").strip().lower() in _TRUTHY)
-    if not on:
+    if not panel_wants_on():
         return False
     try:
         cols = shutil.get_terminal_size().columns
     except OSError:
         return False
     return cols - panel_width() >= 60
+
+
+def panel_wants_on() -> bool:
+    """The user's intent flag (override or NX_PANEL env), WITHOUT the
+    terminal-width guard. The `/panel` toggle keys off this, not
+    panel_enabled(): on a narrow terminal the guard keeps panel_enabled()
+    False even after an explicit on, which would make /panel print 'on'
+    forever instead of toggling."""
+    if _OVERRIDE is not None:
+        return _OVERRIDE
+    return os.environ.get("NX_PANEL", "").strip().lower() in _TRUTHY
 
 
 def set_panel_enabled(on: bool) -> None:

@@ -104,7 +104,7 @@ def _cmd_panel(user: str, state: _ReplState) -> None:
     turn. NX_PANEL=1 defaults it on."""
     from . import _panel
     from ._surfaces import close_dashboard, dashboard_open
-    if _panel.panel_enabled():
+    if _panel.panel_wants_on():
         _panel.set_panel_enabled(False)
         if dashboard_open():  # erase a mid-turn region we may have opened
             close_dashboard()
