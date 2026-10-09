@@ -36,8 +36,10 @@ sub-agent dashboard (docs/ROADMAP.md defers full-TUI; this stays inline).
   `panel_enabled() -> bool` (env + width gate).
 - `nx/_surfaces.py`: `_live_frame` composes the rail via `_panel.panel_cells`
   when enabled; `_tabs_height()` unchanged.
-- `nx/_repl.py`: `/panel` command → toggles `NX_PANEL`-equivalent in-process
-  flag in `_panel` + `open_dashboard()`/`close_dashboard()`.
+- `nx/_repl.py`: `/panel` command → toggles the `NX_PANEL`-equivalent in-process
+  flag only (0.127.1: no prompt-time `open_dashboard()` — the region is a
+  mid-turn construct owned by whoever holds stdin, spec §2/§3); the rail opens
+  at turn start via `_panel.ensure_region()` and closes in the turn's `finally`.
 - `nx/_repl_settings_cmds.py`: `_HELP_COMMANDS` entry.
 - `nx/_chatbox.py`: completions entry next to `/tabs` (line ~49).
 - `nx/__init__.py`: export `_panel_toggle` if the command needs it (keep

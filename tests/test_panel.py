@@ -1,6 +1,7 @@
 """Right status rail (SPEC_PANEL.md, 0.127.0): panel_cells content, the
 NX_PANEL / NX_PANEL_WIDTH gates, and _live_frame composition on/off.
 Headless-safe like the rest of the suite (no tty required)."""
+import importlib
 import os
 import re
 import shutil
@@ -188,6 +189,100 @@ class TestLiveFrame(_PanelEnv):
         lw = max(1, 120 - pw - 2)
         for o, n in zip(off, on):
             self.assertTrue(n.startswith(o[:lw].ljust(lw)))
+
+
+class TestCmdPanelToggle(_PanelEnv):
+    """_cmd_panel flips the flag only; no prompt-time region open/close
+    (EVENTSURFACE_SPEC §2/§3 — the region is owned by stdin's holder)."""
+
+    def setUp(self):
+        super().setUp()
+        # conftest reaps nx._panel between tests; _cmd_panel lazily imports it,
+        # so test the SAME module instance the command handler will see.
+        self._p = importlib.import_module("nx._panel")
+        # panel_enabled() carries the >=60-free-cols width gate
+        self._size = mock.patch.object(shutil, "get_terminal_size",
+                                       return_value=os.terminal_size((120, 24)))
+        self._size.start()
+
+    def tearDown(self):
+        self._size.stop()
+        super().tearDown()
+
+    def _call(self):
+        importlib.import_module("nx._repl")._cmd_panel("/panel", None)
+
+    def _no_open(self):
+        def _boom(*a, **k):
+            raise AssertionError("open_dashboard called at the prompt")
+        return mock.patch.object(_surfaces, "open_dashboard", _boom)
+
+    def test_on_flips_flag_without_opening(self):
+        with self._no_open():
+            self._call()
+        self.assertTrue(self._p.panel_enabled())
+
+    def test_off_when_region_closed_does_not_touch_surfaces(self):
+        self._p.set_panel_enabled(True)
+        with mock.patch.object(_surfaces, "dashboard_open", return_value=False), \
+             self._no_open(), \
+             mock.patch.object(_surfaces, "close_dashboard",
+                               side_effect=AssertionError("closed while closed")):
+            self._call()
+        self.assertFalse(self._p.panel_enabled())
+
+    def test_off_when_region_open_closes_it(self):
+        self._p.set_panel_enabled(True)
+        closed = []
+        with mock.patch.object(_surfaces, "dashboard_open", return_value=True), \
+             mock.patch.object(_surfaces, "close_dashboard",
+                               side_effect=lambda: closed.append(True)):
+            self._call()
+        self.assertFalse(self._p.panel_enabled())
+        self.assertEqual(closed, [True])
+
+
+class TestEnsureRegion(_PanelEnv):
+    """ensure_region(): turn-start open, only when enabled and closed."""
+
+    def setUp(self):
+        super().setUp()
+        self._p = importlib.import_module("nx._panel")
+        # panel_enabled() carries the >=60-free-cols gate; pin a wide terminal
+        # so these tests assert the flag semantics, not the harness width.
+        self._size = mock.patch.object(shutil, "get_terminal_size",
+                                       return_value=os.terminal_size((120, 24)))
+        self._size.start()
+
+    def tearDown(self):
+        self._size.stop()
+        super().tearDown()
+
+    def test_disabled_does_nothing(self):
+        opened = []
+        with mock.patch.object(_surfaces, "dashboard_open", return_value=False), \
+             mock.patch.object(_surfaces, "open_dashboard",
+                               side_effect=lambda: opened.append(True)):
+            _panel.ensure_region()
+        self.assertEqual(opened, [])
+
+    def test_enabled_when_closed_opens(self):
+        self._p.set_panel_enabled(True)
+        opened = []
+        with mock.patch.object(_surfaces, "dashboard_open", return_value=False), \
+             mock.patch.object(_surfaces, "open_dashboard",
+                               side_effect=lambda: opened.append(True)):
+            _panel.ensure_region()
+        self.assertEqual(opened, [True])
+
+    def test_enabled_when_already_open_is_idempotent(self):
+        self._p.set_panel_enabled(True)
+        opened = []
+        with mock.patch.object(_surfaces, "dashboard_open", return_value=True), \
+             mock.patch.object(_surfaces, "open_dashboard",
+                               side_effect=lambda: opened.append(True)):
+            _panel.ensure_region()
+        self.assertEqual(opened, [])
 
 
 if __name__ == "__main__":

@@ -25,6 +25,18 @@ _OVERRIDE: "bool | None" = None
 _TRUTHY = ("1", "true", "yes")
 
 
+def ensure_region() -> None:
+    """Open the live region at TURN START when the rail is enabled (0.127.1):
+    the region is a mid-turn construct owned by whoever holds stdin
+    (EVENTSURFACE_SPEC §2/§3), so it is opened here — never at the prompt.
+    Idempotent; refuses nothing if _surfaces refuses."""
+    if not panel_enabled():
+        return
+    from . import _surfaces
+    if not _surfaces.dashboard_open():
+        _surfaces.open_dashboard()
+
+
 def panel_width() -> int:
     """NX_PANEL_WIDTH: the rail's column budget, default 24, clamped 12..40."""
     from ._env import _env_int

@@ -592,7 +592,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
 | `/bg [kill <pid>\|all]` | list this session's background `run_bash` jobs (and sub-agents), or kill one; `kill` only reaches jobs this session started — `all` lists every nx session's jobs on the machine (read-only, with each job's launch cwd) |
 | `/tabs` | live dashboard of running surfaces: main turn, bg jobs, sub-agents (Ctrl+T); type mid-turn to steer |
-| `/panel` | toggle the right status rail on the `/tabs` live region: ctx utilization, bg-job/agent counts, pending steering; `NX_PANEL=1` defaults it on, `NX_PANEL_WIDTH` sets its width (12..40) |
+| `/panel` | toggle the right status rail flag — the rail shows on the `/tabs` live region during turns (ctx utilization, bg-job/agent counts, pending steering); `NX_PANEL=1` defaults it on, `NX_PANEL_WIDTH` sets its width (12..40) |
 | `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
 | `/init` | generate/update an `AGENTS.md` for this project |
 | `/todo` | show the model's current `todo_write` list |

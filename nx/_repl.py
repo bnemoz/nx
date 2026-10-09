@@ -43,6 +43,7 @@ from ._memory_cmd import (
     _cmd_memory_handler,
 )
 from ._todo import load_persisted_todos
+from . import _panel
 from ._wip import _cmd_wip
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
 from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for tests)
@@ -96,21 +97,22 @@ def _cmd_tabs(user: str, state: _ReplState) -> None:
 
 
 def _cmd_panel(user: str, state: _ReplState) -> None:
-    """Toggle the right status rail on the /tabs live region (SPEC_PANEL.md
-    phase 1): ctx utilization, bg-job / agent counts, pending steering.
-    The live region opens/closes with the rail so a toggle is visible
-    immediately mid-turn; NX_PANEL=1 defaults it on."""
+    """Toggle the right status rail flag (SPEC_PANEL.md, 0.127.1): ctx
+    utilization, bg-job / agent counts, pending steering. The live region is
+    a MID-TURN construct owned by whoever holds stdin (EVENTSURFACE_SPEC
+    §2/§3), so nothing opens at the prompt — the rail appears on the next
+    turn. NX_PANEL=1 defaults it on."""
     from . import _panel
-    from ._surfaces import close_dashboard, open_dashboard
+    from ._surfaces import close_dashboard, dashboard_open
     if _panel.panel_enabled():
         _panel.set_panel_enabled(False)
-        close_dashboard()
+        if dashboard_open():  # erase a mid-turn region we may have opened
+            close_dashboard()
         print(f"{DIM}panel: off (NX_PANEL=1 to default on){RESET}")
     else:
         _panel.set_panel_enabled(True)
-        open_dashboard()
-        print(f"{DIM}panel: on — status rail on the live region "
-              f"(NX_PANEL_WIDTH {_panel.panel_width()}){RESET}")
+        print(f"{DIM}panel: on — rail shows on the live region during "
+              f"turns (NX_PANEL_WIDTH {_panel.panel_width()}){RESET}")
 
 
 _REPL_COMMANDS: dict[str, CommandHandler] = {
@@ -380,6 +382,13 @@ def _repl() -> None:
                                else expand_at_mentions(user)})  # str or parts (@image)
         try:
             st._TURN_ACTIVE = True
+            # 0.127.1: the /panel rail's live region is a mid-turn construct
+            # (EVENTSURFACE_SPEC §2/§3) — open it here, at turn start, when
+            # enabled; the finally below always closes it again.
+            try:
+                _panel.ensure_region()
+            except Exception:
+                pass
             # Clear the wake flag at turn start, not only on the wake path:
             # a flag raised in the race window between the editor's last
             # _WAKE_DUE poll and this point describes work a user-typed turn
