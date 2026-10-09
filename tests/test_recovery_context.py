@@ -149,3 +149,69 @@ def test_globals_are_the_default_store_outside_any_loop(monkeypatch):
         assert m.st._TALLY_RETRIES == 4
     finally:
         m.st._TALLY_RETRIES = 0
+
+
+# --- default-store durability (0.104.1) ------------------------------------------
+# The store the descriptors fall back to must survive what the test harness does
+# to module state between tests. It used to be the st._RECOVERY_DEFAULTS *dict
+# entry*, which conftest's per-test rewind clears in place — so the FIRST turn
+# loop of the next test on the same worker seeded its RecoveryContext from
+# get() -> None for all ten fields, and `cur_tokens > 0` in _turn.py crashed with
+# TypeError('>' not supported between 'NoneType' and 'int'). A single-process run
+# of tests/test_batch_run.py + tests/test_subagent_*.py reproduced it every time.
+
+def test_default_store_is_not_a_module_dict_entry():
+    """Not reachable by the harness's module-dict rewind (the leak that made
+    the suite order-dependent under -n auto)."""
+    assert "_RECOVERY_STORE" not in vars(m.st), \
+        "the default store must live on the descriptor class, not in the dict"
+    assert type(m.st).__dict__["_RECOVERY_STORE"] is not None
+    assert type(m.st).__dict__["_RECOVERY_SEED"] is not None
+
+
+def test_emptied_store_is_repaired_from_the_install_time_seed(monkeypatch):
+    """Whatever empties the store, a routed read falls back to the seeded
+    default — never None for a field the callers treat as int/bool/str."""
+    _quiet(monkeypatch)
+    store = _recovery._store()
+    saved = dict(store)
+    saved_dict = {k: vars(m.st)[k] for k in _recovery.FIELDS if k in vars(m.st)}
+    try:
+        # Emulate the harness rewind of a dict-entry store + a fresh descriptor
+        # generation that installed against it.
+        store.clear()
+        for k in _recovery.FIELDS:
+            vars(m.st).pop(k, None)
+        assert m.st._LAST_PROMPT_TOKENS == 0
+        assert m.st._TALLY_RETRIES == 0
+        assert m.st._LAST_PARTIAL_TEXT == ""
+        assert m.st._MALFORMED_TOOL_FAILURES == {}
+        assert m.st._MALFORMED_TOOL_BROKEN == set()
+        assert m.st._STALL_EPISODE_ACTED is False
+    finally:
+        store.clear()
+        store.update(saved)
+        vars(m.st).update(saved_dict)
+
+
+def test_reset_store_rewinds_to_the_seed(monkeypatch):
+    """conftest's _restore() calls this every test, so session-scoped recovery
+    evidence left in the global store can't leak into the next test.
+
+    `_reset_store()` covers the class-anchored store only; the vars(st) half of
+    the no-frame default is covered by conftest's own dict rewind (that's the
+    pairing the harness relies on)."""
+    _quiet(monkeypatch)
+    store = _recovery._store()
+    saved = dict(store)
+    try:
+        store["_TALLY_RETRIES"] = 7
+        vars(m.st).pop("_TALLY_RETRIES", None)
+        assert m.st._TALLY_RETRIES == 7
+        _recovery._reset_store()
+        assert m.st._TALLY_RETRIES == 0
+    finally:
+        store.clear()
+        store.update(saved)
+        vars(m.st).pop("_TALLY_RETRIES", None)
+

@@ -287,6 +287,23 @@ def _restore(fspath):
             else:
                 _d[_k] = _tmpl
 
+    # 0.104.1: rewind nx._recovery's no-loop default store too. The ten
+    # per-loop recovery fields (_LAST_PROMPT_TOKENS, the breaker evidence, ...)
+    # route through descriptors on the state module's class, and that store
+    # deliberately lives ON the class rather than in a module-dict entry —
+    # conftest's module rewind used to clear it in place between tests, which
+    # left the descriptors reading None and crashed the first turn loop of the
+    # next test on the same worker (`cur_tokens > 0` with cur_tokens None,
+    # nx/_turn.py:1086). Being out of dict reach also means the rewind above
+    # no longer covers it, so reset it explicitly (cheap: ten entries).
+    # Only when already imported — nx._recovery is not imported by `import nx`,
+    # and importing it here would add a module to _BASELINE_MODS forever.
+    _rec = sys.modules.get("nx._recovery")
+    if _rec is not None:
+        _reset = getattr(_rec, "_reset_store", None)
+        if _reset is not None:
+            _reset()
+
     # Re-derive the SESSION_HOME mirror from the just-applied env intents.
     # The module-state rewind above restores nx.SESSION_HOME / st.SESSION_HOME
     # to the baseline snapshot (real ~/.nx, since the baseline import has no

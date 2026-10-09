@@ -21,8 +21,11 @@ DEFAULT store. Data descriptors installed on `st`'s class route every
 `st._X` read/write through the current context when a loop is running, and
 straight to the dict otherwise — so tests that set `st._TALLY_RETRIES = 0`
 before a loop, conftest's in-place `__dict__` rewind (which bypasses
-descriptors and therefore always rewinds the default store), and the
-`nx.<name>` proxy in `__init__.py` all keep working unchanged.
+descriptors), and the `nx.<name>` proxy in `__init__.py` all keep working
+unchanged. The no-loop default store is not IN the module dict, though: it is
+an attribute of the descriptor class, because a dict entry is exactly what the
+harness rewind clears in place (see `_store()` below) — conftest resets it
+through `_reset_store()` instead.
 
 What must NOT move: process-wide config (env-resolved once, read-only at loop
 time) — MALFORMED_TOOL_BREAKER_LIMIT and friends stay plain module globals,
@@ -105,10 +108,96 @@ _CURRENT: contextvars.ContextVar[_Frame | None] = st._RECOVERY_CURRENT
 # anymore; this is where "the module-global default" lives instead. A value
 # written while no loop is running goes into vars(st) (set_) and takes
 # precedence — the snapshot is only the seed, exactly like the plain module
-# global it replaces. Lives on _state (st._RECOVERY_DEFAULTS), not here, so a
-# conftest-style eviction + re-import of this module can't fork the store the
-# already-installed descriptors read.
-_ROUTED_DEFAULTS: dict[str, Any] = st._RECOVERY_DEFAULTS
+# global it replaces.
+#
+# 0.104.1: the store lives on the state module's CLASS, not in a module-dict
+# entry (st._RECOVERY_DEFAULTS, still defined for back-compat). A module dict
+# entry is exactly what the test harness rewinds: conftest's per-test restore
+# walks every nx.* module and does `_cur.clear(); _cur.update(_tmpl)` for dict
+# values, which EMPTIED this store between tests while the already-installed
+# descriptors kept reading it. The next test's first turn loop then seeded a
+# RecoveryContext from get() -> None for all ten fields, and _run_model_turn_
+# loop's `cur_tokens > 0` raised TypeError('NoneType' > 'int') (a single-
+# process run of the batch/subagent files reproduces it every time). Class
+# attributes are invisible to the module-dict rewind and survive both a
+# _state reload and an eviction+re-import of this module, so every generation
+# of descriptors, install(), and get()/set_() agree on one store.
+_COPY_FIELDS = (dict, list, set)
+
+
+def _copy_default(v: Any) -> Any:
+    """A private copy of a container default, so in-place mutation of the
+    live store can't corrupt the seed we repair it from."""
+    if isinstance(v, dict):
+        return dict(v)
+    if isinstance(v, list):
+        return list(v)
+    if isinstance(v, set):
+        return set(v)
+    return v
+
+
+def _store() -> dict[str, Any]:
+    """The no-loop default store (see the note above) — an attribute of the
+    state module's descriptor class, created by _install_descriptors()."""
+    store = getattr(type(st), "_RECOVERY_STORE", None)
+    if store is None:
+        # The state module was re-executed (importlib.reload(nx._state)): its
+        # fresh class is a plain module again, so re-install our class before
+        # writing a store — an immutable `module` type rejects the write.
+        _install_descriptors()
+        store = getattr(type(st), "_RECOVERY_STORE", None)
+    if store is None:  # pragma: no cover - only if the swap itself failed
+        store = {}
+    return store
+
+
+def _reset_store() -> None:
+    """Test-harness hook: rewind the no-loop store to the install-time seed.
+
+    The store lives on the descriptor class SPECIFICALLY so a module-dict
+    rewind can't reach it (see the note above) — which also means conftest's
+    own per-test rewind no longer covers it for free. conftest calls this from
+    _restore() so the isolation contract is unchanged: a test that leaves
+    session-scoped recovery evidence in the global store (a breaker streak, a
+    stale prompt-token count) still can't leak it into its neighbours.
+    """
+    store = getattr(type(st), "_RECOVERY_STORE", None)
+    seed = getattr(type(st), "_RECOVERY_SEED", None)
+    if store is None or seed is None:
+        return  # descriptors not installed on this process yet
+    store.clear()
+    for _k, _v in seed.items():
+        store[_k] = _copy_default(_v)
+
+
+def _seed() -> dict[str, Any]:
+    """The install-time values of every routed field: the truth a read falls
+    back to when the store lost the key (harness rewind, a _state reload, or a
+    descriptor generation that installed against an empty dict entry)."""
+    seed = getattr(type(st), "_RECOVERY_SEED", None)
+    if seed is None:
+        _store()  # installs the class (and both containers) as a side effect
+        seed = getattr(type(st), "_RECOVERY_SEED", None)
+    if seed is None:  # pragma: no cover
+        seed = {}
+    return seed
+
+
+def _default_of(field: str) -> Any:
+    """The value a routed field reads when neither a loop context nor a
+    vars(st) entry has one. Never None for a known field: an emptied store is
+    repaired from the install-time seed instead, because a routed read that
+    returns None for an int/bool/str field crashes its caller."""
+    store = _store()
+    if field in store:
+        return store[field]
+    seed = _seed()
+    if field in seed:
+        val = _copy_default(seed[field])
+        store[field] = val
+        return val
+    return None
 
 
 def current() -> RecoveryContext | None:
@@ -128,9 +217,20 @@ def install() -> RecoveryContext:
     # the descriptor path, whatever the test harness did to the dict in
     # between. A value the rewind restored is folded into _ROUTED_DEFAULTS
     # first so it isn't lost.
+    store, seed = _store(), _seed()
     for f in FIELDS:
         if f in st.__dict__:
-            _ROUTED_DEFAULTS[f] = st.__dict__.pop(f)
+            _val = st.__dict__.pop(f)
+            store[f] = _val
+            # A value the rewind restored is the best default we have seen;
+            # record it as the repair seed too (first write wins — the store
+            # itself carries later runtime values).
+            seed.setdefault(f, _copy_default(_val))
+        elif f not in store:
+            # Nothing in the dict and nothing in the store (a fresh descriptor
+            # generation after a reload that lost the entry): repair from the
+            # seed so the context below never seeds None.
+            _default_of(f)
     parent = current()  # the enclosing loop's context, if any
     ctx = RecoveryContext(parent)
     _CURRENT.set(_Frame(ctx, parent))
@@ -157,7 +257,7 @@ def copy_back_and_reset(ctx: RecoveryContext) -> None:
             # specialized module-attr path could latch onto: the snapshot is
             # the store; a test's own st.X = v write still lands in vars(st)
             # and (correctly) wins while present.
-            _ROUTED_DEFAULTS[f] = getattr(ctx, f)
+            _store()[f] = getattr(ctx, f)
             vars(st).pop(f, None)
     _CURRENT.set(None)
 
@@ -170,7 +270,7 @@ def get(field: str) -> Any:
         return getattr(fr.ctx, field)
     if field in vars(st):
         return vars(st)[field]
-    return _ROUTED_DEFAULTS.get(field)
+    return _default_of(field)
 
 
 def set_(field: str, value: Any) -> None:
@@ -203,7 +303,25 @@ def _install_descriptors() -> None:
     base = type(st)
     if getattr(base, "_RECOVERY_ROUTED", False):
         return
-    ns: dict[str, Any] = {"_RECOVERY_ROUTED": True}
+    # Inherit the store/seed when an earlier generation installed them (None
+    # checks, not `or {}` — an emptied dict must keep its identity, or the
+    # generations would silently fork into separate stores).
+    store: dict[str, Any] = getattr(base, "_RECOVERY_STORE", None)
+    seed: dict[str, Any] = getattr(base, "_RECOVERY_SEED", None)
+    if store is None:
+        store = {}
+    if seed is None:
+        seed = {}
+    ns: dict[str, Any] = {
+        "_RECOVERY_ROUTED": True,
+        # The no-loop default store + the install-time seed. They live on the
+        # class — NOT in a module dict — so conftest's between-test module
+        # rewind (which clears dict values in place) can't empty the store out
+        # from under the descriptors, and so a later descriptor generation
+        # inherits the same two objects instead of forking its own store.
+        "_RECOVERY_STORE": store,
+        "_RECOVERY_SEED": seed,
+    }
     for f in FIELDS:
         ns[f] = property(
             (lambda _f: lambda self: get(_f))(f),
@@ -211,7 +329,10 @@ def _install_descriptors() -> None:
         )
     st.__class__ = type(base.__name__ + "Routed", (base,), ns)
     for f in FIELDS:
-        _ROUTED_DEFAULTS[f] = st.__dict__.pop(f)
+        if f in st.__dict__:
+            _val = st.__dict__.pop(f)
+            store[f] = _val
+            seed.setdefault(f, _copy_default(_val))
 
 
 _install_descriptors()
