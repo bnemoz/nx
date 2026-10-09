@@ -1001,6 +1001,27 @@ def _prune_sessions_store() -> dict[str, int]:
                 shards_dropped += 1
             except OSError:
                 pass
+    # 1c. undo GC (0.129.0): any persisted undo file whose session is dead
+    # (deleted by hand, a crash, or an old /delete predating the GC) is
+    # removed — its snapshots are whole file contents, often secrets. The
+    # CURRENT session's file is never a candidate, and /reset intentionally
+    # keeps its predecessor's file (that session is still resumable).
+    undo_removed = 0
+    try:
+        from . import _undo
+        undo_dir = os.path.join(st.SESSION_HOME, "undo")
+        for name in os.listdir(undo_dir):
+            if not name.endswith(".json"):
+                continue
+            sid = name[:-len(".json")]
+            if sid in ("undo", getattr(st, "SESSION_ID", None)):
+                continue  # legacy shared file / the live session
+            if os.path.exists(_session_path(sid)):
+                continue
+            _undo.delete_persisted_for(sid)
+            undo_removed += 1
+    except OSError:
+        pass
     # 2. immediate GC (no grace: the user asked)
     live = _scan_session_image_refs()
     images_removed = _gc_image_sidecars(live, min_age_s=0.0)
@@ -1021,6 +1042,7 @@ def _prune_sessions_store() -> dict[str, int]:
             "images_kept": kept, "quota_removed": quota_removed,
             "rows_pruned": rows_pruned, "obs_removed": obs_removed,
             "obs_kept": obs_stats["objects"], "obs_bytes": obs_stats["bytes"],
+            "undo_removed": undo_removed,
             "expired_small": retention["expired_small"],
             "expired_floor": retention["expired_floor"]}
 
@@ -1046,6 +1068,11 @@ def _delete_session(session_id: str) -> bool:
         os.remove(path)
     except OSError:
         pass
+    # Undo GC (0.129.0): the persisted checkpoints hold whole pre-edit file
+    # contents (secrets, up to MAX_UNDO_BYTES) keyed by this sid. The session
+    # is gone either way — drop the file even when the row was already missing.
+    from . import _undo
+    _undo.delete_persisted_for(session_id)
     if not existed:
         return False
     try:

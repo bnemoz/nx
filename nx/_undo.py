@@ -248,10 +248,27 @@ def _undo_path() -> str:
     # same undo.json each turn — last writer wins, /undo across the swarm was
     # meaningless. Namespaced per session id when one exists (st.SESSION_ID is
     # absent in some tests/embedded uses), keeping the legacy path as fallback.
-    sid = getattr(st, "SESSION_ID", None)
-    if sid:
-        return os.path.join(st.SESSION_HOME, "undo", f"{sid}.json")
+    return undo_path_for(getattr(st, "SESSION_ID", None))
+
+
+def undo_path_for(session_id: str | None) -> str:
+    """Undo file for an ARBITRARY session id (not just the current one) —
+    the /delete and --prune GC key off the dead sid, not st.SESSION_ID."""
+    if session_id:
+        return os.path.join(st.SESSION_HOME, "undo", f"{session_id}.json")
     return os.path.join(st.SESSION_HOME, "undo.json")
+
+
+def delete_persisted_for(session_id: str | None) -> None:
+    """Best-effort removal of a (dead) session's persisted undo file. The
+    snapshots hold whole pre-edit file contents — up to MAX_UNDO_BYTES each,
+    often secrets — so /delete and --prune must not leave them behind.
+    (/reset deliberately KEEPS the old session's file: a later /resume of it
+    should still have its undo history — 0.128.3.)"""
+    try:
+        os.unlink(undo_path_for(session_id))
+    except OSError:
+        pass
 
 
 def _mark_dirty() -> None:
