@@ -224,17 +224,29 @@ class StreamParser:
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
-        # SPEC_LIVEENGINE.md: while a Live owns the shared console (the /tabs
-        # region Live, or the say-panel's own), the console owns line
-        # discipline — the CLEAR_LINE prefix would erase the Live's frame
-        # instead of this line, so the text is just committed. With no Live
-        # open there is no frame to protect and the classic in-place repaint
-        # (byte-identical to pre-0.128) is kept.
-        prefix = "" if _console_has_live() else CLEAR_LINE
-        line = (prefix + f"{C.ACCENT}  ↳ generating tool call{RESET} "
+        text = (f"{C.ACCENT}  ↳ generating tool call{RESET} "
                 f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
         with write_lock():
-            cprint(line)
+            if _console_has_live():
+                # SPEC_LIVEENGINE.md: while a Live owns the shared console, the
+                # CLEAR_LINE prefix would erase the Live's frame instead of
+                # this line, and cprint() composes every write as a COMMITTED
+                # line above the frame — one new line per 0.2s throttle tick,
+                # which for a long streamed args buffer meant a staircase of
+                # "args 273 chars / 552 chars / …" lines. Repaint in place
+                # instead: only the FIRST emission commits the line; each
+                # later tick moves up onto it (CUU), clears down (EL), and
+                # rewrites. Committed lines above a Live frame are cprint()'s
+                # territory, but this one write is ours, so the raw writes go
+                # to stdout directly (the Live frame itself is untouched).
+                if self.tool_status_active:
+                    sys.stdout.write("\033[1F\033[2K")  # cursor up 1 line, erase it
+                sys.stdout.write(text + "\n")
+                sys.stdout.flush()
+            else:
+                # No Live open: the classic in-place repaint, byte-identical
+                # to pre-0.128.
+                cprint(CLEAR_LINE + text)
         self.tool_status_active = True
         self.last_tool_status = now
 
@@ -300,11 +312,18 @@ class StreamParser:
         if self.quiet:
             return
         if self.tool_status_active:
-            # SPEC_LIVEENGINE.md: with a Live owning the console the status line
-            # is a committed line (no erase needed — and a CLEAR_LINE would
-            # wipe the Live's frame). With no Live open, clear it the classic
-            # way, exactly as before.
+            # The status line was committed above the Live frame (see
+            # show_tool_status): move up onto it and erase it so the next
+            # write (say-panel content, the tool box) starts clean. Two
+            # positive guards (not if/else) so both raw writes stay behind
+            # their own _console_has_live() check (test_raw_write_sites_
+            # are_live_gated audits each write site's guarding condition).
+            if _console_has_live():
+                with write_lock():
+                    sys.stdout.write("\033[1F\033[2K")
+                    sys.stdout.flush()
             if not _console_has_live():
+                # No Live open: clear it the classic way, exactly as before.
                 with write_lock():
                     sys.stdout.write(CLEAR_LINE)
                     sys.stdout.flush()
