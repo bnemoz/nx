@@ -283,6 +283,9 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     if stats.get("obs_kept"):
         print(f"  {DIM}{stats['obs_kept']} obsstore object(s) kept "
               f"({stats['obs_bytes'] // 1024} KiB){RESET}")
+    if stats.get("undo_removed"):
+        print(f"  collected {stats['undo_removed']} orphaned undo file(s) "
+              f"(dead sessions; their checkpoints held file snapshots)")
     return True
 
 
@@ -591,9 +594,9 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     _fileclaim.release_session_claims(old_id)
     new_id = _new_session_id()
     # Carry the transcript + endpoint context into the new session file via
-    # the normal save path, under the new id. _save_current_locked merges
+    # the normal save path, under the new id. _save_current merges
     # metadata (title/source/cwd/metrics) the same way /resume would see it.
-    from ._repl_state import _save_current_locked, _fresh_metrics
+    from ._repl_state import _fresh_metrics
     state.session_id = new_id
     st.SESSION_ID = new_id  # mirror: undo stack swaps with the forked id
     # Re-key the undo store on the switch (0.128.3): the parent's stack stays
@@ -609,7 +612,14 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     meta: dict = {"forked_from": old_id}
     if label:
         meta["title"] = label
-    _save_current_locked(state, meta)
+    # Through the SIGINT-guarded save path (0.129.0): a second ^C landing
+    # inside the store-body join used to crash the REPL mid-switch (the fork
+    # row unwritten while the original was flushed — the fork silently lost).
+    # _save_current_locked is otherwise internal to _save_current. The fork
+    # row must be DURABLE before the "forked" report: flush the async queue
+    # right after, so the queued snapshot under the new id lands now.
+    _save_current(state, meta)
+    _flush_save()
     state.session_dirty = False
     # Fresh cumulative-token recorder for the new id (metrics are per-session).
     st._METRICS = _fresh_metrics(new_id)

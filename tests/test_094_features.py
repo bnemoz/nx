@@ -64,9 +64,13 @@ def test_wip_restored_on_reload(state):
 
 def test_fork_creates_new_session_and_keeps_original(state, capsys, monkeypatch):
     from nx import _sessions_cmd
+    # Stub at the SOURCE module: /fork now routes through the SIGINT-guarded
+    # _save_current (0.129.0), which _sessions_cmd imports directly — the stub
+    # must sit where the code looks it up, not on the wrapper.
+    import nx._repl_state as _rs
     saved = {}
-    monkeypatch.setattr(_sessions_cmd, "_save_current",
-                        lambda s, meta=None, **k: saved.setdefault("id", s.session_id))
+    monkeypatch.setattr(_rs, "_write_session",
+                        lambda *a, **k: saved.setdefault("id", a[0]))
     old_id = state.session_id
     _sessions_cmd._cmd_fork("/fork experiment-b", state)
     out = capsys.readouterr().out
