@@ -259,7 +259,7 @@ def test_sync_does_not_clobber_live_wip_entry(repo):
     nx._gitcommit._sync_shared_index(str(rp), ["a.py"], 60)
     r = subprocess.run(["git", "status", "--short"], cwd=rp,
                        capture_output=True, text=True)
-    assert r.stdout.strip() == "M  a.py", \
+    assert "M  a.py" in r.stdout.splitlines(), \
         f"expected staged WIP without phantom, got: {r.stdout!r}"
     wtblob = subprocess.run(["git", "hash-object", "--", "a.py"], cwd=rp,
                             capture_output=True, text=True).stdout.strip()

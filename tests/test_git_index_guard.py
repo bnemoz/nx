@@ -446,6 +446,77 @@ def test_unclaimed_and_unkillable_semantics_hold(repo, no_claims):
         del os.environ["NX_GIT_INDEX_GUARD"]
 
 
+# ---------------------------------------------------------------------------
+# 6. claim persistence (0.128.x): a claim survives a session restart, but only
+#    while the shared index still holds the SAME blob
+# ---------------------------------------------------------------------------
+def test_claim_survives_process_restart(repo, no_claims):
+    """mark_staged writes <repo>/.nx/staged-claims.json; a FRESH registry (the
+    restarted session's empty _CLAIMED) still matches the unchanged staged
+    blob, so the guard no longer re-prompts on its own prior work."""
+    sc = no_claims
+    (repo / "mine.py").write_text("m\n", encoding="utf-8")
+    _git(repo, "add", "mine.py")
+    sc.mark_staged([str(repo / "mine.py")])
+    # simulate a restart: the in-process set is empty, only the file remains
+    with sc._LOCK:
+        saved, sc._CLAIMED = sc._CLAIMED, set()
+    try:
+        assert git_index_guard("git commit -m mine", cwd=str(repo)) == []
+        assert os.path.exists(repo / ".nx" / "staged-claims.json")
+    finally:
+        with sc._LOCK:
+            sc._CLAIMED = saved
+
+
+def test_restarted_claim_expires_when_blob_changes(repo, no_claims):
+    """A prior session's claim matches only the recorded blob: restaging
+    DIFFERENT content for the same path (another session or the user) invalidates
+    it and the guard prompts again."""
+    sc = no_claims
+    (repo / "mine.py").write_text("v1\n", encoding="utf-8")
+    _git(repo, "add", "mine.py")
+    sc.mark_staged([str(repo / "mine.py")])
+    with sc._LOCK:
+        saved, sc._CLAIMED = sc._CLAIMED, set()
+    try:
+        (repo / "mine.py").write_text("v2\n", encoding="utf-8")
+        _git(repo, "add", "mine.py")
+        assert git_index_guard("git commit -m mine", cwd=str(repo)) == ["mine.py"]
+    finally:
+        with sc._LOCK:
+            sc._CLAIMED = saved
+
+
+def test_foreign_staged_path_without_claim_still_prompts(repo, no_claims):
+    """Persistence must not widen trust: a staged path with no claim file entry
+    (never staged by nx) keeps prompting."""
+    _stage_foreign(repo)
+    assert git_index_guard("git commit -m mine", cwd=str(repo)) == ["foreign.py"]
+
+
+def test_staged_deletion_claim_is_conservative(repo, no_claims):
+    """A staged deletion leaves no index entry, so a RESTARTED session cannot
+    verify the blob and stays conservative (prompts); the same-session claim
+    (empty registry cleared here is NOT the same-session case) — pin the
+    restart semantics: no verifiable blob ⇒ prompt."""
+    sc = no_claims
+    (repo / "gone.txt").write_text("g\n", encoding="utf-8")
+    _git(repo, "add", "gone.txt")
+    _git(repo, "commit", "-q", "-m", "add gone")
+    os.unlink(repo / "gone.txt")
+    _git(repo, "add", "gone.txt")  # stages the deletion: index entry removed
+    sc.mark_staged([str(repo / "gone.txt")])
+    with sc._LOCK:
+        saved, sc._CLAIMED = sc._CLAIMED, set()
+    try:
+        assert git_index_guard("git commit -m mine",
+                               cwd=str(repo)) == ["gone.txt"]
+    finally:
+        with sc._LOCK:
+            sc._CLAIMED = saved
+
+
 def test_mark_staged_ignores_failures(no_claims):
     """Bookkeeping never raises into a commit or a shell run."""
     sc = no_claims
