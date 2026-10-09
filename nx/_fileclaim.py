@@ -47,6 +47,7 @@ claims. `pid` is os.getpid().
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 
@@ -263,6 +264,12 @@ def release_session_claims(session_id: str | None = None) -> int:
     sid = session_id or getattr(st, "SESSION_ID", None)
     if not sid or not _claims_enabled():
         return 0
+    # Charset guard (0.128.3): the DELETE below is a LIKE match, and `--session`
+    # is user-supplied — an id containing % or _ could match OTHER sessions'
+    # rows and delete their claims. Generated ids are YYYYMMDD-HHMMSS-<6hex>,
+    # so anything outside [A-Za-z0-9_-] is not a real session id.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+        return 0
     from . import _sessiondb
     conn = _sessiondb._open()
     if conn is None:
@@ -273,6 +280,72 @@ def release_session_claims(session_id: str | None = None) -> int:
             cur = conn.execute(
                 "DELETE FROM file_claims WHERE owner_id LIKE ?",
                 (f"{sid}:%",))
+            n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            conn.commit()
+            return n
+        except Exception:
+            conn.rollback()
+            raise
+    except Exception:
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def paths_for_owner(owner_id: str) -> set[str]:
+    """The paths currently claimed by `owner_id` (empty set on any failure /
+    disabled protocol). Snapshot helper for release_for_except: the caller
+    records what was held BEFORE a foreground sub-agent runs, so the agent's
+    completion can release only its own delta."""
+    if not owner_id or not _claims_enabled():
+        return set()
+    from . import _sessiondb
+    conn = _sessiondb._open()
+    if conn is None:
+        return set()
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT path FROM file_claims WHERE owner_id = ?", (owner_id,))}
+    except Exception:
+        return set()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def release_for_except(owner_id: str,
+                       keep_paths: set[str] | frozenset[str]) -> int:
+    """Drop every claim held by `owner_id` EXCEPT the ones whose path is in
+    `keep_paths`. The foreground (same-thread) sub-agent's release: its
+    owner_id IS the parent's own identity, so a plain release_for would also
+    delete the claims the PARENT took before the spawn; `keep_paths` is the
+    parent's pre-spawn snapshot (paths_for_owner). An async agent's snapshot
+    is empty, so this degenerates to release_for. Paths are compared
+    _normalize'd, the way claim_file stores them. Returns the number removed
+    (0 on any failure). Never raises."""
+    if not owner_id or not _claims_enabled():
+        return 0
+    keep = {_normalize(p) for p in keep_paths}
+    from . import _sessiondb
+    conn = _sessiondb._open()
+    if conn is None:
+        return 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if keep:
+                marks = ",".join("?" * len(keep))
+                cur = conn.execute(
+                    "DELETE FROM file_claims WHERE owner_id = ?"
+                    f" AND path NOT IN ({marks})", (owner_id, *keep))
+            else:
+                cur = conn.execute(
+                    "DELETE FROM file_claims WHERE owner_id = ?", (owner_id,))
             n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             conn.commit()
             return n

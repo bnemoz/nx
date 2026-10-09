@@ -77,18 +77,31 @@ def _load(repo: str) -> dict[str, str]:
 
 def _save(repo: str, claims: dict[str, str]) -> None:
     """Merge-write, best-effort: read-modify-write under one lock hold keeps
-    two concurrent nx sessions from losing each other's entries; any failure
-    just costs a prompt later."""
+    two THREADS in this process from losing each other's entries; any failure
+    just costs a prompt later. The scratch file is named per pid+thread
+    (0.128.3): a shared `.tmp` let two concurrent nx PROCESSES truncate each
+    other's in-flight write and replace a corrupt JSON into place, and _load
+    would then return {} — wiping every session's staged claims, not just the
+    racing one."""
+    tmp = ""
     try:
         os.makedirs(os.path.dirname(_claims_path(repo)), exist_ok=True)
         merged = _load(repo)
         merged.update(claims)
-        tmp = _claims_path(repo) + ".tmp"
+        tmp = (f"{_claims_path(repo)}.tmp.{os.getpid()}"
+               f".{threading.get_ident()}")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(merged, f)
         os.replace(tmp, _claims_path(repo))
+        tmp = ""  # renamed away — nothing left to clean up
     except OSError:
         pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _index_blob(repo: str, path: str) -> str | None:
