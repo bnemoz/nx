@@ -445,6 +445,25 @@ def test_other_sessions_same_pid_row_still_blocks(tmp_path):
         st.SESSION_ID = None
 
 
+def test_release_session_claims_drops_outgoing_prefix(tmp_path):
+    """0.128.3: /reset, /fork and /resume swap st.SESSION_ID in-process. The
+    outgoing session's rows (one per thread ident) become unreachable for the
+    new session — the 0.125.2 same-pid hatch matches only the CURRENT session's
+    prefix — so each id switch must sweep them first. release_session_claims
+    drops every `sid:*` row; a different session's row survives."""
+    p1 = str(tmp_path / "out1.txt")
+    p2 = str(tmp_path / "out2.txt")
+    p3 = str(tmp_path / "other.txt")
+    _insert(p1, "old-sess:111", os.getpid(), time.time())
+    _insert(p2, "old-sess:222", os.getpid(), time.time())
+    _insert(p3, "other-sess:111", os.getpid(), time.time())
+    n = fc.release_session_claims("old-sess")
+    assert n == 2
+    owners = {r[1] for r in _rows()}
+    assert owners == {"other-sess:111"}
+    assert fc.release_session_claims("nope-sess") == 0
+
+
 def test_subagent_body_releases_its_claims_on_completion(tmp_path, monkeypatch):
     """The primary fix: a write-tier `_run_sync_agent_body`'s `finally` now
     releases the agent's own claims. Drives the real body on a worker thread

@@ -251,6 +251,43 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
             pass
 
 
+def release_session_claims(session_id: str | None = None) -> int:
+    """Drop every claim whose owner_id belongs to `session_id` (default: the
+    CURRENT st.SESSION_ID), regardless of thread ident. Called by the
+    in-process session-id switches (/reset, /fork, /resume) BEFORE the id is
+    reassigned: owner_id is `<session id>:<thread ident>`, so the outgoing
+    session's rows carry a prefix the new session can neither heartbeat nor
+    reclaim (the 0.125.2 same-pid hatch matches only the CURRENT session's
+    prefix) — without this sweep they block edits until the TTL lapses.
+    Returns the number removed (0 on any failure). Never raises."""
+    sid = session_id or getattr(st, "SESSION_ID", None)
+    if not sid or not _claims_enabled():
+        return 0
+    from . import _sessiondb
+    conn = _sessiondb._open()
+    if conn is None:
+        return 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "DELETE FROM file_claims WHERE owner_id LIKE ?",
+                (f"{sid}:%",))
+            n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            conn.commit()
+            return n
+        except Exception:
+            conn.rollback()
+            raise
+    except Exception:
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def release_all_for_pid(pid: int | None = None) -> int:
     """Drop every claim row whose `pid` column is `pid` (default: this
     process) — the session-exit sweep called from the REPL right alongside

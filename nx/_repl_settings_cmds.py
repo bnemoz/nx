@@ -605,6 +605,11 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     # so letting it land after the switch would write the previous
     # conversation under a brand-new, supposedly empty session.
     _flush_save()
+    # Release the outgoing session's file claims BEFORE the id is reassigned:
+    # owner_id carries the old session prefix, which the new session can
+    # neither heartbeat nor reclaim (0.128.3; see _fileclaim.release_session_claims).
+    from . import _fileclaim
+    _fileclaim.release_session_claims(state.session_id)
     state.session_id = _new_session_id()
     st.SESSION_ID = state.session_id  # mirror: undo stack swaps with the fresh id
     state.session_dirty = False

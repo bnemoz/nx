@@ -553,6 +553,12 @@ def _cmd_resume_handler(user: str, state: _ReplState) -> None:
     # the target transcript back), so the outgoing save can never land under
     # the incoming session's id.
     _flush_save()
+    # Release the outgoing session's file claims BEFORE resume_session swaps
+    # the id (0.128.3; see _fileclaim.release_session_claims). The `--resume`
+    # startup path skips this deliberately: at process start there are no
+    # claims to release.
+    from . import _fileclaim
+    _fileclaim.release_session_claims(state.session_id)
     # Same function `nx --resume` runs: images expanded to live form, endpoint +
     # provider routing + cwd restored, nudge flags re-derived, metrics reloaded.
     from ._resume import resume_session
@@ -579,6 +585,10 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     # id — drain anything queued before the id below is reassigned.
     _flush_save()
     old_id = state.session_id
+    # Release the outgoing session's file claims BEFORE the id is reassigned
+    # (0.128.3; see _fileclaim.release_session_claims).
+    from . import _fileclaim
+    _fileclaim.release_session_claims(old_id)
     new_id = _new_session_id()
     # Carry the transcript + endpoint context into the new session file via
     # the normal save path, under the new id. _save_current_locked merges
