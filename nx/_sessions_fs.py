@@ -1111,14 +1111,20 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
     # Snapshot the transcript (a shallow copy of the message pointers) so the
     # background thread never iterates a list the REPL is appending to.
     snapshot = list(messages)
+    # Snapshot the metrics ON THE CALLER THREAD (0.128.3): reading st._METRICS
+    # at thread completion reads whatever recorder is current THEN — after
+    # /reset//fork that is the fresh session's near-zero totals, and merging
+    # them into this (old) session's row destroys its recorded bill.
+    metrics_meta = st._METRICS.as_meta() if st._METRICS is not None else None
     threading.Thread(
-        target=_run_desc_refresh, args=(session_id, snapshot, user_turns),
+        target=_run_desc_refresh, args=(session_id, snapshot, user_turns, metrics_meta),
         daemon=True, name="nx-session-desc").start()
     return None
 
 
 def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
-                      user_turns: int) -> str | None:
+                      user_turns: int,
+                      metrics_meta: dict[str, Any] | None = None) -> str | None:
     """The background half of the refresh: the model call + the persist.
 
     A failure (server down, empty response) leaves the existing description
@@ -1164,7 +1170,7 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
             getattr(resp, "usage", None),
             fallback_chars=len(resp.choices[0].message.content or ""),
             fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
-        )
+        ) if st.SESSION_ID == session_id else None  # stale thread: don't misbill
         desc = (resp.choices[0].message.content or "").strip().splitlines()
         desc = desc[0].strip() if desc else ""
         if not desc:
@@ -1175,10 +1181,16 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
         # messages); the write is lock-guarded inside _write_session, so a
         # background refresh serializes safely with the REPL's per-turn save.
         meta = {"description": desc, "desc_turns": user_turns}
-        if st._METRICS is not None:
-            meta.update(st._METRICS.as_meta())
+        if metrics_meta is not None:
+            meta.update(metrics_meta)
+        # Identity guard (0.128.3): the session was switched away (or deleted)
+        # while this thread ran — skip BOTH the write and the flush. Writing
+        # would merge the snapshot into a row the user left (and, after a
+        # /delete, resurrect the row outright via store_session).
+        if st.SESSION_ID != session_id:
+            return None
         _write_session(session_id, messages, meta)
-        if st._METRICS is not None:
+        if metrics_meta is not None and st._METRICS is not None:
             st._METRICS.flush()
         return desc
     finally:

@@ -29,6 +29,17 @@ def _max_paths() -> int:
     return max(0, _env_int("NX_STALENESS_MAX_PATHS", 512))
 
 
+def clear() -> None:
+    """Drop every read anchor. Called on an in-process session-id switch
+    (/reset, /fork, /resume — 0.128.3): the anchors belong to the session that
+    just ended, and a fresh session that never read a file must not inherit
+    its predecessor's freshness promises (its first edit would be spuriously
+    refused with "changed on disk since this session last read it")."""
+    with _LOCK:
+        _LAST_READ_MTIME.clear()
+        _ORDER.clear()
+
+
 def record_read(path: str) -> None:
     """Note the file's current mtime as the freshness anchor for this session.
     Called by read_file after a successful read (and NOT by cache hits — a
