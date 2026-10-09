@@ -502,6 +502,37 @@ def test_subagent_body_releases_its_claims_on_completion(tmp_path, monkeypatch):
     assert fc.claim_file(f, fc.owner_id()) == (True, None)
 
 
+def test_sync_body_on_parent_thread_spares_the_parents_claims(tmp_path, monkeypatch):
+    """The sync bug (0.128.3): _run_sync_agent runs the body ON THE PARENT
+    THREAD, so claim_owner == the parent's own owner_id, and the finally's
+    release_for deleted the parent's PRE-SPAWN claims too. The release must be
+    the delta: the parent's claim on A survives the spawn; the agent's claim
+    on B is gone. Drives the real body on the main thread (the bug trigger),
+    mirroring the async harness above."""
+    import nx._subagent as S
+    st = nx.st
+    for k in ("NX_SUBAGENT_MODEL", "NX_SUBAGENT_SOURCE", "NX_SUBAGENT_MODEL_POOL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(st, "client", object(), raising=False)
+    monkeypatch.setattr(st, "MODEL", "test-model", raising=False)
+    monkeypatch.setattr(st, "YOLO", True, raising=False)
+    monkeypatch.setattr(st, "SESSION_ID", "sess-delta", raising=False)
+    a, b = str(tmp_path / "a.txt"), str(tmp_path / "b.txt")
+    assert fc.claim_file(a, fc.owner_id())[0]   # the parent's claim, pre-spawn
+
+    def fake_loop(messages, *a_, **kw):
+        # the agent's write tool claims B under the SAME owner (same thread)
+        assert fc.claim_file(b, fc.owner_id())[0]
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", fake_loop)
+    assert S._run_sync_agent_body("go", 3, tier="write") == "done"
+    owners = {r[0]: r[1] for r in _rows()}
+    assert owners.get(fc._normalize(a)) == fc.owner_id()  # parent's claim survives
+    assert fc._normalize(b) not in owners                 # the agent's is released
+
+
 # --- release_all_for_pid: the session-exit sweep (0.119.0) -------------------
 
 def test_release_all_for_pid_drops_this_pids_rows(tmp_path):

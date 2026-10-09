@@ -1035,6 +1035,20 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # would be equivalent — capturing here just makes the pairing obvious.
     from ._fileclaim import owner_id as _claim_owner_id
     claim_owner = _claim_owner_id()
+    # Sync-path hazard (0.128.3): _run_sync_agent runs this body ON THE PARENT
+    # THREAD, so claim_owner above is the PARENT's own claim identity — the
+    # finally must release only the claims the agent itself acquired, never
+    # the ones the parent took before the spawn. Snapshot those pre-held paths
+    # now, before any tool call can claim. Async workers run on their own
+    # thread: their identity is distinct, so the snapshot is empty and the
+    # delta release degenerates to the old plain release_for.
+    keep_claims: set[str] = set()
+    if write:
+        try:
+            from . import _fileclaim as _fc
+            keep_claims = _fc.paths_for_owner(claim_owner)
+        except Exception:
+            keep_claims = set()
     ctx = _SubagentContext(table, write=write, quiet=quiet, scope=scope,
                            worktree=worktree, job_id=job_id)
     ctx.advisor = advisor
@@ -1139,15 +1153,19 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
             # Only write tiers can hold claims (the read-only table has no
             # mutating tool), so a read sweep skips the store round-trip.
             try:
-                # Release this agent's file claims (0.125.2): a sub-agent runs
-                # in-process on a daemon thread, so its rows in the SHARED
-                # file_claims table carry this process's pid and a thread
-                # owner_id nobody else can name. Left behind, the parent's next
-                # edit of the same file was refused with "claimed by another
-                # agent" naming its OWN pid until the NX_FILE_CLAIM_TTL (3600s)
-                # expired. Never let a release failure mask the agent's result.
+                # Release this agent's file claims (0.125.2), as a DELTA
+                # (0.128.3): a sub-agent runs in-process, so its rows in the
+                # SHARED file_claims table carry this process's pid and a
+                # thread owner_id nobody else can name. Left behind, the
+                # parent's next edit of the same file was refused with
+                # "claimed by another agent" naming its OWN pid until the
+                # NX_FILE_CLAIM_TTL (3600s) expired. On the sync path the
+                # owner IS the parent's identity, so only the agent's own
+                # (delta) claims are dropped — keep_claims spares the parent's
+                # pre-spawn claims. Never let a release failure mask the
+                # agent's result.
                 from . import _fileclaim
-                _fileclaim.release_for(claim_owner)
+                _fileclaim.release_for_except(claim_owner, keep_claims)
             except Exception:
                 pass
         _SUBAGENT_TLS.ctx = prev_ctx
