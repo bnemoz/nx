@@ -335,6 +335,18 @@ def clear_persisted() -> None:
         pass
 
 
+def swap_session() -> None:
+    """Re-key the undo store on an in-process session-id switch (/resume,
+    /fork, /reset — 0.128.3). Persist whatever the OUTGOING session left
+    unsaved under its own path, then clear the stack and load the incoming
+    id's persisted stack. Without this, the in-memory stack survives the id
+    swap: /undo in the new session reverts the old session's files and then
+    persists those snapshots into the NEW id's undo file."""
+    persist_undo_stack()  # best-effort write under the OLD _undo_path()
+    st._UNDO_STACK.clear()
+    _load_persisted()
+
+
 def _restore_one(path: str, existed: bool, content: Optional[str]) -> None:
     """Restore one file atomically: temp file + os.replace for a write,
     os.remove for a re-delete. Raises OSError on failure."""

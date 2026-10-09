@@ -171,6 +171,16 @@ def resume_session(session_id: str, state: Any, *, show_transcript: bool = True,
     state.messages[:] = messages
     state.session_id = session_id
     st.SESSION_ID = session_id  # mirror: the undo store keys per-session on it
+    # Re-key the undo store on the switch (0.128.3): persist the outgoing
+    # stack under the OLD id, clear, load the incoming id's persisted stack —
+    # otherwise /undo in the resumed session reverts the previous session's
+    # files (and clobbers this id's undo file with them).
+    from . import _undo as _undo_store
+    _undo_store.swap_session()
+    # Drop the outgoing session's read anchors (0.128.3): they belong to the
+    # session that just ended, and the resumed session never read those files.
+    from . import _staleness
+    _staleness.clear()
     state.session_dirty = False
 
     title = data.get("title") or "(untitled)"

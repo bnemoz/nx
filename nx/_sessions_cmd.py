@@ -596,6 +596,15 @@ def _cmd_fork(user: str, state: _ReplState) -> None:
     from ._repl_state import _save_current_locked, _fresh_metrics
     state.session_id = new_id
     st.SESSION_ID = new_id  # mirror: undo stack swaps with the forked id
+    # Re-key the undo store on the switch (0.128.3): the parent's stack stays
+    # persisted under the OLD id (fork = copy); the fork starts from whatever
+    # its own undo file holds (typically empty).
+    from . import _undo as _undo_store
+    _undo_store.swap_session()
+    # Fresh forked conversation: drop the outgoing session's read anchors
+    # (0.128.3, same rationale as /reset).
+    from . import _staleness
+    _staleness.clear()
     state.session_dirty = True
     meta: dict = {"forked_from": old_id}
     if label:

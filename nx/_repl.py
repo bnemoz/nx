@@ -221,6 +221,12 @@ def _repl() -> None:
     assert session_id  # both branches above mint one; narrows for ty
     state = _ReplState(messages, session_id, False, history)
     st.SESSION_ID = session_id  # mirror: per-session stores key on it (undo, staleness)
+    # Crash recovery, now that the id is known (0.128.3): the legacy
+    # _load_persisted() at CLI startup ran before this mirror existed and
+    # could only ever read the legacy undo.json — the per-session
+    # undo/<sid>.json that flush_undo_stack() writes was never read back.
+    from ._undo import _load_persisted as _undo_load
+    _undo_load()
 
     # --- per-session worktree isolation (0.103.0, phase 3) -------------------
     # NX_SESSION_WORKTREE=1 / `nx --isolate`: create (or re-attach to) this

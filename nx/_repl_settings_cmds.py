@@ -587,9 +587,9 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     st._SESSION_HAS_BACKGROUNDED = False
     st._MULTI_EDIT_NUDGED = False
     st._CONSECUTIVE_EDITS = 0
-    # A fresh conversation has nothing to un-write from the old one: drop both
-    # the in-memory undo stack and its on-disk copy (0.47.0, ROADMAP 2.2).
-    _m._undo.clear_persisted()
+    # 0.128.3: the in-memory undo stack is NOT dropped here — it belongs to
+    # the outgoing session and is persisted under its own id by swap_session
+    # after the id switch below (clear_persisted there handles the fresh id).
     # Fresh tool list too: a /reset implies a new conversation, and an
     # endpoint-level tool-args quirk may have been transient.
     st._MALFORMED_TOOL_FAILURES = {}
@@ -599,6 +599,16 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     # evidence rather than a carry-over.
     st._BREAKER_ENDPOINT_KEY = st.BREAKER_UNOBSERVED
     print(f"{DIM}  context cleared{RESET}")
+    # 0.128.3: staged runtime-note slots belong to the OUTGOING conversation —
+    # leaving them set appends the old session's sub-agent/bg notes to the
+    # fresh session's next turn (and each note is consumed once, so the
+    # session that asked never gets it).
+    for _slot in ("_PENDING_SUBAGENT_NOTICE", "_PENDING_BG_COMPLETION_NOTICE",
+                  "_PENDING_VERIFY_NOTICE", "_PENDING_OCC_REMINDER",
+                  "_PENDING_YOLO_ASYNC_NOTICE", "_PENDING_DELEGATION_NOTICE"):
+        setattr(st, _slot, None)
+    st._READ_STREAK = 0
+    st._YOLO_ASYNC_NUDGED = False
     # A reset forks a new session id so the fresh chat isn't written
     # over the old one (mirrors Hermes's "new session on /new").
     # 0.103.4: drain first — a queued save still carries the OLD session id,
@@ -612,6 +622,17 @@ def _cmd_reset(user: str, state: _ReplState) -> None:
     _fileclaim.release_session_claims(state.session_id)
     state.session_id = _new_session_id()
     st.SESSION_ID = state.session_id  # mirror: undo stack swaps with the fresh id
+    # 0.128.3: the old session's undo file must survive (a later /resume of it
+    # should still have its undo history), so persist + clear happens via
+    # swap_session under the OLD id, and the fresh id's (empty) stack is
+    # cleared on disk after the switch.
+    from . import _undo as _undo_store
+    _undo_store.swap_session()
+    _undo_store.clear_persisted()
+    # Fresh conversation: drop the outgoing session's read anchors too, or its
+    # staleness promises fire spurious "changed on disk" refusals here (0.128.3).
+    from . import _staleness
+    _staleness.clear()
     state.session_dirty = False
     # Fresh recorder for the fresh session.
     st._METRICS = _fresh_metrics(state.session_id)
