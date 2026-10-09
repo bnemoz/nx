@@ -188,6 +188,7 @@ class StreamParser:
         self.last_chunk: str | None = None
         self.tool_status_active = False
         self.last_tool_status = 0.0
+        self._last_tool_status_text: str | None = None
         self.in_text_tool_tag = False  # a <tool_call>/[nx_tool_call] tag opened in content
         self._tag_carry = ""        # raw tail carried across chunks for the tag scan (PF-02/03)
         self._tag_carry_start = 0   # absolute offset of _tag_carry in raw content
@@ -228,21 +229,22 @@ class StreamParser:
                 f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
         with write_lock():
             if _console_has_live():
-                # SPEC_LIVEENGINE.md: while a Live owns the shared console, the
-                # CLEAR_LINE prefix would erase the Live's frame instead of
-                # this line, and cprint() composes every write as a COMMITTED
-                # line above the frame — one new line per 0.2s throttle tick,
-                # which for a long streamed args buffer meant a staircase of
-                # "args 273 chars / 552 chars / …" lines. Repaint in place
-                # instead: only the FIRST emission commits the line; each
-                # later tick moves up onto it (CUU), clears down (EL), and
-                # rewrites. Committed lines above a Live frame are cprint()'s
-                # territory, but this one write is ours, so the raw writes go
-                # to stdout directly (the Live frame itself is untouched).
-                if self.tool_status_active:
-                    sys.stdout.write("\033[1F\033[2K")  # cursor up 1 line, erase it
-                sys.stdout.write(text + "\n")
-                sys.stdout.flush()
+                # SPEC_LIVEENGINE.md: while a Live owns the shared console there
+                # is NO safe in-place repaint. Raw CSI writes fail in both
+                # directions (0.129.0): through the say-panel Live's
+                # redirect_stdout FileProxy rich's AnsiDecoder DROPS non-SGR
+                # sequences entirely, and against a redirect_stdout=False Live
+                # (the /tabs region) the cursor sits at the END of the frame's
+                # last row, so a CUU lands INSIDE the frame and desyncs rich's
+                # erase arithmetic (ghost rows). And a composed console.print
+                # of Control codes is unreliable across rich versions. So the
+                # line is simply COMMITTED — but only when its CONTENT changed
+                # (call name set, a new call joins, or the args count crosses
+                # an abbr bucket), which for a long streamed args buffer is a
+                # handful of lines instead of one per 0.2s tick.
+                if text != self._last_tool_status_text:
+                    cprint(text)
+                    self._last_tool_status_text = text
             else:
                 # No Live open: the classic in-place repaint, byte-identical
                 # to pre-0.128.
@@ -312,16 +314,14 @@ class StreamParser:
         if self.quiet:
             return
         if self.tool_status_active:
-            # The status line was committed above the Live frame (see
-            # show_tool_status): move up onto it and erase it so the next
-            # write (say-panel content, the tool box) starts clean. Two
-            # positive guards (not if/else) so both raw writes stay behind
-            # their own _console_has_live() check (test_raw_write_sites_
-            # are_live_gated audits each write site's guarding condition).
             if _console_has_live():
-                with write_lock():
-                    sys.stdout.write("\033[1F\033[2K")
-                    sys.stdout.flush()
+                # The status line is a committed line above the Live frame (see
+                # show_tool_status) — it cannot be erased in place (the raw-CSI
+                # failure modes in the comment there), and it doesn't need to
+                # be: a committed line reads as transcript history, exactly
+                # like the tool box that follows it. Just drop the repaint
+                # bookkeeping.
+                self._last_tool_status_text = None
             if not _console_has_live():
                 # No Live open: clear it the classic way, exactly as before.
                 with write_lock():
