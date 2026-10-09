@@ -162,6 +162,25 @@ def _pid_alive(pid: object, start_time: object = None) -> bool:
     return pid_is_alive(pid_int, expected)
 
 
+def _thread_alive(owner: str) -> bool:
+    """Whether the worker thread named by an `owner_id` tag is still running
+    in THIS process.
+
+    `owner_id` is `<session id>:<thread ident>` and only same-process tags
+    reach here (the caller checks the holder pid first), so the ident can be
+    matched against the live threads threading.enumerate() reports. A thread
+    that has EXITED is gone from that set even when its ident is still
+    written in a stale claim row — exactly the leftover case the hatch exists
+    for (a finished sub-agent that never released). An unparsable tag names
+    no live thread, so it reads dead. Cost: one enumerate() walk, only on the
+    same-pid-same-session reclaim path (never the hot heartbeat path)."""
+    try:
+        ident = int(str(owner).rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return False
+    return any(t.ident == ident for t in threading.enumerate())
+
+
 def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
     """Atomically claim `path` for `owner_id`.
 
@@ -204,8 +223,9 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                             " WHERE path = ?",
                             (now, path))
                         result = (True, None)
-                    elif str(holder_pid) == str(pid) and str(holder_owner).startswith(
-                            f"{st.SESSION_ID}:"):
+                    elif (str(holder_pid) == str(pid)
+                          and str(holder_owner).startswith(f"{st.SESSION_ID}:")
+                          and not _thread_alive(holder_owner)):
                         # A leftover claim from ANOTHER loop of THIS session in
                         # THIS process — the signature of an in-process
                         # sub-agent (its own worker thread, so a different
@@ -213,9 +233,15 @@ def claim_file(path: str, owner_id: str) -> tuple[bool, str | None]:
                         # the parent's session id) that finished without
                         # releasing. Refusing here made the parent's next edit
                         # report "claimed by another agent" naming its OWN
-                        # pid, until the TTL expired. Reclaim in place; a
-                        # different session's tag, or any other process's pid,
-                        # still blocks below.
+                        # pid, until the TTL expired. The thread-liveness
+                        # check (0.129.0) keeps the hatch narrow: a SIBLING
+                        # live loop of this session — nx run --parallel
+                        # workers, or a second in-process agent — carries the
+                        # same pid and session id but a DIFFERENT, still-live
+                        # thread ident, and its claim is a real concurrent
+                        # holder, so it must still block. Reclaim in place; a
+                        # different session's tag, or any other process's
+                        # pid, still blocks below.
                         conn.execute("DELETE FROM file_claims WHERE path = ?", (path,))
                         conn.execute(
                             "INSERT INTO file_claims(path, owner_id, pid, claimed_at,"

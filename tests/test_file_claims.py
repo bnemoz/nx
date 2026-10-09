@@ -445,6 +445,44 @@ def test_other_sessions_same_pid_row_still_blocks(tmp_path):
         st.SESSION_ID = None
 
 
+def test_live_sibling_loop_of_same_session_still_blocks(tmp_path):
+    """0.129.0: the same-pid reclaim hatch is thread-liveness gated. A LIVE
+    sibling loop of this session (nx run --parallel worker, a second
+    in-process agent) carries the same pid and session prefix but a different,
+    still-running thread ident — its claim is a real concurrent holder and
+    must block. Only a DEAD thread's leftover is reclaimed."""
+    st = nx.st
+    st.SESSION_ID = "sess-parent"
+    started = threading.Event()
+    release = threading.Event()
+
+    def sibling():
+        # the sibling claims ON ITS OWN thread (its real ident)
+        started.set()
+        release.wait(timeout=10)
+
+    t = threading.Thread(target=sibling)
+    t.start()
+    started.wait(timeout=10)
+    try:
+        p = str(tmp_path / "sibling.txt")
+        _insert(p, f"sess-parent:{t.ident}", os.getpid(), time.time(),
+                start_time=fc._pid_start_time())
+        ok, holder = fc.claim_file(p, fc.owner_id())
+        assert ok is False and str(t.ident) in holder, \
+            "a live sibling loop's claim must not be reclaimed"
+    finally:
+        release.set()
+        t.join(timeout=10)
+    # The thread is gone now: the SAME row is a leftover and reclaims cleanly.
+    p = str(tmp_path / "sibling.txt")
+    _insert(p, f"sess-parent:{t.ident}", os.getpid(), time.time(),
+            start_time=fc._pid_start_time())
+    ok, holder = fc.claim_file(p, fc.owner_id())
+    assert ok and holder is None
+    assert _rows()[0][1] == fc.owner_id()
+
+
 def test_release_session_claims_drops_outgoing_prefix(tmp_path):
     """0.128.3: /reset, /fork and /resume swap st.SESSION_ID in-process. The
     outgoing session's rows (one per thread ident) become unreachable for the
