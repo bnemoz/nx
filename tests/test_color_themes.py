@@ -207,6 +207,13 @@ def test_amethyst_switches_via_set_theme():
 # Console in _turn.py. Before the _rich.py bridge, that console used rich's
 # DEFAULT_STYLES palette (fixed dim-yellow headings, pale-blue code) — the one
 # surface in the terminal that ignored NX_THEME // /theme entirely.
+#
+# SPEC_LIVEENGINE.md (0.128.0): `_turn._say_console` IS `_rich.shared_console()`
+# — one process-wide console shared with the /tabs region Live and every
+# mid-turn writer. These tests still hold, but any test that temporarily
+# REBINDS its `.file` must restore the ORIGINAL `_file` (None = lazy sys.stdout
+# resolution), because pinning the resolved stdout on the shared object would
+# make every later console write bypass a test's `redirect_stdout`.
 
 def test_rich_say_panel_tracks_theme():
     from nx import _rich, _turn
@@ -240,7 +247,7 @@ def test_rich_console_styles_markdown_with_theme_palette():
     orig = _ansi.C.name
     try:
         _ansi.set_theme("mocha")
-        rich_stdout = console.file
+        rich_stdout = console._file
         import io
         buf = io.StringIO()
         console.file = buf
@@ -251,6 +258,10 @@ def test_rich_console_styles_markdown_with_theme_palette():
         expected = "\x1b[1;38;2;137;180;250m"  # ACCENT hue, bold (h1)
         assert expected in out, "say-panel markdown not rendered in theme hue"
     finally:
+        # SPEC_LIVEENGINE.md: _say_console is now the process-wide SHARED
+        # console, so this test must restore its LAZY stdout binding (None),
+        # not the resolved stream — pinning the object here would make every
+        # later console write bypass a test's redirect_stdout.
         console.file = rich_stdout
         _ansi.set_theme(orig)
 
@@ -447,7 +458,7 @@ def test_rendered_code_block_uses_theme_hues_end_to_end():
 
     try:
         _ansi.set_theme("mocha")
-        rich_stdout = console.file
+        rich_stdout = console._file   # None: resolved lazily (shared console)
         buf = io.StringIO()
         console.file = buf
         console._force_terminal = True
@@ -462,6 +473,6 @@ def test_rendered_code_block_uses_theme_hues_end_to_end():
         # monokai's signature keyword cyan must be gone
         assert "102;217;239" not in out, "still rendering monokai hues"
     finally:
-        console.file = rich_stdout
+        console.file = rich_stdout   # back to the lazy sys.stdout binding
         _ansi.set_theme(orig)
 

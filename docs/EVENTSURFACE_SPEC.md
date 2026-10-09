@@ -132,6 +132,16 @@ def drop_sink(job_id) -> None
   4 fps from a poll of `_SINKS` tails + `_surfaces_snapshot()`. The main
   turn's own rendering continues above it — the dashboard is a bounded
   overlay (max `NX_TABS_HEIGHT` rows, default 8), not an alternate screen.
+  **Superseded in 0.128.0** (see `docs/SPEC_LIVEENGINE.md`): the hand-rolled
+  erase arithmetic is replaced by a rich `Live`
+  (`auto_refresh=False`, `transient=True`, `redirect_stdout=False`,
+  `vertical_overflow="visible"`) sharing the ONE themed console
+  (`_rich.shared_console()`), with `update`+`refresh` still driven by the
+  owner hooks (the watcher's poll tick / the chatbox idle tick) under
+  `write_lock()`. rich now owns line discipline — mid-turn text is composed
+  above the frame by `console.print` — so the erase prefix and `_DASH_DRAWN`
+  counter are gone. The interactive `run_tabs_dashboard` raw loop is
+  unchanged.
 - **Write serialization**: a module-level `threading.RLock`
   (`_WRITE_LOCK` in `_surfaces.py`) taken by the dashboard repaint and —
   in a hardening commit that is REQUIRED before v1 ships (not a follow-up:
@@ -139,7 +149,10 @@ def drop_sink(job_id) -> None
   print sites in `_turn.py`/`_stream_parse.py`/`_dispatch.py`. This is a
   review-heavy change, not a mechanical swap: writes are scattered across
   ≥6 StreamParser methods plus the turn/dispatch bodies, behind 20+
-  independent quiet checks.
+  independent quiet checks. (0.128.0 finished the job the other way round:
+  those sites now funnel through `_rich.cprint` on the shared console, which
+  composes them above the Live frame; `_WRITE_LOCK` still serializes every
+  write against a repaint — see `docs/SPEC_LIVEENGINE.md`.)
 - **Editor ownership**: the chatbox is the sole stdin reader and sole
   rewriter of its own frame (single-reader invariant,
   `_interrupt.py:151-153`) while at the prompt; the interrupt watcher is
@@ -147,7 +160,9 @@ def drop_sink(job_id) -> None
   composer MUST be repainted from inside the chatbox's own loop (e.g. a
   `wait_ready` timeout on its blocking read), never from an external
   thread. Mid-turn live mode while the turn loop (not the chatbox) owns
-  the terminal may use the armed watcher's poll tick instead.
+  the terminal may use the armed watcher's poll tick instead. Unchanged in
+  0.128.0: the region Live runs with `auto_refresh=False`, so rich spawns no
+  repaint thread of its own.
 - **Agent-row tails** come from `_eventsink.tail()` instead of being
   empty while running.
 - **Tear avoidance** (grounded in Gemini CLI's

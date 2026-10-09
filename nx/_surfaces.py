@@ -369,12 +369,18 @@ def _term_cols() -> int:
 
 
 # --------------------------------------------------------------------------
-# live region (EVENTSURFACE_SPEC §2/§3, Phase 3)
+# live region (EVENTSURFACE_SPEC §2/§3, Phase 3; SPEC_LIVEENGINE.md 0.128.0)
 # --------------------------------------------------------------------------
-# A bounded overlay painted BELOW the current render line while a turn runs:
-# same inline repaint idiom run_tabs_dashboard uses (\x1b[{n}A\r\x1b[J), redrawn
-# at ~4 fps from the sink tails + _surfaces_snapshot(). NOT an alternate
+# A bounded overlay painted BELOW the current render line while a turn runs,
+# redrawn at ~4 fps from the sink tails + _surfaces_snapshot(). NOT an alternate
 # screen — the main turn's output continues above it.
+#
+# 0.128.0: the paint is a rich Live on the SHARED console, not hand-rolled
+# cursor arithmetic (\x1b[{n}A\r\x1b[J). The old arithmetic assumed the region was
+# the last thing written; every mid-turn print below it (stats footer, tool
+# blocks, spinner) invalidated the anchor, so frames stacked and tore. rich
+# instead owns line discipline: mid-turn `console.print` lines are composed
+# ABOVE the frame, and `transient=True` erases the frame on stop().
 
 _WRITE_LOCK = threading.RLock()
 # EVENTSURFACE_SPEC §2 Phase 4 (v1-required): this lock is now also taken by
@@ -398,7 +404,9 @@ def write_lock() -> "threading.RLock":
 _DASH_LOCK = threading.Lock()
 _DASH_OPEN = False
 _DASH_DISABLED = False   # a repaint crash disables live mode for the session
-_DASH_DRAWN = 0          # rows painted last frame (erase arithmetic)
+# The region's rich Live (created on first open, dropped on close).
+# live_region() is the accessor tests use; the raw global stays private.
+_DASH_LIVE = None
 
 LIVE_FPS_INTERVAL = 0.25  # 4 fps
 
@@ -506,38 +514,51 @@ def _live_frame() -> list[str]:
     return out
 
 
-def _erase_live() -> None:
-    """Erase the painted region, restoring the cursor to the render line."""
-    global _DASH_DRAWN
-    if _DASH_DRAWN:
-        sys.stdout.write(f"\x1b[{_DASH_DRAWN}A\r\x1b[J")
-        sys.stdout.flush()
-        _DASH_DRAWN = 0
+def live_region():
+    """The region's rich Live, or None while the region is closed."""
+    return _DASH_LIVE
+
+
+def _region_renderable():
+    """The Live's renderable: the frame lines joined and parsed to a `Text`.
+
+    MUST NOT be a plain `str`: `Live.update(str)` runs it through
+    `Console.render_str`, which parses rich MARKUP — and a frame row routinely
+    contains square brackets (a tool instruction like `[Steering note]`, a
+    clipped `[/etc/hosts]` tail), which raises MarkupError and would trip the
+    crash handler, permanently disabling the region for the session. Passing a
+    `Text` bypasses render_str entirely.
+
+    `Text.from_ansi` is the safe form (SPEC_LIVEENGINE.md §2): it keeps the
+    frame's own SGR. (Where the console has no color system at all the Live
+    does not render its frame anyway, so the style pruning there is
+    unobservable.) `no_wrap=True` because the frame is already clipped to the
+    terminal width — a wrap would add a row and desync the Live's erase count."""
+    from rich.text import Text
+    return Text.from_ansi("\n".join(_live_frame()), no_wrap=True)
 
 
 def repaint_live(force: bool = False) -> None:
     """One dashboard repaint (the 4 fps tick). No-op when closed or disabled;
     a crash inside is caught and disables live mode for the session
-    (belt-and-braces vs termios corruption)."""
-    global _DASH_DISABLED, _DASH_DRAWN
+    (belt-and-braces vs termios corruption).
+
+    The Live is built with auto_refresh=False, so nothing repaints from an
+    external thread; update+refresh run here, under write_lock(), triggered by
+    the terminal's owner hooks (see repaint_live_tick)."""
+    global _DASH_DISABLED
     with _DASH_LOCK:
         if not _DASH_OPEN or _DASH_DISABLED:
             return
-    if not _vt_supported():
+        live = _DASH_LIVE
+    if live is None or not _vt_supported():
         close_dashboard()
         return
     try:
-        frame = _live_frame()
+        renderable = _region_renderable()
         with _WRITE_LOCK:
-            out = ""
-            if _DASH_DRAWN:
-                out += f"\x1b[{_DASH_DRAWN}A\r\x1b[J"
-            else:
-                out += "\r\x1b[J"
-            out += "\n".join(frame) + "\n"
-            sys.stdout.write(out)
-            sys.stdout.flush()
-            _DASH_DRAWN = len(frame)
+            live.update(renderable)
+            live.refresh()
     except Exception:
         _DASH_DISABLED = True
         try:
@@ -556,29 +577,71 @@ def repaint_live_tick() -> None:
     repaint_live()
 
 
+def _make_region_live():
+    """Construct the region's Live (lazy, once per open).
+
+    `Live.__init__` owns the cursor: it WRITES the first frame with surrounding
+    control bytes (cursor hide, a preceding blank line, cursor moves). That
+    write is the open-time paint the old code did by hand, so the Live is built
+    (not merely update()d) under write_lock() in open_dashboard.
+
+    redirect_stdout/stderr MUST stay False: rich's FileProxy AnsiDecoder DROPS
+    non-SGR control bytes, which is exactly what nx's own pre-formatted writes
+    carry. auto_refresh=False keeps refresh on the owner hooks only.
+    transient=True gives the close semantics _erase_live used to implement.
+    vertical_overflow="visible" so a taller-than-terminal frame is never
+    cropped (the frame is already clamped to NX_TABS_HEIGHT anyway)."""
+    from rich.live import Live
+    from ._rich import shared_console
+    return Live(_region_renderable(),
+                console=shared_console(),
+                auto_refresh=False,
+                transient=True,
+                refresh_per_second=4,      # LIVE_FPS_INTERVAL = 0.25s = 4 fps
+                redirect_stdout=False,
+                redirect_stderr=False,
+                vertical_overflow="visible")
+
+
 def open_dashboard() -> bool:
     """Open the live region. False when refused (off-tty / VT missing /
-    disabled for the session)."""
-    global _DASH_OPEN, _DASH_DRAWN
-    with _DASH_LOCK:
-        if _DASH_DISABLED or not _vt_supported():
-            return False
-        _DASH_OPEN = True
-        _DASH_DRAWN = 0
-    repaint_live()
+    disabled for the session). Idempotent: a second open is a no-op success."""
+    global _DASH_OPEN, _DASH_LIVE
+    with _WRITE_LOCK:
+        with _DASH_LOCK:
+            if _DASH_DISABLED or not _vt_supported():
+                return False
+            if _DASH_OPEN:
+                return True
+            _DASH_LIVE = _make_region_live()
+            try:
+                _DASH_LIVE.start(refresh=True)
+            except Exception:
+                _DASH_LIVE = None
+                raise
+            _DASH_OPEN = True
     return True
 
 
 def close_dashboard() -> None:
-    """Erase the live region and mark it closed. Idempotent; safe anywhere."""
-    global _DASH_OPEN, _DASH_DRAWN
+    """Erase the live region and mark it closed. Idempotent; safe anywhere.
+
+    transient=True makes the Live erase its own frame on stop(), which is what
+    the old _erase_live() did with cursor arithmetic — no _DASH_DRAWN counter to
+    keep in sync any more."""
+    global _DASH_OPEN, _DASH_LIVE
+    live = None
     with _DASH_LOCK:
         was_open = _DASH_OPEN
         _DASH_OPEN = False
-    if not was_open:
+        live, _DASH_LIVE = _DASH_LIVE, None
+    if not was_open and live is None:
+        return
+    if live is None:
         return
     try:
-        _erase_live()
+        with _WRITE_LOCK:
+            live.stop()
     except Exception:
         pass
 

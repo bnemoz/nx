@@ -40,6 +40,7 @@ from ._bash_jobs import run_bash, wait_background, kill_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
+from ._rich import cprint
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, check_gate
@@ -445,9 +446,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         accent = tool_accent(name)
         # Header + args line are one visual unit of the tool box: one lock.
         with write_lock():
-            print(f"\n{accent}  ┌─ {header}{RESET}")
+            cprint(f"\n{accent}  ┌─ {header}{RESET}")
             if name != "todo_write":
-                print(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
+                cprint(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -469,7 +470,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # Close the tool box before propagating so it isn't left visually open.
         if not quiet and not buffered:
             with write_lock():
-                print(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
+                cprint(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         result = f"ERROR: {type(e).__name__}: {e}"
@@ -614,20 +615,20 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # one visual unit — a repaint between them would tear the todo list.
         with write_lock():
             for line in disp:
-                print(f"{accent}  │ {RESET}{line}{RESET}")
+                cprint(f"{accent}  │ {RESET}{line}{RESET}")
     elif st.TOOL_OUTPUT_VISIBLE:
         # Bounded preview (≤ 9 lines): one lock for the box body.
         with write_lock():
             for line in preview_lines:
-                print(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+                cprint(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
     else:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
         with write_lock():
-            print(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
+            cprint(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
     if not quiet and not buffered:
         with write_lock():
-            print(f"{accent}  └─{RESET}")
+            cprint(f"{accent}  └─{RESET}")
     if name in _CACHEABLE_READ_TOOLS:
         # git_* results reflect .git/ state, which the root dir's mtime never
         # tracks (commits write under .git/ only) — store_cacheable_result

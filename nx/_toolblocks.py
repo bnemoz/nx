@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 from ._ansi import DIM, RESET, C, LifeSpinner
 from ._progress import ProgressCounter
+from ._rich import cprint
 
 
 # Tools whose call boxes render in the MEMORY role color instead of ACCENT,
@@ -198,12 +199,12 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     if not blocks:
         return
     accent = tool_accent(next((b.name for b in blocks if b.name), ""))
-    print(f"\n{accent}  ┌─ {_group_title(blocks)}{RESET}")
+    cprint(f"\n{accent}  ┌─ {_group_title(blocks)}{RESET}")
     calls = [b for b in blocks if b.name]
     for i, b in enumerate(blocks):
         branch = "└─" if i == len(blocks) - 1 else "├─"
         if not b.name:  # standalone note (pre-hook veto): no call header
-            print(f"{accent}  │{RESET}  {accent}{branch}{RESET} {b.note}")
+            cprint(f"{accent}  │{RESET}  {accent}{branch}{RESET} {b.note}")
             continue
         b_accent = tool_accent(b.name)
         line = f"{b_accent}  │{RESET}  {b_accent}{branch} {b.header or b.name}{RESET}"
@@ -216,13 +217,13 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
             # would force /tooloutput to learn what nx already knows.
             line += (f" {C.ERROR}✗ {b.note}{RESET}" if (b.note and not visible)
                      else f" {C.ERROR}· error{RESET}")
-        print(line)
+        cprint(line)
         if visible and b.body:
             # Keep the box rail down the group, but not under the final entry
             # where the box has already closed.
             rail = "│ " if i < len(blocks) - 1 else "  "
             for body_line in b.body:
-                print(f"{b_accent}  │{RESET}  {rail}{body_line}")
+                cprint(f"{b_accent}  │{RESET}  {rail}{body_line}")
     n = len(calls)
     footer = f"{n} call{'' if n == 1 else 's'} · {elapsed:.1f}s"
     errs = sum(1 for b in calls if b.failed)
@@ -230,4 +231,4 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
         footer += f" · {errs} error{'' if errs == 1 else 's'}"
     if not visible:
         footer += " · output collapsed (/tooloutput)"
-    print(f"{accent}  └─{RESET} {DIM}{footer}{RESET}")
+    cprint(f"{accent}  └─{RESET} {DIM}{footer}{RESET}")

@@ -19,18 +19,17 @@ from . import _state as st
 # renders the assistant's final-answer markdown live — themed like the rest
 # of the terminal (raw-ANSI `C` roles elsewhere) instead of rich's default
 # palette; retheme_console() restyles it on a live /theme switch.
-_say_console = themed_console = None  # replaced below
+#
+# SPEC_LIVEENGINE.md: this is the process-wide SHARED console (one object, owned
+# by `_rich.shared_console()`), not a module-private one built at import. The
+# /tabs region Live and every mid-turn writer go through it too, because rich
+# composes same-console Lives (and Console.print during a Live) into one block,
+# while a second console on stdout fights for the cursor.
+from ._rich import cprint
+from ._rich import shared_console as _shared_console
+from ._rich import themed_console  # noqa: F401  (re-exported, as before)
 
-
-def _init_console():
-    global _say_console, themed_console
-    from ._rich import themed_console as _tc
-    themed_console = _tc
-    _say_console = _tc()
-
-
-_init_console()
-del _init_console
+_say_console = _shared_console()
 
 
 def _ctx_field(prompt_n: int) -> str:
@@ -214,8 +213,8 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     # footer with nothing above it.
     if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
             and not text.strip()):
-        print(f"{DIM}  {'─' * 46}{RESET}")
-        print(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
+        cprint(f"{DIM}  {'─' * 46}{RESET}")
+        cprint(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args
     # repairs applied + corrective retries — so the knobs are tunable in
     # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
@@ -245,7 +244,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0
         prompt_n = usage.prompt_tokens or 0
@@ -262,7 +261,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if t_first:
             parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif streamed_chars > 0:
         gen_n = max(1, streamed_chars // 4)
         window, trusted = (parser.gen_window(elapsed) if parser is not None
@@ -270,6 +269,6 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
                  _tps_field(_window_tps(gen_n, window), trusted),
                  f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall"]
-        print(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
     elif text or tcs:
-        print(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}" + tally)
+        cprint(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}" + tally)

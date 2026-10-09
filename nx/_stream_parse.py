@@ -18,6 +18,7 @@ from typing import Any
 from rich.console import Console
 from rich.live import Live
 
+from ._rich import cprint
 from ._rich import themed_markdown
 # EVENTSURFACE_SPEC §1(a): the stream tap lives on the parser's own thread, so
 # it resolves the job id from that thread's sub-agent context (see tap_event).
@@ -123,6 +124,18 @@ def _tool_call_progress(tcs: dict[int, dict[str, Any]]) -> str:
     return ", ".join(parts) if parts else "tool call ..."
 
 
+def _console_has_live() -> bool:
+    """Does a rich Live currently own the shared console?
+
+    SPEC_LIVEENGINE.md: the mid-turn writers keep their pre-0.128 byte output
+    when nothing is rendering a Live; the console only owns line discipline
+    while a Live is actually up (the /tabs region Live and/or the say-panel's
+    own Live — rich stacks both on the same Console, see Console._live_stack).
+    Imported lazily to keep this module's import surface unchanged."""
+    from ._rich import shared_console
+    return bool(getattr(shared_console(), "_live_stack", None))
+
+
 class StreamParser:
     """Consumes one SSE chunk's delta at a time and accumulates the turn's
     streamed state: reasoning vs. content mode, tool-call arg buffers, TTFT,
@@ -211,11 +224,17 @@ class StreamParser:
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
-        line = (CLEAR_LINE + f"{C.ACCENT}  ↳ generating tool call{RESET} "
+        # SPEC_LIVEENGINE.md: while a Live owns the shared console (the /tabs
+        # region Live, or the say-panel's own), the console owns line
+        # discipline — the CLEAR_LINE prefix would erase the Live's frame
+        # instead of this line, so the text is just committed. With no Live
+        # open there is no frame to protect and the classic in-place repaint
+        # (byte-identical to pre-0.128) is kept.
+        prefix = "" if _console_has_live() else CLEAR_LINE
+        line = (prefix + f"{C.ACCENT}  ↳ generating tool call{RESET} "
                 f"{DIM}{_tool_call_progress(self.tcs)}{RESET}")
         with write_lock():
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            cprint(line)
         self.tool_status_active = True
         self.last_tool_status = now
 
@@ -281,9 +300,14 @@ class StreamParser:
         if self.quiet:
             return
         if self.tool_status_active:
-            with write_lock():
-                sys.stdout.write(CLEAR_LINE)
-                sys.stdout.flush()
+            # SPEC_LIVEENGINE.md: with a Live owning the console the status line
+            # is a committed line (no erase needed — and a CLEAR_LINE would
+            # wipe the Live's frame). With no Live open, clear it the classic
+            # way, exactly as before.
+            if not _console_has_live():
+                with write_lock():
+                    sys.stdout.write(CLEAR_LINE)
+                    sys.stdout.flush()
             self.tool_status_active = False
 
     def close_think_block(self) -> None:
@@ -300,11 +324,11 @@ class StreamParser:
             pass  # parse only — the closer line is terminal noise here
         elif st.REASONING_VISIBLE:
             with write_lock():
-                print()
-                print(f"{DIM}  ────────────── (thought for {dur}){RESET}")
+                cprint()
+                cprint(f"{DIM}  ────────────── (thought for {dur}){RESET}")
         else:
             with write_lock():
-                print(f"{DIM}  (thought for {dur}){RESET}")
+                cprint(f"{DIM}  (thought for {dur}){RESET}")
         self.think_start = None
 
     def gen_window(self, elapsed_total: float) -> tuple[float, bool]:
@@ -395,10 +419,10 @@ class StreamParser:
                 pass
             elif st.REASONING_VISIBLE:
                 with write_lock():
-                    print(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
+                    cprint(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
             else:
                 with write_lock():
-                    print(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
+                    cprint(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
             self.mode = "think"
         if _LEAKED_SPECIAL_TOKEN_RE.search(rc):
             rc = _strip_leaked_tokens(rc)
@@ -414,7 +438,7 @@ class StreamParser:
                 # chunks arriving every few ms, and holding across chunks
                 # would starve the repaint.
                 with write_lock():
-                    print(f"{C.REASONING_TEXT}{rc}{RESET}", end="", flush=True)
+                    cprint(f"{C.REASONING_TEXT}{rc}{RESET}", end="")
             self.reasoning_parts.append(rc)
         # Accumulate while there is no prose, even once tool-call deltas have
         # arrived (glm-style interleaved think blocks land after the first
@@ -427,8 +451,8 @@ class StreamParser:
         if LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT:
             if not self.quiet:
                 with write_lock():
-                    print()
-                    print(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
+                    cprint()
+                    cprint(f"{C.ERROR}  ⚠ LEAKED-TOKEN COLLAPSE — {self.leaked_token_run} consecutive "
                           f"special-token chunks; cutting stream now{RESET}")
             self.loop_cut = True
             return True
@@ -436,8 +460,8 @@ class StreamParser:
                 and self.reasoning_only_chars >= st.REASONING_ONLY_CHAR_LIMIT):
             if not self.quiet:
                 with write_lock():
-                    print()
-                    print(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
+                    cprint()
+                    cprint(f"{C.ERROR}  ⚠ REASONING-ONLY LIMIT HIT — "
                           f"{_abbr(self.reasoning_only_chars)} reasoning chars with no "
                           f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
@@ -448,8 +472,8 @@ class StreamParser:
             elapsed_reason = time.time() - self.reasoning_only_start
             if not self.quiet:
                 with write_lock():
-                    print()
-                    print(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
+                    cprint()
+                    cprint(f"{C.ERROR}  ⚠ REASONING-ONLY TIME LIMIT — "
                           f"{elapsed_reason:.0f}s of reasoning with no "
                           f"answer/tool call — cutting stream now{RESET}")
             self.loop_cut = True
@@ -595,7 +619,7 @@ class StreamParser:
                     self.say_live = None
             if not self.quiet:
                 with write_lock():
-                    print(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
+                    cprint(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
                           f"discarding degenerated output{RESET}")
             self.loop_cut = True
             return True
@@ -636,4 +660,4 @@ class StreamParser:
         self.close_think_block()
         if not self.quiet:
             with write_lock():
-                print(RESET)
+                cprint(RESET)

@@ -460,6 +460,46 @@ def swatch(theme_name: str) -> str:
 #   * low contrast (dim gray track, one highlighted runner) and no color
 #     cycling;
 #   * NX_SPINNER=0 disables the animation entirely (label only).
+def _region_live_open() -> bool:
+    """Is the /tabs region Live currently owning the terminal line?
+
+    SPEC_LIVEENGINE.md. Imported lazily (and defensively) because `_surfaces`
+    imports `_ansi`, so a module-level import here would be a cycle."""
+    try:
+        from ._surfaces import dashboard_open
+        return dashboard_open()
+    except Exception:
+        return False
+
+
+def _draw_frame(text: str) -> None:
+    """Emit one spinner frame (SPEC_LIVEENGINE.md §3, LifeSpinner).
+
+    Two channels, one switch:
+
+    * region Live OPEN — the Live owns line discipline, so a `\x1b[2K\r`
+      rewrite would erase the Live's own frame (that is the tear this spec
+      fixes). The frame becomes ONE committed console line via `cprint`, which
+      rich composes above the frame. The `_WRITE_LOCK` is taken first so a
+      4 fps repaint can never interleave with the frame write (no deadlock:
+      the repaint path takes the same lock and only then the console lock).
+    * region CLOSED — the classic in-place repaint, byte-identical to before
+      (the spinner draws over itself on one line; committing a line per tick
+      would scroll the terminal for every tool call).
+    """
+    if not _region_live_open():
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+    from ._rich import cprint
+    from ._surfaces import write_lock
+    try:
+        with write_lock():
+            cprint(text.replace(CLEAR_LINE, ""))
+    except Exception:
+        pass  # never let a spinner frame break the tool call (as before)
+
+
 class LifeSpinner:
     """A quiet, static-width activity line: `label [▪▪▪▪···]`.
 
@@ -551,18 +591,18 @@ class LifeSpinner:
 
     def _run(self) -> None:
         try:
-            sys.stdout.write(self._render(self._pos))
-            sys.stdout.flush()
+            _draw_frame(self._render(self._pos))
             while not self._stop.wait(self.tick):
                 self._pos = (self._pos + 1) % self._WIDTH
-                sys.stdout.write(self._render(self._pos))
-                sys.stdout.flush()
+                _draw_frame(self._render(self._pos))
         finally:
             # wipe the spinner line deterministically before returning —
             # _run always exits through here, so the caller's next print
-            # never lands on a half-drawn bar
-            sys.stdout.write(CLEAR_LINE)
-            sys.stdout.flush()
+            # never lands on a half-drawn bar. Under an open region Live there
+            # is nothing to wipe: every frame is a committed console line.
+            if not _region_live_open():
+                sys.stdout.write(CLEAR_LINE)
+                sys.stdout.flush()
             self._done.set()
 
     def start(self) -> None:
@@ -581,8 +621,7 @@ class LifeSpinner:
             # it so stop() can clear the same line. No thread, no redraws.
             self._live = False
             self._static_line = self._render(0)
-            sys.stdout.write(self._static_line)
-            sys.stdout.flush()
+            _draw_frame(self._static_line)
             return
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
@@ -598,8 +637,9 @@ class LifeSpinner:
             self._t = None
             return
         if getattr(self, "_static_line", None) is not None:
-            sys.stdout.write(CLEAR_LINE)
-            sys.stdout.flush()
             self._static_line = None
+            if not _region_live_open():
+                sys.stdout.write(CLEAR_LINE)
+                sys.stdout.flush()
 
 

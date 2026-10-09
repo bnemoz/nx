@@ -188,6 +188,73 @@ def themed_console(**kwargs) -> Console:
     return Console(theme=_build_theme(), **kwargs)
 
 
+_SHARED_CONSOLE: Console | None = None
+
+
+def shared_console() -> Console:
+    """The one themed Console for every mid-turn writer (SPEC_LIVEENGINE.md).
+
+    Lazily created so importing `_rich` stays cheap and so the console is built
+    after `_ansi.C` has settled. This is the object `_turn_footer._say_console`
+    is (same identity): all rich Lives must share ONE console, because
+    same-console Lives compose into a single block via `Console._live_stack`,
+    while two consoles writing to stdout fight over the cursor.
+
+    No `file=` is passed: `Console.file` resolves `sys.stdout` lazily on each
+    write, so a captured/redirected stdout is honored at write time."""
+    global _SHARED_CONSOLE
+    if _SHARED_CONSOLE is None:
+        _SHARED_CONSOLE = themed_console()
+    return _SHARED_CONSOLE
+
+
+def cprint(text: str = "", *, end: str = "\n") -> None:
+    """The ONE write channel for mid-turn text (SPEC_LIVEENGINE.md).
+
+    Every writer that used to `print()` a pre-formatted ANSI line calls this
+    instead. Two channels, one switch on whether an active Live owns the shared
+    console (rich tracks that in `Console._live_stack`):
+
+    * a Live is up (the /tabs region Live, or the say-panel's own Live) — the
+      console composes the line through `rich`, which emits it ABOVE the frame
+      and repositions the cursor, instead of tearing through it;
+    * no Live is up — a plain `print(text, end=end)`, byte-identical to the
+      call site's pre-0.128 output. There is no frame to compose against, and
+      this keeps the classic console-allocation-free path (and every existing
+      `builtins.print` capture hook in the test suite) working.
+
+    The rich branch's options are deliberate:
+
+    * `markup=False` — the argument is already-formatted ANSI, and nx strings
+      legitimately contain `[` (tool syntax, list reprs); markup parsing would
+      eat them as tags.
+    * `highlight=False` — no auto-highlighting of already-colored content.
+    * `soft_wrap=True` — emit the line verbatim at any width. raw `print()`
+      never wrapped, and nx's line widths are pre-clipped by their callers; a
+      wrapped footer/tool line would change visible output (and break the
+      `transient` Live's erase arithmetic).
+
+    Passing the RAW string (rather than `Text.from_ansi(s)`) keeps the emitted
+    bytes identical to `print(s, end=...)` — `Text.from_ansi` re-encodes styles
+    and drops them entirely when the console has no color system.
+
+    Both branches take `_surfaces.write_lock()` (an RLock, so the many call
+    sites that already hold it re-enter) and the rich branch then the Console's
+    own lock — the same order the Live repaint uses (`write_lock` →
+    `live.update/refresh`), so a repaint and a writer can never interleave
+    mid-frame. The lock is imported lazily: `_surfaces` imports `_ansi`, and
+    this module is imported by both.
+    """
+    from ._surfaces import write_lock
+    console = shared_console()
+    with write_lock():
+        if getattr(console, "_live_stack", None):
+            console.print(text, markup=False, highlight=False,
+                          soft_wrap=True, end=end)
+        else:
+            print(text, end=end)
+
+
 def retheme_console(console: Console) -> None:
     """Restyle an existing Console in place to the current theme, so a live
     `/theme` switch reaches the say-panel without constructing a new console
