@@ -64,6 +64,7 @@ result the sub-loop continues from.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -284,6 +285,34 @@ _ASYNC_REPORT_TTL_DAYS = _env_int("NX_OVERFLOW_TTL_DAYS", 7)
 # escalation at 2xN (see _progress_step).
 _CHURN_NUDGE_TURN = _env_int("NX_SUBAGENT_CHURN_NUDGE_TURN", 8)
 
+# EXIT_STATE convention (write/implement tiers): the agent's final message ends
+# with an `EXIT_STATE: <STATE>` line; the orchestrator gets the machine state,
+# the prose keeps the rest.
+_EXIT_STATES = ("DONE", "DONE_WITH_DEVIATIONS", "BLOCKED", "NEEDS_REVIEW")
+_EXIT_LINE_RE = re.compile(
+    r"^\s*\**\s*EXIT[\s_]*STATE\s*\**\s*:\s*\**\s*([A-Za-z_ ]+?)\s*\**\s*$",
+    re.MULTILINE | re.IGNORECASE)
+_EXIT_FAILURE_RE = re.compile(r"\b(failed|could not|error|refused)\b", re.IGNORECASE)
+
+
+def _extract_exit_state(answer: str) -> tuple[str, str, str]:
+    """Pull the EXIT_STATE line out of a sub-agent's final message.
+
+    Returns (state, prose, origin) where origin is 'explicit' when the agent
+    emitted a recognized EXIT_STATE line and 'heuristic' otherwise (failure
+    wording -> BLOCKED, anything else -> NEEDS_REVIEW). The state line is
+    stripped from the prose either way so the parent never sees the marker
+    twice."""
+    m = _EXIT_LINE_RE.search(answer)
+    if m:
+        val = m.group(1).upper().replace(" ", "_")
+        if val in _EXIT_STATES:
+            prose = (answer[:m.start()] + answer[m.end():]).strip()
+            return val, prose, "explicit"
+    if _EXIT_FAILURE_RE.search(answer):
+        return "BLOCKED", answer, "heuristic"
+    return "NEEDS_REVIEW", answer, "heuristic"
+
 
 def _agents_report_dir() -> str:
     """Directory holding sub-agent reports (st.SESSION_HOME/agents)."""
@@ -291,7 +320,7 @@ def _agents_report_dir() -> str:
 
 
 def _write_agent_report(job_id: str, instruction: str, status: str,
-                        answer: str) -> str | None:
+                        answer: str, exit_state: str = "") -> str | None:
     """Write one agent's full answer as markdown; return the path, or None.
 
     Written for BOTH done and error finalizations — a failed agent's report is
@@ -307,7 +336,9 @@ def _write_agent_report(job_id: str, instruction: str, status: str,
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         body = (
             f"# Sub-agent report — {job_id}\n\n"
-            f"- status: {status}\n- finished: {now}\n\n"
+            f"- status: {status}\n- finished: {now}\n"
+            + (f"- exit_state: {exit_state}\n" if exit_state else "")
+            + "\n"
             "## Instruction\n\n"
             f"{instruction.strip()}\n\n"
             "## Answer\n\n"
@@ -475,6 +506,8 @@ def list_async_agents() -> list[dict[str, Any]]:
             "turns": rec.get("turns") or 0,
             "max_turns": rec.get("max_turns") or 0,
             "tier": rec.get("tier") or "read",
+            "exit_state": rec.get("exit_state") or "",
+            "exit_origin": rec.get("exit_origin") or "",
         })
     return out
 
@@ -598,19 +631,33 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                    "untouched.]")
     elif wt_note:
         answer += f"\n\n[{wt_note}]"
+    # EXIT_STATE convention: read the machine state off the report, strip the
+    # line from the prose, and surface it on every delivery surface (record,
+    # report file, [Runtime note], /bg listing). Applies to the FINAL answer
+    # of the sub-loop (the async worker's view) AND the foreground body, so
+    # both delivery paths strip the marker from the prose the parent sees.
+    exit_state, exit_origin = "", ""
+    if tier in ("write", "implement") and isinstance(answer, str) and answer.strip():
+        # read/advisor tiers are out of scope — parse write/implement only.
+        # _extract_exit_state strips the line only when explicit; on a missing
+        # line it returns the prose unchanged plus the heuristic state.
+        exit_state, answer, exit_origin = _extract_exit_state(answer)
     with _ASYNC_LOCK:
         rec = _ASYNC_AGENTS.get(job_id)
         if rec is not None:
             rec["answer"] = answer
             rec["status"] = status
             rec["finished"] = time.time()
+            rec["exit_state"] = exit_state
+            rec["exit_origin"] = exit_origin
             if worktree:
                 rec["worktree"] = worktree
     # Full answer to disk first (both done and error), so the runtime note can
     # stay a short head + path instead of dumping thousands of chars of
     # exploration into the parent's context.
     try:
-        path = _write_agent_report(job_id, instruction, status, answer)
+        path = _write_agent_report(job_id, instruction, status, answer,
+                                   exit_state=exit_state)
     except Exception:  # noqa: BLE001 - the report is best-effort; the note is not
         path = None
     if rec is not None:
@@ -636,6 +683,9 @@ def _stage_subagent_answer(job_id: str) -> None:
         steered = rec.get("steered") or 0
         turns = rec.get("turns") or 0
         max_turns = rec.get("max_turns") or 0
+        exit_state = rec.get("exit_state") or ""
+        exit_origin = rec.get("exit_origin") or ""
+        exit_tag = (f"[exit: {exit_state}]" if exit_state else "")
         spent = f" after {turns}/{max_turns} turns" if max_turns else ""
         # Swarm P3: once the note is built AND the full answer is on disk
         # (`report`), the RAM copy is redundant — up to
@@ -655,6 +705,8 @@ def _stage_subagent_answer(job_id: str) -> None:
                     " hit its turn/token budget and stopped early — this is a " +
                     "PARTIAL answer, verify before relying on it:\n" +
                     cut + more + where + "]")
+            if exit_tag:
+                note = note[:-1] + f" {exit_tag}]"
         elif status == "done":
             head = answer[:_ASYNC_REPORT_CHARS]
             marker = " ...[truncated]" if len(answer) > _ASYNC_REPORT_CHARS else ""
@@ -662,7 +714,9 @@ def _stage_subagent_answer(job_id: str) -> None:
             if report:
                 report_line = "\nFull report: " + report + " — read_file it for the rest."
             note = ("[Runtime note: background sub-agent " + job_id + spent +
-                    " finished. Its answer:\n" + head + marker + report_line + "]")
+                    " finished" +
+                    (f" ({exit_tag} via {exit_origin})" if exit_tag else "") +
+                    ". Its answer:\n" + head + marker + report_line + "]")
         elif answer.startswith("ERROR: an identical async agent"):
             # duplicate-in-flight refusal: nothing ran, nothing to wait for —
             # the parent must retry later, so don't announce a [Runtime note]
@@ -807,6 +861,11 @@ def _run_sync_agent(instruction: str, max_turns: int, tier: str = "read",
     old full-text-inline foreground result (handy for tests)."""
     job_id = _new_job_id()
     answer = _run_sync_agent_body(instruction, max_turns, tier=tier, scope=scope)
+    # EXIT_STATE convention (write/implement tiers): strip the explicit marker
+    # line from the prose the parent sees — the async worker does the same.
+    if tier in ("write", "implement") and isinstance(answer, str) \
+            and _EXIT_LINE_RE.search(answer):
+        _, answer, _ = _extract_exit_state(answer)
     if _sync_inline():
         return answer
     return _lean_result(answer, job_id, instruction)

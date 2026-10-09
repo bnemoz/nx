@@ -28,10 +28,12 @@ from . import _state as st
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
 from ._memory_store import (  # noqa: F401 (re-exports)
-    MEMORY_KINDS, _MEMORY_FOOTER_RE, _confirm_memory, _first_title,
-    _iter_memory_dirs, _iter_notes, _memories_dir, _memory_confirm_preview,
-    _memory_dirs_for, _note_kind, _project_memories_dir, _publish_memory,
-    _read_memory_file, _read_memory_title, _read_note_preview, _slugify,
+    MEMORY_KINDS, _MEMORY_FOOTER_RE, _annotate_drift, _confirm_memory,
+    _drift_challenge, _drift_demote, _drift_freshness, _drift_line, _drift_root,
+    _first_title, _iter_memory_dirs, _iter_notes, _memories_dir,
+    _memory_confirm_preview, _memory_dirs_for, _note_kind, _parse_drift,
+    _project_memories_dir, _publish_memory, _read_memory_file,
+    _read_memory_title, _read_note_preview, _slugify, _stamp_note_now,
     _write_memory_file,
 )
 from ._memory_search import (  # noqa: F401 (re-exports)
@@ -289,6 +291,36 @@ def _cmd_memory_list() -> None:
         print(f"  {C.SUCCESS}{i:>2}.{RESET} [{label}] {title}  {DIM}({date}){RESET}")
 
 
+def _superseded_drift_challenge(title: str, scope: str) -> str:
+    """The write-time challenge for a note this `memory_write` supersedes: when
+    a note with the SAME scope+title already exists and is stale per the drift
+    metric, return the challenge text, else ''.
+
+    Called BEFORE the write (the fresh note would otherwise match its own
+    title) and appended to the result AFTER it — the challenge is purely
+    informational and must never block or veto the write. Kept cheap: the scan
+    is titles-only (a bounded head read per note) and a body is read only on a
+    title match — the stamp lives in the footer, so the head cannot answer it.
+    """
+    want = (title or "").strip().lower()
+    if not want:
+        return ""
+    try:
+        for d, _label in _iter_memory_dirs(scope):
+            for _name, path, _mtime, t, _head in _iter_notes(d, titles_only=True):
+                if t.strip().lower() != want:
+                    continue
+                read = _read_memory_file(path, _name)
+                if read is None:
+                    continue
+                chal = _drift_challenge(_parse_drift(read[1]))
+                if chal:
+                    return chal
+    except Exception:
+        return ""  # a drift hiccup must not affect the write's outcome
+    return ""
+
+
 def memory_write(
     title: str, body: str, scope: str = "project", kind: str = "", **_: Any
 ) -> str:
@@ -319,6 +351,9 @@ def memory_write(
         scope = "project"
     if kind and kind not in MEMORY_KINDS:
         kind = ""  # unrecognized tag: store kind-free rather than refuse
+    # Snapshot the superseded note's staleness BEFORE writing (afterward the
+    # new note carries the same title and looks fresh by construction).
+    challenge = _superseded_drift_challenge(title, scope)
 
     try:
         written = _write_memory_file(title, body, scope, gate=True, kind=kind)
@@ -332,4 +367,4 @@ def memory_write(
         rel = os.path.relpath(path)
     except ValueError:
         pass
-    return f"saved {scope} memory: {title}\nfile: {rel}"
+    return f"saved {scope} memory: {title}\nfile: {rel}" + challenge

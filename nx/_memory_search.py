@@ -19,7 +19,8 @@ import os
 from typing import Any, NamedTuple
 
 from ._memory_store import (
-    _iter_memory_dirs, _iter_notes, _memory_confirm_preview, _read_note_preview,
+    _annotate_drift, _drift_demote, _drift_root, _iter_memory_dirs, _iter_notes,
+    _memory_confirm_preview, _parse_drift, _read_note_preview, _stamp_note_now,
 )
 
 # Cap on memory_search results. A store that outgrows the cap says so
@@ -44,6 +45,29 @@ class _MemoryHit(NamedTuple):
     snippet: str
     label: str
     score: float
+    # Drift stamping: `score` stays the RAW relevance score (what _rank_hit /
+    # the FTS path produced); freshness rides alongside it — `eff` is the score
+    # actually sorted on (demoted), `ann` the short tag rendered on the hit.
+    # Both default so older constructors and tests keep working.
+    eff: float = 0.0
+    ann: str = ""
+
+
+def _hit_from(content: str, score: float, can_stamp: bool = False) -> tuple:
+    """(eff_score, annotation) for one hit body: the raw score divided by
+    (1 + drift weight) so stale notes sink, and the short freshness tag.
+
+    `can_stamp=True` (this dir is the CURRENT project's own memory dir, which
+    the scanner backfills) makes a note that predates stamping count as freshly
+    stamped at HEAD — the same verdict the `_iter_notes` scanner reaches, so
+    the FTS accelerator and the plain scan annotate identically. Global notes
+    never get that treatment: another repo's HEAD would be a lie."""
+    stamp = _parse_drift(content)
+    if stamp is None and can_stamp:
+        backfilled = _stamp_note_now(content, _drift_root())
+        if backfilled is not None:
+            stamp = _parse_drift(backfilled[0])
+    return score / (1.0 + _drift_demote(stamp)), _annotate_drift(stamp)
 
 
 def _rank_hit(content: str, query: str) -> float:
@@ -118,9 +142,11 @@ def _memory_scan(
                 # Same preview builder as the plain scan (see _memindex: the
                 # old FTS `snippet()` was token-bounded and truncated to ~12
                 # chars, so the accelerator used to degrade every hit).
+                score = _rank_hit(body, query)
+                eff, ann = _hit_from(body, score, label == "project")
                 hits.append(_MemoryHit(
                     mtime, name, title, _memory_snippet(body, query), label,
-                    _rank_hit(body, query)))
+                    score, eff, ann))
             continue
         for name, _path, mtime, title, content in _iter_notes(d):
             if terms:
@@ -130,9 +156,13 @@ def _memory_scan(
                 score = _rank_hit(content, query)
             else:
                 score = 0.0
+            eff, ann = _hit_from(content, score, label == "project")
             hits.append(_MemoryHit(
-                mtime, name, title, _memory_snippet(content, query), label, score))
-    hits.sort(key=lambda h: (-h.score, -h.mtime))
+                mtime, name, title, _memory_snippet(content, query), label, score,
+                eff, ann))
+    # Ranking: the demoted score (a note whose own files moved 40 commits ago
+    # sinks below a fresh one of equal relevance), newest first on ties.
+    hits.sort(key=lambda h: (-h.eff, -h.mtime))
     total = len(hits)
     if limit and total > limit:
         return hits[:limit], total - limit, total
@@ -173,7 +203,7 @@ def memory_search(query: str, scope: str = "project", **_: Any) -> str:
         head = f"memories ({len(hits)} of {total}):" if overflow else f"memories ({total}):"
     out = [head]
     for hit in hits:
-        out.append(f"[{hit.label}] {hit.title} ({hit.name})")
+        out.append(f"[{hit.label}] {hit.title} ({hit.name}) {hit.ann}".rstrip())
         out.append(f"  {hit.snippet}")
     if overflow:
         out.append(f"  … {overflow} more not shown — raise NX_MEMORY_SEARCH_LIMIT to see them")

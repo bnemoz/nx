@@ -103,7 +103,11 @@ SUBAGENT_WRITE_SYSTEM = (
     "changed (paths + what each edit did) and anything the parent must finish "
     "itself — no preamble, no plan narration. "
     "Deliberate only as long as it takes to place the FIRST edit: a design "
-    "settled in the report but not committed to files is a failed delegation."
+    "settled in the report but not committed to files is a failed delegation.\n"
+    "Your FINAL message must END with a line `EXIT_STATE: <STATE>` where STATE "
+    "is exactly one of: DONE (finished and verified) | DONE_WITH_DEVIATIONS "
+    "(finished but deviated from the instruction) | BLOCKED (could not complete "
+    "— explain why) | NEEDS_REVIEW (finished but uncertain — say what to check)."
 )
 
 
@@ -163,5 +167,9 @@ SUBAGENT_IMPLEMENT_SYSTEM = (
     "allowlisted.\n"
     "Finish with a report the parent can act on: goal, files changed with what "
     "each edit did, how you verified (commands + results), and open questions "
-    "or follow-ups the parent must handle."
+    "or follow-ups the parent must handle.\n"
+    "Your FINAL message must END with a line `EXIT_STATE: <STATE>` where STATE "
+    "is exactly one of: DONE (finished and verified) | DONE_WITH_DEVIATIONS "
+    "(finished but deviated from the instruction) | BLOCKED (could not complete "
+    "— explain why) | NEEDS_REVIEW (finished but uncertain — say what to check)."
 )
