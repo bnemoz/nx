@@ -20,6 +20,10 @@ from rich import theme as _rich_theme
 from rich.console import Console
 from rich.style import Style
 from rich.syntax import SyntaxTheme
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rich.markdown import Markdown
 
 from . import _ansi
 
@@ -148,7 +152,7 @@ def code_theme() -> _PaletteSyntaxTheme:
     return _PaletteSyntaxTheme()
 
 
-def themed_markdown(markup: str, **kwargs) -> "object":
+def themed_markdown(markup: str, **kwargs: Any) -> "Markdown":
     """A rich.markdown.Markdown whose code-block (and inline-code) pygments
     theme follows nx's active theme, on top of the console's themed styles.
     Built here rather than at each call site so the theme mapping has one
