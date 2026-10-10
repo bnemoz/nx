@@ -268,8 +268,12 @@ class StreamParser:
                     self._last_tool_status_text = text
             else:
                 # No Live open: the classic in-place repaint, byte-identical
-                # to pre-0.128.
-                cprint(CLEAR_LINE + text)
+                # to pre-0.128. end="" matters: cprint defaults to a trailing
+                # newline, which would COMMIT a fresh line per 0.2s tick
+                # (the CLEAR_LINE prefix would erase an empty line) — the
+                # staircase 0.129.1/0.129.2 chased on the Live branch. The
+                # line is erased again by clear_tool_status().
+                cprint(CLEAR_LINE + text, end="")
         self.tool_status_active = True
         self.last_tool_status = now
 
