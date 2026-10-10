@@ -114,13 +114,27 @@ def _close_tag_in(text: str) -> bool:
     return any(tag.search(text) for tag in TOOL_CLOSE_TAGS)
 
 
-def _tool_call_progress(tcs: dict[int, dict[str, Any]], precise: bool = True) -> str:
+def _status_abbr(n: int) -> str:
+    """Power-of-two quantized char count for the COMMITTED Live status line.
+
+    _abbr (even the coarse one) still ticks every ~50-100 streamed chars in
+    the K range and every char below 1000, and under a Live each text change
+    commits a new line (the staircase). Rounding to the nearest power of two
+    makes the text change only at doublings: ~4 lines for a 3K args buffer."""
+    if n < 100:
+        return str(n)
+    lo = 1 << (n.bit_length() - 1)
+    return f"~{_abbr(lo if n - lo < (lo << 1) - n else lo << 1)}"
+
+
+def _tool_call_progress(tcs: dict[int, dict[str, Any]], precise: bool = True,
+                        quantized: bool = False) -> str:
     parts = []
     for i in sorted(tcs):
         c = tcs[i]
         name = c["name"] or "tool"
         args_n = len(c["args"])
-        abbr = _precise_abbr if precise else _abbr
+        abbr = _precise_abbr if precise else _status_abbr if quantized else _abbr
         parts.append(f"{name} args {abbr(args_n)} chars" if args_n else f"{name} ...")
     return ", ".join(parts) if parts else "tool call ..."
 
@@ -226,8 +240,9 @@ class StreamParser:
         now = time.time()
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
+        live = _console_has_live()
         text = (f"{C.ACCENT}  ↳ generating tool call{RESET} "
-                f"{DIM}{_tool_call_progress(self.tcs, precise=not _console_has_live())}{RESET}")
+                f"{DIM}{_tool_call_progress(self.tcs, precise=not live, quantized=live)}{RESET}")
         with write_lock():
             if _console_has_live():
                 # SPEC_LIVEENGINE.md: while a Live owns the shared console there
@@ -243,9 +258,11 @@ class StreamParser:
                 # (call name set, a new call joins, or the args count crosses
                 # an abbr bucket), which for a long streamed args buffer is a
                 # handful of lines instead of one per 0.2s tick. The abbr is
-                # the COARSE one here (precise=False above): with two-decimal
-                # precision the text changes every ~50-100 streamed chars and
+                # QUANTIZED here (quantized=True above): even the coarse _abbr
+                # still changes text every ~50-100 streamed chars (and every
+                # char below 1000), and each changed text commits a new line —
                 # the changed-gate degenerates back into a per-tick staircase.
+                # Power-of-two buckets only change at doublings.
                 if text != self._last_tool_status_text:
                     cprint(text)
                     self._last_tool_status_text = text
