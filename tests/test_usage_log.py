@@ -174,3 +174,106 @@ def test_retry_event_per_ladder_step(nx_fresh):
     assert d["attempt"] == 1
     assert d["error_class"] == "ReadTimeout"
     assert d["model"] == "test-model"
+
+
+# --- v2 usage metrics: model_call / give_up / agent lifecycle ----------------
+
+
+def test_model_call_event_fields(nx_fresh, monkeypatch):
+    """usage_model_call stamps duration, finish_reasons, tokens and TTFT;
+    a thread-local turn number set by the turn loop rides along."""
+    nx, tmp, usage_path, _req = nx_fresh
+    from nx._logging import set_turn_no, usage_model_call
+    set_turn_no(4)
+    try:
+        usage_model_call(1234.5, ["stop", "length"],
+                         {"input_tokens": 10, "output_tokens": 5,
+                          "cache_read_tokens": 2, "reasoning_tokens": 0,
+                          "estimated": 0},
+                         streamed_chars=42, ttft_ms=88.25)
+    finally:
+        set_turn_no(None)
+    events = [e for e in _read(usage_path) if e.get("event") == "model_call"]
+    assert len(events) == 1
+    d = events[0]["data"]
+    assert d["duration_ms"] == 1234.5
+    assert d["finish_reasons"] == ["stop", "length"]
+    assert d["tokens"]["input_tokens"] == 10
+    assert d["turn"] == 4
+    assert d["ttft_ms"] == 88.25
+    assert d["streamed_chars"] == 42
+    assert d["model"] == "test-model"
+    assert d["subagent"] is False
+
+
+def test_model_call_without_turn_number_or_tokens(nx_fresh):
+    """Outside a turn loop (no set_turn_no) and with no server usage, the
+    optional fields are simply absent — never nulls or lies."""
+    nx, tmp, usage_path, _req = nx_fresh
+    from nx._logging import usage_model_call
+    usage_model_call(1.0, [], None)
+    events = [e for e in _read(usage_path) if e.get("event") == "model_call"]
+    d = events[0]["data"]
+    assert "turn" not in d
+    assert "tokens" not in d
+    assert "ttft_ms" not in d
+    assert d["finish_reasons"] == []
+
+
+def test_give_up_event_carries_turn_number(nx_fresh):
+    """v1 gap closed: the usage-stream give_up record carries the current
+    turn-loop step alongside the failure fields."""
+    nx, tmp, usage_path, _req = nx_fresh
+    from nx._logging import set_turn_no, usage_give_up
+    set_turn_no(7)
+    try:
+        usage_give_up({"failure": "reasoning_only_stall", "attempts": 3,
+                       "retry_limit": 3, "failsafes_disabled": False})
+    finally:
+        set_turn_no(None)
+    events = [e for e in _read(usage_path) if e.get("event") == "give_up"]
+    assert len(events) == 1
+    d = events[0]["data"]
+    assert d["failure"] == "reasoning_only_stall"
+    assert d["turn"] == 7
+    assert d["model"] == "test-model"
+
+
+def test_agent_spawn_and_done_events(nx_fresh, monkeypatch):
+    """agent_spawn carries tier/async/resolved model; agent_done carries
+    status/turns/elapsed. Emitters are exercised directly (the sub-loop
+    itself needs a live endpoint — covered by the batch data runs)."""
+    nx, tmp, usage_path, _req = nx_fresh
+    from nx._logging import usage_agent
+    usage_agent("spawn", {"tier": "read", "async": True, "max_turns": 100,
+                          "model": "pooled-model", "job_id": "agent-1-abc"})
+    usage_agent("done", {"tier": "read", "status": "done", "turns": 5,
+                         "elapsed_ms": 4321.0, "exit_state": None,
+                         "model": "pooled-model", "job_id": "agent-1-abc"})
+    events = [e for e in _read(usage_path) if e.get("event", "").startswith("agent_")]
+    kinds = [e["event"] for e in events]
+    assert kinds == ["agent_spawn", "agent_done"]
+    spawn, done = events[0]["data"], events[1]["data"]
+    assert spawn["tier"] == "read"
+    assert spawn["async"] is True
+    assert spawn["model"] == "pooled-model"
+    assert done["status"] == "done"
+    assert done["turns"] == 5
+    assert done["elapsed_ms"] == 4321.0
+
+
+def test_run_model_turn_loop_sets_turn_number(nx_fresh, monkeypatch):
+    """The turn loop installs the 1-based step number on its thread before
+    each model_turn call (the seam give_up/model_call read)."""
+    nx, tmp, usage_path, _req = nx_fresh
+    import nx as m
+    from nx import _logging
+    seen = []
+
+    def _fake_model_turn(messages, *a, **k):
+        seen.append(getattr(_logging._turn_no, "n", None))
+        return m.TURN_DONE
+
+    monkeypatch.setattr(m, "model_turn", _fake_model_turn)
+    m._run_model_turn_loop([{"role": "user", "content": "hi"}])
+    assert seen and seen[0] == 1

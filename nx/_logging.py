@@ -263,3 +263,73 @@ def usage_retry(attempt: int, error_class: str) -> None:
     never per chunk). `error_class` is the turn-level stream error class."""
     _usage_emit("retry", {"attempt": attempt, "error_class": error_class},
                 tail=False)
+
+
+# --- v2 usage metrics (model_call / agent lifecycle / turn numbers) ---------
+
+# The 1-based step number of the turn loop that is currently running on THIS
+# thread (set by _run_model_turn_loop_inner each iteration; never set on a
+# thread outside a turn loop). Thread-local, like the metrics/quiet slots: a
+# --parallel batch worker's give_up must report ITS step, not a sibling's.
+_turn_no = threading.local()
+
+
+def set_turn_no(n) -> None:
+    """Record this thread's current turn-loop step (1-based); None clears it
+    (a thread outside any turn loop reports no turn number at all)."""
+    try:
+        if n is None:
+            _turn_no.__dict__.pop("n", None)
+        else:
+            _turn_no.n = n
+    except Exception:  # noqa: BLE001 — telemetry must never break a loop
+        pass
+
+
+def usage_model_call(duration_ms: float, finish_reasons, tokens,
+                     streamed_chars: int = 0, ttft_ms: float | None = None,
+                     prompt_tokens: int | None = None) -> None:
+    """One `model_call` event per settled stream (the same common path
+    _record_usage rides, so error early-returns are included).
+    `tokens` is _normalize_usage()'s dict (input/output/cache_read/reasoning/
+    estimated) or None when the server reported nothing; `ttft_ms` is the
+    client-measured time to first token (parser.t_first)."""
+    if not USAGE_LOG:
+        return
+    fields = {
+        "duration_ms": round(duration_ms, 3),
+        "finish_reasons": [str(fr) for fr in (finish_reasons or [])],
+        "streamed_chars": int(streamed_chars),
+        "subagent": _agent_tag() != "main",
+    }
+    n = getattr(_turn_no, "n", None)
+    if n is not None:
+        fields["turn"] = n
+    if ttft_ms is not None:
+        fields["ttft_ms"] = round(ttft_ms, 3)
+    if tokens:
+        fields["tokens"] = tokens
+    if prompt_tokens is not None:
+        fields["prompt_tokens"] = prompt_tokens
+    _usage_emit("model_call", fields)
+
+
+def usage_give_up(fields: dict) -> None:
+    """A turn that surrendered (collapse / reasoning-only stall / malformed
+    stream). Mirrors the llamacpp.log `give_up` record onto the usage stream
+    and adds the turn number (v1 gap), so give-ups are countable per model
+    alongside the tool_call/model_call events of the same session."""
+    payload = dict(fields)
+    n = getattr(_turn_no, "n", None)
+    if n is not None:
+        payload.setdefault("turn", n)
+    _usage_emit("give_up", payload, tail=True)
+
+
+def usage_agent(event: str, fields: dict) -> None:
+    """Sub-agent lifecycle: `agent_spawn` (tier, resolved model, async,
+    max_turns) when a sub-loop starts and `agent_done` (status, turns,
+    elapsed, exit_state) when it finalizes. The pair makes swarm behavior —
+    fan-out width, per-tier completion rates, agent duration by model —
+    queryable without touching transcripts."""
+    _usage_emit("agent_" + event, fields)

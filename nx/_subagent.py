@@ -642,6 +642,10 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
         # _extract_exit_state strips the line only when explicit; on a missing
         # line it returns the prose unchanged plus the heuristic state.
         exit_state, answer, exit_origin = _extract_exit_state(answer)
+    # v2 usage metrics: one agent_done event per finalized async agent —
+    # status/turns/elapsed per tier+model is the swarm-completion half of the
+    # agent_spawn/agent_done pair. Turn count comes from the job record the
+    # sub-loop kept current (same source /bg reads).
     with _ASYNC_LOCK:
         rec = _ASYNC_AGENTS.get(job_id)
         if rec is not None:
@@ -652,6 +656,23 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
             rec["exit_origin"] = exit_origin
             if worktree:
                 rec["worktree"] = worktree
+    try:
+        from ._logging import usage_agent
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(job_id)
+            started = (rec or {}).get("started") or 0.0
+        usage_agent("done", {
+            "tier": tier,
+            "status": status,
+            "turns": (rec or {}).get("turns") or 0,
+            "elapsed_ms": round((time.time() - started) * 1000.0, 3)
+                          if started else None,
+            "exit_state": exit_state or None,
+            "model": st.MODEL,
+            "job_id": job_id,
+        })
+    except Exception:  # noqa: BLE001 — telemetry must never break a spawn
+        pass
     # Full answer to disk first (both done and error), so the runtime note can
     # stay a short head + path instead of dumping thousands of chars of
     # exploration into the parent's context.
@@ -1055,6 +1076,22 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     ctx.tier = tier
     from ._subagent_model import install as _install_model_target
     _install_model_target(ctx)
+    # v2 usage metrics: one agent_spawn event per sub-loop, with the RESOLVED
+    # model target (pool round-robin included) — the per-model swarm
+    # comparison needs the agent's actual model, not the parent's.
+    try:
+        from ._logging import usage_agent
+        mt = getattr(ctx, "model_target", None)
+        usage_agent("spawn", {
+            "tier": tier,
+            "async": quiet,
+            "max_turns": max_turns,
+            "model": (mt[1] if mt else None) or st.MODEL,
+            "job_id": job_id,
+            "scope": list(scope) if scope else None,
+        })
+    except Exception:  # noqa: BLE001 — telemetry must never break a spawn
+        pass
     _SUBAGENT_TLS.ctx = ctx
     # YOLO/APPROVE_LEVEL are process-global: snapshot+swap under the spawn lock
     # so two concurrent agents can't restore each other's snapshot out of order

@@ -21,7 +21,7 @@ from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
     _disarm_interrupt_armed, _ensure_interrupt_watcher,
 )
-from ._metrics import _abbr, _record_usage
+from ._metrics import _abbr, _normalize_usage, _record_usage
 from ._special_tokens import (
     LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT, _strip_leaked_tokens,
 )
@@ -181,12 +181,15 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             # 0.121.1: background agents run quiet, so this give-up printed
             # nothing anywhere — the agent surrendered silently. Record it in
             # the event log (screen behavior unchanged).
-            from ._logging import _log_event
+            from ._logging import _log_event, usage_give_up
             _log_event("turn", {"kind": "give_up",
                                 "failure": collapse_type,
                                 "recoveries": malformed_stream_cut_count,
                                 "retry_limit": retry_limit,
                                 "model": st.MODEL})
+            usage_give_up({"failure": collapse_type,
+                           "recoveries": malformed_stream_cut_count,
+                           "retry_limit": retry_limit})
             if not quiet:
                 with write_lock():
                     cprint(f"{C.ERROR}  ✗ {collapse_type} after "
@@ -282,13 +285,17 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         # completely silent surrender. Log it either way (screen behavior
         # unchanged); `failsafes_disabled` separates the deliberate
         # benchmark-mode ending from a genuine rescue exhaustion.
-        from ._logging import _log_event
+        from ._logging import _log_event, usage_give_up
         _log_event("turn", {"kind": "give_up",
                             "failure": "reasoning_only_stall",
                             "attempts": cut_count,
                             "retry_limit": retry_limit,
                             "failsafes_disabled": retry_limit == 0,
                             "model": st.MODEL})
+        usage_give_up({"failure": "reasoning_only_stall",
+                       "attempts": cut_count,
+                       "retry_limit": retry_limit,
+                       "failsafes_disabled": retry_limit == 0})
         return TURN_DONE
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
@@ -593,6 +600,18 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         fallback_chars=parser.streamed_chars + sum(len(part) for part in parser.reasoning_parts),
         fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in messages),
     )
+    # v2 usage metrics: one model_call event per settled stream — the same
+    # common path, so error early-returns below are counted too. Tokens ride
+    # along when the server reported them (the _normalize_usage shape); TTFT
+    # is the client-measured first-token delta.
+    from ._logging import usage_model_call
+    usage_model_call(
+        (time.time() - t0) * 1000.0,
+        parser.finish_reasons,
+        _normalize_usage(parser.usage, parser.timings),
+        streamed_chars=parser.streamed_chars,
+        ttft_ms=(parser.t_first * 1000.0) if parser.t_first is not None else None,
+    )
     if stream_error is not None:
         if isinstance(stream_error, httpx.TimeoutException):
             # P3-2 (0.51.0): a mid-stream timeout is a FAILURE, not a completed
@@ -633,7 +652,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         if malformed_stream_cut_count >= retry_limit:
             # 0.121.1: same silent surrender as the collapse path above — a
             # quiet/background agent used to give up here with no trace at all.
-            from ._logging import _log_event
+            from ._logging import _log_event, usage_give_up
             _log_event("turn", {"kind": "give_up",
                                 "failure": "malformed_stream",
                                 "recoveries": malformed_stream_cut_count,
@@ -641,6 +660,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                                 "error": (f"{type(stream_error).__name__}: "
                                           f"{stream_error}")[:300],
                                 "model": st.MODEL})
+            usage_give_up({"failure": "malformed_stream",
+                           "recoveries": malformed_stream_cut_count,
+                           "retry_limit": retry_limit,
+                           "error": (f"{type(stream_error).__name__}: "
+                                     f"{stream_error}")[:300]})
             if not quiet:
                 with write_lock():
                     if parser.mode in ("think", "say"):
@@ -961,6 +985,11 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             if steps >= max_turns - 1 or (sub_rescue_turns >= max(0, _subagent_scoped_retry(1))
                                           and steps >= max_turns - 2):
                 force_final = True
+        # v2 usage metrics: the 1-based step number this loop's model_turn /
+        # give_up events carry. Thread-local, so a --parallel batch worker's
+        # telemetry never reports a sibling's step.
+        from ._logging import set_turn_no
+        set_turn_no(steps + 1)
         _sent_len = len(messages)
         status = _m.model_turn(messages, reasoning_loop_cuts, malformed_stream_cuts,
                             empty_turn_count=empty_turn_cuts,
