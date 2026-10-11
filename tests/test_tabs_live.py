@@ -727,7 +727,8 @@ class TestWriteSerialization(unittest.TestCase):
         self.assertTrue(holding.wait(5))
         parser = sp.StreamParser(Console(file=io.StringIO()), time.time())
         parser.mode = "think"
-        parser.think_start = time.time()
+        parser.think_start = time.time() - 1.0  # past _THINK_MIN: block shows
+        parser._think_shown = True
         buf = io.StringIO()
 
         # redirect_stdout is thread-local since 3.15 only; pin stdout for the

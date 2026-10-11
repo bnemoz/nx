@@ -104,6 +104,9 @@ def _first_tool_tag_index(text: str, start: int = 0) -> int | None:
 # gates the scan. A close tag can straddle chunk boundaries, hence the small
 # carried tail rather than a per-chunk find.
 _SPEC_CLOSE_TAIL = 64
+# Minimum seconds of reasoning before the block header/closer are shown; a
+# shorter burst stays silent (see _handle_reasoning).
+_THINK_MIN = 0.25
 # A real call body is a name plus a few arguments; past this many bytes since
 # the opener the "tag" is prose or a runaway repeat, and re-parsing per close
 # would stop being cheap.
@@ -121,11 +124,37 @@ def _status_abbr(n: int) -> str:
     _abbr (even the coarse one) still ticks every ~50-100 streamed chars in
     the K range and every char below 1000, and under a Live each text change
     commits a new line (the staircase). Rounding to the nearest power of two
-    makes the text change only at doublings: ~4 lines for a 3K args buffer."""
+    makes the text change only at doublings — and exact below 100, so the
+    total is bucketed from the first char: a parallel fan-out of small args
+    buffers (the `spawn_agent args 80 chars` staircase) flips buckets at most
+    once per call while the buffers stay small."""
     if n < 100:
         return str(n)
     lo = 1 << (n.bit_length() - 1)
     return f"~{_abbr(lo if n - lo < (lo << 1) - n else lo << 1)}"
+
+
+def _live_tool_progress(tcs: dict[int, dict[str, Any]]) -> str:
+    """The note for the COMMITTED Live status line.
+
+    Per-call counts are the staircase: N parallel calls each flip buckets
+    independently, and _status_abbr is exact below 100 chars, so a fan-out of
+    small streams commits a line per crossing (~15 in a 3-call spawn turn).
+    One power-of-two TOTAL across all calls flips at most once per doubling,
+    and the names change only when a call joins — the changed-gate in
+    show_tool_status then does what its comment claims. The in-place (no
+    Live) branch keeps the precise per-call view; watching the numbers tick
+    is the point there."""
+    names = []
+    total = 0
+    for i in sorted(tcs):
+        c = tcs[i]
+        names.append(c["name"] or "tool")
+        total += len(c["args"])
+    names = ", ".join(names) if names else "tool call ..."
+    if total:
+        return f"{names} · {_status_abbr(total)} args"
+    return names
 
 
 def _tool_call_progress(tcs: dict[int, dict[str, Any]], precise: bool = True,
@@ -220,6 +249,7 @@ class StreamParser:
         self.had_tool_call = False  # a native tool_calls delta already arrived this turn
         self._live_committed = False  # say_live already frozen once; never reopen it
         self.think_start: float | None = None
+        self._think_shown = False  # header/closer committed only once
         self.last_say_render = 0.0
         self._last_render_len = -1  # clean length at the last Live render (PF-04)
 
@@ -249,8 +279,8 @@ class StreamParser:
         # the spinner tail cannot drift apart; the progress segment is the one
         # part whose precision depends on the render mode.
         text = status_line("  ↳ generating tool call", role_name="ACCENT",
-                           note=_tool_call_progress(
-                               self.tcs, precise=not live, quantized=live))
+                           note=_live_tool_progress(self.tcs) if live
+                           else _tool_call_progress(self.tcs, precise=True))
         with write_lock():
             if live:
                 # SPEC_LIVEENGINE.md: while a Live owns the shared console there
@@ -284,6 +314,14 @@ class StreamParser:
                 emit(text, inplace=True)
         self.tool_status_active = True
         self.last_tool_status = now
+
+    def _show_think_header(self) -> None:
+        if st.REASONING_VISIBLE:
+            with write_lock():
+                cprint(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
+        else:
+            with write_lock():
+                cprint(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
 
     def _spec_text_poll(self, chunk: str) -> None:
         """Speculatively dispatch a text-protocol call whose tag just CLOSED.
@@ -365,10 +403,17 @@ class StreamParser:
     def close_think_block(self) -> None:
         """Print the reasoning-block closer + elapsed duration. Call once
         when leaving "think" mode, however that happens (content, tool
-        call, stream end, or error) — no-op if not currently in think mode."""
+        call, stream end, or error) — no-op if not currently in think mode.
+
+        A microscopic burst (glanced at below) never committed a header, so
+        its closer would be orphaned noise; it prints nothing."""
         if self.mode != "think" or self.think_start is None:
             return
         elapsed = time.time() - self.think_start
+        if not self._think_shown:
+            self.mode = "idle"
+            self.think_start = None
+            return
         dur = _fmt_think_duration(elapsed)
         # Each closer is one visual unit: locked as a block so a repaint can't
         # land between the two lines of the visible variant.
@@ -382,6 +427,7 @@ class StreamParser:
             with write_lock():
                 cprint(f"{DIM}  (thought for {dur}){RESET}")
         self.think_start = None
+        self._think_shown = False
 
     def gen_window(self, elapsed_total: float) -> tuple[float, bool]:
         """Best client-side estimate of the generation-only window, in seconds,
@@ -475,15 +521,22 @@ class StreamParser:
         # deliberately unaffected — the bookkeeping stays intact.
         if self.mode != "think" and not self.had_tool_call:
             self.think_start = time.time()
-            if self.quiet:
-                pass
-            elif st.REASONING_VISIBLE:
-                with write_lock():
-                    cprint(f"{C.REASONING_TEXT}  ── reasoning ──{RESET}")
-            else:
-                with write_lock():
-                    cprint(f"{DIM}  ▸ reasoning (collapsed — /reasoning to expand){RESET}")
+            # _THINK_MIN shows the block only once the burst looks like real
+            # reasoning (>= ~a short thought). A token-flavored single delta
+            # ("Wait.") would otherwise print a header + `(thought for 0ms)`
+            # closer pair around nothing. The mode switches immediately —
+            # reasoning text still accumulates silently — but the header is
+            # deferred to the next delta; close_think_block drops a never-
+            # shown block without a closer.
+            if time.time() - self.think_start >= _THINK_MIN and not self.quiet:
+                self._show_think_header()
+                self._think_shown = True
             self.mode = "think"
+        elif (self.mode == "think" and not self._think_shown
+              and time.time() - (self.think_start or 0.0) >= _THINK_MIN
+              and not self.quiet):
+            self._show_think_header()
+            self._think_shown = True
         if _LEAKED_SPECIAL_TOKEN_RE.search(rc):
             rc = _strip_leaked_tokens(rc)
             self.leaked_token_run += 1

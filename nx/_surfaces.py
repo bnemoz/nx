@@ -806,16 +806,21 @@ class TabsView(_fullscreen.View):
         from ._render import role
         status = f.get("status") or "—"
         marker = "›" if selected else " "
+        tier = f.get("tier")
         head = (f"{role('ACCENT')}{marker}{RESET} "
                 f"{_glyph(f.get('alive', False), status)} "
                 f"{f['kind']:<5} {f['id']:<18} "
                 f"{role('MUTED')}{status:<8}{RESET}")
-        out = [head[:width + 32]]
+        if tier:
+            head += f"{role('MUTED')} {tier:<9}{RESET}"
+        out = [clip_display(head, width - 4)]
         instr = " ".join(str(f.get("instruction", "")).split())
         if instr:
-            out.append(f"{role('MUTED')}    {instr[:width - 6]}{RESET}")
+            out.append(f"{role('MUTED')}    "
+                       f"{clip_display(instr, width - 10)}{RESET}")
         for tl in _tail_lines(f.get("tail") or ""):
-            out.append(f"{role('MUTED')}    │ {tl[:width - 8]}{RESET}")
+            out.append(f"{role('MUTED')}    │ "
+                       f"{clip_display(tl, width - 12)}{RESET}")
         pend = (agent_steering_pending(f["id"]) if f.get("kind") == "agent"
                 else 0)
         if pend:
@@ -829,9 +834,27 @@ class TabsView(_fullscreen.View):
         self.refresh()
         lines = [f"{role('ACCENT')}tabs{RESET}{role('MUTED')} — "
                  f"{hint_line('tabs')}{RESET}"]
+        # Allocate body space per row instead of blind-truncating at the end:
+        # finished rows sort after the live ones (the snapshot's live/done
+        # split), so a plain lines[:height] clips exactly the row the user is
+        # looking for. Every row keeps at least its head line; deep tails are
+        # what give way, and overflow says so.
+        chrome = 1 + 2 + (1 if self.notice else 0)  # title + panel top/bottom + notice
         body: list[str] = []
-        for i, f in enumerate(self.rows):
-            body.extend(self._row_lines(f, i == self.sel, width))
+        budget = max(height - chrome, len(self.rows))  # each row keeps >= 1 line
+        row_lines = [self._row_lines(f, i == self.sel, width)
+                     for i, f in enumerate(self.rows)]
+        if sum(len(r) for r in row_lines) <= budget:
+            for r in row_lines:
+                body.extend(r)
+        else:
+            # Progressive trim: rows keep head (+instruction) while budget
+            # allows; tails are dropped first, rows beyond keep only heads.
+            for i, r in enumerate(row_lines):
+                per = max(1, (budget - len(body)) // (len(row_lines) - i))
+                body.extend(r[:per])
+            body.append(f"{role('MUTED')}  … some tails hidden "
+                        f"(terminal too short){RESET}")
         lines.extend(panel(f"tabs · live surfaces · {len(self.rows)} row(s)",
                            body, footer="q/esc back to chat"))
         if self.notice:

@@ -218,6 +218,13 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     """
     if quiet:
         return
+    # Trivial turn: a bare few tokens of tool-call args (a quick router step)
+    # earns no full stats ladder — the wall time is the only useful number.
+    if (not text.strip() and not getattr(parser, "reasoning_only_chars", 0)
+            and usage is not None and (usage.completion_tokens or 0) < 100
+            and not st._TALLY_ARG_REPAIRS and not st._TALLY_RETRIES):
+        _commit_line(kv_line([("", f"{DIM}{elapsed:4.1f}s wall")]))
+        return
     # Step with no prose (collapsed reasoning, possibly a tool call whose
     # block renders after this footer, or whose output is collapsed): a dim
     # divider + label so consecutive bare footers read as distinct steps.
