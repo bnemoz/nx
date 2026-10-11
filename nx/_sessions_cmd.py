@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from ._ansi import DIM, RESET, C, strip_ansi_for_display
+from . import _fullscreen
 from ._sessions_io import _flatten_message_text, _short_id
 from . import _state as st
 from . import (
@@ -513,6 +514,12 @@ def _cmd_delete(target: str | None, current_id: str | None) -> None:
 # used by `_REPL_COMMANDS` in `_repl.py`.
 
 def _cmd_sessions_handler(user: str, state: _ReplState) -> None:
+    # Phase D: the tty path opens the full-screen browser; its fallback is
+    # this exact inline listing, so off-tty output is unchanged.
+    from . import _fullscreen
+    if _fullscreen.wants_fullscreen() and not user.split()[1:]:
+        cmd_sessions_view(user, state)
+        return
     _cmd_sessions(user, state.session_id)
 
 
@@ -643,3 +650,192 @@ def _cmd_save(user: str, state: _ReplState) -> None:
 def _cmd_delete_handler(user: str, state: _ReplState) -> None:
     target = user.split(None, 1)[1].strip() if " " in user else None
     _cmd_delete(target, state.session_id)
+
+
+# ---------------------------------------------------------------------------
+# /sessions — alternate-screen browser (UIUX_SPEC Phase D, 0.137.0)
+# ---------------------------------------------------------------------------
+# The list → preview → confirm drill-down the spec asks for, over the SAME
+# `_list_sessions` / `_load_session` / `_print_transcript` data the inline
+# command uses. Resuming is not a new mutation path: the view returns the id
+# and the command hands it to the existing `_cmd_resume_handler`, which is the
+# exact code path /resume takes (save outgoing, flush, release claims,
+# `resume_session`).
+
+class SessionsView(_fullscreen.View):
+    """Full-screen session browser: FTS5 body search, one-session preview,
+    resume on confirm. Read-only — nothing but `/resume` runs on confirmation.
+
+    `state` is the `_ReplState` the REPL handler passes; the view keeps only
+    the session id it is currently on (`state.session_id`) so the current row
+    can be marked, exactly like the inline list does.
+    """
+
+    surface = "sessions"
+    title = "sessions"
+
+    def __init__(self, state: Any = None) -> None:
+        super().__init__()
+        self.state = state
+        self.current_id = getattr(state, "session_id", None)
+        self.query = ""
+        self.mode = "list"       # "list" | "preview"
+        self.sel = 0
+        self.sessions: list[dict[str, Any]] = []
+        self.preview: list[str] = []
+        self.notice = ""
+        #: session id to resume — the command runs the existing /resume path
+        self.resume_id: str | None = None
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self.query:
+            self.sessions = _search_sessions(self.query, limit=SESSION_LIST_MAX_LIMIT)
+        else:
+            self.sessions = _list_sessions(limit=SESSION_LIST_DEFAULT_LIMIT)
+        self.sel = min(self.sel, max(0, len(self.sessions) - 1))
+        self.mode = "list"
+        self.preview = []
+
+    def _open_preview(self) -> None:
+        if not self.sessions:
+            return
+        sid = self.sessions[self.sel]["id"]
+        data = _load_session(sid) or {}
+        head = [
+            f"session {sid}",
+            f"title: {data.get('title') or '(untitled)'}",
+            f"messages: {len(data.get('messages', []))} · "
+            f"updated {_fmt_when(data.get('updated_at', 0))}",
+            "── transcript ──",
+        ]
+        self.preview = head + _transcript_lines(data.get("messages", []))
+        self.mode = "preview"
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        head = (f"{role('ACCENT')}sessions{RESET}{role('MUTED')} — "
+                f"{hint_line('sessions')}{RESET}")
+        where = f" matching {self.query!r}" if self.query else ""
+        lines = [head]
+        if self.mode == "preview" and self.sessions:
+            title = f"session · {self.sessions[self.sel]['id']}"
+            body = [ln[:width] for ln in self.preview]
+            footer = "R resume · esc back to the list"
+        else:
+            title = (f"sessions · {len(self.sessions)} row(s){where} · "
+                     f"page 1")
+            body = []
+            for i, s in enumerate(self.sessions):
+                title_txt = s["title"] or "(empty)"
+                mark = ("●" if s["id"] == self.current_id
+                        else ("›" if i == self.sel else " "))
+                body.append(
+                    f"{role('ACCENT')}{mark}{RESET} "
+                    f"{role('LABEL')}{s.get('id', '')[:12]}{RESET}  "
+                    f"{title_txt[:max(10, width - 30)]} "
+                    f"{role('MUTED')}· {s['n']} msg · "
+                    f"{_fmt_when(s['updated_at'])}{RESET}")
+                desc = s.get("description") or s.get("preview")
+                if desc:
+                    body.append(f"{role('MUTED')}      {desc[:width - 8]}{RESET}")
+            footer = "enter preview · / search · R resume · q/esc back"
+            if not self.sessions:
+                body = [f"{role('WARNING')}no sessions{where}{RESET}"]
+        lines.extend(panel(title, body, footer=footer))
+        if self.notice:
+            lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+        return lines[:height]
+
+    def on_key(self, key: str, shell) -> str:
+        self.notice = ""
+        if key == "j/k":
+            # `_keys` advertises the pair as ONE hint label ("j/k move"); the
+            # label is not a key, and the two real keys are handled below.
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(max(0, len(self.sessions) - 1), self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key == "/":
+            q = shell.ask("search sessions (FTS5 body + title) ›", self.query)
+            if q is not None:
+                self.query = q
+            self.refresh()
+            return "repaint"
+        if key == "enter":
+            if self.mode == "preview":
+                self.mode = "list"
+            else:
+                self._open_preview()
+            return "repaint"
+        if key in ("R", "tab"):
+            return self._resume()
+        if key in ("esc", "q", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+    def _resume(self) -> str:
+        if not self.sessions:
+            self.notice = "nothing to resume"
+            return "repaint"
+        sid = self.sessions[self.sel]["id"]
+        if sid == self.current_id:
+            self.notice = "already on that session"
+            return "repaint"
+        self.resume_id = sid
+        return "quit"
+
+
+def _search_sessions(query: str, limit: int) -> list[dict[str, Any]]:
+    """FTS5 body hits, mapped to the same row shape `_list_sessions` returns
+    (so the browser renders one kind of row). Lies about nothing: a hit whose
+    session row is gone is dropped."""
+    from ._sessions_search import search_sessions
+    try:
+        hits = search_sessions(query, limit=limit)
+    except Exception:
+        hits = []
+    known = {s["id"]: s for s in _list_sessions(limit=SESSION_LIST_MAX_LIMIT)}
+    rows: list[dict[str, Any]] = []
+    for h in hits:
+        sid = h.get("id")
+        if sid not in known:
+            continue
+        row = dict(known[sid])
+        row["preview"] = h.get("snippet") or row.get("preview")
+        rows.append(row)
+    return rows
+
+
+def _transcript_lines(messages: list[dict[str, Any]],
+                      max_chars: int = 160) -> list[str]:
+    """`_print_transcript`'s one-line-per-message recap, returned as lines
+    instead of printed — the inline path keeps printing it unchanged."""
+    out: list[str] = []
+    from ._render import role
+    for m in messages:
+        r = m.get("role", "?")
+        if r == "system":
+            continue
+        content = strip_ansi_for_display(_flatten_message_text(m, per_msg=max_chars))
+        role_name = {"user": "ACCENT", "assistant": "TEXT", "tool": "MUTED"}.get(r)
+        label = f"{role(role_name)}{r:>9}{RESET}" if role_name else f"{r:>9}"
+        out.append(f"  {label}  {content}")
+    return out
+
+
+def cmd_sessions_view(user: str, state: _ReplState) -> None:
+    """The `/sessions` command's Phase D path: the alternate-screen browser,
+    with the inline list as the fallback (off tty / NX_FULLSCREEN=0). Resuming
+    from the browser re-enters `/resume` with the chosen target — the same
+    handler, the same downstream path, no new mutation."""
+    from . import _fullscreen
+    view = SessionsView(state)
+    fullscreen = _fullscreen.open_view(
+        view, fallback=lambda: _cmd_sessions(user, state.session_id))
+    if fullscreen and view.resume_id:
+        _cmd_resume_handler(f"/resume {view.resume_id}", state)
