@@ -74,7 +74,30 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/plan [goal|done|off|discard]", "start/view/exit plan mode — while active, mutating tool calls are gated"),
     ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
     ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
+    ("/review [focus]", "scoped reviewer over the current work: ranked findings, never fixes (Ctrl+R)"),
 ]
+
+
+def _cmd_review(user: str, state: _ReplState) -> None:
+    """/review [focus] — run the scoped reviewer (the critique sub-agent)
+    right now and print its findings (nx feature #3).
+
+    The reviewer reads the current work (the diff vs HEAD) with a read-only
+    toolset and returns findings ranked by severity with file:line and a
+    one-line fix sketch — it NEVER fixes anything (no write tool, no
+    run_tests: a finding a reviewer could quietly patch is one the user
+    never judges); acting on the findings stays your call. `focus` (default
+    "correctness") is what the review
+    optimizes for: bugs and broken edge cases, "elegance" (the simplest
+    formulation the diff missed), or free text ("security", "tests",
+    "perf"). Same machinery the model calls as the `critique` tool;
+    Ctrl+R runs the no-arg form.
+    """
+    from ._subagent import critique
+    focus = user[len("/review"):].strip() or "correctness"
+    print(f"{DIM}  reviewer: focus={focus}, scope=current diff — this runs a "
+          f"review sub-agent (a model loop), one moment...{RESET}")
+    print(critique(focus, async_=False))
 
 
 def _cmd_quit(user: str, state: _ReplState) -> str | None:

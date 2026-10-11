@@ -7,7 +7,7 @@ framed, multi-line editor:
   - Up/Down navigate history, Left/Right move within the current line,
     Home/End jump to line start/end, Ctrl+U clears the line, Ctrl+C cancels,
     Ctrl+L is shorthand for /clear (reset the conversation), Ctrl+Q for /exit,
-    F1 for /help, Ctrl+S is shorthand for /compress
+    F1 for /help, Ctrl+S is shorthand for /compress, Ctrl+R for /review
   - Shift+Tab toggles YOLO mode (mirrors /yolo), shown live in the box border
   - Long lines word-wrap visually inside the box; the buffer stays one
     logical string (newlines preserved) so the model sees the real text
@@ -56,6 +56,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/fork", "branch the conversation into a new session (original kept)"),
     ("/memory", "manage persistent memory"),
     ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
+    ("/review", "scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R)"),
     ("/delete", "delete a saved session"),
     ("/todo", "show the model's current todo_write list"),
     ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session"),
@@ -1100,6 +1101,14 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # quit the REPL).
                     finish()
                     return "/compress"
+                elif c == "\x12":
+                    # Ctrl+R -> /review (the scoped reviewer). Readline's
+                    # reverse-history-search convention doesn't apply here:
+                    # history recall in this editor is Up/Down, so the byte
+                    # is free. Runs the no-arg form (whole current diff,
+                    # default focus) — a focus argument is typed as /review.
+                    finish()
+                    return "/review"
                 elif c == "\x11":
                     finish()
                     return "/exit"

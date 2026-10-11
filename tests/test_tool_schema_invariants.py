@@ -91,8 +91,9 @@ def test_every_tool_appears_once():
     # 0.87.0: duckdb joins (27). 0.94.0: lint_check joins (28).
     # 0.103.22: stable project-tool search/call gateways join (31).
     # 0.113.2: kill_background joins (32). 0.129.8: list_dir retires from the
-    # offered floor (still dispatchable) — 31.
-    assert len(names) == 31
+    # offered floor (still dispatchable) — 31. 0.132.0: critique joins (32;
+    # registered in TOOLS, withheld per-turn by its NX_SUBAGENTS gate).
+    assert len(names) == 32
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])

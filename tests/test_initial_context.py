@@ -130,6 +130,20 @@ import nx as m  # noqa: E402
 # then. The schema grew ~30 chars (revalidation/robots line). Measured floor
 # rises by ~180 tok; BUDGET_TOKENS stays 5320 — headroom absorbs it (the
 # floor was 5171 after 0.111.0).
+# 0.132.0: critique (the scoped minimal reviewer) joins TOOLS — and the budget
+# does NOT move, deliberately. Measured 0.132.0 (chars//3.5, this test's
+# method, NX_SUBAGENTS/NX_VISION off): 5276 before and 5276 after, i.e. the
+# reviewer costs ZERO tokens on the guarded floor. That is the whole point of
+# its placement: its schema is GATED on NX_SUBAGENTS (the same switch that
+# withholds spawn_agent), and this test measures with sub-agents off — enabling
+# them is the deliberate, user-visible opt-in this ledger already puts out of
+# scope. The alternative (an always-on `critique` schema) was rejected for the
+# same reason a new always-on tool always is: ~600 tok of permanent rent —
+# ~11% of the 5320 budget — for a tool a session calls a handful of times. So
+# the raise this entry would otherwise justify was NOT taken; BUDGET_TOKENS
+# stays 5320 and the same guard keeps covering the reviewer whenever it is
+# enabled (with NX_SUBAGENTS=1 the floor is 6780, which is what a sub-agent
+# session already paid for spawn_agent + friends, not a new line item).
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5320)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 

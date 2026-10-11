@@ -52,7 +52,8 @@ def test_default_withholds_the_gated_four():
                                               "spawn_agent", "read_image", "plan_edit",
                                               "obs_recall",
                                               "lint_check", "search_project_tools",
-                                              "call_project_tool"))  # web_fetch is ON by default (0.71.0), so it stays in names; opt-in project gateways and lint_check are OFF by default
+                                              "call_project_tool",
+                                              "critique"))  # web_fetch is ON by default (0.71.0), so it stays in names; opt-in project gateways and lint_check are OFF by default
 
 
 def test_memoized_on_the_gate_vector():

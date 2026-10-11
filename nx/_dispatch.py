@@ -45,7 +45,7 @@ from ._rich import cprint
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, check_gate
-from ._subagent import spawn_agent
+from ._subagent import spawn_agent, critique
 from ._delegation_note import _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
@@ -90,6 +90,7 @@ DISPATCH = {
     "memory_write": memory_write, "memory_search": memory_search,
     "memory_delete": memory_delete, "recall_lessons": recall_lessons,
     "spawn_agent": spawn_agent, "read_image": read_image,
+    "critique": critique,
     "plan_edit": plan_edit, "run_tests": run_tests, "git_commit": git_commit,
     "duckdb": duckdb_query,
     "web_fetch": web_fetch,

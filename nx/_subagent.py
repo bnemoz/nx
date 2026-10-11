@@ -97,10 +97,10 @@ from ._subagent_bash import (  # noqa: F401 (re-exports)
 
 from ._prompts import (  # prompt registry (re-exported)
     SUBAGENT_SYSTEM, SUBAGENT_WRITE_SYSTEM, SUBAGENT_IMPLEMENT_SYSTEM,
-    ADVISOR_EXEC_SYSTEM,
+    ADVISOR_EXEC_SYSTEM, CRITIQUE_SYSTEM,
 )
 from ._subagent_tiers import (
-    _advisor_tier_dispatch,
+    _advisor_tier_dispatch, _critique_tier_dispatch, _critique_severity,
 )
 
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
@@ -1006,6 +1006,13 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # from inside another sub-agent (only the parent holds the approval gate).
     write = tier in ("write", "implement", "advisor")
     advisor = tier == "advisor"
+    # Critique tier (scoped minimal reviewer): a reviewer that cannot write
+    # cannot quietly fix what it found, so it runs the plain read-only table —
+    # no worktree, no scope rewrites, no approval prompts, no NX_SUBAGENT_WRITE
+    # opt-in (there is nothing to approve). Its focus + severity floor ride the
+    # instruction (composed by the `critique` tool body), so no extra spawn
+    # parameter — and no signature change tests would have to mirror.
+    critique = tier == "critique"
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
@@ -1019,6 +1026,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
     system = (ADVISOR_EXEC_SYSTEM if advisor
+              else CRITIQUE_SYSTEM if critique
               else SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
               else SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM)
     # Write tiers get an edit-framed budget footer; the read-tier footer is
@@ -1049,6 +1057,8 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # manual, serial-only fallback for tests.
     table = (_advisor_tier_dispatch() if advisor
              else _write_tier_dispatch() if write else _read_only_dispatch())
+    if critique:
+        table = _critique_tier_dispatch()
     prev_ctx = _subagent_ctx()
     # This loop's claim identity, captured BEFORE the agent loop runs: the
     # write tools take file claims under `<session>:<thread ident>` on THIS
@@ -1338,7 +1348,7 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         async_ = raw_async
     t = _normalize_tier(extra.pop("tier", tier))
     if not t:
-        return ("ERROR: tier must be one of read/write/implement/advisor "
+        return ("ERROR: tier must be one of read/write/implement/advisor/critique "
                 "(or omit it — the default is read; NX_SUBAGENT_WRITE=1 only "
                 "permits an explicit write/implement/advisor tier)")
     # The default is a FLOOR, not just the omitted-value fallback (see the note
@@ -1415,6 +1425,70 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
                     "— its answer will arrive as a [Runtime note]; do not re-spawn it")
         return _spawn_async(instruction, max_turns, tier=t, scope=scope)
     return _run_sync_agent(instruction, max_turns, tier=t, scope=scope)
+
+
+def critique(focus: Any, paths: Any = None, severity: Any = None,
+             max_turns: Any = None, async_: Any = None, **extra: Any) -> str:
+    """The scoped minimal reviewer (0.132.0): run a READ-ONLY sub-agent whose
+    only job is to find what is wrong with the work in progress, in the
+    severity-ranked finding format CRITIQUE_SYSTEM defines.
+
+    Deliberately a thin wrapper over spawn_agent(tier="critique") rather than a
+    second spawn machinery: the tier owns the toolset (read-only, see
+    _critique_tier_dispatch), the prompt, the severity floor and the instruction
+    focus line; this body owns only the model-facing argument contract — `focus`
+    is REQUIRED because a scope-free review returns noise (the tier's whole
+    point is that the parent names the claim being judged), and `paths` is
+    folded into the instruction so the reviewer's reading is confined.
+
+    It is deliberately NOT gated on NX_SUBAGENT_WRITE: a reviewer that cannot
+    write needs no approval opt-in, and review-after-change is exactly the case
+    where the user wants it available without the write grant."""
+    if not _delegation_enabled():
+        return ("ERROR: critique needs NX_SUBAGENTS=1 — it runs a reviewer "
+                "sub-agent. Enable sub-agents, or review the change yourself.")
+    if not isinstance(focus, str) or not focus.strip():
+        return ("ERROR: focus is required — name what is being reviewed and "
+                "against what, e.g. focus=\"the timeout changes in _turn.py vs "
+                "the claim that every wait is bounded\". A review with no focus "
+                "returns noise; the scope IS the feature.")
+    if _subagent_ctx() is not None:
+        return ("ERROR: critique is parent-level — sub-agents cannot spawn a "
+                "reviewer (no nested delegation). Review your own diff against "
+                "the focus and report what you find; the parent decides whether "
+                "to run critique on it.")
+    raw_async = extra.pop("async", None)
+    if raw_async is not None:
+        async_ = raw_async
+    raw_sev = _critique_severity(extra.pop("severity", severity))
+    paths = extra.pop("paths", paths)
+    raw_turns = extra.pop("max_turns", max_turns)
+    scope_line = ""
+    if isinstance(paths, (list, tuple)):
+        named = [str(p).strip() for p in paths if str(p).strip()]
+    else:
+        named = [p.strip() for p in str(paths or "").replace(",", " ").split()
+                 if p.strip()]
+    if named:
+        scope_line = ("\nRead scope (inspect these paths and their immediate "
+                      "call sites; a finding elsewhere is out of scope): "
+                      + ", ".join(named) + "\n")
+    instruction = (
+        "[CRITIQUE MODE]\nReview the work named below and report findings only. "
+        "You cannot modify anything. Severity floor: " + raw_sev +
+        " — a finding below it is not reported (if nothing clears it, say "
+        "exactly 'No findings above the floor.' and name what you checked).\n\n"
+        "FOCUS: " + focus.strip() + "\n" + scope_line +
+        "\nJudge the work adversarially against the focus: broken edge cases, "
+        "missing guards, wrong assumptions, races, resource leaks — and the "
+        "simpler formulation the work walked past. Each finding names a "
+        "file:line.")
+    kwargs: dict[str, Any] = {"tier": "critique"}
+    if raw_turns is not None:
+        kwargs["max_turns"] = raw_turns
+    if async_ is not None:
+        kwargs["async_"] = async_
+    return spawn_agent(instruction, **kwargs)
 
 
 # --- parent-side completion sweep --------------------------------------------

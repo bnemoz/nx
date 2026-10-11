@@ -143,6 +143,10 @@ def _subagent_tools() -> list[dict[str, Any]]:
     import nx as _m
     wanted = set(_READ_ONLY_TOOL_NAMES)
     ctx = _subagent_ctx()
+    if ctx is not None and getattr(ctx, "tier", "") == "critique":
+        # Critique tier: the read-only set exactly — no write tools, no
+        # consult_advisor, no run_tests (see _critique_tier_dispatch).
+        return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
     if ctx is not None and ctx.write:
         wanted.update(_WRITE_TIER_TOOL_NAMES)
         if ctx.advisor and ctx.consults_left is not None:
@@ -178,6 +182,30 @@ CONSULT_ADVISOR_TOOL = {"type": "function", "function": {
 }}
 
 
+# Schema for the critique tier (the scoped minimal reviewer, 0.132.0). It is
+# appended to TOOLS in nx/__init__.py but gated on NX_SUBAGENTS exactly like
+# spawn_agent: no sub-agents, no reviewer, 0 schema tokens on the floor.
+CRITIQUE_TOOL = {"type": "function", "function": {
+    "name": "critique",
+    "description": "Hand the work in progress to a read-only REVIEWER sub-agent "
+        "and get back ranked findings. The reviewer cannot fix, edit or run "
+        "tests, so a finding is never quietly patched before you judge it. Use "
+        "it after a substantive change or before a risky merge: critique(focus="
+        "'the timeout changes in _turn.py vs the claim that every wait is "
+        "bounded') returns AT MOST 5 findings, one per line — SEVERITY — "
+        "file:line — what is wrong — fix sketch — or the literal 'No findings "
+        "above the floor.' with what was checked. Not for: style nits a linter "
+        "catches, a review with no focus (the scope IS the feature — it returns "
+        "noise), or asking the reviewer to fix what it finds (it cannot; you do).",
+    "parameters": {"type": "object", "properties": {
+        "focus": {"type": "string", "description": "The claim, change or diff to judge, and against what — e.g. 'the retry loop in nx/_turn.py as changed by this diff: does it ever exit early?'. Required: without a focus the reviewer returns noise."},
+        "paths": {"type": "string", "description": "Optional paths/globs to confine the reading to, space- or comma-separated (e.g. 'nx/_turn.py nx/_compact*.py'). The reviewer reads them; it never writes."},
+        "severity": {"enum": ["critical", "major", "minor", "info"], "description": "Findings below this floor are dropped (default 'major'). 'critical' = would this lose data or lie to the user; 'minor' = show me everything the reviewer sees."},
+        "max_turns": {"type": "integer", "description": "Tool-turn budget for the reviewer (default 100; a smaller request is raised to the floor, ceiling 500). A review wraps up in far fewer turns than an investigation — 30 is usually ample."},
+    }, "required": ["focus"]},
+}}
+
+
 def _read_only_dispatch() -> dict[str, Any]:
     from ._subagent_bash import _subagent_bash
     from ._dispatch import DISPATCH
@@ -208,6 +236,15 @@ def _advisor_tier_dispatch() -> dict[str, Any]:
     table = _write_tier_dispatch()
     table["consult_advisor"] = _consult_advisor
     return table
+
+
+def _critique_tier_dispatch() -> dict[str, Any]:
+    """Dispatch table for a critique-tier sub-agent: the READ-ONLY table and
+    nothing else. A reviewer that could edit would fix what it found instead of
+    reporting it — and the parent, which owns the diff and the approval gate,
+    would lose the chance to judge the fix. So the restriction is the feature:
+    no write tier, no run_tests (it mutates caches), never wait_background."""
+    return _read_only_dispatch()
 
 
 # Consult budget/timeout, resolved per-call from env so tests can flip them.
@@ -326,9 +363,9 @@ def _scope_check(path: str) -> str | None:
 
 
 def _normalize_tier(tier: Any) -> str:
-    """Map the `tier` argument to one of read/write/implement/advisor. Empty
-    string = invalid (caller refuses); None = "read" — the schema's documented
-    default.
+    """Map the `tier` argument to one of read/write/implement/advisor/critique.
+    Empty string = invalid (caller refuses); None = "read" — the schema's
+    documented default.
 
     0.110.1: None used to fall back to the NX_SUBAGENT_WRITE env flag, silently
     upgrading an omitted tier to "write". That broke the schema's "'read'
@@ -339,7 +376,22 @@ def _normalize_tier(tier: Any) -> str:
     if tier is None:
         return "read"
     v = str(tier).strip().lower()
-    return v if v in ("read", "write", "implement", "advisor") else ""
+    return v if v in ("read", "write", "implement", "advisor", "critique") else ""
+
+
+# The critique tier's severity floor, shared by the tier prompt injection and
+# the caller-side validation: the reviewer reports only findings at or above
+# this level, so a parent asking for "critical" gets no minor noise.
+CRITIQUE_SEVERITIES = ("critical", "major", "minor", "info")
+DEFAULT_CRITIQUE_SEVERITY = "major"
+
+
+def _critique_severity(value: Any) -> str:
+    """Normalize a severity floor to one of CRITIQUE_SEVERITIES, defaulting to
+    major when omitted (an unstated floor is the common case; 'major' is the
+    level a parent usually means by 'review this')."""
+    v = str(value or "").strip().lower()
+    return v if v in CRITIQUE_SEVERITIES else DEFAULT_CRITIQUE_SEVERITY
 
 
 def _write_tier_wrapper(name: str):

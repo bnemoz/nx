@@ -404,6 +404,7 @@ TOOLS: list[dict[str, Any]] = [
 # Read-only sub-agent tool (spawn_agent): schema appended below, machinery in
 # nx/_subagent.py. _active_tools() filters it out unless NX_SUBAGENTS=1.
 from ._subagent import SUBAGENT_TOOL, spawn_agent, list_async_agents  # noqa: F401
+from ._subagent_tiers import CRITIQUE_TOOL
 from ._surfaces import (  # noqa: F401 — steering + /tabs surface (0.105.0)
     queue_steering, drain_steering, steer_pending, inject_steering,
     steer_status_line, run_tabs_dashboard, tabs_print_fallback,
@@ -432,6 +433,14 @@ _WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_backgrou
     "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "The PID from the `[background]` result"}, "timeout": {"type": "integer", "description": "Give up after this many seconds (default 0 = wait up to 1800s, then report the log path; capped at 1800)"}}, "required": ["pid"]}}}
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
 TOOLS.append(SUBAGENT_TOOL)
+# critique (0.132.0, feature #3): the scoped minimal reviewer — a read-only
+# sub-agent that reports findings instead of fixing them. Schema lives in
+# _subagent_tiers.CRITIQUE_TOOL; the body (a thin spawn_agent wrapper) and the
+# read-only tier are in _subagent.py/_subagent_tiers.py. Gated on NX_SUBAGENTS
+# exactly like spawn_agent (registered below), so the measured floor the
+# initial-context guard watches is untouched: with sub-agents off the schema is
+# withheld and search_tools still lists it for a model that asks by name.
+TOOLS.append(CRITIQUE_TOOL)
 TOOLS.append(IMAGE_VISION_TOOL)
 # Plan-edit tool (schema here, body in nx/_plan.py): withheld per-turn by
 # _active_tools() until a plan is active (/plan <goal>), like wait_background
@@ -795,6 +804,8 @@ from ._dispatch import (
     _invalidate_tool_list_cache, _TOOL_GATES, search_tools,
     run_tool, _tool_args_parse_error, _run_bg_completion_scan,
 )
+from ._tool_gates import _GATE_REFUSALS
+from ._delegation_note import _delegation_enabled
 from ._tool_cache import (  # noqa: F401 (re-export for tests)
     cache_store_entry as _tool_cache_store_entry,
     cache_valid as _tool_cache_valid,
@@ -802,6 +813,19 @@ from ._tool_cache import (  # noqa: F401 (re-export for tests)
     drop_vcs_entries as _tool_cache_drop_vcs_entries,
     store_cacheable_result as _tool_cache_store_result,
     bound_cache as _tool_cache_bound,
+)
+
+# critique gate + refusal (0.132.0, feature #3). _TOOL_GATES/_GATE_REFUSALS are
+# plain dicts by contract ("adding a gate is a one-entry edit" — _tool_gates.py),
+# so the reviewer tool registers its two entries here, beside the NX_SUBAGENTS
+# definition it keys off. Gate: the same NX_SUBAGENTS switch spawn_agent rides —
+# no sub-agents, no reviewer, 0 schema tokens, actionable refusal if a model
+# emits the name anyway (the measured initial-context floor is untouched).
+_TOOL_GATES["critique"] = _delegation_enabled
+_GATE_REFUSALS["critique"] = (
+    "(NX_SUBAGENTS is off — the read-only reviewer needs a sub-agent). Review "
+    "the diff yourself against the focus with git_diff/read_file, or enable "
+    "sub-agents to run the reviewer."
 )
 
 
