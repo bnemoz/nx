@@ -242,8 +242,20 @@ def _unknown_tool_error(name: str) -> str:
     # doesn't conclude the capability doesn't exist. The wording comes from
     # _GATE_REFUSALS (one entry per gate — the same registry the gate itself
     # lives in); a gated tool without an entry gets the generic wording.
+    # v1 usage metrics: withheld-by-gate refusal — the model asked for a
+    # tool whose schema was never offered this turn (missing-tool signal).
     if name in _GATE_REFUSALS:
+        try:
+            from ._logging import usage_gate
+            usage_gate(name, "gate")
+        except Exception:  # noqa: BLE001 — telemetry must never break a refusal
+            pass
         return f"ERROR: {name} is not available in this session {_GATE_REFUSALS[name]}"
+    try:
+        from ._logging import usage_gate
+        usage_gate(name, "withheld")
+    except Exception:  # noqa: BLE001 — telemetry must never break a refusal
+        pass
     return (f"ERROR: {name} is not available in this session (withheld by the current session "
             "configuration). Use one of: " + ", ".join(sorted(known)))
 

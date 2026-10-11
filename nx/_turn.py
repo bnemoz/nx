@@ -68,7 +68,7 @@ from ._argsalvage import (  # noqa: F401 (re-exports)
     FALLBACK_FOR, _malformed_args_nudge, _repair_log, _salvage_truncated_args,
 )
 from ._turn_retry import (  # noqa: F401 (re-exports)
-    _TASK_DEADLINE_TLS, _plural_ies, _step_backoff_delay, _step_retry_limit,
+    _TASK_DEADLINE_TLS, _plural_ies, _retry_log, _step_backoff_delay, _step_retry_limit,
     _task_deadline, _task_deadline_at, _task_deadline_exceeded,
     _task_timeout_summary,
 )
@@ -185,7 +185,8 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             _log_event("turn", {"kind": "give_up",
                                 "failure": collapse_type,
                                 "recoveries": malformed_stream_cut_count,
-                                "retry_limit": retry_limit})
+                                "retry_limit": retry_limit,
+                                "model": st.MODEL})
             if not quiet:
                 with write_lock():
                     cprint(f"{C.ERROR}  ✗ {collapse_type} after "
@@ -286,7 +287,8 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                             "failure": "reasoning_only_stall",
                             "attempts": cut_count,
                             "retry_limit": retry_limit,
-                            "failsafes_disabled": retry_limit == 0})
+                            "failsafes_disabled": retry_limit == 0,
+                            "model": st.MODEL})
         return TURN_DONE
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
@@ -612,6 +614,9 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                         cprint(f"{C.WARNING}  ↻ STREAM TIMEOUT — server stopped delivering chunks; "
                               f"discarding partial output and retrying "
                               f"({step_retries + 1}/{_step_retry_limit()} in {delay:.1f}s){RESET}")
+                # v1 usage metrics: one retry event per ladder step (never
+                # per chunk), with the turn-level stream error class.
+                _retry_log(step_retries + 1, type(stream_error).__name__)
                 return TURN_TIMED_OUT_RETRY
             if not quiet:
                 with write_lock():
@@ -634,7 +639,8 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                                 "recoveries": malformed_stream_cut_count,
                                 "retry_limit": retry_limit,
                                 "error": (f"{type(stream_error).__name__}: "
-                                          f"{stream_error}")[:300]})
+                                          f"{stream_error}")[:300],
+                                "model": st.MODEL})
             if not quiet:
                 with write_lock():
                     if parser.mode in ("think", "say"):
@@ -707,6 +713,13 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
             parser.leaked_token_run, parser.repeat_chunk_run, parser.reasoning_only_start,
             parser.reasoning_only_chars, parser.reasoning_parts,
             malformed_stream_cut_count)
+
+    # v1 usage metrics: remember this turn's assistant text as the CTX_TAIL
+    # source — the seam where the full text exists BEFORE any tool-call
+    # handler runs, so a tool_call/repair/breaker/gate event fired later
+    # carries what the model was saying when it made the call.
+    from ._usage_ctx import remember as _remember_ctx
+    _remember_ctx(text)
 
     # stats footer — prefer llama.cpp timings if present (server-measured tok/s);
     # otherwise divide the server's completion_tokens by the client-side

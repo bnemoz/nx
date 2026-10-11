@@ -27,6 +27,17 @@ def _step_backoff_delay(attempt: int, retry_after: float | None) -> float:
     return _backoff_delay(attempt, retry_after)
 
 
+def _retry_log(attempt: int, error_class: str) -> None:
+    """v1 usage metrics: one `retry` event per retry-ladder attempt (never
+    per chunk). `error_class` names the turn-level failure the ladder is
+    rescuing. Best-effort — never raises, never delays the ladder."""
+    try:
+        from ._logging import usage_retry
+        usage_retry(attempt, error_class)
+    except Exception:  # noqa: BLE001 — telemetry must never break a retry
+        pass
+
+
 def _plural_ies(n: int) -> str:
     return "y" if n == 1 else "ies"
 

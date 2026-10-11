@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 from . import _state as st
@@ -381,6 +382,12 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             # (with "cached": true) so an audit trail sees every read, not
             # just the miss that populated the entry. Pre-hook already ran
             # above, so a vetoed call can never serve from the cache.
+            # v1 usage metrics: a served-from-cache call is still a tool call
+            # the model made (and the whole point of the flag is to count
+            # them). 0-duration, outcome ok.
+            from ._logging import usage_tool_call
+            usage_tool_call(name, args, cached.result, 0.0, "ok", "ok",
+                            cache_hit=True)
             from ._hooks import post_tool_hook
             post_tool_hook(name, args, cached.result, cached=True)
             # Breaker decay (0.29.9): a cache hit is still a successful
@@ -464,6 +471,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     if not quiet and not buffered:
         spinner.start()
         st._ACTIVE_SPINNER = spinner
+    _u_t0 = time.perf_counter()  # v1 usage metrics: duration of the body only
+    _u_exc = ""  # exception class name when the fold below fires
     try:
         result = fn(**args)
     except _EscToChat:
@@ -473,11 +482,18 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
                 cprint(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
+        _u_exc = type(e).__name__
         result = f"ERROR: {type(e).__name__}: {e}"
     finally:
         if not quiet and not buffered:
             st._ACTIVE_SPINNER = None
             spinner.stop()
+    # v1 usage metrics: outcome/error_kind from the RAW folded result, BEFORE
+    # the arg-repair note can prefix it (the same ERROR:/DENIED convention the
+    # breaker and the failed flag below use).
+    _u_raw = result if isinstance(result, str) else ""
+    _u_denied = _u_raw.startswith("DENIED")
+    _u_failed = _u_raw.startswith(("ERROR", "DENIED"))
     if quiet:
         # Finish line for the tool tap above (trivially available: the result
         # string's own ERROR/DENIED convention, the same test the breaker and
@@ -580,6 +596,14 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # result body was collapsed live (mirrors _LAST_REASONING for reasoning).
     st._LAST_TOOL_NAME = name
     st._LAST_TOOL_OUTPUT = result if isinstance(result, str) else preview_lines[0]
+    # v1 usage metrics: one tool_call event per dispatch — successes too.
+    from ._logging import usage_tool_call
+    usage_tool_call(
+        name, args, st._LAST_TOOL_OUTPUT,
+        (time.perf_counter() - _u_t0) * 1000.0,
+        "ok" if not _u_failed else ("denied" if _u_denied else "error"),
+        "ok" if not _u_failed else (_u_exc or ("DENIED" if _u_denied else "ERROR")),
+        cache_hit=False if name in _CACHEABLE_READ_TOOLS else None)
     # todo_write colors each item by status itself (render_todos_display:
     # done=green, in_progress=yellow, pending=orange) and sanitizes the item
     # text, so it goes to the screen verbatim inside the box — not the generic

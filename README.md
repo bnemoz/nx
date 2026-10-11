@@ -255,6 +255,7 @@ line per action.
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables). Override the file itself with `NX_INPUT_HISTORY_FILE` |
 | `NX_LOG_MAX_BYTES` | size cap on the per-session request log (`~/.nx/logs`, default 10 MB) — the log rolls rather than growing without bound |
 | `NX_LOG_REQUESTS` | log request/response bodies on every model call (default `1`; `0` logs a stub line instead — the per-request json.dumps of a large prompt is real harness CPU, and the transcript already holds the payload) |
+| `NX_USAGE_LOG` | write a per-tool-call usage event stream to the session logs (`logs/usage.jsonl`; default `1`; `0` disables) — one JSONL line per tool call with duration, outcome, args/result sizes and truncated heads, plus repair/breaker/gate/retry events, each tagged with the model and agent tier; the raw feed for offline harness/model failure analysis (query it with DuckDB) |
 | `NX_MAX_UNDO` | how many `/undo` checkpoints are kept per session (default 20) |
 | `NX_MAX_UNDO_BYTES` | byte cap on the persisted undo stack — oldest checkpoints evicted first (default 32 MB; `0` disables the cap). The stack holds whole file contents, so without it a long session against big files is an unbounded RSS term |
 | `NX_BASH_POLL_SECONDS` | how long a `run_bash` call polls inline before backgrounding as a fallback beyond its timeout (default 3) |

@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from . import _state as st
 
+# Tools whose breaker TRIP was already announced on the usage stream (v1
+# metrics): one `breaker` event per open, re-armed when the tool decays or
+# the evidence re-keys to a new endpoint.
+_TRIP_ANNOUNCED: set[str] = set()
+
 
 def _breaker_endpoint_key() -> tuple[str | None, str | None]:
     """Identity of the endpoint the malformed-args evidence was gathered
@@ -46,13 +51,30 @@ def _breaker_views() -> tuple[dict[str, int], set[str]]:
         if observed != st.BREAKER_UNOBSERVED:
             st._MALFORMED_TOOL_FAILURES.clear()
             st._MALFORMED_TOOL_BROKEN.clear()
+            _TRIP_ANNOUNCED.clear()
         st._BREAKER_ENDPOINT_KEY = key
     return st._MALFORMED_TOOL_FAILURES, st._MALFORMED_TOOL_BROKEN
 
 
 def _breaker_broken(name: str) -> bool:
-    """True if `name` is currently dropped by the malformed-args breaker."""
-    return name in _breaker_views()[1]
+    """True if `name` is currently dropped by the malformed-args breaker.
+
+    v1 usage metrics: doubles as the trip ANNOUNCE point. The trip itself
+    happens in _turn_toolcalls (broken.add); this is the first reader every
+    path hits right after (run_tool's refusal gate and _withheld_tool_error
+    both call it in the same turn as the trip), so announcing here emits the
+    `breaker` usage event exactly once per open — with trip_count read live
+    from the failures streak — without restructuring the trip site."""
+    failures, broken = _breaker_views()
+    if name in broken and name not in _TRIP_ANNOUNCED:
+        _TRIP_ANNOUNCED.add(name)
+        try:
+            from ._logging import usage_breaker
+            usage_breaker(name, failures.get(name, 0))
+        except Exception:  # noqa: BLE001 — telemetry must never break a gate
+            pass
+        return True
+    return name in broken
 
 
 def _breaker_decay(name: str) -> None:
@@ -68,3 +90,4 @@ def _breaker_decay(name: str) -> None:
     failures, broken = _breaker_views()
     if failures.pop(name, None) is not None:
         broken.discard(name)
+        _TRIP_ANNOUNCED.discard(name)

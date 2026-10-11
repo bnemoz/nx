@@ -162,7 +162,8 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
                 obj = salvaged
                 _repair_log("salvaged_truncated_args",
                             f"{c.get('name')}: closure repair accepted "
-                            f"({len(raw)} -> {len(json.dumps(salvaged))} chars)")
+                            f"({len(raw)} -> {len(json.dumps(salvaged))} chars)",
+                            raw=raw)
         if obj is not None:
             # 0.29.5: servers occasionally double-encode the arguments object
             # (a JSON string) or emit a list of {name, value} pairs — both die
@@ -197,7 +198,9 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
                 broken.add(tool_name)
         broken_now = _breaker_broken(tool_name)
         st._TALLY_RETRIES += 1  # routes through _recovery's descriptors
-        _repair_log("malformed_args", f"{tool_name}: {detail}")
+        _repair_log("malformed_args", f"{tool_name}: {detail}",
+                    raw=(c.get("arguments") if isinstance(c.get("arguments"), str)
+                         else c.get("args") or ""))
         if st.MALFORMED_TOOL_BREAKER_LIMIT > 0 and tool_name and count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
             _repair_log("breaker_open", f"{tool_name}: {count} malformed attempts")
         retry_limit = _subagent_stream_cut_limit(max(0, st.MALFORMED_STREAM_RETRY_LIMIT))

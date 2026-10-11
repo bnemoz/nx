@@ -28,6 +28,15 @@ from ._private import private_dir
 LOG_PATH = os.path.join(st.SESSION_HOME, "logs", "llamacpp.log")
 LOG_MAX_BYTES = _env_int("NX_LOG_MAX_BYTES", 10000000)
 
+# v1 usage metrics: rich per-tool-call telemetry (harness-vs-model failure
+# diagnosis) on its OWN channel so old req/resp/repair records are never
+# confused with these. Separate stream (usage.jsonl, same async writer class
+# and rotation policy) rather than a dir tag on llamacpp.log: the request log
+# is a firehose and these events are meant to be grep-able on their own.
+# NX_USAGE_LOG=0 disables every emitter at the flag check below.
+USAGE_PATH = os.path.join(st.SESSION_HOME, "logs", "usage.jsonl")
+USAGE_LOG = _env_int("NX_USAGE_LOG", 1) != 0
+
 # Swarm P4: the request log json.dumps's the ENTIRE prompt (and httpx
 # serializes it again for the wire) on every model call — pure harness CPU on
 # the agent's thread, and with N agents the shared queue is an unbounded RAM
@@ -128,6 +137,9 @@ class _AsyncLogWriter:
 _llog = _AsyncLogWriter(LOG_PATH, LOG_MAX_BYTES)
 atexit.register(_llog.flush)
 
+_ulog = _AsyncLogWriter(USAGE_PATH, LOG_MAX_BYTES)
+atexit.register(_ulog.flush)
+
 
 def _log_event(direction: str, payload: Any) -> None:
     """direction: 'req' (outgoing) or 'resp' (incoming SSE chunk). Enqueues
@@ -153,3 +165,101 @@ def _log_event(direction: str, payload: Any) -> None:
             }
         payload = {"_stub": True, **stub}
     _llog.write(json.dumps({"ts": time.time(), "dir": direction, "data": payload}) + "\n")
+
+
+# --- v1 usage-metrics emitters (see the module docstring of nx/_usage_ctx) ----
+
+def _log_usage(event: str, payload: Any) -> None:
+    """One usage event onto the usage.jsonl stream: same async writer
+    pattern as _log_event, distinct file + `event` key instead of `dir`, so
+    old channel records and usage records never mix. Stamps `ts` here.
+    Caller-checked USAGE_LOG flag re-checked defensively; never raises."""
+    if not USAGE_LOG:
+        return
+    try:
+        _ulog.write(json.dumps({"ts": time.time(), "dir": "usage",
+                                "event": event, "data": payload}) + "\n")
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
+        pass
+
+
+def _agent_tag() -> str:
+    """'main', or 'subagent:<tier>' when a sub-agent context owns this
+    thread (the same TLS context run_tool() resolves its dispatch table
+    through)."""
+    try:
+        from ._subagent_tls import _subagent_ctx
+        ctx = _subagent_ctx()
+        if ctx is not None:
+            return "subagent:" + (getattr(ctx, "tier", None) or "read")
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
+        pass
+    return "main"
+
+
+def _usage_emit(event: str, fields: dict, tail: bool = False) -> None:
+    """One usage event: common fields (model/agent/session) + `fields`,
+    onto the usage stream. `tail=True` attaches CTX_TAIL (see _usage_ctx).
+    Cheap no-op when NX_USAGE_LOG=0. Never raises."""
+    if not USAGE_LOG:
+        return
+    try:
+        payload = dict(fields)
+        payload.setdefault("model", st.MODEL)
+        payload.setdefault("agent", _agent_tag())
+        sid = st.SESSION_ID
+        if sid:
+            payload.setdefault("session", sid)
+        if tail:
+            from ._usage_ctx import tail as _tail
+            payload["ctx_tail"] = _tail()
+        _log_usage(event, payload)
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
+        pass
+
+
+def usage_tool_call(name: str, args: dict, result, duration_ms: float,
+                    outcome: str, error_kind: str, cache_hit=None) -> None:
+    """One `tool_call` event per run_tool() dispatch (successes included).
+    `result` is the final string-ish result (content-parts already reduced to
+    their one-line preview)."""
+    if not USAGE_LOG:
+        return
+    try:
+        args_raw = json.dumps(args, sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 — unserializable args: repr is enough
+        args_raw = str(args)
+    result_str = result if isinstance(result, str) else str(result)
+    fields = {
+        "tool": name,
+        "duration_ms": round(duration_ms, 3),
+        "outcome": outcome,               # ok | error | denied
+        "args_bytes": len(args_raw),
+        "args_raw": args_raw[:8192],
+        "result_bytes": len(result_str),
+        "result_head": result_str[:500],
+        "error_kind": error_kind,         # exc class name | prefix | "ok"
+        "subagent": _agent_tag() != "main",
+    }
+    if cache_hit is not None:
+        fields["cache_hit"] = bool(cache_hit)
+    _usage_emit("tool_call", fields, tail=outcome != "ok")
+
+
+def usage_gate(name: str, reason: str) -> None:
+    """A withheld-tool refusal: the model asked for `tool` this turn even
+    though its schema was never offered (missing-tool signal)."""
+    _usage_emit("gate", {"tool": name, "reason": reason}, tail=True)
+
+
+def usage_breaker(name: str, trip_count: int) -> None:
+    """The malformed-args breaker just OPENED for `tool` after
+    `trip_count` consecutive malformed-args failures."""
+    _usage_emit("breaker", {"tool": name, "trip_count": trip_count}, tail=True)
+
+
+def usage_retry(attempt: int, error_class: str) -> None:
+    """One step-retry-ladder attempt for a failed turn (per ladder step,
+    never per chunk). `error_class` is the turn-level stream error class."""
+    _usage_emit("retry", {"attempt": attempt, "error_class": error_class},
+                tail=False)

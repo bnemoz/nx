@@ -23,13 +23,27 @@ FALLBACK_FOR = {
 }
 
 
-def _repair_log(kind: str, what: str) -> None:
+def _repair_log(kind: str, what: str, raw: str = "") -> None:
     """0.30.0 observability: every applied repair and every repair-rejection
     gets one JSONL record in the session log (grep-able when tuning
-    NX_ARG_REPAIR / NX_MALFORMED_TOOL_BREAKER). Best-effort — never raises."""
+    NX_ARG_REPAIR / NX_MALFORMED_TOOL_BREAKER). Best-effort — never raises.
+
+    v1 usage metrics: the record now also carries the endpoint context
+    (model/agent), the malformed `raw` args string (truncated to 8192) and
+    the CTX_TAIL (the model's last words before the broken call), so a
+    repair record alone answers "which model said what, and what did it
+    emit". `raw` is optional: call sites that have no raw string (text-call
+    rejections) just omit it. Still rides the EXISTING repair channel on
+    llamacpp.log, not the usage stream."""
     try:
-        from ._logging import _log_event
-        _log_event("repair", {"kind": kind, "what": what})
+        from ._logging import _log_event, _agent_tag
+        from . import _state as _st
+        from . import _usage_ctx
+        _log_event("repair", {"kind": kind, "what": what,
+                              "model": _st.MODEL,
+                              "agent": _agent_tag(),
+                              "raw": (raw or "")[:8192],
+                              "ctx_tail": _usage_ctx.tail()})
     except Exception:
         pass
 
