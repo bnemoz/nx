@@ -27,7 +27,7 @@ from . import _state as st
 # tool_call events whose outcome wasn't "ok" (folded under their tool name).
 _FRICTION_EVENTS = ("repair", "breaker", "gate", "retry", "give_up")
 
-_MIN_COUNT = 2    # a pattern needs at least this many hits to be a pattern
+_MIN_COUNT = 10   # a pattern needs at least this many hits to be a pattern
 _MAX_PATTERNS = 3  # cap: three notes per retro is already a loud one
 
 _MAIN_AGENTS = (None, "", "main")  # sub-agent friction (read-tier allowlist

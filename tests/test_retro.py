@@ -34,29 +34,35 @@ def _write_usage(path, records):
 
 
 def _seed_records(sid="sess-1"):
-    """Two edit_file repairs, three breaker trips on multi_edit, two failed
-    tool_calls on search_files, one lone gate (below threshold), one ok
-    tool_call, one model_call — plus a foreign-session retry pair."""
-    return [
-        _rec("repair", kind="salvaged_truncated_args", tool="edit_file",
-             what="edit_file: closed brackets", session=sid,
-             ctx_tail="first\nlet me close the brackets"),
-        _rec("repair", kind="malformed_args", tool="edit_file",
-             what="edit_file: bad json", session=sid),
-        _rec("breaker", tool="multi_edit", trip_count=3, session=sid),
-        _rec("breaker", tool="multi_edit", trip_count=4, session=sid),
-        _rec("breaker", tool="multi_edit", trip_count=5, session=sid),
-        _rec("tool_call", tool="search_files", outcome="error",
-             args={"pattern": "x"}, session=sid, error_kind="io"),
-        _rec("tool_call", tool="search_files", outcome="error",
-             args={"pattern": "y"}, session=sid, error_kind="io"),
-        _rec("tool_call", tool="read_file", outcome="ok",
-             args={"path": "a"}, session=sid),
-        _rec("gate", tool="memory_write", reason="no schema", session=sid),
-        _rec("model_call", duration_ms=100, session=sid),
-        _rec("retry", attempt=1, error_class="timeout", session="other"),
-        _rec("retry", attempt=2, error_class="timeout", session="other"),
-    ]
+    """Twelve edit_file repairs, eleven breaker trips on multi_edit, ten
+    failed tool_calls on search_files, one lone repair on web_fetch (below
+    the _MIN_COUNT=10 threshold), one ok tool_call, one model_call — plus a
+    foreign-session retry pair."""
+    recs = []
+    for _ in range(12):
+        recs.append(_rec("repair", kind="salvaged_truncated_args",
+                         tool="edit_file", what="edit_file: closed brackets",
+                         session=sid,
+                         ctx_tail="first\nlet me close the brackets"))
+    for _ in range(11):
+        recs.append(_rec("breaker", tool="multi_edit", trip_count=3,
+                         session=sid))
+    for i in range(10):
+        recs.append(_rec("tool_call", tool="search_files", outcome="error",
+                         args={"pattern": f"p{i}"}, session=sid,
+                         error_kind="io"))
+    recs.append(_rec("repair", kind="malformed_args", tool="web_fetch",
+                     session=sid))
+    recs.append(_rec("tool_call", tool="read_file", outcome="ok",
+                     args={"path": "a"}, session=sid))
+    recs.append(_rec("gate", tool="memory_write", reason="no schema",
+                     session=sid))
+    recs.append(_rec("model_call", duration_ms=100, session=sid))
+    recs.append(_rec("retry", attempt=1, error_class="timeout",
+                     session="other"))
+    recs.append(_rec("retry", attempt=2, error_class="timeout",
+                     session="other"))
+    return recs
 
 
 def _seed(tmp=None, records=None):
@@ -86,23 +92,21 @@ def _notes():
 def test_collect_friction_groups_sorts_and_caps():
     usage, _root = _seed()
     pats = _retro.collect_friction("sess-1", path=usage)
-    # 3 breaker + 2 repair(edit_file) + 2 tool_call(search_files) qualify;
-    # the lone gate and the foreign-session retries do not. Cap keeps 3.
+    # 12 repair(edit_file) + 11 breaker(multi_edit) + 10 tool_call(
+    # search_files) qualify; the lone web_fetch repair, the lone gate and the
+    # foreign-session retries do not. Cap keeps 3.
     assert len(pats) == 3
-    assert pats[0] == {"event": "breaker", "subject": "multi_edit",
-                       "count": 3, "detail": ""}
+    assert pats[0] == {"event": "repair", "subject": "edit_file",
+                       "count": 12, "detail": "let me close the brackets"}
     assert [(p["event"], p["subject"]) for p in pats[1:]] == [
-        ("repair", "edit_file"), ("tool_call", "search_files")]
-    # detail: sample ctx_tail line from the group
-    repair = next(p for p in pats if p["event"] == "repair")
-    assert repair["detail"] == "let me close the brackets"
+        ("breaker", "multi_edit"), ("tool_call", "search_files")]
 
 
 def test_collect_friction_cap_at_three():
     usage = os.path.join(tempfile.mkdtemp(prefix="nx-test-retro-"), "u.jsonl")
     recs = []
     for tool in ("a", "b", "c", "d", "e"):
-        recs += [_rec("breaker", tool=tool), _rec("breaker", tool=tool)]
+        recs += [_rec("breaker", tool=tool) for _ in range(10)]
     _write_usage(usage, recs)
     pats = _retro.collect_friction(None, path=usage)
     assert len(pats) == 3
@@ -127,12 +131,12 @@ def test_collect_friction_ignores_subagent_events():
     usage = os.path.join(tempfile.mkdtemp(prefix="nx-test-retro-"), "u.jsonl")
     recs = [_rec("tool_call", tool="run_bash", outcome="error",
                  session="s", agent="subagent:read")
-            for _ in range(5)]
+            for _ in range(15)]
     recs += [_rec("tool_call", tool="run_bash", outcome="error", session="s")
-             for _ in range(2)]
+             for _ in range(10)]
     _write_usage(usage, recs)
     pats = _retro.collect_friction("s", path=usage)
-    assert [(p["subject"], p["count"]) for p in pats] == [("run_bash", 2)]
+    assert [(p["subject"], p["count"]) for p in pats] == [("run_bash", 10)]
 
 
 def test_dedup_dir_matches_write_dir_when_project_root_missing():
