@@ -51,7 +51,7 @@ from ._repl_settings_cmds import (
     _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
-    _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro, _cmd_review,
+    _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro, _cmd_review, _cmd_build,
 )
 from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
@@ -159,6 +159,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/panel": _cmd_panel,
     "/retro": _cmd_retro,
     "/review": _cmd_review,
+    "/build": _cmd_build,
 }
 
 

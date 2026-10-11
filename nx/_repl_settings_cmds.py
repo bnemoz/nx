@@ -75,7 +75,31 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
     ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
     ("/review [focus]", "scoped reviewer over the current work: ranked findings, never fixes (Ctrl+R)"),
+    ("/build [issue]", "spec-driven pipeline on a feature branch: spec → 2-3 implementers → critique → fixes"),
 ]
+
+
+def _cmd_build(user: str, state: _ReplState) -> None:
+    """/build <issue text> — nx feature #2, the spec-driven build pipeline.
+
+    User-triggered ONLY (never a tool the model can fire): one issue paragraph
+    in, one reviewable feature branch out. A spec sub-agent writes SPEC.md, the
+    user answers ONE y/n, 2-3 implementer sub-agents each land a work package on
+    `nx/build-<stamp>`, the scoped reviewer critiques against the spec's
+    acceptance criteria, and simple findings are fixed inline while structural
+    ones get one follow-up agent (at most one re-critique — no loops). The
+    pipeline commits on the feature branch and leaves it checked out; it never
+    pushes and never touches the branch you started from. See nx/_build.py.
+    """
+    issue = user[len("/build"):].strip()
+    if not issue:
+        print(f"{DIM}  usage: /build <issue text> — e.g. /build add a \"--quiet\" "
+              f"flag to the export command{RESET}")
+        return
+    from ._build import run_build
+    print(f"{DIM}  /build starts a multi-agent pipeline (spec, implementers, "
+          f"reviewer) on its own feature branch. Ctrl-C aborts cleanly.{RESET}")
+    print(run_build(issue, state=state))
 
 
 def _cmd_review(user: str, state: _ReplState) -> None:

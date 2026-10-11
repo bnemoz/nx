@@ -57,6 +57,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/memory", "manage persistent memory"),
     ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
     ("/review", "scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R)"),
+    ("/build", "spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch"),
     ("/delete", "delete a saved session"),
     ("/todo", "show the model's current todo_write list"),
     ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session"),
