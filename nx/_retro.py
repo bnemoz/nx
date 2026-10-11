@@ -30,6 +30,10 @@ _FRICTION_EVENTS = ("repair", "breaker", "gate", "retry", "give_up")
 _MIN_COUNT = 2    # a pattern needs at least this many hits to be a pattern
 _MAX_PATTERNS = 3  # cap: three notes per retro is already a loud one
 
+_MAIN_AGENTS = (None, "", "main")  # sub-agent friction (read-tier allowlist
+# refusals a spawning session generates by design) is the swarm's, not this
+# session's — it must never become the parent's retro pattern.
+
 
 def _usage_path() -> str:
     """Same path nx/_logging.py's USAGE constant is built from, resolved at
@@ -67,6 +71,8 @@ def _friction_key(rec: dict) -> tuple[str, str] | None:
         return None
     data = rec.get("data")
     if not isinstance(data, dict):
+        return None
+    if data.get("agent") not in _MAIN_AGENTS:
         return None
     if event == "tool_call":
         if data.get("outcome") == "ok":
@@ -165,12 +171,20 @@ def _note_body(pattern: dict, session_id: str | None) -> str:
     return "\n\n".join(lines)
 
 
-def _existing_project_notes() -> list:
-    from ._memory_store import _iter_notes, _project_memories_dir
+def _target_notes_dir() -> str:
+    """The dir run_retro's notes will actually land in — the same resolution
+    _write_memory_file performs for scope="project", including its no-project
+    fallback to global. Dedup must scan THIS dir: deduping the project dir
+    while the fallback wrote the note global is what let retro notes pile up
+    unbounded in ~/.nx/memories (every session re-wrote them)."""
+    from ._sessions_fs import _memories_dir, _project_memories_dir
     pdir = _project_memories_dir(getattr(st, "PROJECT_ROOT", None))
-    if not pdir:
-        return []
-    return _iter_notes(pdir)
+    return pdir if pdir else _memories_dir()
+
+
+def _existing_project_notes() -> list:
+    from ._memory_store import _iter_notes
+    return _iter_notes(_target_notes_dir())
 
 
 def _confirm_retro(title: str, body: str) -> bool:

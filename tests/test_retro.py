@@ -120,6 +120,37 @@ def test_collect_friction_skips_malformed_and_ok_events():
     assert _retro.collect_friction(None, path=usage) == []
 
 
+def test_collect_friction_ignores_subagent_events():
+    """Friction from sub-agent threads (the read-only allowlist refusals a
+    spawning session generates by design) is the swarm's, not the parent
+    session's — it must never become the parent's retro pattern."""
+    usage = os.path.join(tempfile.mkdtemp(prefix="nx-test-retro-"), "u.jsonl")
+    recs = [_rec("tool_call", tool="run_bash", outcome="error",
+                 session="s", agent="subagent:read")
+            for _ in range(5)]
+    recs += [_rec("tool_call", tool="run_bash", outcome="error", session="s")
+             for _ in range(2)]
+    _write_usage(usage, recs)
+    pats = _retro.collect_friction("s", path=usage)
+    assert [(p["subject"], p["count"]) for p in pats] == [("run_bash", 2)]
+
+
+def test_dedup_dir_matches_write_dir_when_project_root_missing():
+    """The pileup root cause: with no PROJECT_ROOT the write falls back to
+    the GLOBAL memories dir, so dedup must scan that same dir — deduping the
+    (nonexistent) project dir let every session re-write the same notes."""
+    tmp = tempfile.mkdtemp(prefix="nx-test-retro-")
+    saved = m.st.SESSION_HOME, m.st.PROJECT_ROOT
+    try:
+        m.st.SESSION_HOME = tmp
+        m.st.PROJECT_ROOT = None
+        assert _retro._target_notes_dir() == os.path.join(tmp, "memories")
+        m.st.PROJECT_ROOT = tmp
+        assert _retro._target_notes_dir() == os.path.join(tmp, ".nx", "memories")
+    finally:
+        m.st.SESSION_HOME, m.st.PROJECT_ROOT = saved
+
+
 def test_collect_friction_missing_file():
     missing = os.path.join(tempfile.mkdtemp(prefix="nx-test-retro-"),
                            "nope.jsonl")
