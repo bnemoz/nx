@@ -523,6 +523,7 @@ def test_bg_tint_blends_accent_over_anchor(monkeypatch):
     fake = io.StringIO()
     fake.isatty = lambda: True  # type: ignore[attr-defined]
     monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    monkeypatch.setenv("NX_BG_TINT", "1")
     saved = m.C.light_bg
     try:
         m.C.light_bg = False  # dark terminal
@@ -549,6 +550,7 @@ def test_bg_tint_light_side_blends_toward_white(monkeypatch):
     fake = io.StringIO()
     fake.isatty = lambda: True  # type: ignore[attr-defined]
     monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    monkeypatch.setenv("NX_BG_TINT", "1")
     saved = m.C.light_bg
     try:
         m.C.light_bg = True
@@ -559,12 +561,12 @@ def test_bg_tint_light_side_blends_toward_white(monkeypatch):
         m.C.light_bg = saved
 
 
-def test_bg_tint_off_switch_and_headless():
+def test_bg_tint_off_switch_and_headless(monkeypatch):
     # headless (non-tty in tests): empty string, no bytes
     assert _ansi.bg_tint(_ansi._rgb("89b4fa")) == ""
-    os.environ["NX_BG_TINT"] = "0"
+    monkeypatch.setenv("NX_BG_TINT", "0")
     try:
-        # even on a "tty" the kill switch wins
+        # even with the switch eligible, an explicit "0" wins on a "tty"
         import io
         saved, _ansi.sys.stdout = _ansi.sys.stdout, io.StringIO()
         try:
@@ -576,9 +578,25 @@ def test_bg_tint_off_switch_and_headless():
         del os.environ["NX_BG_TINT"]
 
 
+def test_bg_tint_off_by_default(monkeypatch):
+    # unset NX_BG_TINT (the default): no fill bytes, even on a "tty"
+    monkeypatch.delenv("NX_BG_TINT", raising=False)
+    import io
+    fake = io.StringIO()
+    fake.isatty = lambda: True  # type: ignore[attr-defined]
+    monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    assert _ansi.bg_tint(_ansi._rgb("89b4fa")) == ""
+    from nx import _render
+    hdr = _render.panel_header("t")
+    assert "\033[48;2;" not in hdr and "\033[38;2;" in hdr
+    assert "\033[48;2;" not in _render.panel_row("body", _render.role("ACCENT"))
+    assert "\033[48;2;" not in _render.panel_footer(_render.role("ACCENT"))
+
+
 def test_panel_components_carry_tint_bytes(monkeypatch):
-    # with tinting forced on, the shared box components must emit a 48;2 fill
+    # with NX_BG_TINT=1, the shared box components must emit a 48;2 fill
     # ahead of the accent on header/row/footer — and none without it
+    monkeypatch.setenv("NX_BG_TINT", "1")
     import io
     fake = io.StringIO()
     fake.isatty = lambda: True  # type: ignore[attr-defined]

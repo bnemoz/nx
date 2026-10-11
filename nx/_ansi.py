@@ -640,10 +640,14 @@ def _bg_anchor_hex() -> str:
 def bg_tint(accent_sgr: str, alpha: float = 0.16) -> str:
     """An SGR string painting the terminal background with `accent_sgr`'s hue
     pre-blended at `alpha` over the background anchor. Zero-width in cells
-    (it only changes colors), so it composes anywhere in a line."""
+    (it only changes colors), so it composes anywhere in a line.
+
+    Off by default (0.142.4): a baked fill is a matter of taste and the
+    0.142.0 rollout read as a haze to many users — opt back in with
+    NX_BG_TINT=1."""
     if not sys.stdout.isatty():
         return ""
-    if os.environ.get("NO_COLOR") or os.environ.get("NX_BG_TINT") == "0":
+    if os.environ.get("NO_COLOR") or os.environ.get("NX_BG_TINT") != "1":
         return ""
     fh = hex_of(accent_sgr)
     bh = _bg_anchor_hex()

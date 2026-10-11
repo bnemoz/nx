@@ -511,7 +511,8 @@ On truecolor terminals, tool-call box borders additionally carry a faint
 same-hue *background fill* (the accent pre-blended at ~16% over the terminal
 background — truecolor SGR has no alpha channel, so the blend is baked into
 the RGB), the same large-block declutter Catppuccin's style guide uses for
-selection backgrounds. Disable it with `NX_BG_TINT=0`; it is off on 256-color
+selection backgrounds. Off by default since 0.142.4; opt in with
+`NX_BG_TINT=1`. It is off on 256-color
 or non-tty output, where a baked fill would quantize badly.
 
 The assistant's final answer is rendered as markdown through rich; its
