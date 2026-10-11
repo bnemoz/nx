@@ -732,7 +732,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         return TURN_DONE
 
     loop_cut = parser.loop_cut
-    if not loop_cut and not text.strip() and not parser.tcs and parser.reasoning_only_chars > 0:
+    if (not loop_cut and not text.strip() and not parser.tcs
+            and (parser.reasoning_only_chars > 0
+                 or (parser.reasoning_parts and not parser.content_had_prose))):
+        # A reasoning-only stall, even if reasoning_only_chars was reset by a
+        # stray whitespace-only content delta (chat-template separator).
         loop_cut = True
 
     if loop_cut:

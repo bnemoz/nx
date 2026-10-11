@@ -197,6 +197,7 @@ class StreamParser:
         self.t_last: float | None = None   # last token-bearing delta, rel. to _t0
         self.t_usage: float | None = None  # the usage-bearing chunk, rel. to _t0
         self.loop_cut = False
+        self.content_had_prose = False
         self.reasoning_only_chars = 0
         self.reasoning_only_start: float | None = None
         self.finish_reasons: list[str] = []
@@ -577,6 +578,13 @@ class StreamParser:
             self.content.append(chunk)
             self._content_len += len(chunk)
             self.streamed_chars += len(chunk)
+            # The turn had no real prose when all its content deltas are
+            # whitespace (chat-template separators between/after tool calls).
+            # Track it so the seam checks (reasoning-only stall routing, footer
+            # divider) treat such a turn as text-less instead of misclassifying
+            # a reasoning-only stall as an EMPTY TURN.
+            if chunk.strip():
+                self.content_had_prose = True
             # EVENTSURFACE_SPEC §1(a) stream tap, chokepoint 1 of 2: this is the
             # one place raw prose is appended unconditionally, so it is where a
             # quiet agent's delta becomes visible on /tabs. The job id comes

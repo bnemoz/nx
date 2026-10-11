@@ -175,6 +175,24 @@ def test_empty_turn_arms_escalation_when_disabled():
     assert m.st._STALL_FORCE_NATIVE is True
 
 
+def test_whitespace_content_before_reasoning_stalls_not_empty():
+    """A whitespace-only content delta (chat-template separator) before the
+    reasoning block resets reasoning_only_chars to 0 — the turn must still be
+    classified as a reasoning-only stall, not an EMPTY TURN."""
+    _reset_state()
+    messages = [{"role": "user", "content": "go"}]
+    orig = m.open_stream
+    m.open_stream = lambda *a, **k: iter(
+        [_Chunk({"content": "\n"}),
+         _Chunk({"reasoning_content": "thinking about it"})])
+    try:
+        status = m.model_turn(messages)
+    finally:
+        m.open_stream = orig
+
+    assert status == m.TURN_STALL, f"expected TURN_STALL, got {status!r}"
+
+
 def test_settled_turn_clears_escalation():
     """A turn that completes normally clears the flag."""
     _reset_state()
