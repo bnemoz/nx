@@ -15,6 +15,7 @@ from typing import Any, Optional
 from ._ansi import DIM, RESET, C
 from ._layout import REASONING_DIVIDER_CELLS
 from ._metrics import _abbr
+from ._render import BOX_BL, BOX_H, commit_line as _commit_line, kv_line
 from . import _state as st
 
 # renders the assistant's final-answer markdown live — themed like the rest
@@ -26,7 +27,6 @@ from . import _state as st
 # /tabs region Live and every mid-turn writer go through it too, because rich
 # composes same-console Lives (and Console.print during a Live) into one block,
 # while a second console on stdout fights for the cursor.
-from ._rich import cprint
 from ._rich import shared_console as _shared_console
 from ._rich import themed_console  # noqa: F401  (re-exported, as before)
 
@@ -51,7 +51,7 @@ def _ctx_field(prompt_n: int) -> str:
     mx_s = _abbr(mx)
     ratio = prompt_n / mx if mx > 0 else 0.0
     if ratio < 0.30:
-        color = C.GREEN
+        color = C.SUCCESS
     elif ratio < 0.60:
         color = C.WARNING
     else:
@@ -160,7 +160,7 @@ def _cache_hit_field(hit: Optional[float]) -> str:
         return ""
     pct = hit * 100.0
     if pct >= 75:
-        color = C.GREEN
+        color = C.SUCCESS
     elif pct >= 40:
         color = C.WARNING
     else:
@@ -180,6 +180,19 @@ def _tps_field(tps: float, trusted: bool) -> str:
 def _window_tps(gen_n: float, window: float) -> float:
     """gen_n tokens over a decode window, 0.0-safe."""
     return gen_n / window if window > 0 else 0.0
+
+
+def _footer_row(parts: list[str], tally: str) -> None:
+    """Emit the per-turn stats footer row (UIUX_SPEC B1).
+
+    `parts` are pre-rendered fields, each already carrying its own role color
+    and its `{RESET}{DIM} label` tail — the per-field hues (ctx utilization,
+    cache hit rate) are per-value decisions the component cannot make for the
+    caller, so `kv_line`'s role machinery is bypassed and only its `╰ ` lead
+    shape is kept (the glyph itself comes from `_render.BOX_BL`). `tally` is
+    the self-healing work note (already ` · `-joined).
+    """
+    _commit_line(f"{DIM}  {BOX_BL} {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
 
 
 def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int, t_first: float | None,
@@ -214,8 +227,8 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     # footer with nothing above it.
     if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
             and not text.strip()):
-        cprint(f"{DIM}  {'─' * REASONING_DIVIDER_CELLS}{RESET}")
-        cprint(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
+        _commit_line(f"{DIM}  {BOX_H * REASONING_DIVIDER_CELLS}{RESET}")
+        _commit_line(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args
     # repairs applied + corrective retries — so the knobs are tunable in
     # practice ("2 args repaired · 1 retry"). Folded into every footer branch.
@@ -245,7 +258,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        _footer_row(parts, tally)
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0
         prompt_n = usage.prompt_tokens or 0
@@ -262,7 +275,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         if t_first:
             parts.append(f"{C.STATUS_BAR}{t_first*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
-        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        _footer_row(parts, tally)
     elif streamed_chars > 0:
         gen_n = max(1, streamed_chars // 4)
         window, trusted = (parser.gen_window(elapsed) if parser is not None
@@ -270,6 +283,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
                  _tps_field(_window_tps(gen_n, window), trusted),
                  f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall"]
-        cprint(f"{DIM}  └ {(f'{RESET}{DIM} · ').join(parts)}{RESET}" + tally)
+        _footer_row(parts, tally)
     elif text or tcs:
-        cprint(f"{DIM}  └ {elapsed:4.1f}s wall{RESET}" + tally)
+        # One field, no label: kv_line's bare `╰ <value>` row.
+        _commit_line(kv_line([("", f"{DIM}{elapsed:4.1f}s wall")]) + tally)

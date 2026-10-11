@@ -35,6 +35,7 @@ from ._ansi import (DIM, RESET, C, raw_mode, strip_ansi_for_display,
                     # do `from ._chatbox import THEMES`)
 from ._commands import arg_options_map, menu_list
 from ._layout import DROPDOWN_MAX_ROWS, TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
+from ._render import BOX_BL, BOX_BR, BOX_H, BOX_TL, BOX_TR, BOX_V
 from ._tty import read_byte, wait_ready
 
 # (command, description) — derived from the single command registry
@@ -666,9 +667,9 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         bot_fill = max(0, box_w - 4 - _str_width(stats))
 
         lines = [
-            f"{DIM}╭─ {RESET}{C.ACCENT}you{RESET}{DIM} · {hints}{DIM} {'─' * top_fill}╮{RESET}",
-            *[f"{DIM}│{RESET}{seg}{' ' * (inner_w - _str_width(seg))}{DIM}│{RESET}" for _, _, seg in visual],
-            f"{DIM}╰─ {stats}{' ' * bot_fill}╯{RESET}",
+            f"{DIM}{BOX_TL}{BOX_H} {RESET}{C.ACCENT}you{RESET}{DIM} · {hints}{DIM} {BOX_H * top_fill}{BOX_TR}{RESET}",
+            *[f"{DIM}{BOX_V}{RESET}{seg}{' ' * (inner_w - _str_width(seg))}{DIM}{BOX_V}{RESET}" for _, _, seg in visual],
+            f"{DIM}{BOX_BL}{BOX_H} {stats}{' ' * bot_fill}{BOX_BR}{RESET}",
         ]
 
         matches = current_matches

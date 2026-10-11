@@ -510,7 +510,13 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
                         # flicker source (photosensitivity — see _ansi.py).
                         now = time.monotonic()
                         if now - _last_label_at >= 1.0 and tail != spinner.label:
-                            spinner.label = tail[:60]
+                            # UIUX_SPEC B1: the log tail rides the spinner label
+                            # through the one tail component (ANSI/control bytes
+                            # stripped, whitespace collapsed, clamped — a raw
+                            # command line would otherwise smear the row it
+                            # lands on).
+                            from ._render import stream_tail
+                            spinner.label = stream_tail(tail, 60, plain=True)
                             _last_label_at = now
                     last_tail = tail
             # Wait between liveness probes on the interrupt event rather than

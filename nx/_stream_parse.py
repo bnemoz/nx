@@ -25,6 +25,7 @@ from ._rich import themed_markdown
 from ._subagent_tls import tap_event
 
 from ._ansi import DIM, CLEAR_LINE, C, RESET, strip_ansi_for_display
+from ._render import emit, status_line
 from ._special_tokens import (
     _LEAKED_SPECIAL_TOKEN_RE, LEAKED_TOKEN_RUN_LIMIT, REPEAT_CHUNK_LIMIT,
     _strip_leaked_tokens,
@@ -146,9 +147,10 @@ def _console_has_live() -> bool:
     when nothing is rendering a Live; the console only owns line discipline
     while a Live is actually up (the /tabs region Live and/or the say-panel's
     own Live — rich stacks both on the same Console, see Console._live_stack).
-    Imported lazily to keep this module's import surface unchanged."""
-    from ._rich import shared_console
-    return bool(getattr(shared_console(), "_live_stack", None))
+    UIUX_SPEC B1: the predicate itself now lives on the console it is about
+    (`_rich.live_active`), so this and `_render`'s components cannot disagree."""
+    from ._rich import live_active
+    return live_active()
 
 
 class StreamParser:
@@ -241,10 +243,15 @@ class StreamParser:
         if not force and self.tool_status_active and now - self.last_tool_status < 0.2:
             return
         live = _console_has_live()
-        text = (f"{C.ACCENT}  ↳ generating tool call{RESET} "
-                f"{DIM}{_tool_call_progress(self.tcs, precise=not live, quantized=live)}{RESET}")
+        # The line's shape (label + DIM ` · `-joined tail) comes from the shared
+        # `status_line` component (UIUX_SPEC B1), so the tool-status line and
+        # the spinner tail cannot drift apart; the progress segment is the one
+        # part whose precision depends on the render mode.
+        text = status_line("  ↳ generating tool call", role_name="ACCENT",
+                           note=_tool_call_progress(
+                               self.tcs, precise=not live, quantized=live))
         with write_lock():
-            if _console_has_live():
+            if live:
                 # SPEC_LIVEENGINE.md: while a Live owns the shared console there
                 # is NO safe in-place repaint. Raw CSI writes fail in both
                 # directions (0.129.0): through the say-panel Live's
@@ -264,16 +271,16 @@ class StreamParser:
                 # the changed-gate degenerates back into a per-tick staircase.
                 # Power-of-two buckets only change at doublings.
                 if text != self._last_tool_status_text:
-                    cprint(text)
+                    emit(text)
                     self._last_tool_status_text = text
             else:
                 # No Live open: the classic in-place repaint, byte-identical
-                # to pre-0.128. end="" matters: cprint defaults to a trailing
-                # newline, which would COMMIT a fresh line per 0.2s tick
-                # (the CLEAR_LINE prefix would erase an empty line) — the
-                # staircase 0.129.1/0.129.2 chased on the Live branch. The
-                # line is erased again by clear_tool_status().
-                cprint(CLEAR_LINE + text, end="")
+                # to pre-0.128 (the mode switch is `_render.emit(inplace=True)`,
+                # UIUX_SPEC B1 — this call site no longer branches on it). The
+                # in-place shape (no trailing newline) matters: a committed
+                # line per 0.2s tick is the staircase 0.129.1/0.129.2 chased.
+                # The line is erased again by clear_tool_status().
+                emit(text, inplace=True)
         self.tool_status_active = True
         self.last_tool_status = now
 

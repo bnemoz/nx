@@ -62,8 +62,12 @@ def note_progress(message: str) -> None:
     state. Never visible to the model and never in the transcript.
     """
     from . import _state as st  # late import: _state pulls in _ansi
+    from ._render import stream_tail  # UIUX_SPEC B1: the one tail component
 
-    text = " ".join(str(message).split())[:MAX_NOTE] if message else ""
+    # Sanitize + clamp through the shared component (it strips ANSI/control
+    # bytes and collapses whitespace — a note can come from a tool that quoted
+    # arbitrary output). MAX_NOTE is the budget a tool may SET.
+    text = stream_tail(str(message), MAX_NOTE, plain=True) if message else ""
     sink = st._PROGRESS_SINK
     if sink is not None:
         try:

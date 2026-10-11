@@ -212,6 +212,22 @@ def shared_console() -> Console:
     return _SHARED_CONSOLE
 
 
+def live_active() -> bool:
+    """Is a rich Live currently draining the shared console?
+
+    The ONE place that question is asked (UIUX_SPEC Phase B): `_render`'s
+    components and every migrated writer call this to pick a render mode, so
+    the SPEC_LIVEENGINE "is the Live up?" test lives with the console it is
+    about instead of being spelled `getattr(console, "_live_stack", None)` at
+    each site. `_live_stack` is rich's own live-stack depth, so this is True
+    while ANY Live (the /tabs region or the say-panel's) owns the console.
+    """
+    try:
+        return bool(getattr(shared_console(), "_live_stack", None))
+    except Exception:
+        return False
+
+
 def cprint(text: str = "", *, end: str = "\n") -> None:
     """The ONE write channel for mid-turn text (SPEC_LIVEENGINE.md).
 

@@ -313,6 +313,16 @@ ROLE_DEFAULTS: dict[str, str] = {
     "SUCCESS": "green",        # yolo/auto-approve/allow indicators
     "WARNING": "yellow",       # medium-risk / approval-prompt / recoverable-cut notices
     "ERROR": "red",            # hard failures
+    # Phase B role completion (0.135.0). MUTED/EMPHASIS are *text* roles
+    # replacing raw `DIM`/`BOLD` on body text (the constants stay, for mode
+    # control — spinners and hints). DIFF_ADD/DIFF_REMOVE default to the
+    # green/red palette keys and exist so the approval/git diff surfaces can be
+    # recolored independently of SUCCESS/ERROR (e.g. a theme where "added"
+    # should read teal, not the same green as "ok").
+    "MUTED": "gray",           # secondary/metadata text (was raw DIM on text)
+    "EMPHASIS": "cyan",        # emphasized body text (was raw BOLD on text)
+    "DIFF_ADD": "green",       # added lines in a diff preview
+    "DIFF_REMOVE": "red",      # removed lines in a diff preview
 }
 
 
@@ -372,6 +382,10 @@ class _Colors:
     SUCCESS: str
     WARNING: str
     ERROR: str
+    MUTED: str
+    EMPHASIS: str
+    DIFF_ADD: str
+    DIFF_REMOVE: str
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -495,7 +509,9 @@ def _region_live_open() -> bool:
 def _draw_frame(text: str) -> None:
     """Emit one spinner frame (SPEC_LIVEENGINE.md §3, LifeSpinner).
 
-    Two channels, one switch:
+    The raw-ANSI vs rich-Live branch that used to live here is now the
+    `_render` component's (`emit(inplace=True)`, UIUX_SPEC B1: callers never
+    branch on the render mode):
 
     * region Live OPEN — the Live owns line discipline, so a `\x1b[2K\r`
       rewrite would erase the Live's own frame (that is the tear this spec
@@ -507,15 +523,9 @@ def _draw_frame(text: str) -> None:
       (the spinner draws over itself on one line; committing a line per tick
       would scroll the terminal for every tool call).
     """
-    if not _region_live_open():
-        sys.stdout.write(text)
-        sys.stdout.flush()
-        return
-    from ._rich import cprint
-    from ._surfaces import write_lock
+    from ._render import emit
     try:
-        with write_lock():
-            cprint(text.replace(CLEAR_LINE, ""))
+        emit(text, inplace=True)
     except Exception:
         pass  # never let a spinner frame break the tool call (as before)
 
@@ -572,14 +582,15 @@ class LifeSpinner:
         its arithmetic plain addition: len(label) + len(this) <= TAIL_BUDGET."""
         if not self._live:
             return ""
+        from ._render import stream_tail
         parts = []
         if self.show_elapsed and self._t0 is not None:
             parts.append(fmt_secs(time.monotonic() - self._t0) + "s")
         if self.counter is not None:
             parts.append(str(self.counter))
-        note = " ".join(strip_ansi_for_display(self.note or "").split())
+        note = stream_tail(self.note or "", MAX_NOTE_SHOWN, plain=True)
         if note:
-            parts.append(clip_line(note, MAX_NOTE_SHOWN))
+            parts.append(note)
         if not parts:
             return ""
         # Clip per PART, then the whole: clipping only the joined string would
@@ -588,19 +599,21 @@ class LifeSpinner:
         return " " + DIM + "· " + clip_line(" · ".join(parts), width - 3) + RESET
 
     def _render(self, pos: int) -> str:
-        # Clamp + sanitize the label: it may come from a live command's log
-        # tail (st._ACTIVE_SPINNER.label = ...), i.e. untrusted bytes. \n is
-        # NOT stripped by strip_ansi_for_display, so collapse whitespace
-        # explicitly — the spinner must stay exactly one line.
-        label = " ".join(strip_ansi_for_display(self.label or "").split())
+        from ._render import stream_tail
+        # Clamp + sanitize the label via the shared `stream_tail` component: it
+        # may come from a live command's log tail (st._ACTIVE_SPINNER.label = ...),
+        # i.e. untrusted bytes, and \n is NOT stripped by strip_ansi_for_display,
+        # so whitespace is collapsed there — the spinner must stay exactly one
+        # line. `plain=True` because the label is re-styled right here.
+        label = stream_tail(self.label or "", LABEL_CELLS, plain=True)
         # label + tail share one TAIL_BUDGET-cell row, and the LABEL is served
         # first: `running search_files` is the most useful thing on the line, so
         # it keeps up to LABEL_CELLS and the tail clips into the remainder (never
         # below MIN_TAIL, so the clock still reads). Clamping only the label let a
         # long note squeeze the tool name to five cells; the tail is redrawn every
         # frame and unbounded by construction, so both ends need a bound or the
-        # row wraps and leaves droppings over the tool box.
-        label = clip_line(label, LABEL_CELLS)
+        # row wraps and leaves droppings over the tool box. `stream_tail` above
+        # already applied the LABEL_CELLS clamp.
         tail_w = TAIL_BUDGET - len(label)
         tail = self._tail(tail_w if tail_w > MIN_TAIL else MIN_TAIL)
         cells = ["·"] * self._WIDTH

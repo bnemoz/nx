@@ -214,8 +214,8 @@ def test_write_tier_boxes_readonly_calls_untagged(nx_fresh, monkeypatch, tmp_pat
     finally:
         _SUBAGENT_TLS.ctx = None
     out = buf.getvalue()
-    assert "(sub-agent)" not in out.split("┌─")[1].splitlines()[0] if "┌─" in out else True
-    assert "┌─ read_file" in out  # plain header, no tag
+    assert "(sub-agent)" not in out.split("╭─")[1].splitlines()[0] if "╭─" in out else True
+    assert "╭─ read_file" in out  # plain header, no tag
 
 
 def test_write_tier_never_parallel_fanout(nx_fresh, monkeypatch, tmp_path):

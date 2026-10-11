@@ -15,7 +15,8 @@ from __future__ import annotations
 import os
 import shutil
 
-from ._ansi import DIM, RESET, C
+from ._ansi import RESET, C
+from ._render import role as _role
 from . import _state as st
 
 # In-process override for the env default (NX_PANEL). `/panel` flips this via
@@ -136,8 +137,23 @@ def _ctx_cell() -> str:
         color = C.WARNING
     else:
         color = C.ERROR
-    return (f"{color}{cur}{RESET}{DIM}/{C.STATUS_BAR}{_abbr(mx)}"
-            f"{RESET}{DIM} ctx{RESET}")
+    return (f"{color}{cur}{RESET}{_muted()}/{C.STATUS_BAR}{_abbr(mx)}"
+            f"{RESET}{_muted()} ctx{RESET}")
+
+
+def _muted() -> str:
+    """The MUTED role's SGR (UIUX_SPEC B3), read at call time so a `/theme`
+    switch lands on the next repaint."""
+    return _role("MUTED")
+
+
+def kv_cell(key: str, value: str) -> str:
+    """One rail cell: `key value` through the shared `kv_line` component
+    (UIUX_SPEC B1), so the rail's rows and the turn footer's rows share one
+    implementation and one glyph/role vocabulary. Lazily imported: `_render`
+    imports `_ansi`, and `_panel` is loaded by `_surfaces` mid-import."""
+    from ._render import kv_line
+    return kv_line([(key, value)], footer_glyph=False)
 
 
 def panel_cells(width: int, rows: list[dict]) -> list[str]:
@@ -145,18 +161,25 @@ def panel_cells(width: int, rows: list[dict]) -> list[str]:
 
     `rows` is the `_surfaces_snapshot()` row list (kind main|bg|agent,
     alive, status, id). Pure w.r.t. its argument; reads ctx/steering/claim
-    state from their owning modules. Each cell is truncated to `width`."""
+    state from their owning modules. Each cell is truncated to `width`.
+
+    The job/agent cells render through `_render.kv_line` (UIUX_SPEC B1: the
+    rail's cells are footer-style `key value` rows) so the rail and the turn
+    footer speak one vocabulary and their metadata takes the MUTED role; the
+    glyph/role choice lives in the component, not here. `_ctx_cell` keeps its
+    per-value utilization colors — a decision by design, not metadata.
+    """
     alive = [r for r in rows if r.get("alive")]
     cells = [
         _ctx_cell(),
-        f"jobs {sum(1 for r in alive if r.get('kind') == 'bg')}",
-        f"agents {sum(1 for r in alive if r.get('kind') == 'agent')}",
+        kv_cell("jobs", str(sum(1 for r in alive if r.get('kind') == 'bg'))),
+        kv_cell("agents", str(sum(1 for r in alive if r.get('kind') == 'agent'))),
     ]
     try:
         from ._surfaces import steer_pending
         n_steer = steer_pending()
         if n_steer:  # 0 hidden: an empty queue is not a status
-            cells.append(f"steer {n_steer}")
+            cells.append(kv_cell("steer", str(n_steer)))
     except Exception:
         pass
     try:
@@ -167,7 +190,7 @@ def panel_cells(width: int, rows: list[dict]) -> list[str]:
         if callable(getter):
             n_claims = int(getter())
             if n_claims:
-                cells.append(f"claims {n_claims}")
+                cells.append(kv_cell("claims", str(n_claims)))
     except Exception:
         pass
     return [_clip(c, width) for c in cells[:5]]

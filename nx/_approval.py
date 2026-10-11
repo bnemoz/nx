@@ -20,7 +20,6 @@ _EscToChat control-flow exception that lets the user bail out of an
 approval prompt back to the chat input.
 """
 import difflib
-import re
 import sys
 from contextlib import contextmanager
 from typing import Optional
@@ -28,6 +27,9 @@ from typing import Optional
 from ._ansi import DIM, RESET, C, notice, raw_mode
 from ._env import _env_int
 from ._layout import DIFF_CONTEXT_LINES
+from ._render import commit_line as _commit_line
+from ._render import diff as _render_diff
+from ._render import notice as _role_notice
 from ._tty import read_byte, wait_ready
 from ._risk import _local_risk_hint, LEVEL_ORDER
 from . import _state as st
@@ -36,39 +38,18 @@ from . import _state as st
 _DIFF_CONTEXT = DIFF_CONTEXT_LINES
 
 
-_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-
-
 def _diff_preview(before: str, after: str, *, context: int = _DIFF_CONTEXT) -> str:
     """Render a colored unified diff of `before` -> `after` for the approval
     prompt, with old/new line numbers prefixed on each line. Returns "" if the
     two are identical. Purely a terminal-UX helper — never sent to the model,
-    so it doesn't affect the token floor."""
-    if before == after:
-        return ""
-    lines = difflib.unified_diff(
-        before.splitlines(), after.splitlines(), n=context, lineterm="")
-    out = []
-    old_no = new_no = 0
-    for line in lines:
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("@@"):
-            m = _HUNK_RE.match(line)
-            if m:
-                old_no, new_no = int(m.group(1)), int(m.group(2))
-            out.append(f"{DIM}{line}{RESET}")
-        elif line.startswith("+"):
-            out.append(f"{C.GREEN}{'':>4} {new_no:>4} {line}{RESET}")
-            new_no += 1
-        elif line.startswith("-"):
-            out.append(f"{C.RED}{old_no:>4} {'':>4} {line}{RESET}")
-            old_no += 1
-        else:
-            out.append(f"{DIM}{old_no:>4} {new_no:>4} {line}{RESET}")
-            old_no += 1
-            new_no += 1
-    return "\n".join(out)
+    so it doesn't affect the token floor.
+
+    0.135.0 (UIUX_SPEC B1): the rendering moved to `_render.diff()` — one
+    implementation shared with the /review-style diff surfaces — and its added/
+    removed lines now take the DIFF_ADD/DIFF_REMOVE roles instead of the raw
+    green/red palette hues. This name stays (it is re-exported via
+    `nx._diff_preview` and used by `_edit_tools`)."""
+    return _render_diff(before, after, context)
 
 
 def _diff_hunk(before: str, after: str, *, context: int = 3) -> str:
@@ -315,7 +296,7 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     show_preview = bool(preview) and st.TOOL_OUTPUT_VISIBLE
     if st.YOLO:
         if show_preview:
-            print(preview)
+            _commit_line(preview)
         return True
     # Saved allow rules ("A" at a previous prompt, /approval allow) come
     # before the risk classifier: an explicitly-blessed action shape needs no
@@ -325,9 +306,9 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     if hit is not None:
         pattern, scope = hit
         short = action if len(action) <= 80 else action[:77] + "..."
-        print(f"{DIM}  ↳ auto-allow [rule: {pattern!r} ({scope})] {short}{RESET}")
+        _role_notice("muted", f"  ↳ auto-allow [rule: {pattern!r} ({scope})] {short}")
         if show_preview:
-            print(preview)
+            _commit_line(preview)
         return True
     # If a tool spinner is running, keep it alive during the risk-classifier
     # request and pause it only around our own terminal I/O. Otherwise a slow
@@ -353,15 +334,15 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             # Auto-allow. Show the assessment so the user has a paper trail.
             short = reason if len(reason) <= 80 else reason[:77] + "..."
             pause_spinner()
-            print(f"{DIM}  ↳ auto-allow [{level}] {action}  ({short}){RESET}")
+            _role_notice("muted", f"  ↳ auto-allow [{level}] {action}  ({short})")
             if show_preview:
-                print(preview)
+                _commit_line(preview)
             return True
         short = reason if len(reason) <= 80 else reason[:77] + "..."
         lvl_color = {"low": DIM, "medium": C.WARNING, "high": C.ERROR}[level]
         pause_spinner()
         if show_preview:
-            print(preview)
+            _commit_line(preview)
         choice = _m._ask_approval(
             f"{C.WARNING}  allow {action}? {lvl_color}[risk: {level.upper()} — {short}]{RESET} "
             f"{C.WARNING}[Y/n/a/esc] {RESET}", allow_hint=action)
@@ -373,10 +354,11 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             # prefix), so a one-off permission never silently widens into yolo.
             from ._allowed import add_rule, _rule_from_action
             rule = add_rule(*_rule_from_action(action))
-            print(f"{DIM}  ↳ always allowing {rule['tool']} {rule['pattern']!r} "
-                  f"({rule['scope']}) — /approval allow list to review{RESET}")
+            _role_notice("muted", f"  ↳ always allowing {rule['tool']} "
+                                 f"{rule['pattern']!r} ({rule['scope']}) — "
+                                 "/approval allow list to review")
             if show_preview:
-                print(preview)
+                _commit_line(preview)
             return True
         return choice != "n"
     finally:

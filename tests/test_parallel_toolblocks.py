@@ -75,6 +75,10 @@ def test_group_is_one_box_in_call_order(nx_fresh):
 
     assert all(f"body {i}" in res[i] for i in range(3))  # results still correct
     plain = _strip(out)
+    # The parallel-group box is drawn by nx/_toolblocks.py, which is OUTSIDE
+    # this change's file scope, so it still uses the square corner (reported as
+    # a Phase B deviation; the sequential tool box, chatbox frame, rail and
+    # footer all moved to _render.BOX_*).
     assert plain.count("┌─") == 1                      # exactly one box frame
     assert "3 tool calls in parallel" in plain
     assert plain.count("output collapsed") == 1         # ONE hint, not three

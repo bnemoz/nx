@@ -41,7 +41,8 @@ from ._bash_jobs import run_bash, wait_background, kill_background
 from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
-from ._rich import cprint
+from ._render import commit_line as _commit_line
+from ._render import panel_footer, panel_header, panel_row
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, check_gate
@@ -492,10 +493,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     if not quiet and not buffered:
         accent = tool_accent(name)
         # Header + args line are one visual unit of the tool box: one lock.
+        # The box itself comes from _render (UIUX_SPEC B1/B2): the rounded
+        # glyph set and the row/rail shape live there, so the sequential box,
+        # the parallel-group box and the chatbox frame cannot drift apart.
         with write_lock():
-            cprint(f"\n{accent}  ┌─ {header}{RESET}")
+            _commit_line("\n" + panel_header(header, accent))
             if name != "todo_write":
-                cprint(f"{accent}  │ {RESET}{DIM}{arg_preview}{RESET}")
+                # The args preview is metadata about the call (B3: MUTED, not a
+                # raw DIM wrap), colored by the component.
+                _commit_line(panel_row(arg_preview, accent, body_role="MUTED"))
     # Animate the gap between "cyan args line" and "cyan result line". Tool
     # bodies can take a while — _confirm makes a network round-trip to the
     # risk classifier, run_bash can run for tens of seconds, write_file on a
@@ -519,7 +525,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # Close the tool box before propagating so it isn't left visually open.
         if not quiet and not buffered:
             with write_lock():
-                cprint(f"{tool_accent(name)}  └─{RESET} {DIM}(escaped){RESET}")
+                _commit_line(panel_footer(tool_accent(name), text="(escaped)"))
         raise  # not an error — control-flow signal back to model_turn/REPL
     except Exception as e:  # noqa: BLE001 — surface any tool error back to the model
         _u_exc = type(e).__name__
@@ -698,22 +704,25 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             disp = disp[:8] + [f"{DIM}... [{len(disp) - 8} more lines]{RESET}"]
         # Whole box body under one lock: bounded (≤ 9 lines), and the lines are
         # one visual unit — a repaint between them would tear the todo list.
+        # `body_role=None`: render_todos_display already colored each item.
         with write_lock():
             for line in disp:
-                cprint(f"{accent}  │ {RESET}{line}{RESET}")
+                _commit_line(panel_row(line, accent))
     elif st.TOOL_OUTPUT_VISIBLE:
         # Bounded preview (≤ 9 lines): one lock for the box body.
         with write_lock():
             for line in preview_lines:
-                cprint(f"{accent}  │ {RESET}{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}")
+                _commit_line(panel_row(strip_ansi_for_display(line), accent,
+                                       body_role="TOOL_OUTPUT"))
     else:
         # Collapsed: the header/args lines already named the call; only the
         # result body is hidden. Keep the box closed with a one-line hint.
         with write_lock():
-            cprint(f"{accent}  │ {RESET}{DIM}… (output collapsed — /tooloutput to expand){RESET}")
+            _commit_line(panel_row("… (output collapsed — /tooloutput to expand)",
+                                   accent, body_role="MUTED"))
     if not quiet and not buffered:
         with write_lock():
-            cprint(f"{accent}  └─{RESET}")
+            _commit_line(panel_footer(accent))
     if name in _CACHEABLE_READ_TOOLS:
         # git_* results reflect .git/ state, which the root dir's mtime never
         # tracks (commits write under .git/ only) — store_cacheable_result

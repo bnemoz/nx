@@ -297,7 +297,7 @@ def test_quiet_run_tool_prints_nothing(nx_fresh, monkeypatch, capsys):
     from nx import _state as st
     st._TOOL_RESULT_CACHE.clear()
     _dispatch.run_tool("list_dir", {"path": "."})
-    assert "┌─" in capsys.readouterr().out
+    assert "╭─" in capsys.readouterr().out
 
 
 def test_quiet_confirm_never_prompts(nx_fresh, monkeypatch):

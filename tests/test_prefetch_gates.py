@@ -190,7 +190,7 @@ def test_prefetch_quiet_in_quiet_slot(nx_fresh, capsys):
     assert captured["slots"] is True
     out = capsys.readouterr().out
     assert "policy" not in out
-    assert "┌─" not in out and "└─" not in out
+    assert "╭─" not in out and "╰─" not in out
 
 
 def test_prefetch_gates_plan_writes_not_reads(nx_fresh):
