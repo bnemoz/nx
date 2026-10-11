@@ -201,7 +201,17 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     if not blocks:
         return
     accent = tool_accent(next((b.name for b in blocks if b.name), ""))
-    cprint(f"\n{bg_tint(accent)}{accent}  ┌─ {_group_title(blocks)}{RESET}")
+    # Width-aware clipping: cprint emits lines verbatim (soft_wrap), so a raw
+    # grep hit longer than the terminal wraps and drags the │/├ glyphs onto
+    # continuation rows. clip_display counts SGR as 0 columns, so the color
+    # prefixes survive. chrome = tint+accent+ │+ rail+ padding ≈ 14 cols.
+    from ._ansi import clip_display
+    from ._layout import TERM_FALLBACK_COLS, TERM_MIN_COLS
+    import shutil
+    width = max(TERM_MIN_COLS,
+                shutil.get_terminal_size((TERM_FALLBACK_COLS, 24)).columns)
+    chrome = 14
+    cprint(f"\n{bg_tint(accent)}{accent}  ┌─ {clip_display(_group_title(blocks), width - chrome)}{RESET}")
     calls = [b for b in blocks if b.name]
     for i, b in enumerate(blocks):
         branch = BOX_BRANCH_END if i == len(blocks) - 1 else BOX_BRANCH_MID
@@ -211,7 +221,7 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
         b_accent = tool_accent(b.name)
         line = f"{b_accent}  {BOX_V}{RESET}  {b_accent}{branch} {b.header or b.name}{RESET}"
         if b.detail:
-            line += f" {DIM}{b.detail}{RESET}"
+            line += f" {DIM}{clip_display(b.detail, width - chrome - 12)}{RESET}"
         if b.cached:
             line += f" {DIM}· cached{RESET}"
         if b.failed:
@@ -225,7 +235,8 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
             # where the box has already closed.
             rail = "│ " if i < len(blocks) - 1 else "  "
             for body_line in b.body:
-                cprint(f"{bg_tint(b_accent)}{b_accent}  │{RESET}  {rail}{body_line}")
+                cprint(f"{bg_tint(b_accent)}{b_accent}  │{RESET}  {rail}"
+                       f"{clip_display(body_line, width - chrome - 4)}")
     n = len(calls)
     footer = f"{n} call{'' if n == 1 else 's'} · {elapsed:.1f}s"
     errs = sum(1 for b in calls if b.failed)

@@ -187,7 +187,9 @@ def test_write_tier_tool_box_tagged_sub_agent(nx_fresh, monkeypatch, tmp_path, c
     finally:
         _SUBAGENT_TLS.ctx = None
     out1 = capsys.readouterr().out
-    assert "write_file " + str(target) + " (sub-agent)" in out1, out1
+    # The header is width-clipped (panel_header middle-truncates), so assert
+    # on the invariant parts: tool name, file name, and the sub-agent tag.
+    assert "write_file " in out1 and "tagged.txt (sub-agent)" in out1, out1
 
     _dispatch.run_tool("write_file", args)
     out2 = capsys.readouterr().out

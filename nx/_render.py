@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from . import _ansi as _A
+from ._ansi import clip_display, display_width
 from ._layout import DIFF_CONTEXT_LINES
 
 # Bound from the module object (not `from ._ansi import ...`) so this module can
@@ -132,10 +133,35 @@ def _tinted(accent_sgr: str) -> str:
     return f"{bg_tint(accent_sgr)}{accent_sgr}"
 
 
+def _term_width() -> int:
+    """Current terminal columns, with the shared layout fallbacks. Used by the
+    panel* renderers to clip visible text: cprint emits lines verbatim
+    (soft_wrap), so a raw grep hit longer than the terminal wraps and drags the
+    │/╭ glyphs onto continuation rows. SGR counts 0 columns (clip_display)."""
+    from ._layout import TERM_FALLBACK_COLS, TERM_MIN_COLS
+    import shutil
+    return max(TERM_MIN_COLS,
+               shutil.get_terminal_size((TERM_FALLBACK_COLS, 24)).columns)
+
+
+def _clip_mid(s: str, w: int) -> str:
+    """Middle-truncate `s` to `w` visible columns with a `…`: keep the head
+    (the tool name / verb) and the tail (a `(sub-agent)` tag, a filename) —
+    the middle of a long path is the least informative part. Plain-text only
+    (titles carry no SGR of their own)."""
+    if w <= 0 or display_width(s) <= w:
+        return s
+    keep = max(w - 1, 0)
+    head = keep * 2 // 3
+    tail = keep - head
+    return s[:head] + "…" + (s[len(s) - tail:] if tail else "")
+
+
 def panel_header(title: str, accent: Optional[str] = None, *,
                  prefix: str = _PREFIX, role_name: str = "ACCENT") -> str:
     """A box's opening line: `╭─ title` in the accent color."""
     accent = accent if accent is not None else role(role_name)
+    title = _clip_mid(title, _term_width() - 10)
     return f"{_tinted(accent)}{prefix}{BOX_TL}{BOX_H} {title}{RESET}"
 
 
@@ -147,6 +173,8 @@ def panel_row(text: str, accent: Optional[str] = None, *,
     accent = accent if accent is not None else role(role_name)
     if body_role:
         text = f"{role(body_role)}{text}{RESET}"
+    else:
+        text = clip_display(text, _term_width() - 6)
     return f"{_tinted(accent)}{prefix}{BOX_V} {RESET}{text}"
 
 
