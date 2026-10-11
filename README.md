@@ -241,7 +241,8 @@ line per action.
 | `NX_TOOL_RESULT_SPILL` | write oversized tool results to `~/.nx/overflow/` (default `1`; `0` falls back to the old blind elision marker). Spill files are created `0600` regardless of umask, like every other nx sink |
 | `NX_TOOL_RESULT_SPILL_MIN_CHARS` | append-time spill floor: a tool result larger than this (default 102400, equal to the cap) is written to the overflow store the moment it is produced, *before* it is ever sent, and the model gets the bounded head/tail + path stub instead. This pre-empts the context-overrun evictors, which rewrite already-sent bytes and so bust the server prompt-prefix cache (`cached: 0%`) on exactly the turns the prompt is largest. `0` restores the old behaviour (spill only above `NX_TOOL_RESULT_CHARS`; the evictors remain as the last-resort spiller) |
 | `NX_TOOL_RESULT_REDACT` | mask known credential shapes in tool results before they are shown, capped, spilled, or persisted (default `1`; `0` = pass-through). The same token shapes the approval-side `NX_BASH_PROMPT_SECRETS` gate checks on the way in, covering the way out: a result that printed a key is replaced with a `[redacted:api-key]`-style placeholder (kind kept, value gone) |
-| `NX_ARG_REPAIR` | schema-level argument and tool-name repair before a tool body runs (default `1`; `0` = strict pass-through). Coerces wrong-typed args against the tool's declared schema (`"5"` to `5`, `"true"` to `true`, `42` to `"42"`), case-folds a unique enum match (`"In_Progress"` to `"in_progress"`), renames a near-miss key (`maxresults` to `max_results`; difflib similarity 0.8+ and unambiguous only) plus curated per-tool aliases similarity can't reach (`cmd` to `command`, `old_str` to `old`, `file_path` to `path`) — and repairs the tool NAME itself: one alias (`bash` to `run_bash`, `grep` to `search_files`, `str_replace_editor` to `edit_file`) or one unambiguous close match executes under the real name. A missing required argument is refused up front with the declared schema (`ERROR: read_file missing required "path" — schema: …`) instead of a TypeError from the body; values are never fabricated. Every fix is reported in the tool result as an `[arg repair: <note>]` prefix, never applied silently |
+| `NX_ARG_REPAIR` | schema-level argument and tool-name repair before a tool body runs (default `1`; `0` = strict pass-through). Coerces wrong-typed args against the tool's declared schema (`"5"` to `5`, `"true"` to `true`, `42` to `"42"`), case-folds a unique enum match (`"In_Progress"` to `"in_progress"`), renames a near-miss key (`maxresults` to `max_results`; difflib similarity 0.8+ and unambiguous only) plus curated per-tool aliases similarity can't reach (`cmd` to `command`, `old_str` to `old`, `file_path` to `path`) — and repairs the tool NAME itself: one alias (`bash` to `run_bash`, `grep` to `search_files`, `str_replace_editor` to `edit_file`) or one unambiguous close match executes under the real name. A missing required argument is refused up front with the declared schema (`ERROR: read_file missing required "path" — schema: …`) instead of a TypeError from the body; values are never fabricated. Every fix is reported in the tool result as an `[arg repair: <note>]` prefix, never applied silently. Since 0.131.0 each repair is also mirrored onto the usage stream (`repair` event, tool recovered from the `<tool>: …` note) so `/retro` and the session-end retro can count friction per tool |
+| `NX_RETRO_ON_EXIT` | silent self-retro at session end (nx #1, default `1` = ON; `0` opts out). On a clean exit (`/quit` or EOF/Ctrl-D) after the final save/flush, `nx/_retro.py` scans this session's `usage.jsonl` for repeated friction (repairs, breaker trips, gates, retries, give-ups, failed tool calls), keeps patterns with 2+ hits, and writes at most 3 notes as project `gotcha` memories — the top patterns only, deduped against existing notes by a tool+event substring scan, so a session that repeats itself doesn't grow the store unboundedly. Runs at most once per session id (a module-level `_done` set) and never raises or blocks the exit; the same pass is available on demand via `/retro` (interactive: prints the patterns and asks before each write) |
 | `NX_OVERFLOW_TTL_DAYS` | purge spill files older than N days (default 7, like bg-logs) |
 | `NX_OVERFLOW_ECHO_CHARS` | max chars of head/tail content echoed back alongside the spill path (default 2000; `0` = path note only) |
 | `NX_HOME` / `NX_SESSIONS_DIR` | where the session store (`sessions.sqlite` and, until imported, the legacy per-session JSON files) lives |
@@ -584,6 +585,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
 | `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
 | `/memory reflect [focus]` | cross-project connection pass: reviews the whole store (both scopes) and writes at most 3 global notes — recurring preferences promoted out of project scopes, cross-project patterns the user may not have connected; proposals about broken notes print as advice only. One approval for the run |
+| `/retro` | self-retro: scan this session's `usage.jsonl` for repeated friction (repairs, breaker trips, gates, retries, give-ups, failed tool calls), print the top patterns and save one `gotcha` memory per pattern (y/n first; deduped against existing project notes). The same pass runs automatically at exit — on by default, `NX_RETRO_ON_EXIT=0` silences it |
 | `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/context`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
 | `/context` (`/ctx`) `[pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
 | `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
@@ -1297,6 +1299,40 @@ so. Tunables: `NX_MEMORY_REFLECT_MAX_NOTES` (default 120, `0` = all),
 minutes). Like optimize, reflect is a slash command and not a tool: zero
 schema tokens, and the user decides when a reflective pass is worth a
 round-trip.
+
+### Self-retro (`/retro`, 0.131.0)
+
+Where optimize tidies notes and reflect reads them, `/retro` reads the
+*telemetry*: the session's own `usage.jsonl` (`NX_USAGE_LOG`), which already
+records every friction signal the harness produces — arg repairs, malformed-args
+breaker trips, withheld-tool gates, retry-ladder attempts, give-ups, and tool
+calls whose outcome wasn't `ok`. `collect_friction` groups those by
+`(event, tool-or-error_class)`, keeps only patterns with 2+ hits (a single blip
+is not a pattern), sorts by count and keeps the top 3. Each surviving pattern
+becomes one project-scope `gotcha` memory — the note names the event, the tool,
+the count and one sample detail line (the model's last words before the
+failure, from the usage stream's `ctx_tail`).
+
+The **note contract** that keeps this safe to run unattended:
+each pattern is deduped against the existing project notes by a
+tool+event substring scan before anything is written (a coarse check on
+purpose — a false skip is cheap, a duplicate cluster is not), and the pass
+writes **at most 3 notes**, so a session that repeats itself every turn cannot
+grow the store without bound. Writes go through the same shared writer as
+every other memory (timestamped slug, `0600`, `_kind: gotcha` footer) with
+`gate=False` — the approval gate is replaced by the fact that the note is a
+derived counter, not model-authored content.
+
+**It fires automatically.** The retro must not depend on the user remembering
+to ask, so the session-end hook is **ON by default**: on a clean exit (`/quit`
+or EOF/Ctrl-D), after the final save and flush, `nx/_retro.py`'s
+`retro_on_exit` runs the non-interactive pass. `NX_RETRO_ON_EXIT=0` opts out
+for users who want silence. The hook is defensive by construction: the env
+gate, a module-level `_done` set that makes it run at most once per session id
+(so the `/quit` path and an atexit path in one process can't double-write), and
+a `try/except` that swallows everything — a retro must never raise into, or
+delay, an exit. `/retro` remains the manual entry point: it prints the
+friction table and asks y/n once per note before writing.
 
 ## Metrics
 

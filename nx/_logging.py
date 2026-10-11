@@ -276,6 +276,18 @@ def usage_breaker(name: str, trip_count: int) -> None:
     _usage_emit("breaker", {"tool": name, "trip_count": trip_count}, tail=True)
 
 
+def usage_repair(kind: str, what: str, tool: str = "") -> None:
+    """One applied/rejected args repair (see `_argsalvage._repair_log`).
+    Mirrors the llamacpp.log `repair` record onto the usage stream so the
+    friction counters (self-retro) see repairs per tool alongside breaker/
+    gate/retry without parsing the request-log firehose. `tool` when the
+    repair names one; `what` truncated since the CTX_TAIL carries the rest."""
+    fields = {"kind": kind, "what": (what or "")[:512]}
+    if tool:
+        fields["tool"] = tool
+    _usage_emit("repair", fields, tail=True)
+
+
 def usage_retry(attempt: int, error_class: str) -> None:
     """One step-retry-ladder attempt for a failed turn (per ladder step,
     never per chunk). `error_class` is the turn-level stream error class."""

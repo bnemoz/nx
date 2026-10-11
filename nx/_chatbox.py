@@ -55,6 +55,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/save", "save the current session (optional custom title)"),
     ("/fork", "branch the conversation into a new session (original kept)"),
     ("/memory", "manage persistent memory"),
+    ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
     ("/delete", "delete a saved session"),
     ("/todo", "show the model's current todo_write list"),
     ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session"),

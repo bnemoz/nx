@@ -34,9 +34,15 @@ def _repair_log(kind: str, what: str, raw: str = "") -> None:
     repair record alone answers "which model said what, and what did it
     emit". `raw` is optional: call sites that have no raw string (text-call
     rejections) just omit it. Still rides the EXISTING repair channel on
-    llamacpp.log, not the usage stream."""
+    llamacpp.log, not the usage stream.
+
+    self-retro (nx #1): every repair ALSO mirrors onto the usage stream via
+    `usage_repair` — the two channels stay separate (full detail here,
+    compact counters there) but no repair is invisible to the friction
+    counters anymore. The tool is recovered from the `<tool>: ...` `what`
+    convention the call sites use, when present."""
     try:
-        from ._logging import _log_event, _agent_tag
+        from ._logging import _log_event, _agent_tag, usage_repair
         from . import _state as _st
         from . import _usage_ctx
         _log_event("repair", {"kind": kind, "what": what,
@@ -44,6 +50,9 @@ def _repair_log(kind: str, what: str, raw: str = "") -> None:
                               "agent": _agent_tag(),
                               "raw": (raw or "")[:8192],
                               "ctx_tail": _usage_ctx.tail()})
+        head = what.split(":", 1)[0].strip() if what else ""
+        tool = head if head and head.replace("_", "").isalnum() else ""
+        usage_repair(kind, what, tool)
     except Exception:
         pass
 

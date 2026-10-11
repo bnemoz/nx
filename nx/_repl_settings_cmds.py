@@ -73,21 +73,42 @@ _HELP_COMMANDS: list[tuple[str, str]] = [
     ("/wip [note]", "snapshot work state (branch, dirty files, todos, note) into the session; /resume shows it"),
     ("/plan [goal|done|off|discard]", "start/view/exit plan mode — while active, mutating tool calls are gated"),
     ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
+    ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
 ]
 
 
 def _cmd_quit(user: str, state: _ReplState) -> str | None:
     if state.session_dirty:
         _save_current(state)
+    # self-retro (nx #1): silent friction retro on the clean-exit path, after
+    # the save. ON by default (NX_RETRO_ON_EXIT=0 silences it) and guarded
+    # against ever raising or running twice per session id — a retro must
+    # never block an exit (see _retro.retro_on_exit).
     # 0.103.4: /quit is the documented exit path — drain the async save queue
     # so the last turn is on disk before the process starts tearing down
     # (atexit covers a normal exit too, but not an `os._exit()`/exec one).
     # 0.103.28: cheap exit form first — the final write skips the post-write
     # re-read and the GC sweeps, which used to make Ctrl+Q visibly lag.
     from ._sessions_fs import begin_exit
+    try:
+        from ._retro import retro_on_exit
+        # The state's own id is authoritative; st.SESSION_ID is the mirror
+        # every other per-session store keys on (and the fallback in tests
+        # that drive this handler without a full _ReplState).
+        retro_on_exit(getattr(state, "session_id", None) or st.SESSION_ID)
+    except Exception:  # noqa: BLE001 — a retro must never block an exit
+        pass
     begin_exit()
     _flush_save()
     return "break"
+
+
+def _cmd_retro(user: str, state: _ReplState) -> None:
+    """/retro — manual self-retro: print this session's friction patterns
+    from usage.jsonl and, after a y/n per note, write one gotcha memory per
+    qualifying pattern (see nx/_retro.py)."""
+    from ._retro import run_retro
+    print(f"{DIM}  {run_retro(getattr(state, 'session_id', None) or st.SESSION_ID, interactive=True)}{RESET}")
 
 
 def _cmd_help(user: str, state: _ReplState) -> None:

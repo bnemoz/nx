@@ -51,7 +51,7 @@ from ._repl_settings_cmds import (
     _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
-    _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status,
+    _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro,
 )
 from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
@@ -157,6 +157,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/verify": _cmd_verify,
     "/tabs": _cmd_tabs,
     "/panel": _cmd_panel,
+    "/retro": _cmd_retro,
 }
 
 
@@ -172,6 +173,24 @@ def _release_claims_on_exit() -> None:
     try:
         from ._fileclaim import release_all_for_pid
         release_all_for_pid()
+    except Exception:
+        pass
+
+
+def _retro_on_exit_safe(session_id: str | None = None) -> None:
+    """Session-end self-retro hook (nx #1): the choke point the clean-exit
+    paths call after the final save/flush. `session_id` is the session's own
+    id (the EOF/Ctrl-D path has it on hand); omitted, the `st.SESSION_ID`
+    mirror every per-session store keys on is used.
+
+    ON by default (`NX_RETRO_ON_EXIT=0` opts out) so the retro fires without
+    the user remembering to ask. `_retro.retro_on_exit` owns the env gate,
+    the once-per-session-id guard and the never-raise contract; the import is
+    guarded here too so a broken install can't turn an exit into a traceback
+    (same shape as `_release_claims_on_exit`)."""
+    try:
+        from ._retro import retro_on_exit
+        retro_on_exit(session_id or st.SESSION_ID)
     except Exception:
         pass
 
@@ -324,6 +343,9 @@ def _repl() -> None:
             # drain it here so the documented "exit never loses the last turn"
             # holds even if a later atexit hook calls os._exit().
             _flush_save()
+            # nx #1: after the final save/flush, run the silent session-end
+            # retro. ON by default; a no-op without friction and never raises.
+            _retro_on_exit_safe(state.session_id)
             # Clean up this session's worktree (0.113.2): an isolated session
             # that exits with a clean tree leaves nothing behind — remove the
             # tree AND its nx/session-<sid> branch. Dirty trees are kept
