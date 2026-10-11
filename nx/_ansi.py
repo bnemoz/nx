@@ -65,6 +65,99 @@ def strip_ansi_for_display(text: str) -> str:
     text = _OTHER_ESC_RE.sub("", text)
     return _C0_RE.sub("", text)
 
+# --- display width / ANSI-aware clip (one measure/pad/clip trio) --------------
+# The rail composite used to slice styled lines with a raw codepoint slice
+# (`ln[:lw]`), which cut escape sequences in half (leaking a literal `m`) and
+# counted codepoints where the terminal counts CELLS — a CJK/emoji cell then
+# shifted the `│` separator right, wrapped the row, and desynced the live
+# region's erase arithmetic. One implementation lives here so `_panel._clip` and
+# the `_surfaces` rail composite can never disagree again.
+#
+# The width table comes from `rich.cells` (already an nx dependency, and the
+# same table the Live console uses to lay the frame out — so nx's idea of a
+# cell width always matches rich's). `wcwidth` is deliberately NOT a dependency:
+# it isn't installed, and rich needs the table anyway.
+
+
+def _char_cells(ch: str) -> int:
+    """Display cells one character occupies (0 combining, 1 narrow, 2 wide)."""
+    from rich.cells import get_character_cell_size
+    return get_character_cell_size(ch)
+
+
+def sgr_span_end(s: str, i: int) -> int:
+    """End index (exclusive) of the SGR sequence starting at `s[i] == '\\x1b'`,
+    or -1 when there is no complete sequence here. Only `\\033[...m` is treated as
+    zero-width: any other escape is skipped whole so it can never leak."""
+    if s[i] != "\x1b":
+        return -1
+    j = i + 1
+    if j < len(s) and s[j] == "[":
+        j += 1
+        while j < len(s) and (s[j].isdigit() or s[j] in ";:"):
+            j += 1
+        if j < len(s) and s[j] == "m":
+            return j + 1
+        return -1
+    for j in range(i + 1, len(s)):
+        if "@" <= s[j] <= "~":
+            return j + 1
+    return -1
+
+
+def display_width(s: str) -> int:
+    """Visible columns of `s`: ANSI escapes count 0, wide chars count 2."""
+    from rich.cells import cell_len
+    return cell_len(strip_ansi_for_display(s))
+
+
+def clip_display(s: str, w: int) -> str:
+    """Truncate `s` to at most `w` VISIBLE columns.
+
+    SGR sequences are copied through uncounted and are never cut mid-sequence
+    (the raw `[:w]` slice this replaces could emit a bare `m`); a wide char that
+    would straddle the limit is dropped rather than half-drawn."""
+    if w <= 0:
+        return ""
+    out: list[str] = []
+    n = 0
+    i = 0
+    ln = len(s)
+    while i < ln:
+        if s[i] == "\x1b":
+            j = sgr_span_end(s, i)
+            if j == -1:
+                i += 1          # malformed: drop the lone ESC, keep scanning
+                continue
+            out.append(s[i:j])
+            i = j
+            continue
+        if s[i] == "\n":
+            break
+        cw = _char_cells(s[i])
+        if cw == 0:
+            if n < w:
+                out.append(s[i])
+            i += 1
+            continue
+        if n + cw > w:
+            break
+        out.append(s[i])
+        n += cw
+        i += 1
+    return "".join(out)
+
+
+def pad_display(s: str, w: int) -> str:
+    """`s` padded with spaces to exactly `w` visible columns (already-wider
+    input is clipped). Callers appending a separator after the pad must leave a
+    column free themselves — see `_surfaces._live_frame`'s cols-1 reserve."""
+    cur = display_width(s)
+    if cur >= w:
+        return clip_display(s, w)
+    return s + " " * (w - cur)
+
+
 # Twelve hex values per theme: cyan/green/yellow/red/magenta + gray, blue,
 # orange (the original eight), plus purple, teal, pink, and brown. Every slot
 # is expected to be *used* somewhere: the ten semantic roles draw from eight of

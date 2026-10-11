@@ -428,6 +428,49 @@ def release_all_for_pid(pid: int | None = None) -> int:
             pass
 
 
+def active_claims() -> int:
+    """How many claims are live in the store (0 on any failure, when the
+    protocol is disabled, or with no store) — the count the status rail's
+    `claims` cell renders. Read-only and never raises, like every other helper
+    here; the caller (nx/_panel.py) TTL-caches it, because it opens the session
+    SQLite store per call.
+
+    "Live" is the TTL window, not a raw row count: rows accumulate for every
+    (session, thread) that never released cleanly (`release_all_for_pid` runs at
+    a clean exit only), so a bare COUNT(*) reports history, not status — 1000+
+    stale rows on a host that has run this suite a few times. The TTL is exactly
+    the rule `claim_file` itself applies ("hasn't aged past NX_FILE_CLAIM_TTL"),
+    so a row counted here is a row that would actually block another claim.
+
+    An expired row that still holds (pid alive, within scope) is deliberately
+    NOT counted: proving that needs one os.kill + one /proc read per row, which
+    is not something a 4 fps status cell may spend. The count can only read one
+    TTL low in that case. `NX_FILE_CLAIM_TTL=0` disables expiry, so every row is
+    live by definition and the plain count is correct."""
+    if not _claims_enabled():
+        return 0
+    from . import _sessiondb
+    conn = _sessiondb._open()
+    if conn is None:
+        return 0
+    try:
+        ttl = _ttl()
+        if ttl > 0:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM file_claims WHERE claimed_at >= ?",
+                (time.time() - ttl,)).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) FROM file_claims").fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def release_for(owner_id: str) -> int:
     """Drop every claim held by `owner_id`. Returns the number removed (0 on any
     failure). Never raises."""

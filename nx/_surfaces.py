@@ -28,7 +28,8 @@ from collections import deque
 
 from . import _state as st
 from . import _fullscreen
-from ._ansi import DIM, RESET, C
+from ._ansi import (DIM, RESET, C, clip_display, pad_display,
+                    strip_ansi_for_display)
 from ._tty import IS_WINDOWS
 
 # --------------------------------------------------------------------------
@@ -418,12 +419,37 @@ _DASH_LIVE = None
 
 LIVE_FPS_INTERVAL = 0.25  # 4 fps
 
+# The last painted frame as `(live, plain lines)`, for repaint change
+# suppression (0.140.0). rich Live rewrites the whole frame per refresh, so an
+# unchanged frame is pure terminal traffic + flicker; repaint_live compares
+# against this and skips update/refresh entirely. The Live INSTANCE is part of
+# the key, so a reopened region (or a fresh Live) always paints once even if the
+# frame text is unchanged. Only the terminal's owner thread writes it
+# (repaint_live's contract).
+_LAST_FRAME: "tuple[object, tuple[str, ...]] | None" = None
+
 
 def _tabs_height() -> int:
     """NX_TABS_HEIGHT: the live region's max rows. Non-int/absent -> 8,
     clamped to 1..20."""
     from ._env import _env_int
     return max(1, min(20, _env_int("NX_TABS_HEIGHT", 8)))
+
+
+def _frame_height() -> int:
+    """The render-time frame height: NX_TABS_HEIGHT clamped against the
+    terminal's ROWS too — min(NX_TABS_HEIGHT, rows - 3). A tall frame on a
+    short terminal pushes the prompt (and the next committed line) off the
+    screen, leaving the user typing blind; the 3-row reserve is the prompt, the
+    line being composed, and one row of slack. Never below 1, so an absurdly
+    small terminal still renders one row. `_tabs_height()` keeps its own 1..20
+    contract (its callers and tests read the env semantics, not the screen)."""
+    import shutil
+    from ._layout import TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
+    # os.terminal_size names its fields columns/lines (there is no `.rows`).
+    lines = shutil.get_terminal_size(
+        (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).lines
+    return max(1, min(_tabs_height(), lines - 3))
 
 
 def _vt_supported() -> bool:
@@ -484,7 +510,7 @@ def _live_frame() -> list[str]:
     from ._subagent_tls import sink_tail
     rows = _surfaces_snapshot()
     styles = _agent_styles(rows)
-    height = _tabs_height()
+    height = _frame_height()
     lines: list[str] = [f"{C.ACCENT}tabs{RESET}{DIM} — live · ctrl-t closes{RESET}"]
     width = _term_cols()
     for i, r in enumerate(rows):
@@ -496,29 +522,45 @@ def _live_frame() -> list[str]:
         if not r.get("alive", False) and done_style and status == "done":
             mark = f"{DIM}○{RESET}"
         head = f" {mark} {r['kind']:<5} {r['id']:<18} {status:<8}"
-        lines.append(head[:width])
+        lines.append(clip_display(head, width))
         instr = " ".join(str(r.get("instruction", "")).split())
         if instr and len(lines) < height:
-            lines.append(f"{DIM}    {instr[:width - 6]}{RESET}")
+            lines.append(f"{DIM}    {clip_display(instr, width - 6)}{RESET}")
         if len(lines) < height and r["kind"] == "agent":
             for tl in _tail_lines("\n".join(sink_tail(r["id"], 2)), 2):
                 if len(lines) >= height:
                     break
-                lines.append(f"{DIM}    │ {tl[:width - 8]}{RESET}")
+                lines.append(f"{DIM}    │ {clip_display(tl, width - 8)}{RESET}")
     lines = lines[:height]
-    # right status rail (SPEC_PANEL.md phase 1): compose `left[:LW] pad │
-    # cell` per line when NX_PANEL/`/panel` is on. Disabled -> the frame is
-    # byte-identical to the pre-panel build (lines returned untouched).
-    from ._panel import panel_enabled, panel_cells, panel_width
+    # right status rail (SPEC_PANEL.md): compose `<left pad>│ <cell>` per line
+    # when NX_PANEL/`/panel` is on. Not enabled -> the untouched lines (the
+    # panel-off frame is byte-identical to the pre-panel build), or — when the
+    # user asked for the rail and the terminal is merely too narrow for it —
+    # the same cells as ONE bottom status line (rail-off, compact-on; see
+    # _panel.degraded_line). Both exits below run only when the rail is WANTED
+    # (degraded_line re-checks), so panel-off stays byte-identical.
+    from ._panel import degraded_line, panel_cells, panel_enabled, panel_width
     if not panel_enabled():
-        return lines
+        line = degraded_line(rows, width)
+        if not line:
+            return lines
+        # the compact line is a frame ROW like any other: it must live inside
+        # the same height clamp, so drop the last content row instead of
+        # pushing the frame one row past `rows - 3`.
+        return lines[:max(1, height - 1)] + [line]
     pw = panel_width()
-    lw = max(1, width - pw - 2)
+    # Rail geometry in DISPLAY CELLS, with the terminal's LAST column reserved
+    # (lw + 2 + pw <= width - 1): writing the last cell auto-wraps on most
+    # terminals, which adds a row the Live's erase count never accounted for.
+    # Every slice is the shared ANSI-aware, wcwidth-accurate `_ansi` trio, so a
+    # wide char or an SGR sequence can neither shift the `│` nor wrap the row.
+    lw = max(1, width - pw - 3)
     cells = panel_cells(pw, rows)
     out: list[str] = []
     for i, ln in enumerate(lines):
         cell = cells[i] if i < len(cells) else ""
-        out.append(f"{ln[:lw].ljust(lw)}{DIM}│{RESET} {cell}{RESET}")
+        out.append(f"{pad_display(ln, lw)}{DIM}│{RESET} "
+                   f"{clip_display(cell, pw)}{RESET}")
     return out
 
 
@@ -541,8 +583,12 @@ def _fullscreen_owns_screen() -> bool:
         return False
 
 
-def _region_renderable():
+def _region_renderable(lines: "list[str] | None" = None):
     """The Live's renderable: the frame lines joined and parsed to a `Text`.
+
+    `lines` lets repaint_live reuse the frame it already composed for the
+    change check instead of recomposing (the frame is expensive enough to
+    matter at 4 fps: it walks the surfaces snapshot + the rail's cells).
 
     MUST NOT be a plain `str`: `Live.update(str)` runs it through
     `Console.render_str`, which parses rich MARKUP — and a frame row routinely
@@ -557,7 +603,8 @@ def _region_renderable():
     unobservable.) `no_wrap=True` because the frame is already clipped to the
     terminal width — a wrap would add a row and desync the Live's erase count."""
     from rich.text import Text
-    return Text.from_ansi("\n".join(_live_frame()), no_wrap=True)
+    lines = _live_frame() if lines is None else lines
+    return Text.from_ansi("\n".join(lines), no_wrap=True)
 
 
 def repaint_live(force: bool = False) -> None:
@@ -568,7 +615,7 @@ def repaint_live(force: bool = False) -> None:
     The Live is built with auto_refresh=False, so nothing repaints from an
     external thread; update+refresh run here, under write_lock(), triggered by
     the terminal's owner hooks (see repaint_live_tick)."""
-    global _DASH_DISABLED
+    global _DASH_DISABLED, _LAST_FRAME
     if _fullscreen_owns_screen():
         return
     with _DASH_LOCK:
@@ -579,10 +626,23 @@ def repaint_live(force: bool = False) -> None:
         close_dashboard()
         return
     try:
-        renderable = _region_renderable()
+        lines = _live_frame()
+        # Frame-level change suppression (0.140.0): rich Live rewrites the WHOLE
+        # frame per refresh, so an unchanged frame is pure terminal traffic. The
+        # comparison is on the PLAIN lines (ANSI stripped) — a repaint that
+        # differs only in SGR bytes is not a change the user can see, and a
+        # color-only difference must not buy a full redraw. `force` (the
+        # open-time first paint) always repaints.
+        plain = tuple(strip_ansi_for_display(ln) for ln in lines)
+        cached = _LAST_FRAME
+        if not force and cached is not None and cached[0] is live \
+                and cached[1] == plain:
+            return
+        renderable = _region_renderable(lines)
         with _WRITE_LOCK:
             live.update(renderable)
             live.refresh()
+        _LAST_FRAME = (live, plain)
     except Exception:
         _DASH_DISABLED = True
         try:
@@ -653,11 +713,12 @@ def close_dashboard() -> None:
     transient=True makes the Live erase its own frame on stop(), which is what
     the old _erase_live() did with cursor arithmetic — no _DASH_DRAWN counter to
     keep in sync any more."""
-    global _DASH_OPEN, _DASH_LIVE
+    global _DASH_OPEN, _DASH_LIVE, _LAST_FRAME
     live = None
     with _DASH_LOCK:
         was_open = _DASH_OPEN
         _DASH_OPEN = False
+        _LAST_FRAME = None   # a reopened region must paint at least once
         live, _DASH_LIVE = _DASH_LIVE, None
     if not was_open and live is None:
         return
