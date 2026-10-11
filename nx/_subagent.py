@@ -881,7 +881,8 @@ def _run_sync_agent(instruction: str, max_turns: int, tier: str = "read",
     report path, never the full text. NX_SUBAGENT_SYNC_INLINE=1 restores the
     old full-text-inline foreground result (handy for tests)."""
     job_id = _new_job_id()
-    answer = _run_sync_agent_body(instruction, max_turns, tier=tier, scope=scope)
+    answer = _run_sync_agent_body(instruction, max_turns, tier=tier, scope=scope,
+                                  job_id=job_id)
     # EXIT_STATE convention (write/implement tiers): strip the explicit marker
     # line from the prose the parent sees — the async worker does the same.
     if tier in ("write", "implement") and isinstance(answer, str) \
