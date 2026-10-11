@@ -34,6 +34,7 @@ from ._ansi import (DIM, RESET, C, raw_mode, strip_ansi_for_display,
                     # module attribute before the registry move — callers
                     # do `from ._chatbox import THEMES`)
 from ._commands import arg_options_map, menu_list
+from ._keys import hint_line, print_overlay
 from ._layout import DROPDOWN_MAX_ROWS, TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
 from ._render import BOX_BL, BOX_BR, BOX_H, BOX_TL, BOX_TR, BOX_V
 from ._tty import read_byte, wait_ready
@@ -651,7 +652,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 break
 
         mode = "yolo" if st.YOLO else "manual"
-        hints = f"Enter send · Shift+Enter / ^J newline · ^C cancel · ^L clear · ^Q exit · ^S compress · shift+tab {mode}"
+        # C2 (0.136.0): the hint line and the `?` overlay render from ONE key
+        # registry (nx/_keys.py) — they cannot drift (tests pin both against
+        # KEYS["chatbox"]).
+        hints = hint_line("chatbox", mode=mode)
         max_hints = max(0, box_w - 11)
         truncated = _str_width(hints) > max_hints
         if truncated:
@@ -1065,6 +1069,17 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     return "/exit"
                 elif c in ("\x7f", "\x08"):
                     backspace()
+                elif c == "?" and not any(line.strip() for line in buf):
+                    # C2: `?` at an EMPTY prompt opens the one-frame key
+                    # overlay above the frame; any key dismisses (the frame
+                    # just repaints below it). With text in the buffer `?`
+                    # types normally — the overlay is a prompt-time gesture.
+                    erase_stale_frame()
+                    print_overlay("chatbox",
+                                  mode="yolo" if st.YOLO else "manual")
+                    resync_cursor(advance=False)
+                    render()
+                    continue
                 elif c == "\x15":
                     buf[row] = ""
                     col = 0
