@@ -346,7 +346,7 @@ def _confirm(action: str, preview: Optional[str] = None,
     show_preview = bool(preview) and st.TOOL_OUTPUT_VISIBLE
     if st.YOLO:
         if show_preview:
-            _commit_line(preview)
+            _commit_line("\n" + preview)
         return True
     # Saved allow rules ("A" at a previous prompt, /approval allow) come
     # before the risk classifier: an explicitly-blessed action shape needs no
@@ -358,7 +358,7 @@ def _confirm(action: str, preview: Optional[str] = None,
         short = action if len(action) <= 80 else action[:77] + "..."
         _role_notice("muted", f"  ↳ auto-allow [rule: {pattern!r} ({scope})] {short}")
         if show_preview:
-            _commit_line(preview)
+            _commit_line("\n" + preview)
         return True
     # If a tool spinner is running, keep it alive during the risk-classifier
     # request and pause it only around our own terminal I/O. Otherwise a slow
@@ -398,13 +398,13 @@ def _confirm(action: str, preview: Optional[str] = None,
             pause_spinner()
             _role_notice("muted", f"  ↳ auto-allow [{level}] {action}  ({short})")
             if show_preview:
-                _commit_line(preview)
+                _commit_line("\n" + preview)
             return True
         short = reason if len(reason) <= 80 else reason[:77] + "..."
         lvl_color = {"low": DIM, "medium": C.WARNING, "high": C.ERROR}[level]
         pause_spinner()
         if show_preview:
-            _commit_line(preview)
+            _commit_line("\n" + preview)
         choice = _m._ask_approval(
             f"{C.WARNING}  allow {action}? {lvl_color}[risk: {level.upper()} — {short}]{RESET} "
             # C3: the key tail is generated from the same nx/_keys.py registry
