@@ -66,11 +66,9 @@ def test_sleep_inference_fractional_and_suffixed(nx_fresh):
     assert f("sleep 0.5; ls", 3) == 10
     # suffixed durations (GNU sleep) used to fall through too
     assert f("sleep 2m", 3) == 130
-    # over-1h waits clamp to the default NX_BASH_SLEEP_CAP (3600) + slack
-    assert f("sleep 1h30m && echo done", 3) == 3610
-    assert f("sleep 1h", 3) == 3610
-    # trailing bare number is seconds (GNU semantics: 1h30 = 1h + 30s)
-    assert f("sleep 1h30", 3) == 3610
+    # over-cap waits clamp to the default NX_BASH_SLEEP_CAP (120) + slack
+    assert f("sleep 2h && echo done", 3) == 130
+    assert f("sleep 1h", 3) == 130
     # unchanged behaviors
     assert f("ls && sleep 5", 3) == 15
     assert f("echo x", 3) == 3

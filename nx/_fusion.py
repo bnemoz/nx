@@ -62,7 +62,7 @@ THEN_RUN_PROP = {
         "command": {"type": "string",
                     "description": "Shell command, e.g. the test command"},
         "timeout": {"type": "integer",
-                    "description": "Seconds to wait before backgrounding (default 30; 0 = wait until it exits)"},
+                    "description": "Seconds to wait before backgrounding (default 30; capped at 120 -- long commands should background, not block)"},
     },
     "required": ["command"],
 }

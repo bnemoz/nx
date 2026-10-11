@@ -541,6 +541,12 @@ def _read_log(log_path: str) -> tuple[str, int | None]:
     return out, exit_code
 
 
+# Fail-fast ceiling (0.130.0): an explicit timeout= the model passes is capped
+# here — values like 240 or 900 were seen to stall a whole turn on a command
+# that was never going to finish. 0 disables the cap.
+MAX_EXPLICIT_TIMEOUT = _env_int("NX_BASH_TIMEOUT_CAP", 120)
+
+
 def _infer_timeout_from_sleep(command: str, default: int) -> int:
     """If *command* contains ``sleep N`` (with N in seconds, fractional seconds,
     or a time suffix — ``sleep 0.5``, ``sleep 2m``, ``sleep 1h30m``), return a poll
@@ -553,12 +559,12 @@ def _infer_timeout_from_sleep(command: str, default: int) -> int:
     it gets backgrounded after ~3 s just like anything else.  By recognising
     the sleep we make the "obvious" pattern work again.
 
-    The inferred window is capped at NX_BASH_SLEEP_CAP seconds (default 3600):
+    The inferred window is capped at NX_BASH_SLEEP_CAP seconds (default 120):
     a sleep beyond the cap no longer blocks the turn — the command backgrounds
     after the capped window and the caller gets a PID + log path, which is the
     correct shape for an hour-long wait anyway.
     """
-    cap = _env_int("NX_BASH_SLEEP_CAP", 3600)
+    cap = _env_int("NX_BASH_SLEEP_CAP", 120)
     if cap <= 0:
         # 0/negative = off: restore the old unbounded window (escape hatch for
         # someone who really wants `sleep 1d && …` to block for a day).
@@ -652,7 +658,7 @@ def run_bash(command: str, timeout: int | None = None,
     command).  As a convenience, if your command *does* start with
     ``sleep N …`` the tool auto-extends its poll window to ``N+10`` s
     so the "obvious" pattern still works (capped at NX_BASH_SLEEP_CAP,
-    default 3600 s — a longer sleep just backgrounds with a log path).
+    default 120 s — a longer sleep just backgrounds with a log path).
 
     Use ``timeout=0`` to wait *indefinitely* (the tool blocks until the
     command completes).  To wait for an **already-backgrounded** command,
@@ -663,19 +669,19 @@ def run_bash(command: str, timeout: int | None = None,
     7 days).  Pressing Esc during the poll window immediately backgrounds
     the command.
 
-    NX_BASH_MAX_SECONDS (default 0 = off) is a watchdog on *backgrounded*
+    NX_BASH_MAX_SECONDS (default 1800) is a watchdog on *backgrounded*
     commands: after the poll window expires and the process keeps running, nx
     reaps it at N seconds (SIGTERM, then SIGKILL) instead of leaving it to run
-    forever. Long-running servers/builds that SHOULD outlive the tool call are
-    the normal case — the default is off; set it when you want a hard ceiling.
+    forever. Set NX_BASH_MAX_SECONDS=0 to allow
+    servers/builds that SHOULD outlive the tool call to run unbounded.
 
     With NX_BASH_PROMPT_SECRETS=1, a command that looks like it carries a
     credential (sk-…, ghp_…, AKIA…, a PEM block, …) always prompts, even in
     YOLO mode -- the prompt is the last chance to catch a secret before it
     lands in a log, a file, or a remote host.
 
-    NX_BASH_SLEEP_CAP (default 3600) bounds the sleep-inferred poll window so
-    "sleep 1d && cmd" cannot block the turn for a day; 0 disables the cap.
+    NX_BASH_SLEEP_CAP (default 120) bounds the sleep-inferred poll window so
+    "sleep 10m && cmd" cannot block the turn; 0 disables the cap.
     """
     trap = _heredoc_quote_trap(command) or _heredoc_terminator_suffix_trap(command)
     if trap:
@@ -766,9 +772,11 @@ def run_bash(command: str, timeout: int | None = None,
     if timeout is None:
         timeout = _env_int("NX_BASH_POLL_SECONDS", 3)
         timeout = _infer_timeout_from_sleep(command, timeout)
+    if timeout > 0 and MAX_EXPLICIT_TIMEOUT > 0:
+        timeout = min(timeout, MAX_EXPLICIT_TIMEOUT)
     if timeout <= 0:
         timeout = 999999999  # ∞ — wait indefinitely
-    max_seconds = _env_int("NX_BASH_MAX_SECONDS", 0)
+    max_seconds = _env_int("NX_BASH_MAX_SECONDS", 1800)
     # Staged-path attribution (0.125.0): a raw `git add`/`git commit -a` here
     # stages work this session OWNS, and every later git op of this session
     # would otherwise prompt on it. Snapshot the shared index pre-run and claim
@@ -1035,6 +1043,10 @@ def kill_background(pid: int | str, **_: Any) -> str:
     return f"Sent SIGTERM to PID {pid}. Its log remains in bg-logs for the reaper."
 
 
+# Fail-fast ceiling (0.130.0) for wait_background's indefinite default.
+WAIT_CEILING = _env_int("NX_WAIT_BACKGROUND_CEILING", 1800)
+
+
 def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 0, **_: Any) -> str:
     """Wait for a backgrounded command (started by ``run_bash``) to finish.
 
@@ -1072,7 +1084,9 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
     if not log_path:
         return (f"[error] No background log found for PID {pid}. "
                 "The log may have been cleaned up already.")
-    timeout_s = 999999999 if timeout <= 0 else timeout
+    timeout_s = timeout if timeout > 0 else WAIT_CEILING
+    if WAIT_CEILING > 0:
+        timeout_s = min(timeout_s, WAIT_CEILING)
     status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path,
                        expected_start_time=_find_bg_start_time_for_pid(pid))
     if status == "interrupted":
