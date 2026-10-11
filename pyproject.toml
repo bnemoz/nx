@@ -51,6 +51,13 @@ nx = "nx:main"
 # ≤1, ~+14s wall); per-file packing is deterministic and matches the suite's
 # isolation rules. Revisit after phase 4 of docs/test-architecture.md.
 addopts = "--dist loadfile"
+markers = [
+    # Tier B (docs/test-architecture.md §4): file reloads nx, writes NX_* env
+    # at module scope, or mutates nx globals in place. Auto-applied from
+    # _nxtest._GLOBALS_FILES; opts the file into conftest's module-dict
+    # rewind. Tier A files (unmarked) skip that walk entirely.
+    "globals: test file depends on process-global nx state (module rewind on)",
+]
 
 [tool.setuptools]
 packages = ["nx"]

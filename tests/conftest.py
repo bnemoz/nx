@@ -37,6 +37,9 @@ import threading
 
 import pytest
 
+# re-exported so every test module gets the fixture without importing _nxtest
+from _nxtest import nx_state_reset, _GLOBALS_FILES  # noqa: E402,F401
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -158,6 +161,20 @@ _BASELINE_MODS = {
 _INTENTS = {}
 
 
+def pytest_collection_modifyitems(config, items):
+    """Auto-apply the `globals` marker from the file list + explicit marks.
+
+    A file is Tier B when it is listed in _nxtest._GLOBALS_FILES (the Phase 2
+    migration queue) or carries an explicit @pytest.mark.globals. Every other
+    file is Tier A and skips conftest's expensive module-dict rewind.
+    """
+    for item in items:
+        _rel = os.path.relpath(str(item.fspath), os.path.dirname(__file__))
+        if (_rel in _GLOBALS_FILES
+                or _rel.rsplit("/", 1)[-1] in _GLOBALS_FILES):
+            item.add_marker(pytest.mark.globals)
+
+
 def pytest_collectstart(collector):
     """Import each test module against a scrubbed NX_* env.
 
@@ -191,13 +208,20 @@ def pytest_collectreport(report):
     _scrub_env()  # next module's import starts clean too
 
 
-def _restore(fspath):
+def _restore(fspath, item=None):
     """Rewind NX_* env, cwd, and nx.* module state to the pristine baseline.
 
     Runs before every test's setup (so no state leaks in from earlier tests,
     whether serial or xdist-scrambled) and after every test's teardown (so a
     test that forgets to clean up can't poison its neighbors).
+
+    Phase 1 (docs/test-architecture.md): the expensive nx.* module-dict walk
+    runs only for `globals`-marked (Tier B) files; everything else here — env
+    rewind, the four hidden-state homes, the Live-stack clear, the recovery
+    store, SESSION_HOME — stays universal because it is ~1ms.
     """
+    # No item (the race regression test calls _restore directly): full rewind.
+    _marked = item is None or item.get_closest_marker("globals") is not None
     # cwd: a fixture that os.chdir(tmp_path) without restoring it must not
     # leave later tests resolving relative paths ("README.md", "foo.py")
     # against a temp dir — that was the serial-run failure in
@@ -224,7 +248,10 @@ def _restore(fspath):
     # are cleared+refilled IN PLACE so identity shared across nx modules
     # (e.g. nx._state._TOOL_RESULT_CACHE re-exported by nx/__init__) survives;
     # names a test added that weren't in the baseline are dropped.
-    for _name, _mod in list(sys.modules.items()):
+    # MARKER GATE (phase 1): only `globals`-marked (Tier B) files pay this
+    # walk — it was ~2min across a serial run. Tier A files rely on the
+    # nx_state_reset fixture + their own monkeypatch hygiene.
+    for _name, _mod in (list(sys.modules.items()) if _marked else []):
         if not _is_nx(_name):
             continue
         # A daemon worker thread (subagent tier / worktree prefetch: e.g.
@@ -291,6 +318,9 @@ def _restore(fspath):
     # live on a threading.local, a ContextVar, or were added by a test that
     # reloaded nx (so the live module objects are forks the baseline never
     # snapshotted). Resolve every module via sys.modules AT RESET TIME.
+    # Kept universal (not marker-gated): ~1ms, and it deliberately stays in
+    # the shared unmarked path too — it is the same body as _nxtest's
+    # nx_state_reset fixture teardown, which runs for every test.
     _sa = sys.modules.get("nx._subagent")
     _tls = sys.modules.get("nx._subagent_tls")
     if _tls is not None:
@@ -366,7 +396,7 @@ def pytest_runtest_setup(item):
     setdefaults above; setdefault keeps any value a test deliberately set
     (test_context_window opts back into the overrun probe).
     """
-    _restore(str(item.fspath))
+    _restore(str(item.fspath), item=item)
     for _k, _v in _DEFAULTS.items():
         os.environ.setdefault(_k, _v)
     yield
@@ -377,7 +407,7 @@ def pytest_runtest_teardown(item, nextitem):
     yield
     # post-yield: after fixture finalization (monkeypatch.undo et al.) has
     # restored what it patched, wipe whatever the test left behind.
-    _restore(str(item.fspath))
+    _restore(str(item.fspath), item=item)
 
 
 @pytest.hookimpl(tryfirst=True)
