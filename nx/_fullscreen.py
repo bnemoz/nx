@@ -359,7 +359,11 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
         notifier.open()
 
     def paint(lines: list[str]) -> None:
-        rows = list(lines)[:max(1, height)]
+        # Enforce the render contract ("clipped to width") centrally: a view
+        # line wider than the terminal autowraps into an extra physical row,
+        # desyncing the frame. clip_display is ANSI-aware, so SGR survives.
+        from ._ansi import clip_display
+        rows = [clip_display(ln, width) for ln in lines][:max(1, height)]
         out.write(FRAME_HOME + FRAME_ERASE + "\n".join(rows))
         out.flush()
 
