@@ -25,7 +25,10 @@ from typing import Any
 
 from . import _state as st
 from ._env import _env_float, _env_int
-from ._interrupt import _USER_INTERRUPTED, _watch_for_interrupts
+from ._interrupt import (
+    _USER_INTERRUPTED, _watch_for_interrupts, cancel_requested,
+    clear_tool_cancel, register_tool_cancel,
+)
 from ._logging import _log_event
 from ._ripgrep import prefer_ripgrep
 from ._private import open_private, private_dir, touch_private
@@ -362,6 +365,9 @@ def list_bg_jobs(mine_only: bool = True) -> list[dict[str, Any]]:
             "log_path": log_path,
             "owner_pid": data.get("owner_pid"),
             "cwd": data.get("cwd", ""),
+            # C1: true once the hard-cancel ladder killed this job (/bg and
+            # the live panel render it as `killed` instead of `exited`).
+            "killed": bool(data.get("killed")),
             "tail": _tail_last_line(log_path) if log_path else "",
         })
     jobs.sort(key=lambda j: j.get("started") or 0, reverse=True)
@@ -444,6 +450,68 @@ def _tail_last_line(log_path: str, maxlen: int = 70) -> str:
     return ""
 
 
+# Grace between SIGTERM and SIGKILL on a hard cancel (UIUX_SPEC C1).
+CANCEL_KILL_GRACE = _env_float("NX_CANCEL_KILL_GRACE", 2.0)
+
+
+def _mark_job_killed(pid: int | str) -> None:
+    """Stamp `"killed": true` into the job's bg-pid map so /bg lists it as
+    killed (UIUX_SPEC C1: the ladder's kill is visible in the dashboard, not
+    a vanished process). Best-effort: bookkeeping must never break the tool."""
+    pid = str(pid)
+    if not pid.isdigit():
+        return
+    try:
+        p = os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")
+        with open(p) as f:
+            data = json.load(f)
+        data["killed"] = True
+        with open_private(p) as f:
+            json.dump(data, f)
+    except (OSError, IOError, json.JSONDecodeError):
+        pass
+
+
+def cancel_kill_group(pid: int | str, command: str = "") -> None:
+    """Hard-cancel a detached job: SIGTERM its process group, SIGKILL after
+    CANCEL_KILL_GRACE seconds if it survives (UIUX_SPEC C1).
+
+    Non-blocking: the escalation runs on the interrupt-watcher thread (double
+    Esc) or inside a tool wait (Ctrl+C), and neither may stall on the grace
+    period — so the SIGKILL follow-up rides a short-lived daemon thread that
+    exits as soon as the group is gone (bounded: at most one grace period).
+    The job runs in its own session (start_new_session), so killing the group
+    takes its children down too — same reasoning as the NX_BASH_MAX_SECONDS
+    watchdog. The job is marked killed in its map file for /bg."""
+    _mark_job_killed(pid)
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return
+    try:
+        os.killpg(os.getpgid(pid_i), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Group already gone (or not ours) — still log the cancellation.
+        _log_event("tool", f"hard cancel: job pid {pid} already gone: {command[:120]}")
+        return
+
+    def _escalate() -> None:
+        deadline = time.time() + CANCEL_KILL_GRACE
+        while time.time() < deadline:
+            if not _pid_is_alive(pid_i):
+                break
+            time.sleep(0.1)
+        else:
+            if _pid_is_alive(pid_i):
+                try:
+                    os.killpg(os.getpgid(pid_i), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+        _log_event("tool", f"hard cancel killed bg job pid {pid}: {command[:120]}")
+
+    threading.Thread(target=_escalate, daemon=True, name="nx-cancel-kill").start()
+
+
 def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
               log_path: str | None = None, expected_start_time: str | None = None) -> str:
     """Poll *pid* up to *timeout* seconds.
@@ -452,6 +520,9 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
         "exited"      — process finished
         "timeout"     — poll window expired, process still alive
         "interrupted" — Esc was pressed (only if *check_esc* is True)
+        "cancelled"   — the C1 hard-cancel ladder fired (sticky; checked on
+                        every tick whether Esc armed us or not, so a Ctrl+C
+                        from outside still ends an unwatched wait)
 
     Uses ``os.kill(pid, 0)`` (a kernel-level signal-0 probe) instead of
     shelling out to the external ``kill`` binary.  Some minimal Docker
@@ -495,6 +566,10 @@ def _poll_pid(pid: int | str, timeout: float, check_esc: bool = False,
         last_tail = None
         _last_label_at = time.monotonic()
         while time.time() < deadline:
+            # C1: a hard cancel outranks the plain-Esc backgrounding — the
+            # wait ends and the CALLER kills (it knows pid + command).
+            if cancel_requested():
+                return "cancelled"
             if not _pid_is_alive(pid_i, expected_start_time):
                 return "exited"
             if check_esc and _USER_INTERRUPTED.is_set():
@@ -800,8 +875,30 @@ def run_bash(command: str, timeout: int | None = None,
     except Exception:
         pre_staged = None  # attribution is best-effort; the guard is not
     pid, log_path = _run_bash(command, _cwd=_cwd)
-    status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
-                       expected_start_time=_find_bg_start_time_for_pid(pid))
+    # C1: publish the kill hook for the hard-cancel ladder for exactly the
+    # duration of the wait (cleared in the finally — the slot can never point
+    # at a stale pid between tools).
+    register_tool_cancel(lambda: cancel_kill_group(pid, command))
+    try:
+        status = _poll_pid(pid, timeout, check_esc=True, log_path=log_path,
+                           expected_start_time=_find_bg_start_time_for_pid(pid))
+    except KeyboardInterrupt:
+        # C1: Ctrl+C during the poll window is a hard cancel, not a turn
+        # unwind — convert it HERE so the hook (and the kill below) runs while
+        # the pid is still ours to kill. The model gets the cancelled result,
+        # and the sticky flag makes the dispatch boundary skip the rest of
+        # the tool group.
+        from ._interrupt import request_hard_cancel
+        request_hard_cancel("Ctrl+C in run_bash")
+        status = "cancelled"
+    finally:
+        clear_tool_cancel()
+    if status == "cancelled":
+        cancel_kill_group(pid, command)
+        _mark_bg_notice_seen(pid)
+        _log_event("tool", f"run_bash hard-cancelled by user (pid {pid}): {command[:120]}")
+        return (f"[cancelled] PID {pid} was killed (SIGTERM, then SIGKILL after "
+                f"{CANCEL_KILL_GRACE:g}s). Partial output: {log_path}")
     if status == "interrupted":
         _log_event("tool", f"run_bash interrupted by user while polling (pid {pid})")
         return (f"[background] PID {pid} | log: {log_path}\n"
@@ -1093,8 +1190,30 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
     timeout_s = timeout if timeout > 0 else WAIT_CEILING
     if WAIT_CEILING > 0:
         timeout_s = min(timeout_s, WAIT_CEILING)
-    status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path,
-                       expected_start_time=_find_bg_start_time_for_pid(pid))
+    # C1: same cancel-hook contract as run_bash — waiting on a bg job is a
+    # cancellable wait, and cancelling KILLS the job (the user asked for it).
+    _wcmd = ""
+    try:
+        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
+            _wcmd = json.load(f).get("command", "")
+    except (OSError, IOError, json.JSONDecodeError):
+        pass
+    register_tool_cancel(lambda: cancel_kill_group(pid, _wcmd))
+    try:
+        status = _poll_pid(pid, timeout_s, check_esc=True, log_path=log_path,
+                           expected_start_time=_find_bg_start_time_for_pid(pid))
+    except KeyboardInterrupt:
+        from ._interrupt import request_hard_cancel
+        request_hard_cancel("Ctrl+C in wait_background")
+        status = "cancelled"  # C1: Ctrl+C hard-cancels the wait (see run_bash)
+    finally:
+        clear_tool_cancel()
+    if status == "cancelled":
+        cancel_kill_group(pid, _wcmd)
+        _mark_bg_notice_seen(pid)
+        _log_event("tool", f"wait_background hard-cancelled (pid {pid})")
+        return (f"[cancelled] PID {pid} was killed (SIGTERM, then SIGKILL after "
+                f"{CANCEL_KILL_GRACE:g}s). Partial output: {log_path}")
     if status == "interrupted":
         return (f"[interrupted] PID {pid} still running. "
                 f"Check later with read_file('{os.path.abspath(log_path)}')")

@@ -179,8 +179,12 @@ def _surfaces_snapshot() -> list[dict]:
         # jobs on the machine; /tabs is a per-session dashboard.
         for job in _m.list_bg_jobs():
             alive = job.get("alive", False)
+            # C1: a hard-cancelled job shows as `killed`, not a bare
+            # `finished` — the ladder's outcome stays visible in /tabs.
+            _status = ("running" if alive
+                       else ("killed" if job.get("killed") else "finished"))
             rows.append({"instruction": job.get("command") or job.get("instruction") or "",
-                         "status": "running" if alive else "finished",
+                         "status": _status,
                          "tail": job.get("tail") or "", **job,
                          "kind": "bg", "id": f"bg-{job['pid']}", "alive": alive})
     except Exception:
@@ -216,7 +220,7 @@ def _surfaces_snapshot() -> list[dict]:
 def _glyph(alive: bool, status: str) -> str:
     if alive:
         return f"{C.SUCCESS}●{RESET}"
-    if status in ("error", "partial"):
+    if status in ("error", "partial", "killed"):
         return f"{C.ERROR}✗{RESET}"
     if status == "done":
         return f"{C.ACCENT}✔{RESET}"

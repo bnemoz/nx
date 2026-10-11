@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from ._ansi import DIM, RESET, C, strip_ansi_for_display
 from ._approval import _EscToChat
+from ._interrupt import cancel_requested, _HARD_CANCEL
 from . import _state as st
 from . import run_tool, _tool_args_parse_error
 from ._compress import _nudge_current_user_turn, _flush_pending_background_notice
@@ -252,8 +253,31 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         for c in ordered]})
     esc_action = None
     for idx, (c, args) in enumerate(zip(ordered, parsed_args)):
+        # C1 boundary check: once the hard-cancel ladder has fired, the whole
+        # remaining group is cancelled — the model must see a cancelled
+        # result for EVERY call (the transcript stays honest; a tool result
+        # must never silently vanish).
+        if cancel_requested():
+            messages.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "CANCELLED by user (hard cancel) — not started"})
+            for c2 in ordered[idx + 1:]:
+                messages.append({"role": "tool", "tool_call_id": c2["id"],
+                                 "content": "SKIPPED (user hard-cancelled the turn)"})
+            break
         try:
             result = run_tool(c["name"], args)
+        except KeyboardInterrupt:
+            # C1: Ctrl+C landing inside a tool body = cooperative hard cancel
+            # (kill the live hook, skip the rest of the group) instead of a
+            # raw turn unwind that would leave tool calls without results.
+            from ._interrupt import request_hard_cancel
+            request_hard_cancel("Ctrl+C in tool")
+            messages.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "CANCELLED by user (Ctrl+C hard cancel)"})
+            for c2 in ordered[idx + 1:]:
+                messages.append({"role": "tool", "tool_call_id": c2["id"],
+                                 "content": "SKIPPED (user hard-cancelled the turn)"})
+            break
         except _EscToChat as e:
             esc_action = e.args[0] if e.args else c["name"]
             # Record this call as cancelled, and fill in results for any
@@ -273,6 +297,18 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         messages.append({"role": "user", "content":
             "[User pressed Esc at a tool approval prompt and returned to chat to "
             "add more input. Acknowledge briefly and wait for their next message.]"})
+        return TURN_ESC
+    if cancel_requested() and esc_action is None:
+        # The group consumed the cancel (this call + the skip-fill above):
+        # clear so a later async wake/sub-agent turn doesn't inherit it. The
+        # next interactive model_turn also clears it defensively.
+        _HARD_CANCEL.clear()
+        if not quiet:
+            print(f"{C.WARNING}  ↳ turn hard-cancelled — remaining tools skipped{RESET}")
+        messages.append({"role": "user", "content":
+            "[User hard-cancelled this turn (double Esc / Ctrl+C). Any running "
+            "tool was killed; the cancelled tool results above are final. "
+            "Acknowledge briefly and wait for their next message.]"})
         return TURN_ESC
     _flush_pending_background_notice(messages)
     return TURN_TOOL
@@ -356,7 +392,12 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
         return TURN_TOOL
     obs = []
     esc_action = None
-    for n, a in calls:
+    for ci, (n, a) in enumerate(calls):
+        if cancel_requested():  # C1 boundary check (see native path above)
+            obs.append(f"Observation ({n}): CANCELLED by user (hard cancel) — not started")
+            for n2, _a2 in calls[ci + 1:]:
+                obs.append(f"Observation ({n2}): SKIPPED (user hard-cancelled the turn)")
+            break
         try:
             res = run_tool(n, a)
             # A gated read_image that slipped through on a text-protocol turn
@@ -367,6 +408,11 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
                 from ._images import _parts_preview
                 res = _parts_preview(res)
             obs.append(f"Observation ({n}): {res}")
+        except KeyboardInterrupt:
+            from ._interrupt import request_hard_cancel
+            request_hard_cancel("Ctrl+C in tool")
+            obs.append(f"Observation ({n}): CANCELLED by user (Ctrl+C hard cancel)")
+            break
         except _EscToChat as e:
             esc_action = e.args[0] if e.args else n
             obs.append(f"Observation ({n}): CANCELLED by user (Esc)")
@@ -376,6 +422,15 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
                    "to add more input. Acknowledge briefly and wait for their next message.]")
         if not quiet:
             print(f"{C.WARNING}  ↳ escaped approval of {esc_action!r} — back to chat input{RESET}")
+        messages.append({"role": "user", "content": "\n".join(obs)})
+        return TURN_ESC
+    if cancel_requested():
+        obs.append("[User hard-cancelled this turn (double Esc / Ctrl+C). Any running "
+                   "tool was killed; the cancelled tool results above are final. "
+                   "Acknowledge briefly and wait for their next message.]")
+        _HARD_CANCEL.clear()  # consumed (see native-path note)
+        if not quiet:
+            print(f"{C.WARNING}  ↳ turn hard-cancelled — remaining tools skipped{RESET}")
         messages.append({"role": "user", "content": "\n".join(obs)})
         return TURN_ESC
     messages.append({"role": "user", "content": "\n".join(obs)})

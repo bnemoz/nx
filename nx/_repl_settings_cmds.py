@@ -541,7 +541,12 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
         print(f"{DIM}  background jobs (newest first):{RESET}")
     mine = os.getpid()
     for j in jobs:
-        status = f"{C.SUCCESS}running{RESET}" if j["alive"] else f"{DIM}done{RESET}"
+        if j["alive"]:
+            status = f"{C.SUCCESS}running{RESET}"
+        elif j.get("killed"):  # C1: hard-cancelled by the Esc ladder / Ctrl+C
+            status = f"{C.ERROR}killed{RESET}"
+        else:
+            status = f"{DIM}done{RESET}"
         if show_all and j.get("owner_pid") != mine:
             status = f"{DIM}other session{RESET}"
         age = _fmt_when(j["started"]) if j["started"] else "?"

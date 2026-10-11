@@ -326,6 +326,9 @@ from ._ansi import C
 from ._interrupt import (
     _INTERRUPT_ARMED, _INTERRUPT_EXIT, _USER_INTERRUPTED, _INTERRUPT_RESTORED,
     _interrupt_watcher, _ensure_interrupt_watcher, _watch_for_interrupts,
+    # C1 (0.136.0): the hard-cancel ladder primitives
+    _HARD_CANCEL, cancel_requested, register_tool_cancel, clear_tool_cancel,
+    request_hard_cancel,
 )
 
 

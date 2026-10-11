@@ -1,9 +1,29 @@
 """Lets the user press Esc during model generation to stop the stream and drop
 back to the prompt. A SINGLE daemon thread, started once and parked between
 turns, watches stdin for bare Esc. The main loop checks _USER_INTERRUPTED
-between chunks and closes the stream on interrupt. Tools are never killed;
-run_bash and wait_background arm the watcher while polling, so Esc ends only their wait;
-hard cancellation remains a separate follow-up.
+between chunks and closes the stream on interrupt. Esc ends only the current
+wait; the ESCALATION LADDER (UIUX_SPEC C1, 0.136.0) adds hard cancellation:
+
+  Esc (1x)        interrupt the current wait (existing: stream chunk loop,
+                  _poll_pid -> "interrupted", command keeps running).
+  Esc (2x within  NX_ESC_LADDER_SECONDS, default 0.8s) -> _HARD_CANCEL fires:
+      Esc)        the running tool's registered cancel hook runs (run_bash/
+                  wait_background: SIGTERM the process group, SIGKILL after
+                  2s; job marked killed in /bg), and every tool-dispatch
+                  boundary in _turn_toolcalls skips the rest of the group
+                  with a CANCELLED result (the model is always told).
+  Ctrl+C          same hard cancel, one motion: the KeyboardInterrupt
+                  landing in a tool call converts to request_hard_cancel().
+
+Threads cannot be killed, so sub-agent (and other cooperative) tools get a
+CHECK-AT-BOUNDARY contract instead: poll loops check cancel_requested()
+(~every 100ms) and tool dispatch checks it before every call — that is the
+honest, bounded form of "cooperative cancellation". register_tool_cancel()
+holds AT MOST one live hook (the current tool clears it in its finally), so
+the ladder can never aim at a stale pid. Everything is event-based: no new
+threads live between cancellations, and the watcher stays the persistent
+singleton described below (the thread-leak history further down is the
+regression this design must not revive).
 
 Esc-then-type redirect: once a bare Esc fires, the watcher doesn't just park —
 it keeps draining stdin (`_drain_redirect_text`) for a couple seconds so a user
@@ -83,6 +103,64 @@ _INTERRUPT_RESTORED.set()  # initially: nothing to restore (OK to proceed)
 _INTERRUPT_CAPTURE_REDIRECT = threading.Event()
 _INTERRUPT_CAPTURE_REDIRECT.set()
 st._INTERRUPT_THREAD = None
+
+# ------------------------------------------------- hard-cancel ladder (C1) ---
+# Set by a second Esc inside the ladder window, by Ctrl+C landing in a tool
+# call, or by request_hard_cancel() directly. Checked by tool-wait poll loops
+# (_poll_pid -> "cancelled") and by the tool-dispatch loop in
+# _turn_toolcalls (skip the rest of the group). Cleared at the start of every
+# interactive model turn (model_turn) — never by _watch_for_interrupts, which
+# arms/disarms between tools of the SAME group and must let the flag survive
+# from one tool of the group to the next.
+_HARD_CANCEL = threading.Event()
+# At most one tool is running on the owner thread at a time, so a single
+# slot + lock is the whole registry. The hook must be non-blocking (spawn a
+# bounded daemon thread if it needs a grace period — see _bash_jobs).
+_CANCEL_FN = None
+_CANCEL_LOCK = threading.Lock()
+# Wall-clock of the last watcher Esc fire (module-level, survives the disarm
+# gap BETWEEN tools — a second Esc that lands during the next tool's armed
+# window still escalates). Drives the ladder window below.
+_LAST_ESC_AT = [0.0]
+
+
+def _ladder_window() -> float:
+    """Esc-escalation window in seconds (NX_ESC_LADDER_SECONDS, default 0.8)."""
+    return _env_float("NX_ESC_LADDER_SECONDS", 0.8)
+
+
+def cancel_requested() -> bool:
+    """Cooperative cancellation check for long waits and dispatch boundaries."""
+    return _HARD_CANCEL.is_set()
+
+
+def register_tool_cancel(fn) -> None:
+    """Publish the current tool's kill hook (called by run_bash/wait_background
+    around their poll window; cleared in their finally)."""
+    global _CANCEL_FN
+    with _CANCEL_LOCK:
+        _CANCEL_FN = fn
+
+
+def clear_tool_cancel() -> None:
+    global _CANCEL_FN
+    with _CANCEL_LOCK:
+        _CANCEL_FN = None
+
+
+def request_hard_cancel(reason: str = "") -> bool:
+    """Escalate: mark the turn hard-cancelled and fire the live tool hook.
+    Returns whether a tool hook ran. Idempotent-safe (the event is sticky
+    until the next interactive turn starts); never raises."""
+    _HARD_CANCEL.set()
+    with _CANCEL_LOCK:
+        fn = _CANCEL_FN
+    if fn is not None:
+        try:
+            fn()
+        except Exception:
+            pass  # a kill hook must never take down the caller
+    return fn is not None
 
 # ---------------------------------------------------------------- wake pipe ---
 # PF-06 (0.56.0): disarming used to leave the watcher blocked in a 0.1s
@@ -245,9 +323,15 @@ def _run_armed_session(fd: int, old: Any) -> bool:
                     pass
                 continue
             now = time.time()
-            if now - last_fire < 0.25:  # debounce — don't fire twice in a row
+            gap = now - last_fire
+            if gap < 0.08:  # key-repeat debounce — a held key is not a ladder
                 continue
+            # C1 ladder: a second Esc inside NX_ESC_LADDER_SECONDS escalates
+            # to a hard cancel of the running tool (see _HARD_CANCEL above).
+            if 0.08 <= gap <= _ladder_window():
+                request_hard_cancel("double Esc")
             last_fire = now
+            _LAST_ESC_AT[0] = now
             _USER_INTERRUPTED.set()
             # Leave _INTERRUPT_ARMED set: main will clear it on disarm,
             # which exits the inner loop and parks us. In the meantime
@@ -361,6 +445,10 @@ def _drain_redirect_text(fd: int, old_mode: Any) -> str:
             continue
         if c == b"\x1b":  # a second Esc while draining: abandon the redirect
             buf = []
+            # C1 ladder: the drain runs right after the first Esc fired, so
+            # an Esc inside the window here is the 2x-press escalation too.
+            if time.time() - _LAST_ESC_AT[0] <= _ladder_window():
+                request_hard_cancel("double Esc")
             break
         try:
             ch = c.decode("utf-8")
@@ -404,6 +492,7 @@ def _ensure_interrupt_watcher() -> None:
     _INTERRUPT_ARMED.clear()
     _INTERRUPT_RESTORED.set()  # fresh thread: nothing to restore yet
     _USER_INTERRUPTED.clear()
+    _HARD_CANCEL.clear()
     st._INTERRUPT_REDIRECT_TEXT = ""
     st._INTERRUPT_REDIRECT_SUBMITTED = False
     # Go through the top-level package (not the bare name in this module's

@@ -18,7 +18,7 @@ from ._ansi import (
     DIM, RESET, LifeSpinner, C,
 )
 from ._interrupt import (
-    _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
+    _HARD_CANCEL, _INTERRUPT_ARMED, _INTERRUPT_RESTORED, _USER_INTERRUPTED,
     _disarm_interrupt_armed, _ensure_interrupt_watcher,
 )
 from ._metrics import _abbr, _normalize_usage, _record_usage
@@ -493,6 +493,10 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     _ensure_interrupt_watcher()
     if not quiet and not _watcher_disabled():
         _USER_INTERRUPTED.clear()
+        # C1: a hard cancel lives for exactly one turn — the tool group it
+        # killed plus the skip-fill of its remainder. A fresh interactive
+        # turn starts clean (quiet loops never clear: they don't own stdin).
+        _HARD_CANCEL.clear()
         st._INTERRUPT_REDIRECT_TEXT = ""
         st._INTERRUPT_REDIRECT_SUBMITTED = False
     # Reset the per-turn bg-completion scan flag: the first tool call of this
