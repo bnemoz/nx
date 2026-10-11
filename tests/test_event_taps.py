@@ -176,8 +176,12 @@ def test_quiet_agent_loop_produces_stream_status_and_tool_kinds(nx_fresh, monkey
     job = _job_id(spawn_agent("q", async_=True))
     started.wait(timeout=10)
     from nx._subagent_tls import sink_tail
-    _wait_for(lambda: any("[tool]" in ln for ln in sink_tail(job, 40)),
-              "the tool tap lines")
+    # Wait for BOTH tap kinds: the tool tap lands a few statements before the
+    # stream tap on the worker thread, so waiting on "[tool]" alone could read
+    # the tail in between (a flake under -n auto load).
+    _wait_for(lambda: any("[tool]" in ln for ln in sink_tail(job, 40))
+              and any("[stream]" in ln for ln in sink_tail(job, 40)),
+              "the tool and stream tap lines")
     lines = sink_tail(job, 40)
     kinds = {ln.split("]")[0].lstrip("[") for ln in lines}
     assert {"tool", "stream", "status"} <= kinds, f"kinds seen: {kinds} / {lines}"

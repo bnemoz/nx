@@ -328,6 +328,10 @@ def run_repl_commands(commands):
         captured.write(" ".join(str(x) for x in a) + (kw.get("end", "\n")))
 
     builtins.print = fake_print
+    # Pin argv: under pytest, sys.argv is pytest's argv and nx's main() reads
+    # it (it would die with "unknown command 'tests/...'").
+    old_argv = sys.argv
+    sys.argv = ["nx"]
     prompts = iter(list(commands) + ["/quit"])
     m.read_multiline = lambda history=None, initial=None: next(prompts)
     m.open_stream = lambda *a, **k: iter([])  # no network
@@ -338,113 +342,120 @@ def run_repl_commands(commands):
         m.main()
     finally:
         builtins.print = real_print
+        sys.argv = old_argv
     return captured.getvalue()
 
 
-m.ACTIVE = _FakeSource(10000)
-# Start from a known state.
-m.AUTOCOMPRESS_PERCENT = 85
+def test_autocompress_command_parsing():
+    """The whole TEST 4 sequence runs through one test function so module
+    import never calls m.main() (under pytest, sys.argv is pytest's argv —
+    nx's main() would read it and fail with 'unknown command')."""
+    m.ACTIVE = _FakeSource(10000)
+    # Start from a known state.
+    m.AUTOCOMPRESS_PERCENT = 85
 
-# bare /autocompress → shows current %
-out = run_repl_commands(["/autocompress"])
-assert "auto-compress: 85%" in out, f"bare /autocompress should show 85%: {out!r}"
-print("  /autocompress → shows 85% → PASS")
+    # bare /autocompress → shows current %
+    out = run_repl_commands(["/autocompress"])
+    assert "auto-compress: 85%" in out, f"bare /autocompress should show 85%: {out!r}"
+    print("  /autocompress → shows 85% → PASS")
 
-# /autocompress 70 → sets to 70
-out = run_repl_commands(["/autocompress 70"])
-assert "auto-compress: 70%" in out, f"/autocompress 70 should set 70%: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == 70
-print("  /autocompress 70 → sets 70% → PASS")
+    # /autocompress 70 → sets to 70
+    out = run_repl_commands(["/autocompress 70"])
+    assert "auto-compress: 70%" in out, f"/autocompress 70 should set 70%: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == 70
+    print("  /autocompress 70 → sets 70% → PASS")
 
-# /autocompress off → disables
-out = run_repl_commands(["/autocompress off"])
-assert "auto-compress: off" in out, f"/autocompress off should disable: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == 0
-print("  /autocompress off → disables → PASS")
+    # /autocompress off → disables
+    out = run_repl_commands(["/autocompress off"])
+    assert "auto-compress: off" in out, f"/autocompress off should disable: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == 0
+    print("  /autocompress off → disables → PASS")
 
-# bare /autocompress when off → shows "off"
-out = run_repl_commands(["/autocompress"])
-assert "auto-compress: off" in out, f"bare when off should show off: {out!r}"
-print("  /autocompress (off) → shows off → PASS")
+    # bare /autocompress when off → shows "off"
+    out = run_repl_commands(["/autocompress"])
+    assert "auto-compress: off" in out, f"bare when off should show off: {out!r}"
+    print("  /autocompress (off) → shows off → PASS")
 
-# /autocompress on → re-enables at the configured default (85 here)
-out = run_repl_commands(["/autocompress on"])
-assert f"auto-compress: {m.AUTOCOMPRESS_DEFAULT}%" in out, \
-    f"/autocompress on should restore the configured default: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == m.AUTOCOMPRESS_DEFAULT
-print(f"  /autocompress on → re-enables {m.AUTOCOMPRESS_DEFAULT}% (configured default) → PASS")
+    # /autocompress on → re-enables at the configured default (85 here)
+    out = run_repl_commands(["/autocompress on"])
+    assert f"auto-compress: {m.AUTOCOMPRESS_DEFAULT}%" in out, \
+        f"/autocompress on should restore the configured default: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == m.AUTOCOMPRESS_DEFAULT
+    print(f"  /autocompress on → re-enables {m.AUTOCOMPRESS_DEFAULT}% (configured default) → PASS")
 
-# /autocompress 0 → disables (alias for off)
-out = run_repl_commands(["/autocompress 0"])
-assert "auto-compress: off" in out, f"/autocompress 0 should disable: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == 0
-print("  /autocompress 0 → disables → PASS")
+    # /autocompress 0 → disables (alias for off)
+    out = run_repl_commands(["/autocompress 0"])
+    assert "auto-compress: off" in out, f"/autocompress 0 should disable: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == 0
+    print("  /autocompress 0 → disables → PASS")
 
-# /autocompress 999 → out of range
-m.AUTOCOMPRESS_PERCENT = 50
-out = run_repl_commands(["/autocompress 999"])
-assert "out of range" in out, f"999 should be out of range: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == 50, "should be unchanged after invalid input"
-print("  /autocompress 999 → rejected, unchanged → PASS")
+    # /autocompress 999 → out of range
+    m.AUTOCOMPRESS_PERCENT = 50
+    out = run_repl_commands(["/autocompress 999"])
+    assert "out of range" in out, f"999 should be out of range: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == 50, "should be unchanged after invalid input"
+    print("  /autocompress 999 → rejected, unchanged → PASS")
 
-# /autocompress abc → usage message
-out = run_repl_commands(["/autocompress abc"])
-assert "usage" in out.lower(), f"abc should show usage: {out!r}"
-print("  /autocompress abc → usage → PASS")
+    # /autocompress abc → usage message
+    out = run_repl_commands(["/autocompress abc"])
+    assert "usage" in out.lower(), f"abc should show usage: {out!r}"
+    print("  /autocompress abc → usage → PASS")
 
 # ---------------------------------------------------------------------------
 # 5. ENV var NX_AUTOCOMPRESS_PERCENT seeds the default.
 # ---------------------------------------------------------------------------
-print("TEST 5: NX_AUTOCOMPRESS_PERCENT env var")
-import importlib
-saved_env = dict(os.environ)
-for k in list(os.environ):
-    if k.startswith("NX_"):
-        del os.environ[k]
-os.environ["NX_ENV_FILE"] = "/dev/null"
-os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
-# the del-loop above wiped conftest's NX_SKIP_STARTUP_PROBES; re-pin so the
-# reloads below don't dial localhost:8080 three times (~3.5s each)
-os.environ["NX_SKIP_STARTUP_PROBES"] = "1"
-os.environ["NX_AUTOCOMPRESS_PERCENT"] = "60"
-sys.argv = ["nx.py"]
-importlib.reload(m)
-assert m.AUTOCOMPRESS_PERCENT == 60, f"env 60 → {m.AUTOCOMPRESS_PERCENT}"
-print(f"  NX_AUTOCOMPRESS_PERCENT=60 → {m.AUTOCOMPRESS_PERCENT} → PASS")
+def test_autocompress_env_seeds_default():
+    """TEST 5: NX_AUTOCOMPRESS_PERCENT env var seeds the default (runs inside a
+    test function for the same argv reason as test_autocompress_command_parsing)."""
+    import importlib
+    saved_env = dict(os.environ)
+    for k in list(os.environ):
+        if k.startswith("NX_"):
+            del os.environ[k]
+    os.environ["NX_ENV_FILE"] = "/dev/null"
+    os.environ["NX_SOURCE_LOCAL_BASE_URL"] = "http://localhost:8080/v1"
+    # the del-loop above wiped conftest's NX_SKIP_STARTUP_PROBES; re-pin so the
+    # reloads below don't dial localhost:8080 three times (~3.5s each)
+    os.environ["NX_SKIP_STARTUP_PROBES"] = "1"
+    os.environ["NX_AUTOCOMPRESS_PERCENT"] = "60"
+    sys.argv = ["nx.py"]
+    importlib.reload(m)
+    assert m.AUTOCOMPRESS_PERCENT == 60, f"env 60 → {m.AUTOCOMPRESS_PERCENT}"
+    print(f"  NX_AUTOCOMPRESS_PERCENT=60 → {m.AUTOCOMPRESS_PERCENT} → PASS")
 
-# /autocompress on restores the *configured* default (60), not a hardcoded 85.
-assert m.AUTOCOMPRESS_DEFAULT == 60, \
-    f"AUTOCOMPRESS_DEFAULT should track the env default, got {m.AUTOCOMPRESS_DEFAULT}"
-out = run_repl_commands(["/autocompress off", "/autocompress on"])
-assert "auto-compress: 60%" in out, \
-    f"/autocompress on should restore the configured 60%, not 85: {out!r}"
-assert m.AUTOCOMPRESS_PERCENT == 60, \
-    f"on should restore configured 60, got {m.AUTOCOMPRESS_PERCENT}"
-print("  /autocompress off → on restores configured 60% (not hardcoded 85) → PASS")
+    # /autocompress on restores the *configured* default (60), not a hardcoded 85.
+    assert m.AUTOCOMPRESS_DEFAULT == 60, \
+        f"AUTOCOMPRESS_DEFAULT should track the env default, got {m.AUTOCOMPRESS_DEFAULT}"
+    out = run_repl_commands(["/autocompress off", "/autocompress on"])
+    assert "auto-compress: 60%" in out, \
+        f"/autocompress on should restore the configured 60%, not 85: {out!r}"
+    assert m.AUTOCOMPRESS_PERCENT == 60, \
+        f"on should restore configured 60, got {m.AUTOCOMPRESS_PERCENT}"
+    print("  /autocompress off → on restores configured 60% (not hardcoded 85) → PASS")
 
-# clamp upper bound
-os.environ["NX_AUTOCOMPRESS_PERCENT"] = "150"
-importlib.reload(m)
-assert m.AUTOCOMPRESS_PERCENT == 100, f"env 150 should clamp to 100, got {m.AUTOCOMPRESS_PERCENT}"
-print(f"  NX_AUTOCOMPRESS_PERCENT=150 → clamped to {m.AUTOCOMPRESS_PERCENT} → PASS")
+    # clamp upper bound
+    os.environ["NX_AUTOCOMPRESS_PERCENT"] = "150"
+    importlib.reload(m)
+    assert m.AUTOCOMPRESS_PERCENT == 100, f"env 150 should clamp to 100, got {m.AUTOCOMPRESS_PERCENT}"
+    print(f"  NX_AUTOCOMPRESS_PERCENT=150 → clamped to {m.AUTOCOMPRESS_PERCENT} → PASS")
 
-# clamp lower bound
-os.environ["NX_AUTOCOMPRESS_PERCENT"] = "-5"
-importlib.reload(m)
-assert m.AUTOCOMPRESS_PERCENT == 0, f"env -5 should clamp to 0, got {m.AUTOCOMPRESS_PERCENT}"
-print(f"  NX_AUTOCOMPRESS_PERCENT=-5 → clamped to {m.AUTOCOMPRESS_PERCENT} → PASS")
+    # clamp lower bound
+    os.environ["NX_AUTOCOMPRESS_PERCENT"] = "-5"
+    importlib.reload(m)
+    assert m.AUTOCOMPRESS_PERCENT == 0, f"env -5 should clamp to 0, got {m.AUTOCOMPRESS_PERCENT}"
+    print(f"  NX_AUTOCOMPRESS_PERCENT=-5 → clamped to {m.AUTOCOMPRESS_PERCENT} → PASS")
 
-# restore env
-for k in list(os.environ):
-    if k.startswith("NX_"):
-        del os.environ[k]
-os.environ.update({k: v for k, v in saved_env.items() if k.startswith("NX_") or k == "NX_ENV_FILE"})
-# the restore above re-imports the user's real multi-source config; keep the
-# final reload probe-free like conftest's default (its value was scrubbed by
-# the del-loop just above)
-os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
-importlib.reload(m)
+    # restore env
+    for k in list(os.environ):
+        if k.startswith("NX_"):
+            del os.environ[k]
+    os.environ.update({k: v for k, v in saved_env.items() if k.startswith("NX_") or k == "NX_ENV_FILE"})
+    # the restore above re-imports the user's real multi-source config; keep the
+    # final reload probe-free like conftest's default (its value was scrubbed by
+    # the del-loop just above)
+    os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
+    importlib.reload(m)
 
-print()
-print("=" * 50)
-print("ALL TESTS PASSED")
+    print()
+    print("=" * 50)
+    print("ALL TESTS PASSED")

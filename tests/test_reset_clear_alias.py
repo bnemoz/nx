@@ -46,6 +46,10 @@ def run_with(cmd):
     captured.truncate(0); captured.seek(0)
     import builtins
     builtins.print = fake_print
+    # Pin argv: under pytest, sys.argv is pytest's argv and nx's main() reads
+    # it (it would die with "unknown command 'tests/...'").
+    old_argv = sys.argv
+    sys.argv = ["nx"]
     try:
         m.open_stream = fake_open_stream
         m.model_turn = fake_model_turn
@@ -55,19 +59,9 @@ def run_with(cmd):
         m.main()
     finally:
         builtins.print = real_print
+        sys.argv = old_argv
     return captured.getvalue()
 
-
-out_reset = run_with("/reset")
-out_clear = run_with("/clear")
-out_new = run_with("/new")
-
-# --- assertions --------------------------------------------------------------
-for label, out in (("/reset", out_reset), ("/clear", out_clear), ("/new", out_new)):
-    assert "context cleared" in out, \
-        f"{label} should have cleared context, got:\n{out}"
-    assert "new session" in out, \
-        f"{label} should have forked a new session id, got:\n{out}"
 
 # The three commands take the same code path, so their output should match
 # exactly (the new session id is non-deterministic, so strip those lines).
@@ -78,10 +72,24 @@ def strip_session_id(out):
     )
 
 
-baseline = strip_session_id(out_reset)
-for label, out in (("/clear", out_clear), ("/new", out_new)):
-    assert strip_session_id(out) == baseline, \
-        f"{label} should behave identically to /reset:\n" \
-        f"--- /reset ---\n{out_reset}\n--- {label} ---\n{out}"
+def test_reset_clear_new_aliases():
+    # The REPL passes run inside the test, not at module scope: under pytest
+    # sys.argv is pytest's argv and nx's main() reads it — module-scope
+    # m.main() broke plain `pytest tests/` collection with "unknown command".
+    out_reset = run_with("/reset")
+    out_clear = run_with("/clear")
+    out_new = run_with("/new")
 
-print("OK — /clear and /new are aliases for /reset")
+    for label, out in (("/reset", out_reset), ("/clear", out_clear), ("/new", out_new)):
+        assert "context cleared" in out, \
+            f"{label} should have cleared context, got:\n{out}"
+        assert "new session" in out, \
+            f"{label} should have forked a new session id, got:\n{out}"
+
+    baseline = strip_session_id(out_reset)
+    for label, out in (("/clear", out_clear), ("/new", out_new)):
+        assert strip_session_id(out) == baseline, \
+            f"{label} should behave identically to /reset:\n" \
+            f"--- /reset ---\n{out_reset}\n--- {label} ---\n{out}"
+
+    print("OK — /clear and /new are aliases for /reset")

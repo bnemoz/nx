@@ -82,10 +82,27 @@ def test_stale_wake_bytes_do_not_spin_the_loop(monkeypatch):
         iw._INTERRUPT_ARMED.set()
         iw._USER_INTERRUPTED.clear()
         iw._INTERRUPT_RESTORED.clear()
+        # Sync on the loop actually reaching its select (after the entry
+        # _drain_wake consumed the stale byte) instead of a blind sleep —
+        # under -n auto load 0.05s can elapse before the thread even starts.
+        first_select = threading.Event()
+        thread_err = []
+        real_select = iw._select_stdin_or_wake
+        def _select_mark(fd, timeout):
+            first_select.set()
+            return real_select(fd, timeout)
+        monkeypatch.setattr(iw, "_select_stdin_or_wake", _select_mark)
         t = threading.Thread(target=iw._armed_loop, args=(r, ("posix", [])),
                              daemon=True)
         t.start()
-        time.sleep(0.05)
+        # If the thread dies before select, the join below ends early and the
+        # message says so instead of timing out blind.
+        first_select.wait(timeout=10.0)
+        if not first_select.is_set():
+            t.join(timeout=1.0)
+        assert first_select.is_set(), (
+            "armed loop never reached select (thread alive: "
+            f"{t.is_alive()})")
         # If the stale byte were not drained the loop would have exited early
         # (treating the wake as a disarm). It must still be armed.
         assert not iw._INTERRUPT_RESTORED.is_set(), \

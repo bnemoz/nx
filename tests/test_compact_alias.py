@@ -50,6 +50,10 @@ def run_with(cmd):
     # patch print so we can capture without messing up the real terminal
     import builtins
     builtins.print = fake_print
+    # Pin argv: under pytest, sys.argv is pytest's argv and nx's main() reads
+    # it (it would die with "unknown command 'tests/...'").
+    old_argv = sys.argv
+    sys.argv = ["nx"]
     try:
         # seed a few messages so compress() has something to summarize
         m.read_multiline = lambda history=None, initial=None: None  # placeholder, replaced below
@@ -66,22 +70,18 @@ def run_with(cmd):
         m.main()
     finally:
         builtins.print = real_print
+        sys.argv = old_argv
         m.compress = _real_compress  # never leak the stub into a later import
     return captured.getvalue()
 
-out_compact = run_with("/compact")
-out_compress = run_with("/compress")
-
-
-# --- assertions --------------------------------------------------------------
-def normalize(out, cmd):
-    """Strip the command-name mention so /compact and /compress outputs compare equal."""
-    # the only place the command string appears in output is the banner line,
-    # which is identical between runs since it just lists the toggles.
-    return out
-
-
 def test_compact_and_compress_alias():
+    # Run both REPL passes inside the test (not at module scope): under pytest
+    # sys.argv is pytest's argv, and nx's main() reads it — a module-scope
+    # m.main() made plain `pytest tests/` collection die with "unknown
+    # command".
+    out_compact = run_with("/compact")
+    out_compress = run_with("/compress")
+
     # /compact and /compress must take the exact same code path.
     assert "nothing to compress" not in out_compact, \
         f"/compact should have triggered compress branch, got:\n{out_compact}"
@@ -95,7 +95,7 @@ def test_compact_and_compress_alias():
 
     # byte-identical output when run back-to-back (modulo timestamps, which
     # aren't printed in this path)
-    assert normalize(out_compact, "/compact") == normalize(out_compress, "/compress"), \
+    assert out_compact == out_compress, \
         f"output differs:\n--- /compact ---\n{out_compact}\n--- /compress ---\n{out_compress}"
 
 

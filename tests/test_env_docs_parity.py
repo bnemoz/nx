@@ -26,6 +26,7 @@ _ALLOWLIST = {
     "NX_UNQUOTED": "parser vocabulary in a test",
     "NX_FOO": "test fixture",
     "NX_MY": "test fixture",
+    "NX_TEST_URLOPEN_HOLD": "test-suite only: shrinks the busy-keep sleep in test_perf_turn_tax",
     "NX_MY_TOKEN": "test fixture",
     "NX_OTHER": "test fixture",
     "NX_MISSING_API_KEY": "test fixture",

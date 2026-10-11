@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.142.11"
+version = "0.143.0"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,13 @@ pdf = ["pymupdf4llm"]
 [project.scripts]
 nx = "nx:main"
 
+[tool.pytest.ini_options]
+# --dist loadfile: an entire test module lands on one xdist worker. Arbitrary
+# packing re-exposed cross-file residue during migration (15 flaky failures →
+# ≤1, ~+14s wall); per-file packing is deterministic and matches the suite's
+# isolation rules. Revisit after phase 4 of docs/test-architecture.md.
+addopts = "--dist loadfile"
+
 [tool.setuptools]
 packages = ["nx"]
 
@@ -68,6 +75,10 @@ select = ["E4", "E7", "E9", "F"]
 # test ergonomics, not lint targets. Style rules are relaxed for tests/** only;
 # F811/F821/F541 stay on so real shadowing/undefined-name bugs still surface.
 "tests/**" = ["E402", "E702", "E731", "E741", "F841"]
+
+# scripts/ holds standalone harnesses (ram stress, table regen) with the same
+# terse style as tests — semicolon-packed state setup, lambdas — not lint targets.
+"scripts/**" = ["E402", "E702", "E731", "E741", "F841"]
 
 [[tool.ty.overrides]]
 # The test suite drives nx through its deliberately dynamic seams:

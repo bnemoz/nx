@@ -36,10 +36,14 @@ def test_metrics_flush_does_not_block_on_a_dead_endpoint(monkeypatch):
     from nx import _metrics as mm
 
     calls = []
-    # A urlopen that would block forever if it were ever called inline.
+    # A urlopen that would block forever if it were ever called inline. The
+    # 30s is a worker busy-keep (the fake endpoint must NOT return while the
+    # assertion below measures flush()'s enqueue latency), not a wedged call —
+    # shrink it via the NX_TEST_URLOPEN_HOLD tunable.
+    hold = float(os.environ.get("NX_TEST_URLOPEN_HOLD", "30"))
     def never_returns(req, timeout=None):
         calls.append(timeout)
-        time.sleep(30)
+        time.sleep(hold)
     monkeypatch.setattr(mm.urllib.request, "urlopen", never_returns)
 
     m = mm._Metrics("sid", model="x", source="s", push_url="http://10.255.255.1:9/push")

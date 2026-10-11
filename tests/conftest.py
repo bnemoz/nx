@@ -287,6 +287,41 @@ def _restore(fspath):
             else:
                 _d[_k] = _tmpl
 
+    # 0.143.0: the four homes the module-dict rewind above can't see — they
+    # live on a threading.local, a ContextVar, or were added by a test that
+    # reloaded nx (so the live module objects are forks the baseline never
+    # snapshotted). Resolve every module via sys.modules AT RESET TIME.
+    _sa = sys.modules.get("nx._subagent")
+    _tls = sys.modules.get("nx._subagent_tls")
+    if _tls is not None:
+        _tls._SUBAGENT_TLS.__dict__.clear()      # subagent ctx + residue
+    if _sa is not None:
+        # quiet is assigned, never deleted, by production — clear the whole
+        # TLS dict rather than popping one key (prod re-creates it anyway).
+        _sa._ASYNC_QUIET_SLOTS.__dict__.clear()
+        # Drain live workers BEFORE clearing their registry: _worker() re-reads
+        # its _ASYNC_AGENTS record under the lock, so clearing with a worker
+        # mid-flight loses the staged note and skips worktree removal.
+        for _t in _sa._live_worker_threads():
+            _t.join(timeout=2)
+        with _sa._ASYNC_LOCK:
+            _sa._ASYNC_AGENTS.clear()
+    _no = sys.modules.get("nx._notices")
+    if _no is not None:
+        _no._CURRENT.set(None)
+    # A Live leaked by a dashboard test (test_tabs_live / test_panel) stays on
+    # the shared console's stack, which reroutes every later cprint through
+    # rich — invisible to the suite's builtins.print captures (a source of the
+    # test_preview_visibility "auto-allow [rule:" flake under -n auto).
+    _rich = sys.modules.get("nx._rich")
+    if _rich is not None:
+        try:
+            _stack = getattr(_rich.shared_console(), "_live_stack", None)
+            if _stack:
+                _stack.clear()
+        except Exception:
+            pass
+
     # 0.104.1: rewind nx._recovery's no-loop default store too. The ten
     # per-loop recovery fields (_LAST_PROMPT_TOKENS, the breaker evidence, ...)
     # route through descriptors on the state module's class, and that store

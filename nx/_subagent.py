@@ -380,6 +380,16 @@ _ASYNC_AGENTS: dict[str, dict[str, Any]] = {}
 # callers/tests still wrap it in `with _ASYNC_LOCK:` — same-thread
 # re-entrancy keeps both postures deadlock-free.
 _ASYNC_LOCK = threading.RLock()
+# Live worker threads (job_id -> Thread), so the test suite can drain them
+# before clearing _ASYNC_AGENTS (the worker re-reads its record under the
+# lock; clearing with a worker mid-flight loses the staged note).
+_LIVE_WORKERS: dict[str, threading.Thread] = {}
+
+
+def _live_worker_threads() -> list[threading.Thread]:
+    """Snapshot of still-running async worker threads (test-suite aid)."""
+    with _ASYNC_LOCK:
+        return [t for t in list(_LIVE_WORKERS.values()) if t.is_alive()]
 _ASYNC_SEQ = 0
 
 # st slot the finished answer is staged into, flushed (and cleared) by
@@ -853,9 +863,14 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
             # self-locking (0.103.7): pops under the lock, then removes the
             # evicted records' worktrees AFTER releasing it
             _evict_finished_agents()
+            with _ASYNC_LOCK:
+                _LIVE_WORKERS.pop(job_id, None)
 
-    threading.Thread(target=_worker, daemon=True,
-                     name=f"nx-subagent-{job_id}").start()
+    _t = threading.Thread(target=_worker, daemon=True,
+                          name=f"nx-subagent-{job_id}")
+    with _ASYNC_LOCK:
+        _LIVE_WORKERS[job_id] = _t
+    _t.start()
     if queued:
         return (f"[background sub-agent] job {job_id} (queued)\n"
                 f"instruction: {instruction[:200]}\n"
