@@ -289,7 +289,13 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     if _subagent_quiet():
         if st.YOLO:
             return True
-        return False
+        # C4 (0.135.1): NX_APPROVAL_POLICY=headless-allow:<glob> lets an
+        # operator pre-approve tool names on headless surfaces (Telegram,
+        # async sub-agent bash, `nx run` batch) — all three funnel through
+        # this one deny point. Anything unmatched, and any unset/other
+        # policy value, keeps the documented auto-deny.
+        from ._approval_policy import headless_allow
+        return headless_allow(action)
     # The approval preview is tool output on screen too (git_commit's staged
     # diff, edit_file's before/after), so /tooloutput collapsed must collapse
     # it like any other result body — the decision is unchanged either way.

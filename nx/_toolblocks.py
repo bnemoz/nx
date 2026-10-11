@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 from ._ansi import DIM, RESET, C, LifeSpinner
 from ._progress import ProgressCounter
+from ._render import BOX_BRANCH_END, BOX_BRANCH_MID, BOX_V, role
 from ._rich import cprint
 
 
@@ -44,7 +45,7 @@ from ._rich import cprint
 # so memory traffic stands apart from ordinary tool calls.
 _MEMORY_TOOLS = frozenset({"memory_search", "memory_write", "memory_delete"})
 
-# Tools whose call boxes render in the diff-deletion color (C.RED, the hue the
+# Tools whose call boxes render in the DIFF_REMOVE role color (the hue the
 # approval diff uses for removed lines) — recall_lessons digs through PAST
 # (i.e. deleted-from-context) transcripts.
 _DELETED_TOOLS = frozenset({"recall_lessons"})
@@ -56,11 +57,12 @@ _SUBAGENT_TOOLS = frozenset({"spawn_agent"})
 
 
 def tool_accent(name: str) -> str:
-    """The rail/border color for one tool call's box: C.RED for the
-    deletion-accent tools, C.MEMORY for the memory tools, C.SUBAGENT for
-    spawn_agent, C.ACCENT otherwise."""
+    """The rail/border color for one tool call's box: the DIFF_REMOVE role for
+    the deletion-accent tools, C.MEMORY for the memory tools, C.SUBAGENT for
+    spawn_agent, C.ACCENT otherwise. Colors come from the shared role layer
+    (NX_DIFF_REMOVE_COLOR and theme switches are honored); no raw palette."""
     if name in _DELETED_TOOLS:
-        return C.RED
+        return role("DIFF_REMOVE")
     if name in _SUBAGENT_TOOLS:
         return C.SUBAGENT
     return C.MEMORY if name in _MEMORY_TOOLS else C.ACCENT
@@ -202,12 +204,12 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     cprint(f"\n{accent}  ┌─ {_group_title(blocks)}{RESET}")
     calls = [b for b in blocks if b.name]
     for i, b in enumerate(blocks):
-        branch = "└─" if i == len(blocks) - 1 else "├─"
+        branch = BOX_BRANCH_END if i == len(blocks) - 1 else BOX_BRANCH_MID
         if not b.name:  # standalone note (pre-hook veto): no call header
-            cprint(f"{accent}  │{RESET}  {accent}{branch}{RESET} {b.note}")
+            cprint(f"{accent}  {BOX_V}{RESET}  {accent}{branch}{RESET} {b.note}")
             continue
         b_accent = tool_accent(b.name)
-        line = f"{b_accent}  │{RESET}  {b_accent}{branch} {b.header or b.name}{RESET}"
+        line = f"{b_accent}  {BOX_V}{RESET}  {b_accent}{branch} {b.header or b.name}{RESET}"
         if b.detail:
             line += f" {DIM}{b.detail}{RESET}"
         if b.cached:

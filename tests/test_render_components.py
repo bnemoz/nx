@@ -252,14 +252,14 @@ def test_the_override_env_names_are_parsed():
 
 def test_no_raw_palette_reads_outside_the_render_layer():
     """B3 acceptance: the raw-palette grep returns nothing outside
-    _ansi.py / _rich.py / _render.py. `_toolblocks.tool_accent` is the one
-    remaining read (`C.RED` for the deletion-accent tools) and is allowed here
-    only because that module is outside this change's file scope — see the
-    Phase B report; the semantic role for it is DIFF_REMOVE."""
+    _ansi.py / _rich.py / _render.py. The last carve-out (`_toolblocks`'s
+    C.RED read for the deletion-accent tools) is gone — it now takes the
+    DIFF_REMOVE role from the shared layer, so the guard covers the whole
+    package outside the render layer."""
     pkg = os.path.dirname(_ansi.__file__)
     pattern = re.compile(
         r"C\.(CYAN|GREEN|YELLOW|RED|MAGENTA|BLUE|ORANGE|PURPLE|TEAL|PINK|BROWN)\b")
-    allowed = {"_ansi.py", "_rich.py", "_render.py", "_toolblocks.py"}
+    allowed = {"_ansi.py", "_rich.py", "_render.py"}
     offenders = []
     for name in sorted(os.listdir(pkg)):
         if not name.endswith(".py") or name in allowed:

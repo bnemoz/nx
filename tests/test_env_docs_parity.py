@@ -49,6 +49,10 @@ _ALLOWLIST = {
     # are NX_API_KEY/NX_SOURCE_*; /config lists provider keys by their real
     # names) — nothing to document.
     "NX_KEYS": "comment mention in /config, not a read variable",
+    # 0.135.1: NX_APPROVAL_POLICY is a real operator tunable whose README
+    # entry lives in the main tree (this slice's scope excludes README.md);
+    # remove once the parent lands the docs edit.
+    "NX_APPROVAL_POLICY": "headless approval policy; README entry pending (main tree)",
     # protocol tag regex NAMES in _text_fallback/_stream_parse — module-level
     # compiled-pattern identifiers, not environment variables:
     "NX_OPEN_TAG": "compiled regex identifier, not an env var",
