@@ -375,14 +375,15 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
                     paint(_overlay_lines(view.surface) if overlay
                           else view.render(width, height))
                     if overlay:
-                        overlay = False
-                        # any key dismisses the overlay
+                        # the overlay is persistent: a poll timeout repaints it
+                        # (loop top), only a key dismisses it
                         if not wait_ready(fd, POLL):
                             continue
                         try:
                             reader(fd)
                         except EOFError:
                             break
+                        overlay = False
                         continue
                     extra = notifier.fds()
                     ready = (wait_ready_any([fd, *extra], POLL) if extra
