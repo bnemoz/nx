@@ -158,15 +158,15 @@ def pad_display(s: str, w: int) -> str:
     return s + " " * (w - cur)
 
 
-# Twelve hex values per theme: cyan/green/yellow/red/magenta + gray, blue,
-# orange (the original eight), plus purple, teal, pink, and brown. Every slot
+# Thirteen hex values per theme: cyan/green/yellow/red/magenta + gray, blue,
+# orange (the original eight), plus purple, teal, pink, brown, and slate. Every slot
 # is expected to be *used* somewhere: the ten semantic roles draw from eight of
 # them (ROLE_DEFAULTS below), and _rich.py maps markdown styles and code-block
 # syntax tokens onto the rest (purple bullets/numbers, pink decorators/links,
 # brown docstrings/link URLs, teal table borders). "gray" is reasoning text,
 # where plain SGR-2 dim or ANSI bright-black (90) is unreadable on many
 # terminals, so it needs its own legible-but-muted hue per theme rather than a
-# fixed gray. A new theme must be designed as a whole: all twelve slots
+# fixed gray. A new theme must be designed as a whole: all thirteen slots
 # distinct in RGB space, and the amethyst monochrome rule (below) is the
 # exception that proves it.
 THEMES: dict[str, dict[str, str]] = {
@@ -175,42 +175,42 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "f38ba8", "magenta": "cba6f7", "gray": "7f849c",
         "blue": "89b4fa", "orange": "fab387",
         "purple": "b4befe", "teal": "94e2d5", "pink": "f5c2e7",
-        "brown": "e0b089",
+        "brown": "e0b089", "slate": "9399b2",
     },
     "latte": {   # Catppuccin Latte — light
         "cyan": "04a5e5", "green": "40a02b", "yellow": "df8e1d",
         "red": "d20f39", "magenta": "8839ef", "gray": "6c6f85",
         "blue": "1e66f5", "orange": "fe640b",
         "purple": "7287fd", "teal": "179299", "pink": "ea76cb",
-        "brown": "9a6b4f",
+        "brown": "9a6b4f", "slate": "8c8fa1",
     },
     "dracula": {
         "cyan": "8be9fd", "green": "50fa7b", "yellow": "f1fa8c",
         "red": "ff5555", "magenta": "bd93f9", "gray": "6272a4",
         "blue": "7aa6da", "orange": "ffb86c",
         "purple": "aa87f0", "teal": "5af0c8", "pink": "ff79c6",
-        "brown": "c9a56e",
+        "brown": "c9a56e", "slate": "8b93b8",
     },
     "nord": {
         "cyan": "88c0d0", "green": "a3be8c", "yellow": "ebcb8b",
         "red": "bf616a", "magenta": "b48ead", "gray": "4c566a",
         "blue": "81a1c1", "orange": "d08770",
         "purple": "9d7fc9", "teal": "8fbcbb", "pink": "d8a1c0",
-        "brown": "a97c5e",
+        "brown": "a97c5e", "slate": "7b88a1",
     },
     "gruvbox": {   # Gruvbox dark
         "cyan": "8ec07c", "green": "b8bb26", "yellow": "fabd2f",
         "red": "fb4934", "magenta": "d3869b", "gray": "928374",
         "blue": "83a598", "orange": "fe8019",
         "purple": "b16286", "teal": "689d6a", "pink": "e78a4e",
-        "brown": "af3a03",
+        "brown": "af3a03", "slate": "928377",
     },
     "vaporwave": {   # neon pastel — fluorescent but soft
         "cyan": "5ffbf1", "green": "8aff80", "yellow": "fdfd96",
         "red": "ff6ec7", "magenta": "d183ff", "gray": "9a86b3",
         "blue": "7aa2f7", "orange": "ff9e64",
         "purple": "a44dff", "teal": "3dfcd2", "pink": "ff9ecb",
-        "brown": "d9a05b",
+        "brown": "d9a05b", "slate": "8ea0c9",
     },
     "ayu-light": {   # ayu light (ayu-theme) — light
         # authored: yellow #eca944, orange #f2ae49, teal #4cbf99 sit above the
@@ -220,7 +220,7 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "ea6c66", "magenta": "a37acc", "gray": "5c6166",
         "blue": "399ee6", "orange": "d78c16",
         "purple": "9e75c7", "teal": "2aa886", "pink": "ed6ea0",
-        "brown": "99703f",
+        "brown": "99703f", "slate": "8a9199",
     },
     "bluloco-light": {   # bluloco light (uloco) — light
         # authored: yellow #c5a332 / teal #27618d outside the band; nudged
@@ -229,14 +229,14 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "db3a63", "magenta": "ce33c0", "gray": "676a77",
         "blue": "275fe4", "orange": "df631c",
         "purple": "823ff1", "teal": "296695", "pink": "ff6480",
-        "brown": "946b3d",
+        "brown": "946b3d", "slate": "8f95a5",
     },
     "frappe": {   # Catppuccin Frappé — medium-dark
         "cyan": "81c8be", "green": "a6d189", "yellow": "e5c890",
         "red": "e78284", "magenta": "ca9ee6", "gray": "838ba7",
         "blue": "8caaee", "orange": "ef9f76",
         "purple": "babbf1", "teal": "99d1db", "pink": "f4b8e4",
-        "brown": "d699b6",
+        "brown": "d699b6", "slate": "949cbb",
     },
     "opencode": {   # OpenCode default theme (opencode.ai) — dark, warm orange
         # primary #fab283 as orange; accent #9d7cd8 as magenta; secondary
@@ -246,7 +246,7 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "e06c75", "magenta": "9d7cd8", "gray": "808080",
         "blue": "5c9cf5", "orange": "fab283",
         "purple": "ffc09f", "teal": "94e2d5", "pink": "f5c2e7",
-        "brown": "e0af79",
+        "brown": "e0af79", "slate": "8a93a6",
     },
     "amethyst": {   # monochrome purple — every hue is a violet/orchid/pink
         # shade, so roles stay distinguishable by lightness and by position in
@@ -256,13 +256,13 @@ THEMES: dict[str, dict[str, str]] = {
         "red": "f65aa3", "magenta": "ec8fff", "gray": "9e9eaa",
         "blue": "6655fc", "orange": "fa47cd",
         "purple": "8a5cf6", "teal": "c4a8ff", "pink": "ff8ad8",
-        "brown": "b092d9",
+        "brown": "b092d9", "slate": "9273d1",
     },
 }
 DEFAULT_THEME = "opencode"
 _PALETTE_KEYS: tuple[str, ...] = (
     "cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
-    "purple", "teal", "pink", "brown",
+    "purple", "teal", "pink", "brown", "slate",
 )
 
 # --- light/dark variants ------------------------------------------------------
@@ -273,7 +273,7 @@ _PALETTE_KEYS: tuple[str, ...] = (
 # band that's legible on the opposite background while keeping its hue family
 # (so "mocha on white" still reads as mocha), nudge saturation up slightly on
 # light backgrounds (white compresses perceived saturation), then push any
-# near-duplicate pair apart in lightness until the twelve slots are as
+# near-duplicate pair apart in lightness until the thirteen slots are as
 # distinguishable as an authored palette's. A user who prefers a hand-tuned
 # look can still pick the authored side explicitly via /theme.
 
@@ -322,6 +322,11 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
                 hls[k][1] += 0.02
             while luma_of(k) > 185 and hls[k][1] > 0.10:
                 hls[k][1] -= 0.02
+            # a fully desaturated slot stalls in the loop above (its guard
+            # requires sat > 0.05), so finish the dark-side luma ceiling on
+            # lightness alone — hue is preserved where desaturation lost it
+            while luma_of(k) > 200 and hls[k][1] > 0.10:
+                hls[k][1] -= 0.02
     # The lightness walk above can stall below the luma floor for hues whose
     # luma is dominated by a channel their hue pins low (saturated violet on
     # the light side, gruvbox's red-dominant brown on the dark side);
@@ -337,7 +342,7 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
                    for i in (0, 2, 4)) ** 0.5
 
     # Deterministic separability pass: repeatedly take the closest hue pair
-    # and split them in lightness until the twelve slots are distinct enough
+    # and split them in lightness until the thirteen slots are distinct enough
     # (the authored amethyst palette's own min pair distance is the bar).
     for _ in range(20):
         pair = min(itertools.combinations(hls, 2), key=lambda p: dist(*p))
@@ -362,8 +367,10 @@ def _variant_derive(hexes: dict[str, str], *, to_light: bool) -> dict[str, str]:
                     hls[k][1] += 0.02
             while luma_of(k) < 100 and hls[k][2] > 0.05:
                 hls[k][2] -= 0.05
-            while luma_of(k) > (118 if to_light else 185) and hls[k][2] > 0.05:
+            while luma_of(k) > (118 if to_light else 200) and hls[k][2] > 0.05:
                 hls[k][2] -= 0.05
+            while luma_of(k) > (118 if to_light else 200) and hls[k][1] > 0.10:
+                hls[k][1] -= 0.02
     return {k: rgb(k) for k in hexes}
 
 
@@ -386,9 +393,9 @@ def variant_for(name: str, *, light_bg: bool) -> dict[str, str]:
     return _variant_derive(hexes, to_light=light_bg)
 
 
-# Semantic roles used across the codebase, each backed by one of the twelve
+# Semantic roles used across the codebase, each backed by one of the thirteen
 # palette hues above by default. Centralizing the role→hue mapping here means
-# a new theme only has to supply the twelve palette hexes (above) — it never
+# a new theme only has to supply the thirteen palette hexes (above) — it never
 # needs to know about roles (several roles may share a hue). Each role can
 # also be overridden independently
 # via `NX_<ROLE>_COLOR` (see _parse_color_override), e.g. NX_TEXT_COLOR=green,
@@ -397,7 +404,8 @@ ROLE_DEFAULTS: dict[str, str] = {
     "TEXT": "green",           # the model's final answer text
     "REASONING_TEXT": "gray",  # reasoning/thinking block text
     "STATUS_BAR": "cyan",      # per-turn stats footer (tok/s, ctx, ttft, wall)
-    "TOOL_OUTPUT": "magenta",  # tool/bash result body lines
+    "TOOL_OUTPUT": "slate",    # tool/bash result body lines (muted background
+                               # chatter; magenta via NX_TOOL_OUTPUT_COLOR=magenta)
     "ACCENT": "blue",          # borders, model name, chatbox prompt
     "MEMORY": "purple",        # memory tool calls (memory_search/write/delete)
     "SUBAGENT": "teal",        # spawn_agent tool call boxes (delegated work)
@@ -463,6 +471,7 @@ class _Colors:
     TEAL: str
     PINK: str
     BROWN: str
+    SLATE: str
     TEXT: str
     REASONING_TEXT: str
     STATUS_BAR: str
@@ -503,6 +512,7 @@ class _Colors:
         self.TEAL = _rgb(hexes["teal"])
         self.PINK = _rgb(hexes["pink"])
         self.BROWN = _rgb(hexes["brown"])
+        self.SLATE = _rgb(hexes["slate"])
         for role, palette_key in ROLE_DEFAULTS.items():
             override = _ROLE_OVERRIDES.get(role)
             if override is None:
@@ -566,11 +576,88 @@ def set_theme(name: str) -> bool:
     return True
 
 
+def hex_of(sgr: str) -> str:
+    """The 6-digit hex a `_rgb()`-built SGR foreground string encodes
+    (e.g. '\\033[38;2;147;153;178m' -> '9399b2'). Round-trips the palette
+    escapes so call sites can re-derive ramps from the live C.* values."""
+    parts = sgr[len("\033[38;2;"):sgr.rindex("m")].split(";")
+    return "%02x%02x%02x" % tuple(int(p) for p in parts[:3])
+
+
+def _luma_of(hex_color: str) -> float:
+    """Perceived luma (0-255) of a hex color — the same weights the variant
+    legibility clamps use."""
+    return sum(w * int(hex_color[i:i + 2], 16) for w, i in
+               ((0.2126, 0), (0.7152, 2), (0.0722, 4)))
+
+
+def luma_ramp(hex_color: str, steps: int = 3, *, to_dark: bool = True) -> list[str]:
+    """`steps` SGR strings running from the base color toward the terminal's
+    background (to_dark=True on a dark background) in equal HLS-lightness
+    increments. Step 0 is the base color itself; step N-1 is the faintest.
+    Used to layer a stream dump (headers strongest, body faintest) without
+    inventing new theme slots."""
+    import colorsys
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, lum, sat = colorsys.rgb_to_hls(r, g, b)
+    # Near-background anchor + the legible luma floor/ceiling for each side.
+    anchor = 0.06 if to_dark else 0.97
+    luma_min, luma_max = (60.0, 255.0) if to_dark else (0.0, 200.0)
+    out: list[str] = []
+    for i in range(max(1, steps)):
+        t = i / max(1, steps - 1) if steps > 1 else 0.0
+        nl = lum + (anchor - lum) * t
+        rgbv = colorsys.hls_to_rgb(hue, nl, sat)
+        h = "%02x%02x%02x" % (round(rgbv[0] * 255),
+                              round(rgbv[1] * 255),
+                              round(rgbv[2] * 255))
+        # Clamp the lightness into the legible band so the faintest step never
+        # goes illegible (HLS-lightness alone doesn't control luma uniformly).
+        guard = 0
+        while not (luma_min <= _luma_of(h) <= luma_max) and guard < 64:
+            nl += 0.02 if _luma_of(h) < luma_min else -0.02
+            nl = min(1.0, max(0.0, nl))
+            rgbv = colorsys.hls_to_rgb(hue, nl, sat)
+            h = "%02x%02x%02x" % (round(rgbv[0] * 255),
+                                  round(rgbv[1] * 255),
+                                  round(rgbv[2] * 255))
+            guard += 1
+        out.append(_rgb(h))
+    return out
+
+
+# --- background tinting (large-block declutter, 0.142.0) ----------------------
+# Truecolor SGR has no alpha channel, so a "20% accent background" is made by
+# pre-blending the accent hue over the terminal's background anchor (the same
+# 0.06 dark / 0.97 light anchors the luma_ramp uses) into an opaque RGB the
+# terminal renders as a faint fill: `bg` SGRs set 48;2;… behind the box glyphs,
+# and a RESET restores the default background after the span. Only applied on
+# truecolor terminals — the fill on a 256-color fallback would quantize badly.
+def _bg_anchor_hex() -> str:
+    return "0f0f0f" if C.light_bg is not True else "f2f2f2"
+
+
+def bg_tint(accent_sgr: str, alpha: float = 0.16) -> str:
+    """An SGR string painting the terminal background with `accent_sgr`'s hue
+    pre-blended at `alpha` over the background anchor. Zero-width in cells
+    (it only changes colors), so it composes anywhere in a line."""
+    if not sys.stdout.isatty():
+        return ""
+    if os.environ.get("NO_COLOR") or os.environ.get("NX_BG_TINT") == "0":
+        return ""
+    fh = hex_of(accent_sgr)
+    bh = _bg_anchor_hex()
+    blended = "%02x%02x%02x" % tuple(
+        round(int(fh[i:i + 2], 16) * alpha + int(bh[i:i + 2], 16) * (1.0 - alpha))
+        for i in (0, 2, 4))
+    return f"\033[48;2;{int(blended[0:2], 16)};{int(blended[2:4], 16)};{int(blended[4:6], 16)}m"
+
+
 def swatch(theme_name: str) -> str:
-    """Return a one-line rendered sample of `theme_name`'s palette (the twelve hue slots)."""
+    """Return a one-line rendered sample of `theme_name`'s palette (the thirteen hue slots)."""
     hexes = THEMES[theme_name]
     order = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
-             "purple", "teal", "pink", "brown")
+             "purple", "teal", "pink", "brown", "slate")
     return " ".join(f"{_rgb(hexes[k])}██{RESET}" for k in order)
 
 

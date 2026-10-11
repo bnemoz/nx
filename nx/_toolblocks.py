@@ -35,7 +35,7 @@ import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
-from ._ansi import DIM, RESET, C, LifeSpinner
+from ._ansi import DIM, RESET, C, LifeSpinner, bg_tint
 from ._progress import ProgressCounter
 from ._render import BOX_BRANCH_END, BOX_BRANCH_MID, BOX_V, role
 from ._rich import cprint
@@ -201,7 +201,7 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     if not blocks:
         return
     accent = tool_accent(next((b.name for b in blocks if b.name), ""))
-    cprint(f"\n{accent}  ┌─ {_group_title(blocks)}{RESET}")
+    cprint(f"\n{bg_tint(accent)}{accent}  ┌─ {_group_title(blocks)}{RESET}")
     calls = [b for b in blocks if b.name]
     for i, b in enumerate(blocks):
         branch = BOX_BRANCH_END if i == len(blocks) - 1 else BOX_BRANCH_MID
@@ -225,7 +225,7 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
             # where the box has already closed.
             rail = "│ " if i < len(blocks) - 1 else "  "
             for body_line in b.body:
-                cprint(f"{b_accent}  │{RESET}  {rail}{body_line}")
+                cprint(f"{bg_tint(b_accent)}{b_accent}  │{RESET}  {rail}{body_line}")
     n = len(calls)
     footer = f"{n} call{'' if n == 1 else 's'} · {elapsed:.1f}s"
     errs = sum(1 for b in calls if b.failed)
@@ -233,4 +233,4 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
         footer += f" · {errs} error{'' if errs == 1 else 's'}"
     if not visible:
         footer += " · output collapsed (/tooloutput)"
-    cprint(f"{accent}  └─{RESET} {DIM}{footer}{RESET}")
+    cprint(f"{bg_tint(accent)}{accent}  └─{RESET} {DIM}{footer}{RESET}")

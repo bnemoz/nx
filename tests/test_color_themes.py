@@ -28,15 +28,19 @@ import nx as m  # noqa: E402
 from nx import _ansi, _tty  # noqa: E402
 
 PALETTE = ("cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
-           "purple", "teal", "pink", "brown")
+           "purple", "teal", "pink", "brown", "slate")
 
 
-def test_every_theme_supplies_all_twelve_distinct_hues():
+def test_every_theme_supplies_all_thirteen_distinct_hues():
     for tname, hexes in _ansi.THEMES.items():
         assert set(hexes) == set(PALETTE), f"{tname} missing/extra hues: {set(hexes)}"
         assert len(set(hexes.values())) == len(PALETTE), (
             f"{tname} has duplicate hex values"
         )
+    # slate must read as distinct background chatter: different from the theme's
+    # own gray in every theme.
+    for tname, hexes in _ansi.THEMES.items():
+        assert hexes["slate"] != hexes["gray"], f"{tname}: slate == gray"
 
 
 def test_palette_keys_match_themes():
@@ -60,15 +64,46 @@ def test_proxy_module_exposes_new_palette_names():
     assert m.ORANGE == m.C.ORANGE
 
 
+def _luma(hexv: str) -> float:
+    r, g, b = _rgb_tuple(hexv)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def test_luma_ramp_layering_contract():
+    base = _ansi._rgb(_ansi.THEMES["mocha"]["slate"])
+    ramp = _ansi.luma_ramp(_ansi.THEMES["mocha"]["slate"], 3)
+    assert len(ramp) == 3
+    assert ramp[0] == base, "step 0 must be the plain base color"
+    # on a dark background the ramp must move monotonically toward dark
+    def luma_sgr(sgr):
+        return _luma(_ansi.hex_of(sgr))
+    assert luma_sgr(ramp[-1]) < luma_sgr(ramp[0]), "faintest step not fainter"
+    assert all(luma_sgr(ramp[i]) >= luma_sgr(ramp[i + 1]) - 0.5
+               for i in range(len(ramp) - 1)), "ramp not monotonic toward dark"
+    assert _ansi.luma_ramp(_ansi.THEMES["mocha"]["slate"], 1) == [base]
+
+
+def test_luma_ramp_stays_legible_on_every_theme():
+    # the faintest step on the dark side never drops below the luma floor
+    for tname in _ansi.THEMES:
+        faintest = _ansi.luma_ramp(_ansi.THEMES[tname]["slate"], 3)[-1]
+        assert _luma(_ansi.hex_of(faintest)) >= 60, \
+            f"{tname}: faintest ramp step luma below 60"
+    # and specifically amethyst (spec call-out): readable at the faintest step
+    am = _ansi.luma_ramp(_ansi.THEMES["amethyst"]["slate"], 3, to_dark=True)[-1]
+    assert _luma(_ansi.hex_of(am)) >= 60
+
+
 def test_role_defaults_map_remapped_hues():
     # The declarative role→hue map is env-independent: this is the contract,
     # regardless of any NX_*_COLOR overrides captured at import time.
     assert _ansi.ROLE_DEFAULTS["ACCENT"] == "blue"  # was cyan (== STATUS_BAR)
     assert _ansi.ROLE_DEFAULTS["LABEL"] == "orange"  # was magenta (== TOOL_OUTPUT)
     assert _ansi.ROLE_DEFAULTS["TODO"] == "orange"  # todo_write output, distinct from TOOL_OUTPUT
-    # STATUS_BAR and TOOL_OUTPUT keep their original hues:
+    # STATUS_BAR keeps its original hue; TOOL_OUTPUT moved to slate (muted
+    # background chatter; magenta stays reachable via NX_TOOL_OUTPUT_COLOR).
     assert _ansi.ROLE_DEFAULTS["STATUS_BAR"] == "cyan"
-    assert _ansi.ROLE_DEFAULTS["TOOL_OUTPUT"] == "magenta"
+    assert _ansi.ROLE_DEFAULTS["TOOL_OUTPUT"] == "slate"
     # every role maps to a known palette key:
     for role, key in _ansi.ROLE_DEFAULTS.items():
         assert key in PALETTE, f"{role} -> unknown hue {key!r}"
@@ -93,9 +128,9 @@ def test_role_remap_gives_each_role_a_distinct_default_hue():
     # The two collisions the expansion fixed:
     assert m.C.ACCENT == m.C.BLUE  # was cyan (== STATUS_BAR)
     assert m.C.LABEL == m.C.ORANGE  # was magenta (== TOOL_OUTPUT)
-    # STATUS_BAR and TOOL_OUTPUT keep their original hues:
+    # STATUS_BAR keeps its original hue; TOOL_OUTPUT reads as slate chatter.
     assert m.C.STATUS_BAR == m.C.CYAN
-    assert m.C.TOOL_OUTPUT == m.C.MAGENTA
+    assert m.C.TOOL_OUTPUT == m.C.SLATE
     # every semantic role now maps to a distinct escape across the palette:
     roles = [
         "TEXT",
@@ -131,7 +166,7 @@ def test_set_theme_round_trip_resets_eight_hues():
     _apply_with_no_overrides("nord")
     nord = {k: getattr(m.C, k.upper()) for k in PALETTE}
     assert orig != nord, "nord should differ from the default (mocha)"
-    assert len(set(nord.values())) == 12, "nord hues not all distinct"
+    assert len(set(nord.values())) == 13, "nord hues not all distinct"
     _apply_with_no_overrides(_ansi.DEFAULT_THEME)
     for k in PALETTE:
         assert getattr(m.C, k.upper()) == orig[k], f"{k} not restored"
@@ -196,7 +231,7 @@ def test_amethyst_switches_via_set_theme():
         assert _ansi.set_theme("amethyst")
         assert m.C.name == "amethyst"
         assert m.C.ACCENT == _ansi._rgb(_ansi.THEMES["amethyst"]["blue"])
-        assert m.C.TOOL_OUTPUT == _ansi._rgb(_ansi.THEMES["amethyst"]["magenta"])
+        assert m.C.TOOL_OUTPUT == _ansi._rgb(_ansi.THEMES["amethyst"]["slate"])
         assert _ansi.set_theme("amethyst-not-a-theme") is False
     finally:
         _ansi.set_theme(orig)
@@ -377,7 +412,7 @@ def test_variant_keeps_twelve_distinct_hues_for_every_theme():
         for light in (False, True):
             v = _ansi._variant_hexes(tname, light)
             assert set(v) == set(PALETTE)
-            assert len(set(v.values())) == 12, f"{tname} light={light}: dup hues"
+            assert len(set(v.values())) == 13, f"{tname} light={light}: dup hues"
 
 
 def test_variant_preserves_hue_family():
@@ -475,4 +510,84 @@ def test_rendered_code_block_uses_theme_hues_end_to_end():
     finally:
         console.file = rich_stdout   # back to the lazy sys.stdout binding
         _ansi.set_theme(orig)
+
+
+# --- background tinting (0.142.0) ---------------------------------------------
+# Large-block declutter: box borders carry a faint same-hue background fill
+# (the accent pre-blended over the background anchor, since truecolor SGR has
+# no alpha channel). Catppuccin's style guide does the same for selection
+# backgrounds (20-30% opacity) rather than dimming the foreground.
+
+def test_bg_tint_blends_accent_over_anchor(monkeypatch):
+    import io
+    fake = io.StringIO()
+    fake.isatty = lambda: True  # type: ignore[attr-defined]
+    monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    saved = m.C.light_bg
+    try:
+        m.C.light_bg = False  # dark terminal
+        tint = _ansi.bg_tint(_ansi._rgb("89b4fa"), alpha=0.16)
+        # a 48;2;… background SGR, with the blended fill visibly darker than
+        # the accent (mostly anchor) but not identical to it
+        assert tint.startswith("\033[48;2;")
+        params = tint[len("\033[48;2;"):-1].split(";")
+        hexv = "%02x%02x%02x" % tuple(int(p) for p in params)
+        def _lum(h):
+            return sum(w * int(h[i:i + 2], 16) for w, i in
+                       ((0.2126, 0), (0.7152, 2), (0.0722, 4)))
+        assert _lum(hexv) < _lum("89b4fa"), "fill not blended toward the anchor"
+        assert _lum(hexv) > 20, "fill vanished entirely into the background"
+        # alpha=0 must produce the plain anchor color
+        zero = _ansi.bg_tint(_ansi._rgb("89b4fa"), alpha=0.0)
+        assert zero.endswith("48;2;15;15;15m")
+    finally:
+        m.C.light_bg = saved
+
+
+def test_bg_tint_light_side_blends_toward_white(monkeypatch):
+    import io
+    fake = io.StringIO()
+    fake.isatty = lambda: True  # type: ignore[attr-defined]
+    monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    saved = m.C.light_bg
+    try:
+        m.C.light_bg = True
+        tint = _ansi.bg_tint(_ansi._rgb("1e66f5"), alpha=0.16)
+        params = tint[len("\033[48;2;"):-1].split(";")
+        assert int(params[0]) > int("1e", 16), "fill not blended toward light anchor"
+    finally:
+        m.C.light_bg = saved
+
+
+def test_bg_tint_off_switch_and_headless():
+    # headless (non-tty in tests): empty string, no bytes
+    assert _ansi.bg_tint(_ansi._rgb("89b4fa")) == ""
+    os.environ["NX_BG_TINT"] = "0"
+    try:
+        # even on a "tty" the kill switch wins
+        import io
+        saved, _ansi.sys.stdout = _ansi.sys.stdout, io.StringIO()
+        try:
+            _ansi.sys.stdout.isatty = lambda: True  # type: ignore[attr-defined]
+            assert _ansi.bg_tint(_ansi._rgb("89b4fa")) == ""
+        finally:
+            _ansi.sys.stdout = saved
+    finally:
+        del os.environ["NX_BG_TINT"]
+
+
+def test_panel_components_carry_tint_bytes(monkeypatch):
+    # with tinting forced on, the shared box components must emit a 48;2 fill
+    # ahead of the accent on header/row/footer — and none without it
+    import io
+    fake = io.StringIO()
+    fake.isatty = lambda: True  # type: ignore[attr-defined]
+    monkeypatch.setattr(_ansi.sys, "stdout", fake)
+    from nx import _render
+    hdr = _render.panel_header("t")
+    assert "\033[48;2;" in hdr and "\033[38;2;" in hdr
+    row = _render.panel_row("body", _render.role("ACCENT"))
+    assert "\033[48;2;" in row
+    ftr = _render.panel_footer(_render.role("ACCENT"))
+    assert "\033[48;2;" in ftr
 

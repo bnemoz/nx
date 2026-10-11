@@ -467,8 +467,9 @@ trailing note cannot fold away your last real tool result.
 
 ### Themes
 
-Each theme supplies twelve palette hues — `cyan`, `green`, `yellow`, `red`,
-`magenta`, `gray`, `blue`, `orange`, `purple`, `teal`, `pink`, and `brown` —
+Each theme supplies thirteen palette hues — `cyan`, `green`, `yellow`, `red`,
+`magenta`, `gray`, `blue`, `orange`, `purple`, `teal`, `pink`, `brown`, and
+`slate` —
 that eleven semantic roles draw from — plus a twelfth, `SUBAGENT`, which shares
 the `teal` hue. All twelve slots are used: the roles take
 the original eight, and the say-panel's markdown + code rendering maps the
@@ -480,7 +481,7 @@ docstrings, pink decorators):
 | `TEXT` | green | the model's final answer text |
 | `REASONING_TEXT` | gray | reasoning/thinking block text |
 | `STATUS_BAR` | cyan | per-turn stats footer (tok/s, ctx, ttft, wall) |
-| `TOOL_OUTPUT` | magenta | tool/bash result body lines |
+| `TOOL_OUTPUT` | slate | tool/bash result body lines (pin back to magenta with `NX_TOOL_OUTPUT_COLOR=magenta`) |
 | `ACCENT` | blue | borders, model name, chatbox prompt |
 | `MEMORY` | purple | memory tool calls (`memory_search`/`memory_write`/`memory_delete`/`recall_lessons`) — box rail and header |
 | `SUBAGENT` | teal | `spawn_agent` tool call boxes — delegated sub-agent work |
@@ -498,6 +499,20 @@ twelve hues above, resolved against the *active* theme so it tracks
 `NX_ACCENT_COLOR=magenta` makes borders/prompt magenta in every theme, while
 `NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
 theme. Invalid values are ignored with a warning.
+
+Tool dump bodies are layered for legibility: the first line (and any
+ERROR/DENIED block) renders at the full `TOOL_OUTPUT` hue, while continuing
+body lines render a fainter luma-ramped step of the same hue, so streamed
+chatter recedes while the parts you scan for stay strong. The ramp is derived
+from the active theme — no configuration needed, and `NX_TOOL_OUTPUT_COLOR`
+still pins the base hue the ramp starts from.
+
+On truecolor terminals, tool-call box borders additionally carry a faint
+same-hue *background fill* (the accent pre-blended at ~16% over the terminal
+background — truecolor SGR has no alpha channel, so the blend is baked into
+the RGB), the same large-block declutter Catppuccin's style guide uses for
+selection backgrounds. Disable it with `NX_BG_TINT=0`; it is off on 256-color
+or non-tty output, where a baked fill would quantize badly.
 
 The assistant's final answer is rendered as markdown through rich; its
 heading/code/link/bullet colors come from the same active theme (headings and
@@ -565,6 +580,13 @@ ladder (arg repair → truncated-args salvage → per-tool circuit breaker → t
 `/toolcalls text` escape hatch, which pins `"none"` for the session), and
 `NX_NATIVE_TOOLS=0` restores the old text-protocol-only posture if a
 source's native args are unusable.
+
+A stream that dies while tool-call args are mid-flight (a collapse cut, a
+server-side abort) is recovered as a malformed-args turn — the buffered args
+are parsed by the normal repair ladder and nudged like any other malformed
+call — never as an empty turn or a reasoning stall, so the "EMPTY TURN" rescue
+never fires for a model that was visibly mid-call (the `generating tool call
+… args N chars` progress line).
 
 Qwen-style chat templates (qwen3.8-27b, Qwen3.8-flash-next, …) interleave a
 literal newline as a `content` delta between their native `tool_calls`; nx

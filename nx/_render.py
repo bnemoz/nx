@@ -123,11 +123,20 @@ def commit_line(text: str = "", *, end: str = "\n") -> None:
 
 
 # --- panel --------------------------------------------------------------------
+def _tinted(accent_sgr: str) -> str:
+    """`accent_sgr` plus a faint background fill of the same hue (0.142.0's
+    large-block declutter: the accent is pre-blended over the background
+    anchor, because truecolor SGR has no alpha channel). Off when tinting is
+    disabled, so callers never branch on it."""
+    from ._ansi import bg_tint
+    return f"{bg_tint(accent_sgr)}{accent_sgr}"
+
+
 def panel_header(title: str, accent: Optional[str] = None, *,
                  prefix: str = _PREFIX, role_name: str = "ACCENT") -> str:
     """A box's opening line: `╭─ title` in the accent color."""
     accent = accent if accent is not None else role(role_name)
-    return f"{accent}{prefix}{BOX_TL}{BOX_H} {title}{RESET}"
+    return f"{_tinted(accent)}{prefix}{BOX_TL}{BOX_H} {title}{RESET}"
 
 
 def panel_row(text: str, accent: Optional[str] = None, *,
@@ -138,7 +147,7 @@ def panel_row(text: str, accent: Optional[str] = None, *,
     accent = accent if accent is not None else role(role_name)
     if body_role:
         text = f"{role(body_role)}{text}{RESET}"
-    return f"{accent}{prefix}{BOX_V} {RESET}{text}"
+    return f"{_tinted(accent)}{prefix}{BOX_V} {RESET}{text}"
 
 
 def panel_footer(accent: Optional[str] = None, *, prefix: str = _PREFIX,
@@ -150,7 +159,7 @@ def panel_footer(accent: Optional[str] = None, *, prefix: str = _PREFIX,
     """
     accent = accent if accent is not None else role(role_name)
     tail = f" {role('MUTED')}{text}{RESET}" if text else ""
-    return f"{accent}{prefix}{BOX_BL}{BOX_H}{RESET}{tail}"
+    return f"{_tinted(accent)}{prefix}{BOX_BL}{BOX_H}{RESET}{tail}"
 
 
 def panel(title: str, lines: Iterable[str], accent: Optional[str] = None, *,

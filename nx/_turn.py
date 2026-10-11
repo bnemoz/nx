@@ -736,6 +736,18 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         loop_cut = True
 
     if loop_cut:
+        # A collapse/reasoning-only cut with buffered tool-call args is a
+        # malformed-args turn, not a reasoning stall: the model was mid-call
+        # when the stream degenerated, and the malformed-args recovery (same
+        # family _handle_native_tool_calls uses) is the correct nudge — the
+        # stall ladder's "start reasoning anew" nudge would discard the args
+        # context the model was actually working in.
+        if parser.tcs and not text.strip():
+            # Local alias: the module-level name must stay callable above.
+            _native = _handle_native_tool_calls
+            return _native(messages, parser.tcs, text,
+                           parser.finish_reasons,
+                           malformed_stream_cut_count)
         return _handle_loop_cut(
             messages, forced_final, reasoning_loop_cut_count,
             parser.leaked_token_run, parser.repeat_chunk_run, parser.reasoning_only_start,
@@ -804,7 +816,13 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         st._LAST_PARTIAL_TEXT = text
         return TURN_LENGTH_CUT
 
-    if not text.strip():
+    if not text.strip() and not parser.tcs:
+        # parser.tcs in the guard: a stream cut mid-args (server-side abort,
+        # a collapse cut after tool-call deltas started, ...) can land here
+        # with an in-progress tool call buffered.  Classifying that as an
+        # "empty turn" misleads the recovery: the model was actively emitting
+        # call args, not stalling.  A populated tcs falls through to the
+        # native handler below, whose malformed-args recovery owns it.
         # Silent stall: the model emitted nothing. In a real agentic loop this is
         # almost never a legitimate "done" — it usually follows a short/empty
         # tool result (the model "knows" the answer but produces no tokens), and
