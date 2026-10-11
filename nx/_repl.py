@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Callable
 
-from ._ansi import DIM, BOLD, RESET, C, CLEAR_LINE
+from ._ansi import DIM, BOLD, RESET, C, CLEAR_LINE, notice
 from ._mentions import expand_at_mentions
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from ._compress import _maybe_autocompress
@@ -34,6 +34,8 @@ from . import (
 )
 
 from ._repl_state import _ReplState, _save_current, _fresh_metrics, _flush_save
+from ._commands import bind_handlers, command, handler_map, help_rows
+from . import _repl_settings_cmds as _rsc
 from ._resume import resume_session
 from ._sessions_cmd import (
     _cmd_sessions_handler, _cmd_resume_handler, _cmd_save, _cmd_delete_handler,
@@ -80,6 +82,7 @@ def _banner() -> str:
 
 CommandHandler = Callable[[str, _ReplState], "str | None"]
 
+@command("/tabs")
 def _cmd_tabs(user: str, state: _ReplState) -> None:
     """Live dashboard of every running surface: main turn, background bash
     jobs, async sub-agents. Interactive (raw-key) on a tty; one-shot print
@@ -96,6 +99,7 @@ def _cmd_tabs(user: str, state: _ReplState) -> None:
     _m.tabs_print_fallback()
 
 
+@command("/panel")
 def _cmd_panel(user: str, state: _ReplState) -> None:
     """Toggle the right status rail flag (SPEC_PANEL.md, 0.127.1): ctx
     utilization, bg-job / agent counts, pending steering. The live region is
@@ -108,27 +112,29 @@ def _cmd_panel(user: str, state: _ReplState) -> None:
         _panel.set_panel_enabled(False)
         if dashboard_open():  # erase a mid-turn region we may have opened
             close_dashboard()
-        print(f"{DIM}panel: off (NX_PANEL=1 to default on){RESET}")
+        notice(f"{DIM}panel: off (NX_PANEL=1 to default on){RESET}")
     else:
         _panel.set_panel_enabled(True)
-        print(f"{DIM}panel: on — rail shows on the live region during "
-              f"turns (NX_PANEL_WIDTH {_panel.panel_width()}){RESET}")
+        notice(f"{DIM}panel: on — rail shows on the live region during "
+               f"turns (NX_PANEL_WIDTH {_panel.panel_width()}){RESET}")
 
 
-_REPL_COMMANDS: dict[str, CommandHandler] = {
+# Dispatch map derived from the single command registry (nx/_commands.py,
+# 0.134.0): bind the handlers defined elsewhere through the `command`
+# decorator, then build name+alias -> handler. Aliases (/exit, /compact,
+# /resmon, ...) bind to the same handler as their primary command. The
+# module-level name is kept (moved-names rule): tests patch/read it.
+bind_handlers({
     "/quit": _cmd_quit,
-    "/exit": _cmd_quit,
     "/help": _cmd_help,
     "/source": _cmd_source,
     "/theme": _cmd_theme,
     "/reasoning": _cmd_reasoning,
     "/tooloutput": _cmd_tooloutput,
-    "/tools": _cmd_tooloutput,  # legacy alias — toggles *output* visibility, not tools
     "/toolcalls": _cmd_toolcalls,  # malformed-args breaker: show / reset [tool]
     "/provider": _cmd_provider,
     "/budget": _cmd_budget,
     "/resources": _cmd_resources,
-    "/resmon": _cmd_resources,
     "/context": _cmd_ctx,
     "/cost": _cmd_cost,
     "/status": _cmd_status,
@@ -136,13 +142,10 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/yolo": _cmd_yolo,
     "/approval": _cmd_approval,
     "/reset": _cmd_reset,
-    "/clear": _cmd_reset,
-    "/new": _cmd_reset,
     "/init": _cmd_init,
     "/recover": _cmd_recover,
     "/undo": _cmd_undo,
     "/compress": _cmd_compress,
-    "/compact": _cmd_compress,
     "/autocompress": _cmd_autocompress,
     "/sessions": _cmd_sessions_handler,
     "/resume": _cmd_resume_handler,
@@ -155,12 +158,19 @@ _REPL_COMMANDS: dict[str, CommandHandler] = {
     "/wip": _cmd_wip,
     "/plan": _cmd_plan,
     "/verify": _cmd_verify,
-    "/tabs": _cmd_tabs,
-    "/panel": _cmd_panel,
     "/retro": _cmd_retro,
     "/review": _cmd_review,
     "/build": _cmd_build,
-}
+})
+
+_REPL_COMMANDS: dict[str, CommandHandler] = handler_map()
+
+# /help renders _HELP_COMMANDS (defined in _repl_settings_cmds.py, which is
+# outside this refactor's file scope) — rebind it to the registry-derived
+# rows here so /help, the completion menu, the arg dropdowns and dispatch
+# all derive from the one table (UIUX_SPEC A1). Reading the name from the
+# defining module still works: the rows are the same registry data.
+_rsc._HELP_COMMANDS = help_rows()
 
 
 def _release_claims_on_exit() -> None:

@@ -29,79 +29,26 @@ import unicodedata
 from typing import Callable, cast
 
 from . import _state as st
-from ._ansi import DIM, RESET, C, THEMES, raw_mode, strip_ansi_for_display
+from ._ansi import (DIM, RESET, C, raw_mode, strip_ansi_for_display,
+                    THEMES)  # noqa: F401  (THEMES re-exported: it was a
+                    # module attribute before the registry move — callers
+                    # do `from ._chatbox import THEMES`)
+from ._commands import arg_options_map, menu_list
+from ._layout import DROPDOWN_MAX_ROWS, TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
 from ._tty import read_byte, wait_ready
 
-# (command, description) — kept in sync with the README "Commands" table.
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "list all slash commands"),
-    ("/init", "generate/update AGENTS.md for this project"),
-    ("/source", "list sources, switch to one, or override its model"),
-    ("/theme", "list color themes, or switch to one"),
-    ("/provider", "show or set OpenRouter provider-routing order"),
-    ("/budget", "show or set the reasoning token budget"),
-    ("/yolo", "toggle auto-approve for writes and bash"),
-    ("/resources", "show this nx process's CPU% and RSS memory"),
-    ("/context", "context breakdown by message; pin/unpin turns against /compress"),
-    ("/cost", "session usage + per-source cost scoreboard"),
-    ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
-    ("/bg", "list this session's background run_bash jobs and sub-agents, or /bg kill <pid>; /bg all lists every session's"),
-    ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T"),
-    ("/panel", "toggle the right status rail on the live region"),
-    ("/approval", "show or set risk threshold (all/low/medium/high/yolo)"),
-    ("/sessions", "list recent sessions, or show one in full"),
-    ("/export", "write the current session to a markdown file"),
-    ("/resume", "resume a past session (n/id/prefix/title)"),
-    ("/save", "save the current session (optional custom title)"),
-    ("/fork", "branch the conversation into a new session (original kept)"),
-    ("/memory", "manage persistent memory"),
-    ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
-    ("/review", "scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R)"),
-    ("/build", "spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch"),
-    ("/delete", "delete a saved session"),
-    ("/todo", "show the model's current todo_write list"),
-    ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session"),
-    ("/plan", "start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard"),
-    ("/verify", "set / clear / force-run the post-edit verify command (NX_VERIFY_CMD)"),
-    ("/compress", "summarize older turns into one, keep last 2 verbatim"),
-    ("/compact", "alias for /compress"),
-    ("/autocompress", "show or set the auto-compress threshold"),
-    ("/recover", "force a low-temp visible checkpoint after a bad stream"),
-    ("/reasoning", "on|off|last — toggle or show reasoning trace"),
-    ("/tooloutput", "on|off|last — toggle or show tool-call result"),
-    ("/tools", "legacy alias for /tooloutput"),
-    ("/toolcalls", "tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show"),
-    ("/undo", "revert the last write_file/edit_file/multi_edit"),
-    ("/reset", "clear conversation, start a fresh session"),
-    ("/clear", "alias for /reset"),
-    ("/new", "alias for /reset"),
-    ("/quit", "exit"),
-    ("/exit", "alias for /quit"),
-]
+# (command, description) — derived from the single command registry
+# (nx/_commands.py, 0.134.0), which mirrors the README "Commands" table.
+# Module-level name kept (moved-names rule): tests patch/read it.
+SLASH_COMMANDS: list[tuple[str, str]] = menu_list()
 
 
 # Valid keyword arguments for slash commands that take an enum-like first
-# argument -- surfaced as a dropdown once the user types "/cmd " (mirrors the
-# command autocomplete above, kept in sync with the handlers in _repl.py).
+# argument -- surfaced as a dropdown once the user types "/cmd " (derived
+# from the same registry as SLASH_COMMANDS above).
 # A value may be a static list, or a zero-arg callable for options that can
 # only be known at runtime (e.g. "/source"'s configured source names).
-SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = {
-    "/theme": sorted(THEMES),
-    "/reasoning": ["on", "off", "last"],
-    "/tooloutput": ["on", "off", "last"],
-    "/tools": ["on", "off", "last"],  # legacy alias arg dropdown
-    "/toolcalls": ["reset", "text", "native", "auto"],
-    "/approval": ["all", "low", "medium", "high", "yolo"],
-    "/autocompress": ["off", "on"],
-    "/budget": ["off"],
-    "/bg": ["kill", "all"],
-    "/verify": ["off", "run"],
-    "/context": ["pin", "unpin", "clear"],
-    "/plan": ["done", "off", "discard"],
-    "/memory": ["save", "remember", "delete", "list", "archived", "optimize", "reflect"],
-    "/export": ["md"],
-    "/source": lambda: list(st.SOURCE_ORDER),
-}
+SLASH_ARG_OPTIONS: dict[str, list[str] | "Callable[[], list[str]]"] = arg_options_map()
 
 
 def _fuzzy_score(query: str, text: str) -> float | None:
@@ -190,7 +137,7 @@ def _match_source_model(src_name: str, prefix: str) -> list[tuple[str, str]]:
 # dropdown (slash, arg, arg2/model, @file): nothing is hard-truncated, long
 # lists (multi-model hosts, aggregators, big repos) scroll instead, and the
 # window is generous because these lists are often browsed rather than typed.
-_DROPDOWN_MAX_ROWS = 8
+_DROPDOWN_MAX_ROWS = DROPDOWN_MAX_ROWS
 
 
 def _dropdown_window(n: int, sel: int, top: int) -> tuple[int, bool, bool]:
@@ -671,7 +618,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
     def render() -> None:
         nonlocal rendered_lines, rendered_rows, line_widths, cursor_line, \
             sel_idx, win_top, last_width
-        width = shutil.get_terminal_size((80, 24)).columns
+        width = shutil.get_terminal_size(
+            (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns
         if last_width is not None and width != last_width:
             # The terminal was resized (maximized/windowed): the previously
             # painted frame re-wrapped to the new width, so the cursor is no
@@ -793,7 +741,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         the terminal wraps every line FURTHER, so the frame can occupy more
         rows than when it was painted. Clear down past that recomputed
         bottom, then clear upward through the whole recomputed height."""
-        cols = shutil.get_terminal_size((80, 24)).columns
+        cols = shutil.get_terminal_size(
+            (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns
         total_rows = _frame_rows(line_widths, cols) \
             if len(line_widths) == rendered_lines else rendered_lines
         sys.stdout.write("\r")

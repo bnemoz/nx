@@ -641,10 +641,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             pass
         # box the result; the preview is a further display-only trim of the (already
         # context-bounded) result
+        from ._layout import TOOL_PREVIEW_LINES
         preview_lines = result.splitlines()
-        if len(preview_lines) > 8:
-            hidden = len(preview_lines) - 8
-            preview_lines = preview_lines[:8] + [f"... [{hidden} more lines]"]
+        if len(preview_lines) > TOOL_PREVIEW_LINES:
+            hidden = len(preview_lines) - TOOL_PREVIEW_LINES
+            preview_lines = preview_lines[:TOOL_PREVIEW_LINES] + [f"... [{hidden} more lines]"]
     # User/org post-hook (NX_POST_TOOL_HOOK): observer only — failures are
     # logged, never raised, and the result is unaffected. Parts results are
     # serialized for the hook's JSON stdin — via _parts_preview, so the hook

@@ -13,6 +13,7 @@ import threading
 from typing import Any, Optional
 
 from ._ansi import DIM, RESET, C
+from ._layout import REASONING_DIVIDER_CELLS
 from ._metrics import _abbr
 from . import _state as st
 
@@ -213,7 +214,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     # footer with nothing above it.
     if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
             and not text.strip()):
-        cprint(f"{DIM}  {'─' * 46}{RESET}")
+        cprint(f"{DIM}  {'─' * REASONING_DIVIDER_CELLS}{RESET}")
         cprint(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args
     # repairs applied + corrective retries — so the knobs are tunable in

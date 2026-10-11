@@ -21,6 +21,26 @@ def _rgb(hex_color: str) -> str:
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 CLEAR_LINE = "\033[2K\r"   # erase entire line, return cursor to col 0
 
+
+def notice(text: str) -> None:
+    """One human-facing line to stdout, flushed (UIUX_SPEC A3 writer
+discipline, 0.134.0). The single replacement for ad-hoc `print()` calls in
+REPL feedback paths: same bytes as `print(text)` (caller keeps its own
+DIM/RESET decoration) but flushed like the live-render path expects, so a
+notice never interleaves torn with the spinner/live region. Phase B moves
+this to `_render.py` as `notice(level, text)` with role colors."""
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
+def warn(text: str) -> None:
+    """One human-facing warning line to stderr, flushed (UIUX_SPEC A3).
+The single stderr writer for configuration warnings (theme/role-color
+messages) — keeps those off the stdout render stream without each site
+hand-rolling `file=sys.stderr`."""
+    sys.stderr.write(text + "\n")
+    sys.stderr.flush()
+
 # Strips CSI (\033[...<final byte>), OSC (\033]...BEL or \033\\), and other C0
 # control chars (except \t/\n) before untrusted content (tool output, resumed
 # transcripts, streamed model text) hits the real terminal. This is a
@@ -312,8 +332,8 @@ def _parse_color_override(env_name: str) -> _ColorOverride | None:
     h = v.lstrip("#")
     if len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h):
         return ("hex", h)
-    print(f"nx: ignoring invalid {env_name}={val!r} — want one of "
-          f"{', '.join(_PALETTE_KEYS)} or a 6-digit hex color", file=sys.stderr)
+    warn(f"nx: ignoring invalid {env_name}={val!r} — want one of "
+         f"{', '.join(_PALETTE_KEYS)} or a 6-digit hex color")
     return None
 
 
@@ -390,8 +410,8 @@ class _Colors:
 _requested_theme = os.environ.get("NX_THEME")
 if _requested_theme and _requested_theme not in THEMES:
     avail = ", ".join(sorted(THEMES))
-    print(f"nx: unknown NX_THEME {_requested_theme!r} — falling back to {DEFAULT_THEME!r}. "
-          f"Available: {avail}", file=sys.stderr)
+    warn(f"nx: unknown NX_THEME {_requested_theme!r} — falling back to {DEFAULT_THEME!r}. "
+         f"Available: {avail}")
 
 # Auto-detect the terminal background's lightness and, when the active theme's
 # authored side doesn't match it, apply that theme's derived opposite-side

@@ -365,7 +365,10 @@ def run_tabs_dashboard() -> None:
 
 def _term_cols() -> int:
     import shutil
-    return max(40, shutil.get_terminal_size((80, 24)).columns)
+    from ._layout import TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS, TERM_MIN_COLS
+    return max(TERM_MIN_COLS,
+               shutil.get_terminal_size(
+                   (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns)
 
 
 # --------------------------------------------------------------------------

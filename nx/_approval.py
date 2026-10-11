@@ -25,13 +25,15 @@ import sys
 from contextlib import contextmanager
 from typing import Optional
 
-from ._ansi import DIM, RESET, C, raw_mode
+from ._ansi import DIM, RESET, C, notice, raw_mode
 from ._env import _env_int
+from ._layout import DIFF_CONTEXT_LINES
 from ._tty import read_byte, wait_ready
 from ._risk import _local_risk_hint, LEVEL_ORDER
 from . import _state as st
 
-_DIFF_CONTEXT = 2
+# Approval diff-preview context lines (nx/_layout.py, pure move).
+_DIFF_CONTEXT = DIFF_CONTEXT_LINES
 
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -205,7 +207,7 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
             return "a"
         if ans == "n":
             return "n"
-        print("Unrecognized response; please enter Y, n, a (always), or esc.")
+        notice("Unrecognized response; please enter Y, n, a (always), or esc.")
         return _ask_approval(prompt, allow_hint)
     fd = sys.stdin.fileno()
     with raw_mode(fd):
@@ -240,14 +242,11 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
                 if rest in ("[Z", "[1;2Z"):
                     st.toggle_yolo()
                     on = "ON" if st.YOLO else "OFF"
-                    sys.stdout.write(
-                        f"{DIM}\n  yolo {on}  approval={_approval_display()}{RESET}\n")
-                    sys.stdout.flush()
+                    notice(f"{DIM}\n  yolo {on}  approval={_approval_display()}{RESET}")
                     return _ask_approval(prompt, allow_hint)
                 # Any other non-bare-Esc sequence (arrow keys, Home/End,
                 # bracketed paste, …) is meaningless at a Y/n/esc prompt.
-                sys.stdout.write(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}\n")
-                sys.stdout.flush()
+                notice(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}")
                 return _ask_approval(prompt, allow_hint)
             sys.stdout.write(f"{DIM}esc{RESET}\n")
             sys.stdout.flush()
@@ -264,8 +263,7 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
         elif c in ("e", "E"):
             shown, result = "esc", "esc"
         else:
-            sys.stdout.write(f"{DIM}unrecognized response; please press Y, n, or esc{RESET}\n")
-            sys.stdout.flush()
+            notice(f"{DIM}unrecognized response; please press Y, n, or esc{RESET}")
             return _ask_approval(prompt, allow_hint)
         sys.stdout.write(f"{DIM}{shown}{RESET}\n")
         sys.stdout.flush()

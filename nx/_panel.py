@@ -38,22 +38,26 @@ def ensure_region() -> None:
 
 
 def panel_width() -> int:
-    """NX_PANEL_WIDTH: the rail's column budget, default 24, clamped 12..40."""
+    """NX_PANEL_WIDTH: the rail's column budget, default 24, clamped
+    PANEL_MIN..PANEL_MAX (nx/_layout.py)."""
     from ._env import _env_int
-    return max(12, min(40, _env_int("NX_PANEL_WIDTH", 24)))
+    from ._layout import PANEL_MAX_COLS, PANEL_MIN_COLS
+    return max(PANEL_MIN_COLS, min(PANEL_MAX_COLS, _env_int("NX_PANEL_WIDTH", 24)))
 
 
 def panel_enabled() -> bool:
     """Is the status rail on? NX_PANEL=1/true/yes is the default; `/panel`
     (set_panel_enabled) overrides in-process. Silently off when the terminal
-    is too narrow for chat + rail: cols - PW must stay >= 60."""
+    is too narrow for chat + rail: cols - PW must stay >=
+    PANEL_MIN_CHAT_COLS (nx/_layout.py)."""
+    from ._layout import PANEL_MIN_CHAT_COLS
     if not panel_wants_on():
         return False
     try:
         cols = shutil.get_terminal_size().columns
     except OSError:
         return False
-    return cols - panel_width() >= 60
+    return cols - panel_width() >= PANEL_MIN_CHAT_COLS
 
 
 def panel_wants_on() -> bool:
