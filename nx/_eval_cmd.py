@@ -285,9 +285,9 @@ _WORKSPACE_FILES: dict[str, str] = {
 SCENARIOS: dict[str, dict[str, Any]] = {
     "e-happy": {
         "title": "one tool call, then a clean final answer",
-        "instruction": "Survey the eval workspace with list_dir and report what is present.",
+        "instruction": "Survey the eval workspace with run_bash 'ls .' and report what is present.",
         "script": [
-            {"tool_call": {"name": "list_dir", "args": {"path": "."}}},
+            {"tool_call": {"name": "run_bash", "args": {"command": "ls ."}}},
             {"final": "Eval run complete: the workspace is ready and holds the notes directory."},
         ],
         "expect": {"status": "done", "final_contains": "the workspace is ready"},
@@ -323,7 +323,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "title": "explore with real tools, then report what the files say",
         "instruction": "Find out what the handoff note in the notes directory says and report it.",
         "script": [
-            {"tool_call": {"name": "list_dir", "args": {"path": "."}}},
+            {"tool_call": {"name": "run_bash", "args": {"command": "ls ."}}},
             {"tool_call": {"name": "read_file", "args": {"path": "notes/handoff.md"}}},
             {"final": "The handoff note says the queued payload was never flushed after the restart."},
         ],

@@ -40,8 +40,8 @@ def test_load_orientation_note_includes_real_cwd():
         assert note["role"] == "user"
         cwd = os.path.realpath(os.getcwd())
         assert cwd in note["content"], note["content"]
-        # Points at the approval-free read-only tool, not a shell recipe.
-        assert "list_dir" in note["content"], note["content"]
+        # Points at an approval-free read path, not a shell recipe.
+        assert "ls" in note["content"], note["content"]
         assert "pwd" not in note["content"].lower(), note["content"]
     finally:
         if old is not None:

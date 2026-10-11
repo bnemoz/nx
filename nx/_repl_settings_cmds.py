@@ -709,7 +709,7 @@ def _cmd_init(user: str, state: _ReplState) -> None:
             print(f"{DIM}  cancelled{RESET}")
             return
     prompt = (
-        "Explore this codebase (list_dir/read_file as needed — build config, "
+        "Explore this codebase (run_bash ls / read_file as needed — build config, "
         "entry points, module layout, test setup, existing README/AGENTS.md) "
         "and then write_file an AGENTS.md at the project root "
         f"({agents_path}) documenting: what this project is, build/test/run commands, "

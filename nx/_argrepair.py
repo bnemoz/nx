@@ -70,7 +70,7 @@ _TOOL_ALIASES: dict[str, str] = {
     "run_command": "run_bash", "execute": "run_bash",
     "grep": "search_files", "search": "search_files",
     "find": "search_files", "ripgrep": "search_files",
-    "ls": "list_dir", "dir": "list_dir",
+    "ls": "list_dir", "dir": "list_dir",  # list_dir retired (0.129.8): still dispatches
     "cat": "read_file", "read": "read_file",
     "str_replace_editor": "edit_file", "str_replace": "edit_file",
     "edit": "edit_file",
@@ -79,6 +79,11 @@ _TOOL_ALIASES: dict[str, str] = {
     "test": "run_tests", "pytest": "run_tests", "run_test": "run_tests",
     "commit": "git_commit", "git_add": "git_commit", "gitcommit": "git_commit",
 }
+
+# Tools retired from the offered floor (0.129.8) that still dispatch: part of
+# the resolution universe so the alias table and near-miss repair reach them
+# (run_tool() then answers with the actionable retired-tool refusal).
+_RETIRED_DISPATCHABLE = frozenset({"list_dir"})
 
 # Per-tool ARG aliases for near-miss keys the 0.8 similarity cutoff
 # deliberately rejects ("cmd"→"command" is 0.6; lowering the cutoff starts
@@ -306,6 +311,11 @@ def resolve_tool_name(name: Any) -> tuple[str | None, str | None]:
         return None, None
     cand = name.strip()
     tools = _tool_names()
+    # Retired-from-the-floor tools (0.129.8) stay resolvable: they are no
+    # longer in TOOLS, but they still dispatch (tests, direct callers), and a
+    # model that emits the name should reach run_tool()'s actionable
+    # "retired, use X instead" refusal rather than "unknown tool".
+    tools = tools | _RETIRED_DISPATCHABLE
     if cand in tools:
         return cand, None
     if cand in _TOOL_ALIASES:

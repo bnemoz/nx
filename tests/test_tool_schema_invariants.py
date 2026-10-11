@@ -90,8 +90,9 @@ def test_every_tool_appears_once():
     # test_background_gating pins the exact count when a tool is added/removed.
     # 0.87.0: duckdb joins (27). 0.94.0: lint_check joins (28).
     # 0.103.22: stable project-tool search/call gateways join (31).
-    # 0.113.2: kill_background joins (32).
-    assert len(names) == 32
+    # 0.113.2: kill_background joins (32). 0.129.8: list_dir retires from the
+    # offered floor (still dispatchable) — 31.
+    assert len(names) == 31
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -246,7 +247,10 @@ def test_mutating_and_read_only_sets_stay_in_agreement_with_plan_gating():
     the model gets inconsistent affordances -- so cross-check against
     PLAN_GATE_TOOLS, which is the explicit mutating list."""
     from nx._plan import PLAN_GATE_TOOLS, PLAN_READONLY_TOOLS
-    names = {_fn(t)["name"] for t in _all_tools()} | {"final_answer"}
+    names = {_fn(t)["name"] for t in _all_tools()} | {"final_answer", "list_dir"}
+    # list_dir is retired from the offered floor (0.129.8) but stays in the
+    # dispatch tables and PLAN_READONLY_TOOLS (still a read-only tool for
+    # callers that emit it) — allowlisted here explicitly.
     assert PLAN_GATE_TOOLS <= names, PLAN_GATE_TOOLS - names
     assert PLAN_READONLY_TOOLS <= names, PLAN_READONLY_TOOLS - names
     assert not (PLAN_GATE_TOOLS & PLAN_READONLY_TOOLS)

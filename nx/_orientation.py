@@ -44,8 +44,7 @@ def _load_orientation_note() -> dict[str, str] | None:
     if root:
         lines.append(f"Project root: {root}")
     lines.append(
-        "Orient with list_dir('.') and list_dir(pattern='**/*.py'); both are "
-        "read-only and skip approval."
+        "Orient with run_bash `ls` (read-only, approval-free for pure reads)."
     )
     return {
         "role": "user",

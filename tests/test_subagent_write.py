@@ -207,14 +207,15 @@ def test_write_tier_boxes_readonly_calls_untagged(nx_fresh, monkeypatch, tmp_pat
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             # unique path: "." would hit the cross-test read-only result cache
-            # (list_dir entries persist on the shared _state module) and return
+            # (read entries persist on the shared _state module) and return
             # before any box is printed
-            _dispatch.run_tool("list_dir", {"path": str(tmp_path)})
+            _dispatch.run_tool("read_file", {"path": str(tmp_path / "sub_plain.md")})
+        (tmp_path / "sub_plain.md").unlink(missing_ok=True)
     finally:
         _SUBAGENT_TLS.ctx = None
     out = buf.getvalue()
-    assert f"list_dir {tmp_path} (sub-agent)" not in out
-    assert "┌─ list_dir" in out  # plain header, no tag
+    assert "(sub-agent)" not in out.split("┌─")[1].splitlines()[0] if "┌─" in out else True
+    assert "┌─ read_file" in out  # plain header, no tag
 
 
 def test_write_tier_never_parallel_fanout(nx_fresh, monkeypatch, tmp_path):

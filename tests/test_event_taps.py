@@ -163,7 +163,7 @@ def test_quiet_agent_loop_produces_stream_status_and_tool_kinds(nx_fresh, monkey
             on_step()
         # a real tool call through dispatch: quiet, so no box, but the sink
         # still records start + outcome
-        out = _dispatch.run_tool("list_dir", {"path": "."})
+        out = _dispatch.run_tool("git_status", {"path": "."})
         assert not out.startswith("ERROR")
         # a multi-line delta: one ring line per display line
         from nx._subagent_tls import tap_event  # the parser's own fork
@@ -181,7 +181,7 @@ def test_quiet_agent_loop_produces_stream_status_and_tool_kinds(nx_fresh, monkey
     lines = sink_tail(job, 40)
     kinds = {ln.split("]")[0].lstrip("[") for ln in lines}
     assert {"tool", "stream", "status"} <= kinds, f"kinds seen: {kinds} / {lines}"
-    assert "[tool] list_dir ok" in lines, "finish line must carry ok/error"
+    assert "[tool] git_status ok" in lines, "finish line must carry ok/error"
     # status tap: turn counter + tier
     assert any(ln.startswith("[status] turn ") and "tier=" in ln for ln in lines)
     # multi-line split: no ring entry contains a newline, and the blank line was

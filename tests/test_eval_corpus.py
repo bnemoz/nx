@@ -77,7 +77,7 @@ def test_stub_serves_scripted_turns_keyed_by_instruction():
                         out += (tc.get("function") or {}).get("name") or ""
                 return out
             assert content_of(a1) == "", content_of(a1)[:80]
-            assert "list_dir" in content_of(b1), content_of(b1)[:80]
+            assert "run_bash" in content_of(b1), content_of(b1)[:80]
             assert content_of(a2) == "", content_of(a2)[:80]
             # A request with no scenario instruction is rejected, not guessed.
             r = c.post("/chat/completions", json={"messages": []})

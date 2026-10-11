@@ -85,7 +85,7 @@ def test_subagent_loop_uses_readonly_dispatch(nx_fresh, monkeypatch):
             out2 = _dispatch.run_tool("run_bash", {"command": "rm -rf /"})
             assert "read-only commands" in out2  # allowlist-gated bash tier
             # read-only tools DO work inside the sub-loop
-            out3 = _dispatch.run_tool("list_dir", {"path": "."})
+            out3 = _dispatch.run_tool("search_files", {"pattern": "x", "path": "."})
             assert not out3.startswith("ERROR")
             messages.append({"role": "assistant", "content": "findings: module X is in nx/_x.py"})
             return nx_fresh.TURN_DONE

@@ -18,11 +18,12 @@ from . import _state as st
 from ._env import _env_int
 from ._subagent_tls import _SUBAGENT_TLS, _subagent_ctx  # noqa: F401 (re-exports)
 # Tools the sub-agent may call: the read-only dispatch entries (derived from
-# the same tuple run_tool() result-caches, plus list_dir) + run_bash, which is
-# gated to the read-only allowlist by _subagent_bash(). Never mutating tools,
-# never wait_background.
+# the same tuple run_tool() result-caches) + run_bash, which is gated to the
+# read-only allowlist by _subagent_bash(). Never mutating tools, never
+# wait_background. list_dir is retired from the offered floor (0.129.8) — a
+# sub-agent lists directories via its allowlisted bash `ls`.
 _READ_ONLY_TOOL_NAMES = (
-    "read_file", "list_dir", "search_files", "git_status", "git_diff", "git_log",
+    "read_file", "search_files", "git_status", "git_diff", "git_log",
     "memory_search", "recall_lessons", "run_bash",
 )
 

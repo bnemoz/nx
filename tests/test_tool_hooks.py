@@ -190,7 +190,7 @@ def test_hook_runs_inside_subagent_loop_too(nx_fresh, monkeypatch):
     from nx._dispatch import run_tool
 
     def fake_loop(messages, *a, **kw):
-        out = run_tool("list_dir", {"path": "."})
+        out = run_tool("search_files", {"pattern": "x", "path": "."})
         assert out.startswith("ERROR: blocked by NX_PRE_TOOL_HOOK")
         messages.append({"role": "assistant", "content": "blocked"})
         return {"status": "done", "turns": 1}

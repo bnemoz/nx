@@ -165,9 +165,9 @@ def test_pre_hook_sees_resolved_tool_name(nx_fresh):
     hook, out = _hook_capturing(tmp, name="hook2.sh")
     os.environ["NX_PRE_TOOL_HOOK"] = hook
     from nx._dispatch import run_tool
-    run_tool("list_dirx", {"path": "."})  # one keystroke off list_dir
+    run_tool("grep", {"pattern": "x", "path": "."})  # alias -> search_files
     payload = json.loads(out.read_text())
-    assert payload["tool"] == "list_dir"
+    assert payload["tool"] == "search_files"
 
 
 def test_pre_hook_veto_still_blocks_after_repair(nx_fresh):

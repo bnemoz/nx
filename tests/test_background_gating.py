@@ -53,12 +53,14 @@ def test_active_tools_excludes_wait_background_by_default():
     # only a usage nudge is deferred, not availability (see _active_tools()).
     assert "multi_edit" in names
     assert set(names) == {"read_file", "write_file", "edit_file", "delete_file",
-                          "list_dir", "run_bash", "search_files", "git_status",
+                          "run_bash", "search_files", "git_status",
                           "git_diff", "git_log", "sed_edit", "multi_edit",
                           "apply_patch", "todo_write", "memory_write",
                           "memory_search", "memory_delete", "recall_lessons",
                           "run_tests",
                           "git_commit", "search_tools", "web_fetch", "duckdb"}
+    # list_dir retired from the floor (0.129.8): still dispatchable, never offered
+    assert "list_dir" not in names
 
 
 def test_active_tools_includes_wait_background_once_flag_set():
@@ -75,7 +77,7 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # ...+ obs_recall + web_fetch (0.70.0, tier-2) + duckdb (0.87.0)
     # + lint_check (0.94.0) + recall_lessons (0.102.0) + stable project gateways
     # + kill_background (0.113.2, model-facing /bg kill)
-    assert len(m.TOOLS) == 32
+    assert len(m.TOOLS) == 31
 
 
 # ---------------------------------------------------------------------------

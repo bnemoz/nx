@@ -396,9 +396,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
                         f"ERROR: {args.get('path')} does not exist as given "
                         f"(this same call has failed {st._PATH_FAIL_RUN} "
                         f"times in a row; the working directory is "
-                        f"{os.getcwd()}). Do NOT retry it unchanged — run "
-                        "list_dir on the directory you expect it in and use "
-                        "a path from that listing."
+                        f"{os.getcwd()}). Do NOT retry it unchanged — list "
+                        "the directory you expect it in (run_bash `ls <dir>`) "
+                        "and use a path from that listing."
                     )
                 # 1 cached miss so far: fall through to the ORIGINAL cache-hit
                 # flow below (post-hook, breaker decay, box) untouched.
@@ -548,9 +548,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             result += (f"\n[Runtime note: this exact call has now failed "
                        f"{st._PATH_FAIL_RUN} times in a row — the path does "
                        f"not exist as given (the working directory is "
-                       f"{os.getcwd()}). Do NOT retry it unchanged; run "
-                       "list_dir on the directory you expect it in and use a "
-                       "path from that listing.]")
+                       f"{os.getcwd()}). Do NOT retry it unchanged; list "
+                       "the directory you expect it in (run_bash `ls <dir>`) "
+                       "and use a path from that listing.]")
     else:
         st._PATH_FAIL_LAST, st._PATH_FAIL_RUN = None, 0
     if quiet:

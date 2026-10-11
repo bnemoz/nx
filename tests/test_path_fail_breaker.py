@@ -45,7 +45,7 @@ def test_second_identical_missing_path_gets_nudge(nx_fresh, capsys):
     assert "has failed" in second
     assert "failed 2 times" in second
     assert os.getcwd() in second  # the cwd rides the nudge
-    assert "list_dir" in second
+    assert "ls <dir>" in second  # the nudge points at bash ls, not a tool name
 
 
 def test_third_failure_escalates_count(nx_fresh, capsys):

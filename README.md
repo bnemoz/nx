@@ -1024,7 +1024,7 @@ than the provider's `tools=` request, preserving the stable schema prefix.
 | `delete_file` | `path` | delete one file; restorable via `/undo` (unlike `rm` via bash); fence-checked like the other writers (see `NX_WRITE_FENCE`) |
 | `sed_edit` | `pattern`, `replacement`, `path` | regex find/replace over a file or glob; every matched file must sit inside a writable root (see `NX_WRITE_FENCE`) |
 | `apply_patch` | `diff`, `path?` | apply a unified diff; for multi-file restructure; each `+++` target is fence-checked against the writable roots (see `NX_WRITE_FENCE`) |
-| `list_dir` | `path`, `pattern?` | flat list, or recursive glob (`**/*.py`) |
+| `list_dir` | `path`, `pattern?` | **retired from the offered schema (0.129.8)** — still dispatches for direct callers (@dir mentions, tests, scripts); models list directories with `run_bash ls` (which also gives filters/counts/metadata the flat listing never had). Emits an actionable refusal pointing at `ls`/`search_files` when a model calls it |
 | `search_files` | `pattern`, `path?`, `glob?`, … | regex content search; read-only |
 | `git_status` | `path?` | `git status --short -b`; read-only. `path` is a directory (repo), never a file |
 | `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
@@ -1052,8 +1052,9 @@ than the provider's `tools=` request, preserving the stable schema prefix.
 
 **Advisor tier** (0.112.0): `spawn_agent` with `tier:"advisor"` hands the task to an executor backed by an on-call advisor — the parent model itself. The executor consults the advisor (`consult_advisor`, a one-shot no-tools side-call) when a decision exceeds its judgment, keeps `implementation-notes.md` with a Plan and a Deviations log, and takes the conservative option on any advisor timeout or refusal. Consult budget/timeout: `NX_SUBAGENT_CONSULT_BUDGET` (default 3) / `NX_SUBAGENT_CONSULT_TIMEOUT` (default 60 s). Requires `NX_SUBAGENT_WRITE=1` (the executor edits files); background advisor spawns need a yolo session like the other write tiers.
 
-`read_file`/`list_dir` results are cached per-path and invalidated on writes
-or any `run_bash`.
+`read_file` results are cached per-path and invalidated on writes
+or any `run_bash`. `list_dir` results cache the same way for the direct callers
+that still dispatch it.
 
 `run_tests` (0.49.0, ROADMAP P3-5) is the closed-loop verification tier: the
 model runs the suite after edits without spending a turn composing a shell

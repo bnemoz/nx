@@ -93,7 +93,7 @@ _GATE_REFUSALS: dict[str, str] = {
     "wait_background": "(no command has backgrounded yet — nothing to wait on). run_bash returns a '[background] PID' line when a command needs waiting on; read_file that log path in the meantime.",
     "kill_background": "(no command has backgrounded yet in this session — nothing to kill, and the tool only reaches jobs this session started).",
     "read_image": "(NX_VISION is off, native tool calls are not confirmed on this source, or NX_TOOL_FLOOR_SLIM=1 withholds it this session). Describe images by other means or ask the user to paste the relevant details.",
-    "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/list_dir.",
+    "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/run_bash.",
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
     "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
     "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
@@ -251,6 +251,18 @@ def _unknown_tool_error(name: str) -> str:
         except Exception:  # noqa: BLE001 — telemetry must never break a refusal
             pass
         return f"ERROR: {name} is not available in this session {_GATE_REFUSALS[name]}"
+    # Retired-from-the-floor tools (0.129.8): dispatchable but never offered,
+    # so a model emitting one gets the same actionable "withheld" story — with
+    # the native replacement named — instead of a bare unknown-tool error.
+    if name == "list_dir":
+        try:
+            from ._logging import usage_gate
+            usage_gate(name, "retired")
+        except Exception:  # noqa: BLE001 — telemetry must never break a refusal
+            pass
+        return ("ERROR: list_dir is retired in this session — list a "
+                "directory with run_bash `ls [path]` (flags/pipes/filters "
+                "work), and search file NAMES + contents with search_files.")
     try:
         from ._logging import usage_gate
         usage_gate(name, "withheld")
