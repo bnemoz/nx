@@ -35,6 +35,12 @@ PANEL_MAX_WIDTH = 40
 PANEL_MIN_COLS = PANEL_MIN_WIDTH
 PANEL_MAX_COLS = PANEL_MAX_WIDTH
 PANEL_MIN_CHAT_COLS = 60
+# Degradation ladder (0.140.0): when the rail can't fit (cols - PW <
+# PANEL_MIN_CHAT_COLS) but the user wants it on, the same cells render as ONE
+# bottom status line (rail-off, compact-on) — but only from this width up.
+# Narrower than this, one line of status is itself noise and the frame stays
+# byte-identical to panel-off.
+PANEL_DEGRADED_MIN_COLS = 46
 
 # Approval diff preview (_approval.py): context lines around each hunk.
 DIFF_CONTEXT_LINES = 2

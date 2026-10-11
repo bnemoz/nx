@@ -536,7 +536,7 @@ class TestLiveFrame(_PanelEnv):
         self.assertGreaterEqual(checked, 2, "expected railed rows")
 
     def test_degraded_one_line_bottom_status(self):
-        """Rail can't fit but the user wants it on (cols >= DEGRADED_MIN_COLS):
+        """Rail can't fit but the user wants it on (cols >= PANEL_DEGRADED_MIN_COLS):
         the SAME cells as one extra bottom line, rail-off/compact-on."""
         snap = mock.patch.object(_surfaces, "_surfaces_snapshot",
                                  return_value=list(ROWS))
@@ -560,7 +560,7 @@ class TestLiveFrame(_PanelEnv):
         self.assertLessEqual(display_width(msg[-1]), 51)
 
     def test_below_the_degraded_floor_stays_byte_identical(self):
-        """Under DEGRADED_MIN_COLS one line of status is itself noise: the
+        """Under PANEL_DEGRADED_MIN_COLS one line of status is itself noise: the
         frame must equal the panel-off frame byte for byte."""
         snap = mock.patch.object(_surfaces, "_surfaces_snapshot",
                                  return_value=list(ROWS))

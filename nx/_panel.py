@@ -47,12 +47,8 @@ _TRUTHY = ("1", "true", "yes")
 # Below this rail width the ctx cell renders as a `▰▱` bar instead of cur/max.
 BAR_MODE_WIDTH = 20
 
-# Degradation ladder (0.140.0): when the rail can't fit (cols - PW <
-# PANEL_MIN_CHAT_COLS, nx/_layout.py) but the user wants it on AND the terminal
-# is at least this wide, the same cells render as ONE bottom status line
-# (rail-off, compact-on). Narrower than this, one line of status is itself
-# noise and the frame stays byte-identical to panel-off.
-DEGRADED_MIN_COLS = 46
+# The rail-off width floor: kept in _layout.py beside PANEL_MIN_CHAT_COLS as
+# PANEL_DEGRADED_MIN_COLS.
 
 # The polled-cell TTLs: the rail repaints up to ~10 Hz (owner tick), so a git
 # fork or a sqlite open per repaint is out of the question. Values are refreshed
@@ -415,21 +411,21 @@ def degraded_line(rows: list[dict], cols: int | None = None) -> str | None:
     """The compact bottom status line for a terminal that can't fit the rail:
     None when the rail is off, when the user never asked for it, when the rail
     actually FITS (`panel_enabled()`), or when the terminal is narrower than
-    DEGRADED_MIN_COLS — below that one line of status is itself noise.
+    PANEL_DEGRADED_MIN_COLS — below that one line of status is itself noise.
 
     Only reached when the rail can't fit but the user wants it on
     (`panel_wants_on()` and not `panel_enabled()`), so `panel off` stays
     byte-identical: `_live_frame` returns before ever calling this."""
-    from ._layout import PANEL_MIN_CHAT_COLS
+    from ._layout import PANEL_DEGRADED_MIN_COLS, PANEL_MIN_CHAT_COLS
     if not panel_wants_on() or panel_enabled():
         return None
     if cols is None:
         cols = _term_cols()
-    if cols is None or cols < DEGRADED_MIN_COLS:
+    if cols is None or cols < PANEL_DEGRADED_MIN_COLS:
         return None
     if cols - panel_width() >= PANEL_MIN_CHAT_COLS:
         return None  # the full rail fits; _live_frame already drew it
-    cells = panel_cells(max(DEGRADED_MIN_COLS, cols - 4), rows)
+    cells = panel_cells(max(PANEL_DEGRADED_MIN_COLS, cols - 4), rows)
     if not cells:
         return None
     body = clip_display(f"{_muted()} · {RESET}".join(cells), max(1, cols - 1))
