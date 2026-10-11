@@ -61,13 +61,18 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     """Append BACKGROUND_GUIDANCE once, if run_tool() just saw the first
     backgrounded run_bash result this session. Appends a brand-new tail
     message (never rewrites an earlier one) so it can't invalidate a
-    server's prompt-prefix cache."""
+    server's prompt-prefix cache. Also drains worker-staged notes that landed
+    in the module store outside this loop's notice frame (see
+    _flush_module_store_notes)."""
+    _delivered: set[str] = set()
     if st._PENDING_BACKGROUND_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
+        _delivered.add(st._PENDING_BACKGROUND_NOTICE)
         st._PENDING_BACKGROUND_NOTICE = None
     if _notices.get("_PENDING_BG_COMPLETION_NOTICE"):
         messages.append({"role": "user",
                          "content": _notices.get("_PENDING_BG_COMPLETION_NOTICE")})
+        _delivered.add(_notices.get("_PENDING_BG_COMPLETION_NOTICE"))
         _notices.set_("_PENDING_BG_COMPLETION_NOTICE", None)
     # Finished async sub-agent answer(s): staged by the agent worker itself
     # (nx/_subagent.py) the moment the sub-loop completes, swept by run_tool()'s
@@ -75,6 +80,7 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     subagent_note = _notices.get("_PENDING_SUBAGENT_NOTICE")
     if subagent_note:
         messages.append({"role": "user", "content": subagent_note})
+        _delivered.add(subagent_note)
         _notices.set_("_PENDING_SUBAGENT_NOTICE", None)
     # Online Context Compact (0.67.0): the post-compaction continuation note
     # (re-issue the plan) staged by _occompact.maybe_compact_after_boundary.
@@ -91,7 +97,50 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
         _text = _notices.get(_slot)
         if _text:
             messages.append({"role": "user", "content": _text})
+            _delivered.add(_text)
             _notices.set_(_slot, None)
+    _flush_module_store_notes(messages, _delivered)
+
+
+# Slots whose notes may be staged into the MODULE store (vars(st)) while a turn
+# loop's per-thread notice frame is installed: an async sub-agent's worker
+# thread, the wake poller and the verify sweep all run OUTSIDE the parent's
+# loop, and _notices.set_() from a frameless thread writes the module store —
+# which the parent's frame-scoped reads and the frame-scoped flush above can
+# never see. Without this drain the note sits in the module store until the
+# turn ends text-only (undelivered), and the wake poller then fires a pointless
+# "background job finished — auto-continuing" turn for work the parent could
+# have consumed on its own last turn (seen live: every chat using an async
+# agent ends with a banner + "Nothing needs doing").
+_MODULE_NOTE_SLOTS = ("_PENDING_BG_COMPLETION_NOTICE", "_PENDING_SUBAGENT_NOTICE",
+                      "_PENDING_VERIFY_NOTICE", "_PENDING_MULTI_EDIT_NOTICE",
+                      "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE")
+
+
+def _flush_module_store_notes(messages: list[dict[str, Any]],
+                              delivered: set[str]) -> None:
+    """Deliver worker-staged notes the frame-based flush above cannot see.
+
+    For each pending-note slot, when the module store holds a non-empty string
+    the frame-based flush did NOT already deliver, it is appended and cleared
+    in place. `delivered` carries the strings the frame drain appended (the
+    frame seeds a pre-existing module-store value by reference, so the
+    frame-based flush may have delivered exactly that string while clearing
+    only the frame slot — without the guard it would be appended twice).
+    Clearing the module slot directly is safe: the frame's slot stays at its
+    seed value (None), so the pop fold-back skips it as unchanged and cannot
+    resurrect or clobber the worker's note."""
+    for _slot in _MODULE_NOTE_SLOTS:
+        _mod = getattr(st, _slot, None)
+        if not _mod or not isinstance(_mod, str):
+            continue
+        if _mod in delivered:
+            # The frame seeded this string by reference and already delivered
+            # it — clear the module copy so it can't re-announce later.
+            setattr(st, _slot, None)
+            continue
+        messages.append({"role": "user", "content": _mod})
+        setattr(st, _slot, None)
 
 
 def _keep_past_notes(body: list[dict[str, Any]], keep: int) -> int:
