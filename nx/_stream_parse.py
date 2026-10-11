@@ -725,6 +725,13 @@ class StreamParser:
         for any reason (normal end, interrupt, error) before reading back
         mode/say_live elsewhere."""
         self.close_think_block()
+        # The reset must NOT carry its own newline: `cprint(RESET)` with the
+        # default end="\n" turns it into an escape-only line — one blank line
+        # per step, which stacked blank/footer/blank/footer into a footer
+        # "staircase" whenever several small steps settle back-to-back. The
+        # cursor is at column 0 here (every prior line ended in a newline or
+        # an in-place CLEAR_LINE), so an inline reset is invisible and the
+        # footer that follows still starts on a fresh line.
         if not self.quiet:
             with write_lock():
-                cprint(RESET)
+                cprint(RESET, end="")

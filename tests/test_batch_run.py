@@ -569,7 +569,7 @@ def test_quiet_stream_parser_finish_writes_nothing(nx_fresh, monkeypatch):
     buf2 = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf2)
     StreamParser(buf2, t0=0.0, quiet=False).finish()
-    assert buf2.getvalue() == "\x1b[0m\n"
+    assert buf2.getvalue() == "\x1b[0m"  # inline reset — no self-owned blank line
 
 
 def test_quiet_forced_final_handler_is_silent(nx_fresh):
