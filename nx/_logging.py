@@ -197,6 +197,24 @@ def _agent_tag() -> str:
     return "main"
 
 
+def _event_model() -> str | None:
+    """The model to attribute this thread's usage events to: a sub-agent's
+    ROUTED model (its model_target — the pool round-robin entry) when one is
+    resolved, else the parent's active model. The per-model comparison is the
+    point of the stream, so an agent running on qwen must not be billed to
+    the glm session that spawned it."""
+    try:
+        from ._subagent_tls import _subagent_ctx
+        ctx = _subagent_ctx()
+        if ctx is not None:
+            mt = getattr(ctx, "model_target", None)
+            if mt and mt[1]:
+                return str(mt[1])
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
+        pass
+    return st.MODEL
+
+
 def _usage_emit(event: str, fields: dict, tail: bool = False) -> None:
     """One usage event: common fields (model/agent/session) + `fields`,
     onto the usage stream. `tail=True` attaches CTX_TAIL (see _usage_ctx).
@@ -205,7 +223,7 @@ def _usage_emit(event: str, fields: dict, tail: bool = False) -> None:
         return
     try:
         payload = dict(fields)
-        payload.setdefault("model", st.MODEL)
+        payload.setdefault("model", _event_model())
         payload.setdefault("agent", _agent_tag())
         sid = st.SESSION_ID
         if sid:
