@@ -285,24 +285,30 @@ if "--yolo" in sys.argv:
     st.YOLO = True
     st.APPROVE_LEVEL = None  # --yolo overrides everything; never prompt
 
-# --- --prompt-file: non-interactive single-shot mode ------------------------
+# --- --prompt-file / --prompt: non-interactive single-shot mode -------------
 # `--prompt-file <path>` (or `-f <path>`) reads the full task instruction from
 # a file, runs exactly one model turn, and exits — no REPL, no banner, no
-# session save. Designed for headless benchmark harnesses (Harbor/Terminal-Bench)
-# that pipe a task in and wait for the agent to finish. When set, main() runs
-# _run_one_shot() instead of the interactive loop. A value of "-" reads from
-# stdin instead of a file (useful for `echo ... | nx -f -`).
+# session save. `--prompt <text>` (or `-p <text>`) takes the instruction
+# inline on the command line instead. Designed for headless benchmark
+# harnesses (Harbor/Terminal-Bench) that pipe a task in and wait for the agent
+# to finish. When either is set, main() runs _run_one_shot() instead of the
+# interactive loop. A prompt-file value of "-" reads from stdin instead of a
+# file (useful for `echo ... | nx -f -`).
 _PROMPT_FILE = None
+_PROMPT_TEXT = None
 for _i, _arg in enumerate(sys.argv):
     if _arg in ("--prompt-file", "-f") and _i + 1 < len(sys.argv):
         _PROMPT_FILE = sys.argv[_i + 1]
+        break
+    if _arg in ("--prompt", "-p") and _i + 1 < len(sys.argv):
+        _PROMPT_TEXT = sys.argv[_i + 1]
         break
 
 # `--json`: one-shot mode emits a single machine-readable JSON summary (final
 # answer, status, token totals, ordered tool-call trace) to stdout instead of
 # the normal streamed chat output — for benchmark harnesses that need to score
 # a run programmatically rather than scrape terminal text.
-_JSON_OUTPUT = "--json" in sys.argv
+_JSON_OUTPUT = "--json" in sys.argv and (_PROMPT_FILE is not None or _PROMPT_TEXT is not None)
 
 # --- base-level traffic log -------------------------------------------------
 from ._logging import LOG_PATH, LOG_MAX_BYTES, _AsyncLogWriter, _llog, _log_event

@@ -6,6 +6,8 @@ import importlib
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
 for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SOURCES", "NX_ACTIVE"):
@@ -28,12 +30,58 @@ def test_bare_v_flag_is_not_version():
     assert _cli._cli_help_or_version(["--session", "-v-thing"]) is False
 
 
+def test_typo_verb_is_rejected_not_repl(monkeypatch, capsys):
+    # `nx v` (forgotten dash) must not silently fall through to the REPL
+    import pytest
+    from nx import _cli
+    for argv in (["v"], ["version"], ["sesions"]):
+        with pytest.raises(SystemExit) as e:
+            _cli._cli_help_or_version(argv)
+        assert e.value.code == 2
+        assert "unknown command" in capsys.readouterr().err
+    # known verbs and flags still fall through / short-circuit as before
+    assert _cli._cli_help_or_version(["run"]) is False
+    assert _cli._cli_help_or_version(["--tokens"]) is False
+    assert _cli._cli_help_or_version([]) is False
+
+
 def test_main_prints_version_for_v(capsys, monkeypatch):
     from nx import _cli
     monkeypatch.setattr(sys, "argv", ["nx", "-v"])
     _cli.main()
     out = capsys.readouterr().out
     assert out == f"nx {_cli._cli_version()}\n"
+
+
+def test_prompt_flag_uses_inline_text(monkeypatch, capsys):
+    # -p/--prompt runs one-shot mode with the inline text, no REPL
+    from nx import _cli
+    import nx
+    monkeypatch.setattr(sys, "argv", ["nx", "-p", "hello world"])
+    monkeypatch.setattr(nx, "_PROMPT_TEXT", "hello world")
+    monkeypatch.setattr(nx, "_PROMPT_FILE", None)
+    monkeypatch.setattr(_cli, "_PROMPT_TEXT", "hello world")
+    monkeypatch.setattr(_cli, "_PROMPT_FILE", None)
+    monkeypatch.setattr(_cli, "_initial_messages", lambda: [])
+    captured = {}
+    def fake_loop(messages, on_step=None):
+        captured["content"] = messages[-1]["content"]
+        return {"status": "ok"}
+    monkeypatch.setattr(_cli, "_run_model_turn_loop", fake_loop)
+    monkeypatch.setattr(_cli, "_ensure_ctx_probe", lambda a: None)
+    monkeypatch.setattr(_cli, "_fresh_metrics", lambda session_id=None: object())
+    with pytest.raises(SystemExit) as e:
+        _cli._run_one_shot()
+    assert e.value.code == 0
+    assert captured["content"] == "hello world"
+    assert capsys.readouterr().out == ""  # no REPL banner, no extra output
+
+
+def test_prompt_and_prompt_file_fall_through_to_repl(monkeypatch):
+    from nx import _cli
+    monkeypatch.setattr(_cli, "_PROMPT_TEXT", None)
+    monkeypatch.setattr(_cli, "_PROMPT_FILE", None)
+    assert _cli._run_one_shot() is False
 
 
 # --- _help_colored: uv/rustup-style blocks, TTY-gated -------------------------
