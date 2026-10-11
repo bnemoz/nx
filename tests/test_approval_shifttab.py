@@ -152,21 +152,20 @@ def test_shift_tab_csi_1_2z_variant_toggles_yolo():
     print("PASS — Shift+Tab [1;2Z variant toggles YOLO on at the approval prompt")
 
 
-def test_shift_tab_then_toggles_yolo_back_off():
-    """Two Shift+Tabs at the prompt cancel out: YOLO ends back off, and the
-    final 'n' still denies the action."""
+def test_shift_tab_proceeds_instead_of_reprompting():
+    """C3 (0.136.0) contract change: Shift+Tab at a prompt (always a YOLO
+    OFF -> ON flip, since a prompt can't appear while YOLO is on) toggles
+    YOLO AND proceeds with the pending action — it returns 'y' directly
+    instead of re-prompting the same action. The visible confirmation is
+    still printed (never a silent flip)."""
     assert m.YOLO is False
-    result, printed = _drive_approval([
-        [b"\x1b", b"[", b"Z"],     # first Shift+Tab -> yolo ON
-        [b"\x1b", b"[", b"Z"],     # second Shift+Tab -> yolo OFF
-        [b"n"],
-    ])
-    assert result == "n", f"expected 'n', got {result!r}"
-    assert m.YOLO is False, "YOLO should be OFF after two Shift+Tabs"
-    # Both confirmations printed: ON then OFF.
-    assert "ON" in printed and "OFF" in printed, \
-        f"expected both yolo-ON and yolo-OFF confirmations, got: {printed!r}"
-    print("PASS — two Shift+Tabs cancel out; YOLO back to off, prompt returns 'n'")
+    # ONE burst: just Shift+Tab — no follow-up keypress is read at all.
+    result, printed = _drive_approval([[b"\x1b", b"[", b"Z"]])
+    assert result == "y", f"expected 'y' (proceed) after Shift+Tab, got {result!r}"
+    assert m.YOLO is True, "YOLO should be ON after Shift+Tab at the approval prompt"
+    assert "ON" in printed and "proceeding" in printed.lower(), \
+        f"expected a visible yolo-ON + proceeding confirmation, got: {printed!r}"
+    print("PASS — Shift+Tab toggles YOLO on and proceeds with the pending action")
 
 
 def test_bare_esc_still_returns_esc():

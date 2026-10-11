@@ -33,8 +33,19 @@ from ._tools import _strip_line_numbers
 from ._undo import push_checkpoint as _undo_push, snapshot as _undo_snapshot
 
 
-def _confirm(action: str, preview: str | None = None) -> bool:
+def _confirm(action: str, preview: str | None = None,
+             diff_src: tuple | None = None) -> bool:
     import nx as _m
+    # C3: pass diff_src only when the (possibly test-patched) top-level
+    # _confirm accepts it — the historical `(action, preview=None)` patches
+    # keep working untouched.
+    if diff_src is not None:
+        import inspect
+        try:
+            if "diff_src" in inspect.signature(_m._confirm).parameters:
+                return _m._confirm(action, preview=preview, diff_src=diff_src)
+        except (TypeError, ValueError):
+            pass
     return _m._confirm(action, preview=preview)
 
 
@@ -141,7 +152,8 @@ def write_file(path: str, content: str, **_: Any) -> str:
         before, before_mtime = _read_with_mtime(path)
     except (FileNotFoundError, IsADirectoryError):
         before, before_mtime = "", None
-    if not _confirm(f"write {path} ({len(content)} bytes)", preview=_diff_preview(before, content)):
+    if not _confirm(f"write {path} ({len(content)} bytes)", preview=_diff_preview(before, content),
+                    diff_src=(before, content)):
         return "DENIED by user"
     try:
         after_mtime = os.stat(path).st_mtime
@@ -273,7 +285,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
         if new_src == src:
             return f"ERROR: no change to {path} (new content identical to lines {start}-{end})"
         action = f"edit {path} (lines {start}-{end})"
-        if not _confirm(action, preview=_diff_preview(src, new_src)):
+        if not _confirm(action, preview=_diff_preview(src, new_src),
+                        diff_src=(src, new_src)):
             return "DENIED by user"
         try:
             now_mtime = os.stat(path).st_mtime
@@ -323,7 +336,8 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
     if new_src == src:
         return f"ERROR: no change to {path} (`old` and `new` are identical)"
     action = f"edit {path}" + (f" ({count} occurrences)" if replace_all and count > 1 else "")
-    if not _confirm(action, preview=_diff_preview(src, new_src)):
+    if not _confirm(action, preview=_diff_preview(src, new_src),
+                    diff_src=(src, new_src)):
         return "DENIED by user"
     try:
         now_mtime = os.stat(path).st_mtime
@@ -424,7 +438,8 @@ def multi_edit(path: str, edits: list[dict[str, str]], **_: Any) -> str:
         work = work.replace(old, new, 1)
     if work == src:
         return f"no change to {path} (edits were no-ops)"
-    if not _confirm(f"edit {path} ({len(edits)} edits)", preview=_diff_preview(src, work)):
+    if not _confirm(f"edit {path} ({len(edits)} edits)", preview=_diff_preview(src, work),
+                    diff_src=(src, work)):
         return "DENIED by user"
     try:
         now_mtime = os.stat(path).st_mtime

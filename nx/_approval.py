@@ -26,6 +26,7 @@ from typing import Optional
 
 from ._ansi import DIM, RESET, C, notice, raw_mode
 from ._env import _env_int
+from ._keys import print_overlay, prompt_tail
 from ._layout import DIFF_CONTEXT_LINES
 from ._render import commit_line as _commit_line
 from ._render import diff as _render_diff
@@ -164,7 +165,9 @@ def _paused_spinner():
             sp.start()
 
 
-def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
+def _ask_approval(prompt: str, allow_hint: Optional[str] = None,
+                  diff_src: Optional[tuple] = None,
+                  context: int = _DIFF_CONTEXT) -> str:
     """Read a single keypress for a Y/n/esc approval prompt. Returns one of
     'y', 'n', 'esc', 'always'. Esc is accepted both as the bare Esc key (read
     in raw mode) and as the letter 'e'/'E' for terminals where raw mode isn't
@@ -175,8 +178,19 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
     inherit the default approval, especially for high-risk actions.
     `allow_hint` (the action string) enables the `a` key: "always allow
     actions matching this shape" — the prompt advertises [Y/n/a/esc] and the
-    saved rule auto-allows future matches via nx/_allowed.py. (The prompt text
-    itself, including the [Y/n/a/esc] hint, is built by the callers.)
+    saved rule auto-allows future matches via nx/_allowed.py.
+
+    C3 (0.136.0) keys (registry: nx/_keys.py "approval", same source as the
+    prompt's hint tail and the `?` overlay):
+      +/-   widen/narrow the diff preview — needs `diff_src=(before, after)`;
+            re-renders `_render.diff` at the new `context` (default
+            `_layout.DIFF_CONTEXT_LINES`) and re-prompts.
+      ?     one-frame key overlay above the prompt, any key dismisses.
+      Shift+Tab  toggle YOLO; after confirming the toggle the PENDING action
+            proceeds (returns 'y') instead of being re-prompted — the prompt
+            only ever appears with YOLO off, so the toggle at a prompt is
+            always ON, and a user who switches to auto-approve mid-turn means
+            it for the action in front of them, not just the next one.
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         ans = input(prompt).strip().lower()
@@ -211,27 +225,55 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
                         rest += read_byte(fd).decode("utf-8", "replace")
                     except OSError:
                         break
-                # Shift+Tab toggles YOLO here too — mirroring the chatbox
-                # editor so a user who started in manual mode can switch to
-                # auto-approve mid-turn, right at the approval prompt,
-                # instead of being stuck in manual mode until the turn ends
-                # and the chatbox comes back. A visible confirmation is
-                # printed (never a silent flip) and the SAME action is
-                # re-prompted: the toggle changes future approvals, not this
-                # one, so a stray muscle-memory Shift+Tab can't sneak a
-                # high-risk action through as a side effect.
+                # C3 (0.136.0): Shift+Tab toggles YOLO AND proceeds with the
+                # pending action (spec: "after confirming, proceed with the
+                # pending action instead of re-prompting"). A prompt can only
+                # appear with YOLO off, so this toggle is always ON — the
+                # visible confirmation stays (never a silent flip), and the
+                # action rides the just-enabled auto-approve.
                 if rest in ("[Z", "[1;2Z"):
                     st.toggle_yolo()
                     on = "ON" if st.YOLO else "OFF"
-                    notice(f"{DIM}\n  yolo {on}  approval={_approval_display()}{RESET}")
-                    return _ask_approval(prompt, allow_hint)
+                    notice(f"{DIM}\n  yolo {on}  approval={_approval_display()}"
+                           f"{'  — proceeding' if st.YOLO else ''}{RESET}")
+                    if st.YOLO:
+                        return "y"
+                    return _ask_approval(prompt, allow_hint,
+                                         diff_src=diff_src, context=context)
+                # C2: `?` opens the one-frame key overlay (registry-driven,
+                # same data as the prompt hint tail); any key dismisses — the
+                # next iteration re-prompts.
+                if rest and rest.startswith("[") and "?" in rest:
+                    print_overlay("approval")
+                    return _ask_approval(prompt, allow_hint,
+                                         diff_src=diff_src, context=context)
                 # Any other non-bare-Esc sequence (arrow keys, Home/End,
                 # bracketed paste, …) is meaningless at a Y/n/esc prompt.
                 notice(f"{DIM}unrecognized key sequence; please press Y, n, or esc{RESET}")
-                return _ask_approval(prompt, allow_hint)
+                return _ask_approval(prompt, allow_hint,
+                                     diff_src=diff_src, context=context)
             sys.stdout.write(f"{DIM}esc{RESET}\n")
             sys.stdout.flush()
             return "esc"
+        # C3: `?` (plain byte) — same overlay as the escape-sequence guard.
+        if c == "?":
+            print_overlay("approval")
+            return _ask_approval(prompt, allow_hint,
+                                 diff_src=diff_src, context=context)
+        # C3: +/- widen/narrow the diff context (bounded 0..30 — a full-file
+        # view is what read_file is for). Needs the structured diff source;
+        # without it (bash/commit previews) the keys are inert, like before.
+        if c in ("+", "=") or c == "-":
+            new_ctx = min(30, context + 1) if c in ("+", "=") else max(0, context - 1)
+            if diff_src is not None and new_ctx != context:
+                sys.stdout.write(f"\n{DIM}  ·· diff context {new_ctx} ··{RESET}\n")
+                sys.stdout.write(_render_diff(diff_src[0], diff_src[1],
+                                              context=new_ctx) + "\n")
+                sys.stdout.flush()
+                return _ask_approval(prompt, allow_hint, diff_src=diff_src,
+                                     context=new_ctx)
+            return _ask_approval(prompt, allow_hint, diff_src=diff_src,
+                                 context=context)
         # Echo the choice for feedback
         if c in ("\r", "\n"):
             shown, result = "Y (default)", "y"
@@ -245,13 +287,15 @@ def _ask_approval(prompt: str, allow_hint: Optional[str] = None) -> str:
             shown, result = "esc", "esc"
         else:
             notice(f"{DIM}unrecognized response; please press Y, n, or esc{RESET}")
-            return _ask_approval(prompt, allow_hint)
+            return _ask_approval(prompt, allow_hint, diff_src=diff_src,
+                                 context=context)
         sys.stdout.write(f"{DIM}{shown}{RESET}\n")
         sys.stdout.flush()
         return result
 
 
-def _confirm(action: str, preview: Optional[str] = None) -> bool:
+def _confirm(action: str, preview: Optional[str] = None,
+             diff_src: Optional[tuple] = None) -> bool:
     """Decide whether to run `action`. Returns True to proceed, False to deny.
     Raises `_EscToChat` if the user presses Esc — propagating up so the turn
     stops and the REPL drops back to the chat input.
@@ -333,6 +377,18 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
     # avoid a real model round-trip) takes effect — _assess_risk lives in
     # __init__.py, in a different module from this function.
     import nx as _m
+    # C3: pass the new kwargs only when there is a structured diff to widen
+    # AND the (possibly test-patched) _ask_approval actually accepts them —
+    # patches with the historical `(prompt, allow_hint=None)` signature keep
+    # working untouched.
+    _ask_kw: dict = {}
+    if diff_src is not None:
+        import inspect
+        try:
+            if "diff_src" in inspect.signature(_m._ask_approval).parameters:
+                _ask_kw["diff_src"] = diff_src
+        except (TypeError, ValueError):
+            pass
     try:
         level, reason = _local_risk_hint(action) or _m._assess_risk(action)
         # APPROVE_LEVEL is the max level to AUTO-APPROVE. level ≤ threshold → run.
@@ -351,7 +407,10 @@ def _confirm(action: str, preview: Optional[str] = None) -> bool:
             _commit_line(preview)
         choice = _m._ask_approval(
             f"{C.WARNING}  allow {action}? {lvl_color}[risk: {level.upper()} — {short}]{RESET} "
-            f"{C.WARNING}[Y/n/a/esc] {RESET}", allow_hint=action)
+            # C3: the key tail is generated from the same nx/_keys.py registry
+            # the `?` overlay renders — prompt hint and overlay can't drift.
+            f"{C.WARNING}[{prompt_tail('approval')}]{RESET} ",
+            allow_hint=action, **_ask_kw)
         if choice == "esc":
             raise _EscToChat(action)
         if choice == "a":
