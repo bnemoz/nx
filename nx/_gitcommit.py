@@ -50,7 +50,7 @@ def _stage_index(repo: str) -> tuple[str, str | None]:
     silently parent onto someone else's new tip (see _head_moved below).
     """
     head = _head_hash(repo)
-    fd, idx = tempfile.mkstemp(prefix=".nx-index-", dir=os.path.join(repo, ".git"))
+    fd, idx = tempfile.mkstemp(prefix=".nx-index-", dir=_gitdir(repo))
     os.close(fd)
     env_seed = dict(os.environ, GIT_INDEX_FILE=idx)
     try:
@@ -59,6 +59,27 @@ def _stage_index(repo: str) -> tuple[str, str | None]:
     except (OSError, subprocess.TimeoutExpired):
         pass  # fresh empty index still stages correctly below
     return idx, head
+
+
+def _gitdir(repo: str) -> str:
+    """The real git directory for `repo`, which may be a LINKED WORKTREE.
+
+    In a linked worktree (every `nx` sub-agent worktree, `nx/_worktree.py`)
+    `.git` is a FILE holding `gitdir: <path>`, not a directory — the pre-0.137.0
+    code passed `<repo>/.git` straight to `mkstemp`, which fails with
+    NotADirectoryError and made `git_commit` unusable in exactly the worktrees nx
+    itself creates. `git rev-parse --git-dir` resolves both shapes; an
+    unresolvable/odd repo falls back to `<repo>/.git` (the common case, and the
+    one that already worked).
+    """
+    try:
+        proc = subprocess.run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"],
+                              capture_output=True, text=True, timeout=15)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.join(repo, ".git")
 
 
 def _head_hash(repo: str) -> str | None:
