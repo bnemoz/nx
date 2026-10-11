@@ -512,6 +512,19 @@ def _repl() -> None:
             print(f"{DIM}  turn failed: {e}{RESET}")
         finally:
             st._TURN_ACTIVE = False
+            # Race guard: a note staged by a worker thread AFTER this turn's
+            # last tool-call flush (and a text-only ending delivers nothing)
+            # used to depend on the poller's next 2s tick to be noticed — a
+            # tick whose wake_due() guards (_TURN_ACTIVE, _async_running)
+            # were evaluated against a stale snapshot mid-turn. Re-check at
+            # turn end, when every guard is finally false: if a note is
+            # pending now, raise the flag so the editor's next poll wakes
+            # immediately instead of idling until the poller happens to
+            # agree. A user-typed turn's own delivery already ran (the flush
+            # happens at its start), so this can only fire on genuinely
+            # undelivered work.
+            if not wake and _m._autowake._any_pending_notice():
+                st._WAKE_DUE = True
             # EVENTSURFACE_SPEC guardrail, termination: the /tabs live region
             # closes at turn end (its own driver — the watcher tick — parks
             # with the turn).
