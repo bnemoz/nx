@@ -226,7 +226,7 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     # collapsed reasoning used to slip past both guards and render as a bare
     # footer with nothing above it.
     if (parser is not None and getattr(parser, "reasoning_only_chars", 0) > 0
-            and not text.strip()):
+            and not getattr(parser, "tcs", None) and not text.strip()):
         _commit_line(f"{DIM}  {BOX_H * REASONING_DIVIDER_CELLS}{RESET}")
         _commit_line(f"{DIM}  (step: reasoning · /reasoning to expand){RESET}")
     # 0.30.0: one footer field for the self-healing work this turn — args

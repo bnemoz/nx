@@ -464,7 +464,15 @@ class StreamParser:
 
     def _handle_reasoning(self, rc: str) -> bool:
         """Returns True if the stream should be cut (collapse detected)."""
-        if self.mode != "think":
+        # glm-style interleaved think blocks: reasoning deltas keep arriving
+        # after tool-call deltas have started (glm alternates tc, rc, tc, rc).
+        # Once a tool-call delta landed this turn, a new reasoning burst must
+        # NOT re-open the think block — the old guard re-printed a
+        # `▸ reasoning` header + `(thought for Xs)` closer pair on every
+        # alternation cycle, each commit a fresh line under a Live.
+        # Accumulation below (reasoning_parts / reasoning_only_chars) is
+        # deliberately unaffected — the bookkeeping stays intact.
+        if self.mode != "think" and not self.had_tool_call:
             self.think_start = time.time()
             if self.quiet:
                 pass
