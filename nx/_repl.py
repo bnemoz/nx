@@ -85,18 +85,57 @@ CommandHandler = Callable[[str, _ReplState], "str | None"]
 @command("/tabs")
 def _cmd_tabs(user: str, state: _ReplState) -> None:
     """Live dashboard of every running surface: main turn, background bash
-    jobs, async sub-agents. Interactive (raw-key) on a tty; one-shot print
-    otherwise. Steering: lines typed during a turn are queued and injected at
-    the next step boundary (nx/_surfaces.py)."""
-    import sys as _sys
+    jobs, async sub-agents. Steering: lines typed during a turn are queued and
+    injected at the next step boundary (nx/_surfaces.py).
+
+    Phase D (0.137.0): on a tty the dashboard takes the ALTERNATE SCREEN
+    (`_fullscreen`): j/k focus, Enter steers the focused agent row through the
+    same queue, `?` for the key overlay, Esc back to scroll-chat. Off a tty or
+    with NX_FULLSCREEN=0 the pre-Phase-D behaviour is unchanged — the old
+    inline dashboard (still `run_tabs_dashboard`) is not reached at all: the
+    one-shot print takes over, exactly as it did when no usable tty fd existed.
+    """
     import nx as _m
-    if _sys.stdin.isatty() and _sys.stdout.isatty():
-        try:
-            _m.run_tabs_dashboard()
-            return
-        except (OSError, ValueError):
-            pass  # no usable tty fd — fall through to the plain print
-    _m.tabs_print_fallback()
+    from . import _fullscreen
+    from ._surfaces import tabs_view
+    _fullscreen.open_view(tabs_view(), fallback=_m.tabs_print_fallback)
+
+
+@command("/diff")
+def _cmd_diff(user: str, state: _ReplState) -> None:
+    """Full-screen review of the WORKING TREE diff vs HEAD: the changed file
+    list, the rendered diff of one file (enter), and `a` for the reviewed
+    commit flow (the existing `git_commit` tool: private staging index, secret
+    scan, Y/n gate — the prompt runs after leaving the alternate screen).
+
+    Read-only until you commit. The inline fallback — off a tty, with
+    NX_FULLSCREEN=0, or with an explicit path — is a plain file list, or that
+    one file's diff for `/diff <path>`.
+
+    Distinct from /review, which runs the read-only critique sub-agent.
+    """
+    args = user[len("/diff"):].strip()
+    from . import _fullscreen
+    from ._render import commit_line
+    from ._review import ReviewView, review_lines
+    if args:
+        # One path named: the review of exactly that file, inline — the
+        # full-screen browser is the bare /diff.
+        for line in review_lines(path=args.split()[0]):
+            commit_line(line)
+        return
+    _fullscreen.open_view(ReviewView(state),
+                          fallback=lambda: _inline_review())
+
+
+def _inline_review() -> None:
+    """`/diff`'s inline fallback (off tty / NX_FULLSCREEN=0): the working-tree
+    file list exactly as `_review.review_lines` renders it, printed through the
+    shared console path."""
+    from ._render import commit_line
+    from ._review import review_lines
+    for line in review_lines():
+        commit_line(line)
 
 
 @command("/panel")

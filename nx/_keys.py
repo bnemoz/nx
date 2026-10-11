@@ -7,8 +7,10 @@ registry, so they cannot drift (a test pins it: same tuples, both paths).
 Surfaces:
   * "chatbox"   — the prompt editor (keys handled in `_chatbox._raw_read_key`)
   * "approval"  — the Y/n/a approval prompt (`_approval._ask_approval`)
-  * "tabs"      — reserved for Phase D full-screen /tabs (registry ready now)
-  * "fullscreen"— reserved for Phase D full-screen views (registry ready now)
+  * "tabs"      — the full-screen /tabs dashboard (`_surfaces.TabsView`)
+  * "diff"      — the full-screen /diff working-tree review (`_review.ReviewView`)
+  * "sessions"  — the full-screen /sessions browser (`_sessions_cmd.SessionsView`)
+  * "fullscreen"— the fallback list for any view without its own entry
 
 Each entry is (key, meaning); `{mode}` in a meaning is substituted per
 surface rendering (the chatbox colors its own yolo/manual tail).
@@ -43,14 +45,37 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("?", "keys"),
         ("esc", "back to chat"),
     ],
-    # Phase D placeholders: the registry is ready so Phase D views plug into
-    # the same hint/overlay machinery without touching this module's shape.
+    # Phase D (0.137.0) — the fullscreen surfaces. Entered from the prompt,
+    # Esc returns to scroll-chat, `?` paints this same overlay INSIDE the
+    # alternate screen. The fullscreen shell handles ?/Esc/q itself; every
+    # other key here is the view's own handler, so this list is the hint line,
+    # the overlay and the key dispatch all at once.
     "tabs": [
         ("j/k", "move"),
         ("enter", "steer row"),
+        ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),
     ],
+    "diff": [
+        ("j/k", "move"),
+        ("enter", "open diff"),
+        ("tab", "back to list"),
+        ("a", "commit…"),
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    "sessions": [
+        ("j/k", "move"),
+        ("/", "search"),
+        ("enter", "preview"),
+        ("R", "resume"),
+        ("esc", "back"),
+    ],
+    # Any fullscreen view without its own entry degrades to this one (the
+    # shell's keys are identical on every surface, so a new view is never
+    # hint-less).
     "fullscreen": [
         ("j/k", "move"),
         ("enter", "select"),

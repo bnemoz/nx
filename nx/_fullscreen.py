@@ -1,0 +1,500 @@
+"""Full-screen views on the alternate screen (UIUX_SPEC Phase D, 0.137.0).
+
+ONE owner of the alternate screen — `\\033[?1049h` / `\\033[?1049l` — plus the
+view dispatch, the raw-key loop, the SIGWINCH repaint, and the "stop the world"
+contract the spec spells out:
+
+  * a view is only ever entered while the TURN LOOP IS IDLE (the prompt owns
+    stdin; `wants_fullscreen()` refuses mid-turn), so nothing else is draining
+    the terminal;
+  * the mid-turn live dashboard (`_surfaces` live region) is CLOSED on entry
+    and REOPENED on exit when it had been open — paused, not lost;
+  * the alternate screen itself guarantees the acceptance criterion: entering
+    and leaving it restores the cursor position and the scrollback exactly as
+    they were, because a view's frames are drawn in the alternate buffer and
+    never touch the normal one.
+
+Views are plain `View` objects implemented in the module that owns their data
+(`_surfaces.py` for /tabs, `_review.py` for /review, `_sessions_cmd.py` for
+/sessions) and they render EXCLUSIVELY through `_render.py` components: no raw
+palette reads, one glyph set, semantic roles (the Phase B grep-guard test
+covers every module in the package). Key lists come from `_keys.py` — the same
+registry behind the chatbox border hints and the `?` overlay — so a fullscreen
+view cannot advertise a key it does not handle, and `?` inside a view paints
+the same overlay the chatbox paints.
+
+State is read-only from a view: the only mutations a view can cause are
+*existing* commands (`/reset`-free resume, the git_commit confirmation flow),
+which a view hands back to the shell as a deferred action — the shell leaves the
+alternate screen FIRST and then runs the action, so an approval prompt is never
+painted into the alternate buffer.
+
+Off a tty, and when `NX_FULLSCREEN=0`, `wants_fullscreen()` is False and every
+command keeps its pre-Phase-D inline output byte for byte (pinned by tests
+against the pre-existing command functions).
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import signal
+import sys
+from collections.abc import Iterator
+from typing import Callable, Optional
+
+# --- the contract with the terminal ------------------------------------------
+# Enter/exit are the ONLY cursor-and-scrollback-relevant bytes this module
+# emits outside a frame: the alternate screen saves the cursor and swaps the
+# scrollback, so pair-for-pair they restore the pre-entry state exactly.
+ALT_ENTER = "\033[?1049h"
+ALT_EXIT = "\033[?1049l"
+# A frame is drawn inside the alternate buffer: home + erase below, so no
+# cursor arithmetic has to be kept in sync between frames.
+FRAME_HOME = "\033[H"
+FRAME_ERASE = "\033[2J"
+
+# How long to wait after a lone ESC for the rest of a CSI/SS3 sequence before
+# calling it a bare Esc (the same disambiguation the chatbox uses).
+ESC_WAIT = 0.05
+# Key-poll slice: also the resize-repaint latency ceiling on platforms where a
+# SIGWINCH wake pipe is unavailable (Windows).
+POLL = 0.25
+
+OVERLAY_KEY = "?"
+
+# --- key decoding -------------------------------------------------------------
+_SIMPLE = {
+    "\r": "enter", "\n": "enter", "\t": "tab",
+    "\x03": "ctrl-c", "\x04": "ctrl-d", "\x7f": "backspace", "\x08": "backspace",
+    " ": "space",
+}
+_ESC_SEQ = {
+    "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+    "[H": "home", "[F": "end", "[Z": "shift+tab",
+    "[5~": "pageup", "[6~": "pagedown",
+    "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+}
+_FINALS = "ABCDHFZ~"
+
+
+def read_key(fd: int, *, wait: Optional[Callable[[int, float], bool]] = None) -> str:
+    """One keypress as a symbolic name ("esc", "enter", "up", "ctrl-c") or the
+    literal character for anything printable.
+
+    Built on the SAME raw reader the chatbox uses (`_chatbox._raw_read_key`),
+    so there is one byte source per process: a bare Esc is told apart from an
+    arrow/Ctrl-arrow sequence by a short `wait_ready` probe. Raises EOFError
+    when stdin closes (the caller's exit signal).
+    """
+    from ._chatbox import _raw_read_key
+    if wait is None:
+        from ._tty import wait_ready as wait
+    ch = _raw_read_key(fd)
+    if ch != "\x1b":
+        return _SIMPLE.get(ch, ch)
+    if not wait(fd, ESC_WAIT):
+        return "esc"
+    tail = _raw_read_key(fd)
+    if tail == "O":
+        if wait(fd, ESC_WAIT):
+            tail += _raw_read_key(fd)
+    elif tail == "[":
+        while len(tail) < 3 and wait(fd, ESC_WAIT):
+            tail += _raw_read_key(fd)
+            if tail[-1] in _FINALS:
+                break
+    return _ESC_SEQ.get(tail, "esc")
+
+
+def read_line(fd: int, out, label: str, *, width: int = 0, initial: str = "") -> Optional[str]:
+    """A one-line raw-mode editor drawn on `out`'s bottom row: printable keys,
+    backspace, Enter commits, Esc/Ctrl-C cancels (returns None).
+
+    Deliberately minimal, exactly like the pre-Phase-D /tabs steer prompt: a
+    one-line nudge (a steer note, a search query, a commit subject) is not a
+    chat box, and reusing the chatbox editor inside the alternate screen would
+    duplicate its frame arithmetic for no gain.
+    """
+    from ._tty import wait_ready
+    buf = initial
+    while True:
+        out.write(f"\r\x1b[K{label} {buf}")
+        out.flush()
+        if not wait_ready(fd, POLL):
+            continue
+        try:
+            key = read_key(fd)
+        except EOFError:
+            return None
+        if key == "enter":
+            return buf.strip()
+        if key in ("esc", "ctrl-c", "ctrl-d"):
+            return None
+        if key == "backspace":
+            buf = buf[:-1]
+            continue
+        if len(key) == 1 and key >= " ":
+            buf += key
+
+
+# --- resize (SIGWINCH) --------------------------------------------------------
+class _ResizeNotifier:
+    """SIGWINCH -> a readable fd, so the key loop's select() wakes immediately
+    instead of waiting out its poll slice.
+
+    POSIX only (Windows has no SIGWINCH; there the loop's POLL timeout is the
+    repaint trigger). `trigger()` is the handler body, exposed so tests can
+    simulate a resize without a real signal.
+    """
+
+    def __init__(self) -> None:
+        self._fds: tuple[int, int] = (-1, -1)
+        self._prev = None
+        self._drain = lambda: None
+
+    def open(self) -> None:
+        if os.name != "posix":
+            return
+        try:
+            self._fds = os.pipe()
+            os.set_blocking(self._fds[0], False)
+            os.set_blocking(self._fds[1], False)
+
+            def _drain() -> None:
+                try:
+                    while os.read(self._fds[0], 64):
+                        pass
+                except (BlockingIOError, OSError):
+                    pass
+            self._drain = _drain
+            self._prev = signal.signal(signal.SIGWINCH, self._on_signal)
+        except (AttributeError, OSError, ValueError, RuntimeError):
+            self._fds = (-1, -1)
+            self._prev = None
+
+    def _on_signal(self, signum, frame) -> None:  # pragma: no cover - signal path
+        self.trigger()
+
+    def trigger(self) -> None:
+        """Post a resize wake-up (the SIGWINCH handler's whole body)."""
+        if self._fds[1] >= 0:
+            try:
+                os.write(self._fds[1], b"w")
+            except OSError:
+                pass
+
+    def fds(self) -> list[int]:
+        return [f for f in self._fds if f >= 0]
+
+    def drain(self) -> None:
+        self._drain()
+
+    def close(self) -> None:
+        if self._prev is not None:
+            try:
+                signal.signal(signal.SIGWINCH, self._prev)
+            except (OSError, ValueError):
+                pass
+            self._prev = None
+        for f in self._fds:
+            if f >= 0:
+                try:
+                    os.close(f)
+                except OSError:
+                    pass
+        self._fds = (-1, -1)
+        self._drain = lambda: None
+
+
+# --- the alternate screen + stop-the-world -----------------------------------
+_SCREEN_OWNER = False
+
+
+def owns_screen() -> bool:
+    """Is a fullscreen view painting right now? The live region asks this
+    before repainting (a 4 fps dashboard frame must never land inside a view's
+    alternate screen)."""
+    return _SCREEN_OWNER
+
+
+def _term_lines(rows: tuple[int, int]) -> tuple[int, int]:
+    import shutil
+    from ._layout import TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS, TERM_MIN_COLS
+    size = shutil.get_terminal_size((TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS))
+    return max(TERM_MIN_COLS, size.columns), max(3, size.lines)
+
+
+@contextlib.contextmanager
+def alternate_screen(*, out=None, pause: bool = True) -> Iterator[None]:
+    """Own the alternate screen for the duration of the block.
+
+    Enter emits `ALT_ENTER` and exit emits `ALT_EXIT` (plus an SGR reset so a
+    colored last frame cannot bleed into the restored prompt) — that pair is
+    what restores the cursor and the scrollback, and the exit line is emitted
+    from a `finally`, so an exception inside a view (or Ctrl-C) still gives the
+    terminal back.
+
+    `pause=True` implements the stop-the-world contract: the mid-turn live
+    dashboard is closed on entry and reopened on exit if it *was* open.
+    """
+    global _SCREEN_OWNER
+    from ._render import RESET
+    out = out if out is not None else sys.stdout
+    was_open = False
+    if pause:
+        was_open = _pause_dashboard()
+    out.write(ALT_ENTER)
+    out.flush()
+    _SCREEN_OWNER = True
+    try:
+        yield
+    finally:
+        _SCREEN_OWNER = False
+        try:
+            out.write(RESET + ALT_EXIT)
+            out.flush()
+        except Exception:
+            pass
+        if pause and was_open:
+            _resume_dashboard()
+
+
+def _pause_dashboard() -> bool:
+    """Close the live region for the duration of a view; True if it was open."""
+    try:
+        from ._surfaces import close_dashboard, dashboard_open
+        if not dashboard_open():
+            return False
+        close_dashboard()
+        return True
+    except Exception:
+        return False
+
+
+def _resume_dashboard() -> None:
+    """Reopen the live region a view paused (only if something is still live —
+    the region's own termination rule, `maybe_close_if_idle`)."""
+    try:
+        from ._surfaces import close_dashboard, open_dashboard
+        if not open_dashboard():
+            return
+        from ._surfaces import _surfaces_snapshot
+        if not any(r.get("alive") for r in _surfaces_snapshot()
+                   if r.get("kind") != "main"):
+            close_dashboard()
+    except Exception:
+        pass
+
+
+# --- view protocol ------------------------------------------------------------
+class View:
+    """One alternate-screen view.
+
+    A view gathers its own data and renders lines; it never writes to the
+    terminal (the shell does), never mutates state, and never handles keys the
+    shell reserves (`?` overlay, Esc/quitter). A view that needs a mutation
+    returns "run" from `on_key` after setting `pending_action` to a zero-arg
+    callable; the shell leaves the alternate screen and then runs it.
+    """
+
+    #: `_keys.py` surface name — the key list both the hint line and the `?`
+    #: overlay inside this view are rendered from.
+    surface = "fullscreen"
+    #: The view's own box title.
+    title = "view"
+
+    def __init__(self) -> None:
+        self.pending_action: Optional[Callable[[], None]] = None
+        #: transient one-line feedback drawn under the view
+        self.notice = ""
+
+    def render(self, width: int, height: int) -> list[str]:
+        """The frame as ready-to-write lines (already colored, clipped to
+        `width`). MUST go through `_render.py` components."""
+        raise NotImplementedError
+
+    def on_key(self, key: str, shell: "Shell") -> str:
+        """Handle one key: return "repaint", "quit", or "run" (then the shell
+        runs `pending_action` after leaving the alternate screen)."""
+        return "repaint"
+
+    def take_action(self) -> Optional[Callable[[], None]]:
+        act, self.pending_action = self.pending_action, None
+        return act
+
+
+class Shell:
+    """The bridge a view uses for the two things the shell owns: drawing, and a
+    one-line prompt on the bottom row (`ask`) — the view's data stays its own."""
+
+    def __init__(self, fd: int, out, width: int, height: int) -> None:
+        self.fd = fd
+        self.out = out
+        self.width = width
+        self.height = height
+
+    def ask(self, label: str, initial: str = "") -> Optional[str]:
+        return read_line(self.fd, self.out, label, initial=initial)
+
+
+def run_view(view: View, *, fd: Optional[int] = None, out=None,
+             _reader: Optional[Callable[[int], str]] = None,
+             _notifier: Optional[_ResizeNotifier] = None) -> Optional[Callable[[], None]]:
+    """Run one view until it quits; returns the deferred action (or None).
+
+    The loop is the chatbox's discipline, not cursor arithmetic: each frame is
+    `FRAME_HOME + FRAME_ERASE + lines`, and the next frame erases the previous
+    one wholesale. Resizes repaint immediately (SIGWINCH wake pipe on POSIX,
+    the poll slice elsewhere). `?` paints the `_keys` overlay for one frame.
+    """
+    from ._tty import raw_mode, wait_ready, wait_ready_any
+    out = out if out is not None else sys.stdout
+    fd = fd if fd is not None else sys.stdin.fileno()
+    reader = _reader or read_key
+
+    notifier = _notifier
+    own_notifier = notifier is None
+    if own_notifier:
+        notifier = _ResizeNotifier()
+        notifier.open()
+
+    def paint(lines: list[str]) -> None:
+        rows = list(lines)[:max(1, height)]
+        out.write(FRAME_HOME + FRAME_ERASE + "\n".join(rows))
+        out.flush()
+
+    overlay = False
+    action: Optional[Callable[[], None]] = None
+    try:
+        with alternate_screen(out=out):
+            with (raw_mode(fd, icrnl=True) if _is_tty(fd)
+                  else contextlib.nullcontext()):
+                width, height = _term_lines(_term_size())
+                shell = Shell(fd, out, width, height)
+                while True:
+                    paint(_overlay_lines(view.surface) if overlay
+                          else view.render(width, height))
+                    if overlay:
+                        overlay = False
+                        # any key dismisses the overlay
+                        if not wait_ready(fd, POLL):
+                            continue
+                        try:
+                            reader(fd)
+                        except EOFError:
+                            break
+                        continue
+                    extra = notifier.fds()
+                    ready = (wait_ready_any([fd, *extra], POLL) if extra
+                             else (fd if wait_ready(fd, POLL) else None))
+                    if extra and ready in extra:
+                        notifier.drain()
+                        width, height = _term_lines(_term_size())
+                        continue
+                    if ready is None:
+                        continue  # poll timeout: repaint (clock/live rows)
+                    try:
+                        key = reader(fd)
+                    except EOFError:
+                        break
+                    if key == OVERLAY_KEY:
+                        overlay = True
+                        continue
+                    verdict = view.on_key(key, shell)
+                    if verdict == "quit":
+                        break
+                    if verdict == "run":
+                        action = view.take_action()
+                        break
+    finally:
+        if own_notifier and notifier is not None:
+            notifier.close()
+    return action
+
+
+def _is_tty(fd: int) -> bool:
+    try:
+        return os.isatty(fd)
+    except OSError:
+        return False
+
+
+def _term_size() -> tuple[int, int]:
+    import shutil
+    from ._layout import TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
+    size = shutil.get_terminal_size((TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS))
+    return size.columns, size.lines
+
+
+def _overlay_lines(surface: str) -> list[str]:
+    """The `?` overlay for a fullscreen view: the SAME `_keys.overlay_lines`
+    the chatbox renders (one registry, so hints and overlay cannot drift)."""
+    from ._keys import overlay_lines
+    return overlay_lines(surface, title=(
+        f"keys · {surface} (any key closes)"))
+
+
+# --- dispatch -----------------------------------------------------------------
+def wants_fullscreen() -> bool:
+    """Should a view take the alternate screen right now?
+
+    False off a tty, with `NX_FULLSCREEN=0` (or false/no/off), or while a turn
+    is running — the views are prompt-time surfaces, and refusing mid-turn is
+    the "turn loop idle" half of the stop-the-world contract. Callers fall
+    through to their inline (pre-Phase-D) output when this is False.
+    """
+    if os.environ.get("NX_FULLSCREEN", "").strip().lower() in (
+            "0", "false", "no", "off"):
+        return False
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    from . import _state as st
+    return not st._TURN_ACTIVE
+
+
+def tabs():
+    from ._surfaces import TabsView
+    return TabsView()
+
+
+def review(state=None):
+    from ._review import ReviewView
+    return ReviewView(state)
+
+
+def sessions(state):
+    from ._sessions_cmd import SessionsView
+    return SessionsView(state)
+
+
+def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> bool:
+    """Run `view` in the alternate screen when `wants_fullscreen()`, else call
+    `fallback` (the command's pre-Phase-D inline output) and return False.
+
+    Returns True when the view actually ran. A failure to reach a usable tty
+    fd falls back too, so a /tabs in a weird terminal still prints something.
+    """
+    if not wants_fullscreen():
+        if fallback is not None:
+            fallback()
+        return False
+    try:
+        action = run_view(view)
+    except (OSError, ValueError):
+        if fallback is not None:
+            fallback()
+        return False
+    if action is not None:
+        action()
+    return True
+
+
+__all__ = [
+    "ALT_ENTER", "ALT_EXIT", "OVERLAY_KEY",
+    "View", "Shell", "read_key", "read_line",
+    "alternate_screen", "run_view", "open_view",
+    "wants_fullscreen", "owns_screen", "tabs", "review", "sessions",
+]

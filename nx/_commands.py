@@ -82,6 +82,8 @@ _SPECS = [
      [], ["kill", "all"], 1),
     ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T",
      None, [], None, 2),
+    ("/diff", "full-screen working-tree diff review; a commits via the reviewed git flow",
+     "[path]", [], None, 1),
     ("/panel", "toggle the right status rail on the live region", None, [],
      None, 0),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)",

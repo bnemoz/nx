@@ -27,6 +27,7 @@ import threading
 from collections import deque
 
 from . import _state as st
+from . import _fullscreen
 from ._ansi import DIM, RESET, C
 from ._tty import IS_WINDOWS
 
@@ -526,6 +527,20 @@ def live_region():
     return _DASH_LIVE
 
 
+def _fullscreen_owns_screen() -> bool:
+    """Is a Phase D fullscreen view painting the alternate screen right now?
+
+    Lazy import: `_fullscreen` imports this module's view classes at call time,
+    so a module-level import here would be a cycle. Failure to import (a
+    stripped build) means "no view", which is the pre-Phase-D behaviour.
+    """
+    try:
+        from ._fullscreen import owns_screen
+        return owns_screen()
+    except Exception:
+        return False
+
+
 def _region_renderable():
     """The Live's renderable: the frame lines joined and parsed to a `Text`.
 
@@ -554,6 +569,8 @@ def repaint_live(force: bool = False) -> None:
     external thread; update+refresh run here, under write_lock(), triggered by
     the terminal's owner hooks (see repaint_live_tick)."""
     global _DASH_DISABLED
+    if _fullscreen_owns_screen():
+        return
     with _DASH_LOCK:
         if not _DASH_OPEN or _DASH_DISABLED:
             return
@@ -690,3 +707,111 @@ def tabs_print_fallback() -> None:
               f"{' '.join(str(r.get('instruction', '')).split())[:100]}")
         for tl in _tail_lines(r.get("tail") or "", 2):
             print(f"     │ {tl[:100]}")
+
+
+# --------------------------------------------------------------------------
+# /tabs — alternate-screen view (UIUX_SPEC Phase D)
+# --------------------------------------------------------------------------
+# The pre-0.137.0 inline raw-key dashboard (`run_tabs_dashboard`) is kept below
+# for callers that enter it directly; the /tabs COMMAND now goes through the
+# fullscreen shell (`_fullscreen.open_view(tabs_view(), fallback=...)`), which
+# owns the alternate screen, the resize repaint and the `?` overlay. The data,
+# the steering queue and the inline fallback are unchanged.
+
+class TabsView(_fullscreen.View):
+    """The Phase D /tabs view: one row per live surface (main turn, bg jobs,
+    async agents), j/k focus, Enter steers the focused row through the SAME
+    `_surfaces` steering queue the mid-turn watcher fills.
+
+    Renders through `_render.py` (`panel`, `role`, `hint_line`) — read-only:
+    steering a row is the queue the pre-existing dashboard already used, and
+    the view touches no job state itself.
+    """
+
+    surface = "tabs"
+    title = "tabs"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sel = 0
+        self.rows: list[dict] = []
+        self.notice = ""
+
+    def refresh(self) -> None:
+        self.rows = _surfaces_snapshot()
+        self.sel = min(self.sel, max(0, len(self.rows) - 1))
+
+    def _row_lines(self, f: dict, selected: bool, width: int) -> list[str]:
+        from ._render import role
+        status = f.get("status") or "—"
+        marker = "›" if selected else " "
+        head = (f"{role('ACCENT')}{marker}{RESET} "
+                f"{_glyph(f.get('alive', False), status)} "
+                f"{f['kind']:<5} {f['id']:<18} "
+                f"{role('MUTED')}{status:<8}{RESET}")
+        out = [head[:width + 32]]
+        instr = " ".join(str(f.get("instruction", "")).split())
+        if instr:
+            out.append(f"{role('MUTED')}    {instr[:width - 6]}{RESET}")
+        for tl in _tail_lines(f.get("tail") or ""):
+            out.append(f"{role('MUTED')}    │ {tl[:width - 8]}{RESET}")
+        pend = (agent_steering_pending(f["id"]) if f.get("kind") == "agent"
+                else 0)
+        if pend:
+            out.append(f"{role('WARNING')}    ▸ {pend} steering line"
+                       f"{'s' if pend != 1 else ''} queued{RESET}")
+        return out
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        self.refresh()
+        lines = [f"{role('ACCENT')}tabs{RESET}{role('MUTED')} — "
+                 f"{hint_line('tabs')}{RESET}"]
+        body: list[str] = []
+        for i, f in enumerate(self.rows):
+            body.extend(self._row_lines(f, i == self.sel, width))
+        lines.extend(panel(f"tabs · live surfaces · {len(self.rows)} row(s)",
+                           body, footer="q/esc back to chat"))
+        if self.notice:
+            lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+        return lines[:height]
+
+    def _steer(self, shell) -> None:
+        row = self.rows[self.sel] if self.sel < len(self.rows) else None
+        if row is None or row.get("kind") != "agent":
+            self.notice = "only sub-agent rows accept steering (select one)"
+            return
+        if not row.get("alive"):
+            self.notice = f"{row['id']} is not running"
+            return
+        text = shell.ask(f"steer {row['id']} ›")
+        if not text:
+            self.notice = "steer cancelled"
+            return
+        ok = queue_agent_steering(row["id"], text)
+        self.notice = (f"steered {row['id']}: {text[:50]}" if ok
+                       else f"{row['id']} is not running — line dropped")
+
+    def on_key(self, key: str, shell) -> str:
+        self.notice = ""
+        if key == "j/k":
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(max(0, len(self.rows) - 1), self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key == "enter":
+            self._steer(shell)
+            return "repaint"
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+
+def tabs_view() -> "TabsView":
+    """The /tabs view object the fullscreen shell runs (`_fullscreen.tabs()`
+    is the thin alias the command path uses)."""
+    return TabsView()
