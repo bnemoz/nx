@@ -46,6 +46,7 @@ def nx_fresh(tmp_path, monkeypatch):
                         _logging._AsyncLogWriter(str(req_path), 0))
     monkeypatch.setattr(_logging, "USAGE_LOG", True)
     _logging.st._TOOL_RESULT_CACHE.clear()
+    _logging.set_turn_no(None)  # a sibling test's loop may have left a turn no. on this worker thread
     yield nx, tmp_path, usage_path, req_path
 
 
@@ -275,5 +276,8 @@ def test_run_model_turn_loop_sets_turn_number(nx_fresh, monkeypatch):
         return m.TURN_DONE
 
     monkeypatch.setattr(m, "model_turn", _fake_model_turn)
-    m._run_model_turn_loop([{"role": "user", "content": "hi"}])
+    try:
+        m._run_model_turn_loop([{"role": "user", "content": "hi"}])
+    finally:
+        _logging.set_turn_no(None)
     assert seen and seen[0] == 1

@@ -137,6 +137,12 @@ st._PENDING_YOLO_ASYNC_NOTICE = None  # ditto (yolo async:false nudge)
 # Outside a turn loop (tests, import time) the module dict remains the store.
 st._READ_STREAK = 0  # how many exploration reads in a row with no spawn_agent
 st._DELEGATION_NUDGE_COUNT = 0  # how many times the delegation nudge has fired this session (re-fires; see run_tool())
+# Same-failing-path loop breaker (0.129.7): the (tool, path) key of the last
+# existence-type failure and its consecutive run. A model that immediately
+# re-calls read_file with the SAME missing path is stuck; the second repeat
+# gets a nudge (with the cwd) appended to the error instead of silence.
+st._PATH_FAIL_LAST = None
+st._PATH_FAIL_RUN = 0
 
 # (Thresholds, guidance strings, _BG_SCAN_LOCK and the fresh-session preamble
 # live in _session_preamble / _bg_completions — re-exported above.)
@@ -362,7 +368,40 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             # tool message on every turn — observed burning ~100K tokens
             # re-reading one file ~40 times. The first result is already in
             # history, so the stub only needs to point back at it. Cached
-            # errors / tiny results pass through untouched.
+            # errors / tiny results pass through untouched — except the
+            # cached-ERROR case below, which is the loop breaker's real seat:
+            # a model retrying a missing path lands HERE, not at the body.
+            if cached.result.startswith("ERROR"):
+                key = (name, str(args.get("path")))
+                if st._PATH_FAIL_LAST == key:
+                    st._PATH_FAIL_RUN += 1
+                else:
+                    st._PATH_FAIL_LAST, st._PATH_FAIL_RUN = key, 1
+                if st._PATH_FAIL_RUN >= 2:
+                    # Same-failing-path loop breaker, cache-hit seat: the model
+                    # retrying a missing path lands HERE (the error was cached
+                    # on the miss), so the nudge rides the cached result.
+                    # Audit-trail contract preserved: the post-hook still fires,
+                    # tagged cached=True, with the UNnudged cached result.
+                    from ._hooks import post_tool_hook
+                    post_tool_hook(name, args, cached.result, cached=True)
+                    from ._subagent import _subagent_ctx as _cache_ctx
+                    _rec = current_recorder() if _cache_ctx() is None else None
+                    if _rec is not None:
+                        _h, _, _d = tool_display(name, args)
+                        _rec.blocks.append(ToolBlock(name=name, header=_h,
+                                                     detail=_d, cached=True,
+                                                     failed=True))
+                    return (
+                        f"ERROR: {args.get('path')} does not exist as given "
+                        f"(this same call has failed {st._PATH_FAIL_RUN} "
+                        f"times in a row; the working directory is "
+                        f"{os.getcwd()}). Do NOT retry it unchanged — run "
+                        "list_dir on the directory you expect it in and use "
+                        "a path from that listing."
+                    )
+                # 1 cached miss so far: fall through to the ORIGINAL cache-hit
+                # flow below (post-hook, breaker decay, box) untouched.
             if (cached.hits >= 2 and isinstance(cached.result, str)
                     and len(cached.result) > 500):
                 from ._subagent import _subagent_ctx as _cache_ctx
@@ -494,6 +533,26 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     _u_raw = result if isinstance(result, str) else ""
     _u_denied = _u_raw.startswith("DENIED")
     _u_failed = _u_raw.startswith(("ERROR", "DENIED"))
+    # Same-failing-path loop breaker: existence-type failures only (a missing
+    # path is deterministic — retrying it identical is a loop, not patience).
+    # Transient failures ("claimed by another agent", approval denials) reset
+    # nothing and never nudge: a retry there is the CORRECT move.
+    if _u_failed and name in ("read_file", "write_file", "search_files") and (
+            "No such file" in _u_raw or "Is a directory" in _u_raw):
+        key = (name, str(args.get("path")))
+        if st._PATH_FAIL_LAST == key:
+            st._PATH_FAIL_RUN += 1
+        else:
+            st._PATH_FAIL_LAST, st._PATH_FAIL_RUN = key, 1
+        if st._PATH_FAIL_RUN >= 2:
+            result += (f"\n[Runtime note: this exact call has now failed "
+                       f"{st._PATH_FAIL_RUN} times in a row — the path does "
+                       f"not exist as given (the working directory is "
+                       f"{os.getcwd()}). Do NOT retry it unchanged; run "
+                       "list_dir on the directory you expect it in and use a "
+                       "path from that listing.]")
+    else:
+        st._PATH_FAIL_LAST, st._PATH_FAIL_RUN = None, 0
     if quiet:
         # Finish line for the tool tap above (trivially available: the result
         # string's own ERROR/DENIED convention, the same test the breaker and

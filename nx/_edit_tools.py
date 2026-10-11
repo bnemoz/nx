@@ -124,7 +124,10 @@ def _claim_error(path: str) -> str | None:
               else "claims do not expire (NX_FILE_CLAIM_TTL=0)")
     return (f"ERROR: {path} is currently claimed by another agent ({holder}) "
             f"— refusing to edit; {expiry}, or is reclaimed automatically once "
-            "that process exits")
+            "that process exits. Do NOT retry this file right now: the claim "
+            "is per-process, so your retry will fail identically until the "
+            "holder exits or the TTL lapses. Work on a different file in the "
+            "meantime, or let the claim expire.")
 
 
 def write_file(path: str, content: str, **_: Any) -> str:
