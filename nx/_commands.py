@@ -44,6 +44,8 @@ class CommandSpec:
     aliases: list = field(default_factory=list)
     arg_options: Optional[ArgOptions] = None
     tier: int = 1
+    # /help section key (see _HELP_GROUP_ORDER); defaults to "general".
+    group: str = "general"
     hidden: bool = False
     handler: Optional[Callable] = None
 
@@ -58,96 +60,108 @@ class CommandSpec:
 COMMANDS: "dict[str, CommandSpec]" = {}
 
 _SPECS = [
-    ("/help", "list all slash commands", None, [], None, 1),
-    ("/init", "generate/update AGENTS.md for this project", None, [], None, 1),
+    # (name, help, args, aliases, arg_options, tier, group)
+    ("/help", "list all slash commands", None, [], None, 1, "session"),
+    ("/init", "generate/update AGENTS.md for this project", None, [], None, 1, "session"),
     ("/source", "list sources, switch to one, or override its model",
-     "[name] [model]", [], lambda: list(st.SOURCE_ORDER), 1),
+     "[name] [model]", [], lambda: list(st.SOURCE_ORDER), 1, "model"),
     ("/theme", "list color themes, or switch to one", "[name]", [],
-     sorted(THEMES), 1),
+     sorted(THEMES), 1, "display"),
     ("/provider", "show or set OpenRouter provider-routing order",
-     "[source] [order|off]", [], None, 1),
+     "[source] [order|off]", [], None, 1, "model"),
     ("/budget", "show or set the reasoning token budget", "[tokens|off]",
-     [], ["off"], 1),
-    ("/yolo", "toggle auto-approve for writes and bash", None, [], None, 0),
+     [], ["off"], 1, "model"),
+    ("/yolo", "toggle auto-approve for writes and bash", None, [], None, 0, "session"),
     ("/resources", "show this nx process's CPU% and RSS memory", None,
-     [("/resmon", "alias for /resources", True)], None, 1),
+     [("/resmon", "alias for /resources", True)], None, 1, "display"),
     ("/context", "context breakdown by message; pin/unpin turns against /compress",
      "[all|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
-     ["pin", "unpin", "clear"], 1),
-    ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1),
+     ["pin", "unpin", "clear"], 1, "context"),
+    ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1, "context"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval",
-     None, [], None, 1),
+     None, [], None, 1, "context"),
     ("/bg", "list this session's background run_bash jobs and sub-agents, "
      "or /bg kill <pid>; /bg all lists every session's", "[kill <pid>|all]",
-     [], ["kill", "all"], 1),
+     [], ["kill", "all"], 1, "workflow"),
     ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T",
-     None, [], None, 2),
+     None, [], None, 2, "display"),
     ("/diff", "full-screen working-tree diff review; a commits via the reviewed git flow",
-     "[path]", [], None, 1),
+     "[path]", [], None, 1, "workflow"),
     ("/panel", "toggle the right status rail on the live region", None, [],
-     None, 0),
+     None, 0, "display"),
     ("/approval", "show or set risk threshold (all/low/medium/high/yolo)",
-     "[level]", [], ["all", "low", "medium", "high", "yolo"], 1),
+     "[level]", [], ["all", "low", "medium", "high", "yolo"], 1, "session"),
     ("/sessions", "list recent sessions, or show one in full", "[n]", [],
-     None, 1),
+     None, 1, "session"),
     ("/export", "write the current session to a markdown file", "[md] [path]",
-     [], ["md"], 1),
+     [], ["md"], 1, "session"),
     ("/resume", "resume a past session (n/id/prefix/title)", "[target]", [],
-     None, 1),
+     None, 1, "session"),
     ("/save", "save the current session (optional custom title)", "[title]",
-     [], None, 1),
+     [], None, 1, "session"),
     ("/fork", "branch the conversation into a new session (original kept)",
-     "[title]", [], None, 1),
+     "[title]", [], None, 1, "session"),
     ("/memory", "manage persistent memory",
      "[save|remember|delete|list|archived|optimize|reflect]", [],
      ["save", "remember", "delete", "list", "archived", "optimize",
-      "reflect"], 1),
+      "reflect"], 1, "context"),
     ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories",
-     None, [], None, 1),
+     None, [], None, 1, "context"),
     ("/review", "scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R)",
-     "[focus]", [], None, 1),
+     "[focus]", [], None, 1, "workflow"),
     ("/build", "spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch",
-     "[issue]", [], None, 1),
-    ("/delete", "delete a saved session", "[target]", [], None, 1),
-    ("/todo", "show the model's current todo_write list", None, [], None, 1),
+     "[issue]", [], None, 1, "workflow"),
+    ("/delete", "delete a saved session", "[target]", [], None, 1, "session"),
+    ("/todo", "show the model's current todo_write list", None, [], None, 1, "context"),
     ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session",
-     "[note]", [], None, 1),
+     "[note]", [], None, 1, "context"),
     ("/plan", "start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard",
-     "[goal|done|off|discard]", [], ["done", "off", "discard"], 1),
+     "[goal|done|off|discard]", [], ["done", "off", "discard"], 1, "workflow"),
     ("/verify", "set / clear / force-run the post-edit verify command (NX_VERIFY_CMD)",
-     "[cmd|off|run]", [], ["off", "run"], 1),
+     "[cmd|off|run]", [], ["off", "run"], 1, "workflow"),
     ("/compress", "summarize older turns into one, keep last 2 verbatim",
-     None, [("/compact", "alias for /compress", False)], None, 1),
+     None, [("/compact", "alias for /compress", False)], None, 1, "context"),
     ("/autocompress", "show or set the auto-compress threshold",
-     "[pct|off|on]", [], ["off", "on"], 1),
+     "[pct|off|on]", [], ["off", "on"], 1, "context"),
     ("/recover", "force a low-temp visible checkpoint after a bad stream",
-     "[note]", [], None, 1),
+     "[note]", [], None, 1, "context"),
     ("/reasoning", "on|off|last — toggle or show reasoning trace",
-     "on|off|last", [], ["on", "off", "last"], 1),
+     "on|off|last", [], ["on", "off", "last"], 1, "display"),
     ("/tooloutput", "on|off|last — toggle or show tool-call result",
      "on|off|last", [("/tools", "legacy alias for /tooloutput", False)],
-     ["on", "off", "last"], 1),
+     ["on", "off", "last"], 1, "display"),
     ("/toolcalls", "tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show",
      "[text|native|auto] [reset [tool]]", [],
-     ["reset", "text", "native", "auto"], 1),
+     ["reset", "text", "native", "auto"], 1, "model"),
     ("/undo", "revert the last write_file/edit_file/multi_edit", "[--list]",
-     [], None, 1),
+     [], None, 1, "workflow"),
     ("/reset", "clear conversation, start a fresh session", None,
      [("/clear", "alias for /reset", False),
-      ("/new", "alias for /reset", False)], None, 1),
-    ("/quit", "exit", None, [("/exit", "alias for /quit", False)], None, 0),
+      ("/new", "alias for /reset", False)], None, 1, "session"),
+    ("/quit", "exit", None, [("/exit", "alias for /quit", False)], None, 0, "session"),
 ]
 
-for _name, _help, _args, _alias, _argopts, _tier in _SPECS:
+# /help section titles, in display order. A command whose group is missing
+# here lands in the last (Settings & tooling) section, never dropped.
+HELP_GROUP_ORDER = [
+    ("session", "Session & approval"),
+    ("context", "Context, memory & compression"),
+    ("model", "Model & tool-calling"),
+    ("display", "Display & status"),
+    ("workflow", "Workflow & review"),
+    ("general", "Settings & tooling"),
+]
+
+for _name, _help, _args, _alias, _argopts, _tier, _group in _SPECS:
     COMMANDS[_name] = CommandSpec(name=_name, help=_help, args=_args,
                                   aliases=list(_alias), arg_options=_argopts,
-                                  tier=_tier)
-del _name, _help, _args, _alias, _argopts, _tier
+                                  tier=_tier, group=_group)
+del _name, _help, _args, _alias, _argopts, _tier, _group
 
 
 def command(name: str, help: Optional[str] = None, args: Optional[str] = None,
             aliases: Optional[list] = None, arg_options: Optional[ArgOptions] = None,
-            tier: Optional[int] = None):
+            tier: Optional[int] = None, group: Optional[str] = None):
     """Decorator binding a handler (and optionally overriding metadata) to a
     registry entry. Usage:
 
@@ -170,6 +184,8 @@ def command(name: str, help: Optional[str] = None, args: Optional[str] = None,
             spec.arg_options = arg_options
         if tier is not None:
             spec.tier = tier
+        if group is not None:
+            spec.group = group
         spec.handler = fn
         return fn
     return _register
@@ -221,11 +237,14 @@ def arg_options_map() -> "dict[str, ArgOptions]":
     return out
 
 
-def help_rows() -> "list[tuple[str, str]]":
-    """/help rows: (usage, description). The usage column names the command
-    with its args and its aliases, e.g. "/reset, /clear, /new" — the same
-    shape the old hand-synced _HELP_COMMANDS used (hidden-in-menu aliases
-    like /resmon still show here, as they did before)."""
+def help_rows(grouped: bool = False) -> "list[tuple[str, str]] | list[tuple[str, list[tuple[str, str]]]]":
+    """/help rows: (usage, description) pairs — or, with grouped=True,
+    [(section title, [(usage, description), ...]), ...] in HELP_GROUP_ORDER.
+    The usage column names the command with its args and its aliases, e.g.
+    "/reset, /clear, /new" — the same shape the old hand-synced
+    _HELP_COMMANDS used (hidden-in-menu aliases like /resmon still show
+    here, as they did before). Commands with a group missing from
+    HELP_GROUP_ORDER land in its last section, never dropped."""
     rows = []
     for spec in COMMANDS.values():
         if spec.hidden:
@@ -233,8 +252,15 @@ def help_rows() -> "list[tuple[str, str]]":
         label = f"{spec.name} {spec.args}".strip() if spec.args else spec.name
         for alias in spec.aliases:
             label += f", {alias[0]}"
-        rows.append((label, spec.help))
-    return rows
+        rows.append((label, spec.help, spec.group))
+    if not grouped:
+        return [(label, help) for label, help, _ in rows]
+    known = [k for k, _ in HELP_GROUP_ORDER]
+    fallback = known[-1]
+    sections: "dict[str, list[tuple[str, str]]]" = {}
+    for label, help, grp in rows:
+        sections.setdefault(grp if grp in known else fallback, []).append((label, help))
+    return [(title, sections.get(key, [])) for key, title in HELP_GROUP_ORDER]
 
 
 def handler_map() -> "dict[str, Callable]":

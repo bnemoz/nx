@@ -9,24 +9,35 @@ undocumented everywhere else.
 A slash command has **three** touch points. Miss one and the command "works"
 but is broken in a way that's easy to not notice:
 
-1. **Dispatch** — `nx/_repl.py`, the `_REPL_COMMANDS` dict (command → handler
+1. **Registry row** — `nx/_commands.py`, the `_SPECS` table (single source of
+   truth since 0.134.0): name, help text, args spec, aliases, arg dropdown
+   options, disclosure tier, and **group**. The group key (one of
+   `HELP_GROUP_ORDER` at the bottom of the table) decides which `/help`
+   section the command appears under — omit it and the command falls into
+   the last section ("Settings & tooling") rather than being dropped. From
+   this one row, the `/help` output, the chatbox completion menu, and the
+   arg dropdowns are all generated automatically — no other display list
+   needs editing.
+2. **Dispatch** — `nx/_repl.py`, the `_REPL_COMMANDS` dict (command → handler
    from `_repl_settings_cmds.py` / `_sessions_cmd.py` / `_memory_cmd.py` (whose
    storage layers live in `_memory_store.py` / `_memory_search.py`), and
    subcommand modules like `_memory_optimize.py` reached via their parent
    handler). This is where the command actually runs.
-2. **Chatbox hint menu** — `nx/_chatbox.py`, the `SLASH_COMMANDS` list
-   (`(command, description)` tuples). Drives the autocomplete dropdown when
-   typing `/`. A command missing here still works if typed in full, but users
-   who rely on the menu will never discover it.
-3. **README** — the `## Commands` table. User-facing reference doc.
+3. **README** — the `## Commands` table is machine-generated from the same
+   registry: it lives between the `<!-- BEGIN GENERATED COMMANDS -->` and
+   `<!-- END GENERATED COMMANDS -->` markers. After touching `_SPECS`, run
+   `uv run python scripts/regen_commands_table.py` (or `nx --dump-commands`
+   and paste the output); `tests/test_docs_parity.py` fails if the block is
+   stale.
 
-Also add the command to `_HELP_COMMANDS` in `_repl_settings_cmds.py` (the
-`/help` output) — a fourth touch point that's easy to miss. All four must be
-updated together for a new command. When reviewing a diff that adds a
-command, grep for the command string across all four files to verify:
+All three must be updated together for a new command (dispatch plus the
+registry row is often one decorated handler + one `_SPECS` line). When
+reviewing a diff that adds a command, grep for the command string across all
+three files to verify:
 
 ```bash
-grep -rn '"/yourcommand"' nx/_repl.py nx/_chatbox.py nx/_repl_settings_cmds.py README.md
+grep -rn '"/yourcommand"' nx/_commands.py nx/_repl.py
+uv run python scripts/regen_commands_table.py   # refresh the README table
 ```
 
 Subcommands can live in the same module as their parent's dispatch (see
@@ -41,8 +52,10 @@ sync with the README row too — see `/reasoning`'s `on|off|last` as the
 pattern to match.
 
 If the command takes a fixed, enum-like first argument (a closed set of
-keywords, not a freeform value like a path or session id), also add it to
-`SLASH_ARG_OPTIONS` in `nx/_chatbox.py`. This drives a second autocomplete
+keywords, not a freeform value like a path or session id), add its options to
+the `arg_options` field of its `_SPECS` row (a list or a zero-arg callable —
+see `/theme`, `/memory`, `/approval`, and `/autocompress` as examples). This
+drives a second autocomplete
 dropdown that appears after typing `/cmd ` (mirrors the `/` command menu, but
 for the argument). Keep the option list there in sync with whatever actually
 validates the argument in `_repl.py` — see `/theme`, `/reasoning`,
@@ -310,10 +323,11 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
 - [ ] `uv run ruff check .` is clean (no new `# noqa`, no new per-file-ignores
       beyond the two intentional blocks in `pyproject.toml`).
 - [ ] `uv run ty check nx` adds no new diagnostics in the files you touched.
-- [ ] Does it show up in the chatbox `/` hint menu (if it's a slash command)?
-- [ ] If it takes an enum-like keyword argument, is it in `SLASH_ARG_OPTIONS`
-      (`nx/_chatbox.py`) so the argument dropdown offers it?
-- [ ] Is it in the README (Commands table or env var table)?
+- [ ] Is it in the chatbox `/` hint menu (registry row → automatic)?
+- [ ] If it takes an enum-like keyword argument, are the options in its
+      `_SPECS` row's `arg_options` so the argument dropdown offers them?
+- [ ] README command table regenerated (`scripts/regen_commands_table.py`) —
+      or env var table updated, for a new `NX_*` variable?
 - [ ] Does an inline "unknown arg" / usage-error message (if any) match the
       documented syntax?
 - [ ] If it touches `TOOLS`/`FINAL_ANSWER_TOOL`/`SYSTEM`, is the added text as

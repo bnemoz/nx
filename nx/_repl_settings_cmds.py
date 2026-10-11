@@ -32,51 +32,15 @@ from . import _state as st
 from . import MANUAL_RECOVERY_NUDGE, _initial_messages, _new_session_id, list_bg_jobs
 from ._subagent import list_async_agents
 from ._repl_state import _ReplState, _save_current, _fresh_metrics, _flush_save
+from . import _commands as _commands_mod
+from ._commands import help_rows as _registry_help_rows
 from ._todo import render_todos_display
 
 
-_HELP_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "show this list of commands"),
-    ("/quit, /exit", "save session (if dirty) and exit"),
-    ("/source [name] [model]", "list or switch model source/backend"),
-    ("/theme [name]", "list or switch color theme"),
-    ("/reasoning [on|off|show|hide|last]", "toggle/show reasoning-content visibility"),
-    ("/tooloutput [on|off|show|hide|last], /tools", "toggle/show tool-call result visibility"),
-    ("/toolcalls [text|native|auto] [reset [tool]]", "show/set tool-calling mode, or clear the malformed-args breaker streaks"),
-    ("/provider [source] [order|off]", "set/clear OpenRouter provider routing"),
-    ("/resources, /resmon", "show CPU%/RSS process stats"),
-    ("/bg [kill <pid>|all]", "list/kill this session's background bash jobs; /bg all lists every session's"),
-    ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T; type mid-turn to steer"),
-    ("/panel", "toggle the right status rail on the live region (NX_PANEL=1 to default on)"),
-    ("/yolo", "toggle yolo mode (disable all approval prompts)"),
-    ("/approval [level]", "show/set approval level (session-only)"),
-    ("/approval set-default <level>", "persist the default approval mode to ~/.env"),
-    ("/approval allow [list|forget <n>|<tool> <pattern>]", "manage the persistent approval allowlist"),
-    ("/reset, /clear, /new", "clear context, start a new session"),
-    ("/init", "have the model write/update AGENTS.md"),
-    ("/recover [note]", "force a visible recovery checkpoint turn"),
-    ("/undo [--list]", "undo last file change / list undo checkpoints"),
-    ("/compress, /compact", "fold older turns into a summary"),
-    ("/context [all|pin|unpin|clear]", "token breakdown by message; pin turns to survive compress"),
-    ("/cost", "session usage + per-source cost scoreboard"),
-    ("/status", "snapshot: source, model, caps, budgets, fence, approval"),
-    ("/budget [<tokens|off>]", "cap the model's reasoning phase (reasoning token budget)"),
-    ("/autocompress [percent|on|off]", "configure automatic compression threshold"),
-    ("/sessions [...]", "list/manage sessions (non-title query → full-text body search)"),
-    ("/export [md] [path]", "write the current session to a markdown file"),
-    ("/resume [target]", "switch to another session"),
-    ("/save [title]", "persist current session, optionally with a title"),
-    ("/fork [title]", "branch the current conversation into a new session (original kept; prompt-cache-friendly)"),
-    ("/memory [save|remember|delete|list|optimize]", "save a distilled memory, search/remove/list saved memories, optimize (merge duplicates, retire stale notes)"),
-    ("/delete [target]", "delete a session"),
-    ("/todo", "show the model's current todo_write list"),
-    ("/wip [note]", "snapshot work state (branch, dirty files, todos, note) into the session; /resume shows it"),
-    ("/plan [goal|done|off|discard]", "start/view/exit plan mode — while active, mutating tool calls are gated"),
-    ("/verify [cmd|off|run]", "show/set/clear or force-run the post-edit verify command"),
-    ("/retro", "distill this session's friction (usage.jsonl) into gotcha memories"),
-    ("/review [focus]", "scoped reviewer over the current work: ranked findings, never fixes (Ctrl+R)"),
-    ("/build [issue]", "spec-driven pipeline on a feature branch: spec → 2-3 implementers → critique → fixes"),
-]
+# The hand-synced list that used to live here is gone: /help renders
+# reg.help_rows() (rebound in _repl.py), so the registry is the single source
+# of truth. The name is kept as a registry view for tests that patch/import it.
+_HELP_COMMANDS: list[tuple[str, str]] = _registry_help_rows()
 
 
 def _cmd_build(user: str, state: _ReplState) -> None:
@@ -160,8 +124,14 @@ def _cmd_retro(user: str, state: _ReplState) -> None:
 
 def _cmd_help(user: str, state: _ReplState) -> None:
     print(f"{DIM}  commands:{RESET}")
-    for cmd, desc in _HELP_COMMANDS:
-        print(f"  {C.ACCENT}{cmd:<28}{RESET} {DIM}{desc}{RESET}")
+    for title, rows in _commands_mod.help_rows(grouped=True):
+        if rows:
+            print(f"\n  {C.ACCENT}{title}{RESET}")
+        for cmd, desc in rows:
+            print(f"  {C.ACCENT}{cmd:<28}{RESET} {DIM}{desc}{RESET}")
+    print(f"{DIM}\n  type / plus a prefix for the completion menu — /help is\n"
+          f"  generated from the command registry (nx/_commands.py); new\n"
+          f"  commands appear here automatically{RESET}")
 
 
 def _cmd_source(user: str, state: _ReplState) -> None:

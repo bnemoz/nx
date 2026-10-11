@@ -19,7 +19,7 @@ from typing import Any
 
 from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
-from . import _PROMPT_FILE, _JSON_OUTPUT, _initial_messages
+from . import _PROMPT_FILE, _PROMPT_TEXT, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl
 from ._sessions_cmd import _cli_sessions, _cli_prune_sessions, _cli_tokens
 from ._sessions_cmd import _cli_migrate_sessions
@@ -58,6 +58,8 @@ Commands:
                  pipx / pip), or just report the install with --check.
 
 Options:
+  -p, --prompt <text>       One-shot: run <text> as a prompt and exit (same as
+                            -f - with the text piped via stdin)
   -f, --prompt-file <path>  Headless one-shot mode; "-" reads stdin. With
                             --json, emits a JSON result summary on stdout
                             instead of streamed chat output; exit 4 if the
@@ -152,14 +154,40 @@ def _cli_version() -> str:
 _VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup", "update")
 
 
+def _commands_markdown() -> str:
+    """The README `## Commands` table, generated from the slash-command
+    registry — same source `/help` renders from, so the docs can't go stale."""
+    from ._commands import HELP_GROUP_ORDER, COMMANDS
+    lines = ["| command | what it does |", "| --- | --- |"]
+    for key, _title in HELP_GROUP_ORDER:
+        for spec in COMMANDS.values():
+            if spec.hidden or spec.group != key:
+                continue
+            label = f"{spec.name} {spec.args}".strip() if spec.args else spec.name
+            label = label.replace("|", "\\|")
+            lines.append(f"| `{label}` | {spec.help} |")
+    return "\n".join(lines)
+
+
 def _cli_help_or_version(argv: list[str]) -> bool:
     # Verb-first invocations fall through so each subcommand prints its own
     # usage; the top-level flag list describes flags those verbs reject.
     # main()'s verb dispatch handles them.
     if argv and argv[0] in _VERBS:
         return False
+    # `nx v` (and other near-miss spellings) is NOT a verb or a version flag:
+    # falling through here would silently launch the REPL with the typo as a
+    # prompt. Fail loudly instead.
+    known = set(_VERBS) | {"-h", "--help", "-v", "--version", "--tokens", "--bench"}
+    if argv and not argv[0].startswith("-") and argv[0] not in known:
+        sys.stderr.write(
+            f"nx: unknown command {argv[0]!r} — try 'nx --help' (did you mean the flag '-v'?)\n")
+        raise SystemExit(2)
     if "-h" in argv or "--help" in argv:
         sys.stdout.write(_help_colored(_HELP_TEXT))
+        return True
+    if "--dump-commands" in argv:
+        print(_commands_markdown())
         return True
     if "--version" in argv or "-v" in argv:
         print(f"nx {_cli_version()}")
@@ -168,12 +196,14 @@ def _cli_help_or_version(argv: list[str]) -> bool:
 
 
 def _run_one_shot() -> bool:
-    """Non-interactive entry point for --prompt-file. Reads the instruction,
-    runs _run_model_turn_loop once, and exits with a status code."""
-    if _PROMPT_FILE is None:
+    """Non-interactive entry point for --prompt-file / --prompt. Reads the
+    instruction, runs _run_model_turn_loop once, and exits with a code."""
+    if _PROMPT_FILE is None and _PROMPT_TEXT is None:
         return False  # not in one-shot mode; caller should proceed to REPL
     # --- read the instruction --------------------------------------------------
-    if _PROMPT_FILE == "-":
+    if _PROMPT_TEXT is not None:
+        instruction = _PROMPT_TEXT
+    elif _PROMPT_FILE == "-":
         instruction = sys.stdin.read()
     else:
         try:

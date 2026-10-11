@@ -88,8 +88,26 @@ def _readme_command_rows() -> set[str]:
 
 
 def test_every_dispatched_command_is_in_the_readme_table():
-    missing = _dispatch_keys() - _readme_command_rows()
+    """Aliases live on their primary's row (they render inside its usage
+    label), so only non-alias dispatch keys need a row of their own."""
+    from nx import _commands as reg
+    alias_names = {a[0] for spec in reg.COMMANDS.values() for a in spec.aliases}
+    missing = _dispatch_keys() - alias_names - _readme_command_rows()
     assert not missing, f"dispatched but absent from the README command table: {sorted(missing)}"
+
+
+def test_generated_commands_table_matches_the_registry():
+    """The README command block is machine-generated (`nx --dump-commands`):
+    regenerate it and it must match the registry byte-for-byte."""
+    from nx import _cli
+    expected = _cli._commands_markdown()
+    mm = re.search(
+        r"<!-- BEGIN GENERATED COMMANDS[^\n]*-->\n(.*?)\n<!-- END GENERATED COMMANDS -->",
+        README, re.DOTALL)
+    assert mm, "README generated-commands markers are missing"
+    assert mm.group(1) == expected, (
+        "README command table is stale — run `nx --dump-commands` and paste the "
+        "output between the GENERATED COMMANDS markers")
 
 
 def test_ctx_all_is_implemented_not_just_hinted():

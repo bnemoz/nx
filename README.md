@@ -196,8 +196,9 @@ disables the probe and the attach.
 | `--resume [target]` / `-r [target]` | resume a saved session; bare = most recent |
 | `--session <id>` | start a fresh run attached to a specific session id |
 | `--isolate` | run this session in its own git worktree (alias of `NX_SESSION_WORKTREE=1`; see the env table) |
+| `--prompt <text>` / `-p <text>` | one-shot with an inline prompt: run one turn on `<text>` and exit |
 | `--prompt-file <path>` / `-f <path>` | headless one-shot mode: run one turn and exit (`-` reads stdin) |
-| `--json` | (with `--prompt-file`) emit a JSON result summary on stdout instead of streamed chat; exits `4` when the run errors (endpoint unreachable, API rejects the request) and `0` otherwise |
+| `--json` | (with `--prompt`/`--prompt-file`) emit a JSON result summary on stdout instead of streamed chat; exits `4` when the run errors (endpoint unreachable, API rejects the request) and `0` otherwise |
 | `nx run -f tasks.jsonl` | headless batch mode: every JSONL line is one task — emits one JSON result line per task on stdout, one process exit code for the run (see "Batch mode" below) |
 | `nx eval list` / `nx eval run` | offline eval corpus: replays recorded stub-server scenarios through the real batch harness and scores each against its expectation (see "Eval corpus" below) |
 | `--tokens` / `--bench` | print the exact prompt-token floor and exit |
@@ -260,6 +261,8 @@ line per action.
 | `NX_PDF_TIMEOUT` | wall-clock ceiling in seconds for one CLI PDF extraction, including the OCR pass (default 300; `0` = no timeout). On timeout the mention degrades to an error note rather than holding the turn |
 | `NX_READ_FILE_SCAN_LINES` | how far past a windowed `read_file` the header's exact line-count scan may reach (default 200000); beyond it the header reports a lower bound as `N+` instead of scanning an unbounded file |
 | `NX_HISTORY_LINES` | how many past prompt submissions Up/Down recalls across runs (`~/.nx/input_history.json`; default 100; `0` disables). Override the file itself with `NX_INPUT_HISTORY_FILE` |
+| `NX_PANEL` | show the right status rail on the `/tabs` live region by default (set `1`; otherwise toggled per session with `/panel`) |
+| `NX_PANEL_WIDTH` | width of that status rail in columns (default 24; clamped 12..40) |
 | `NX_LOG_MAX_BYTES` | size cap on the per-session request log (`~/.nx/logs`, default 10 MB) — the log rolls rather than growing without bound |
 | `NX_LOG_REQUESTS` | log request/response bodies on every model call (default `1`; `0` logs a stub line instead — the per-request json.dumps of a large prompt is real harness CPU, and the transcript already holds the payload) |
 | `NX_USAGE_LOG` | write a usage event stream to the session logs (`logs/usage.jsonl`; default `1`; `0` disables) — one JSONL line per tool call (duration, outcome, args/result sizes and truncated heads) plus `model_call` (per settled model turn: duration, finish reasons, token split, TTFT, turn number), `agent_spawn`/`agent_done` (sub-agent tier, resolved model, status, turns, elapsed), `give_up` (with turn number), and repair/breaker/gate/retry events, each tagged with the model and agent tier; the raw feed for offline harness/model failure analysis (query it with DuckDB) |
@@ -573,50 +576,49 @@ call.
 
 Run `/help` in the REPL for the full list. The essentials:
 
+<!-- BEGIN GENERATED COMMANDS (nx --dump-commands; do not edit by hand) -->
 | command | what it does |
 | --- | --- |
-| `/source [name] [model]` | list sources, switch to one, or override its model |
-| `/provider [source] [a,b,…\|off]` | show or set OpenRouter provider-routing order |
+| `/help` | list all slash commands |
+| `/init` | generate/update AGENTS.md for this project |
 | `/yolo` | toggle auto-approve for writes and bash |
-| `/approval [level]` | show or set risk threshold (`all`/`low`/`medium`/`high`/`yolo`; session-only)
-| `/approval set-default <level>` | persist the default approval mode to `~/.env` |
-| `/approval allow …` | manage the persistent allowlist: `list`, `forget <n>`, `forget-all`, or save `<tool> <pattern>` |
-| `/theme [name]` | list color themes, or switch to one |
-| `/reasoning on\|off\|last` | toggle or show the reasoning trace |
-| `/help` | list all slash commands (this table; the dropdown offers them too) |
-| `/tooloutput on\|off\|last` / `/tools` | toggle or show tool-call result visibility (`/tools` is a legacy alias; todo_write always renders) |
-| `/toolcalls [text\|native\|auto] [reset [tool]]` | bare: show the session's tool-calling mode and the malformed-args breaker streaks per tool (marked `[broken]` when dropped from the tool list); `reset` clears every streak and re-offers every tool, `reset <tool>` re-arms just that one; `text` forces the grammar-constrained text protocol for this session (the rung past the breaker — an endpoint whose NATIVE args keep truncating gets the client-repairable protocol back without switching sources), `native` re-arms the native flag, `auto` returns to the reactive default |
-| `/sessions [n]` / `/resume [target]` | list or resume a past session (a non-title query falls through to full-text body search). A bare `/sessions` on a tty opens the alternate-screen browser (0.137.0): `j`/`k` move, `/` searches (FTS5 over session bodies on top of the title/id match), `Enter` previews the transcript, `R` resumes (the same `/resume` path — nothing loads until you confirm), `Esc`/`q` returns to scroll-chat; `NX_FULLSCREEN=0` or a non-tty prints the inline list unchanged |
-| `/export [md] [path]` | write the current session to a markdown transcript |
-| `/save [title]` | save the current session |
-| `/fork [title]` | branch the current conversation into a new session id — every message carried, the original kept on disk (resume either). Prompt-cache-friendly: the fork is prefix-identical to the parent, so no context rebuild cost when exploring an alternative approach |
+| `/approval [level]` | show or set risk threshold (all/low/medium/high/yolo) |
+| `/sessions [n]` | list recent sessions, or show one in full |
+| `/export [md] [path]` | write the current session to a markdown file |
+| `/resume [target]` | resume a past session (n/id/prefix/title) |
+| `/save [title]` | save the current session (optional custom title) |
+| `/fork [title]` | branch the conversation into a new session (original kept) |
 | `/delete [target]` | delete a saved session |
-| `/memory save\|remember\|delete\|list\|archived` | manage persistent memory; `/memory archived [target]` lists retired notes and restores one by title/filename/prefix |
-| `/memory optimize [dry] [focus]` | librarian pass over the memory store: one model review per `NX_MEMORY_OPTIMIZE_BATCH` notes (oldest `NX_MEMORY_OPTIMIZE_MAX_NOTES` first) proposes merge groups and retirements, shown as a plan and approved once; merged notes go through the normal writer and every retired note moves to `<memories dir>/archive/<stamp>/` (nothing is unlinked). `dry` prints the plan only; a `focus` argument guides the review |
-| `/memory reflect [focus]` | cross-project connection pass: reviews the whole store (both scopes) and writes at most 3 global notes — recurring preferences promoted out of project scopes, cross-project patterns the user may not have connected; proposals about broken notes print as advice only. One approval for the run |
-| `/review [focus]` | the scoped reviewer: a READ-ONLY reviewer sub-agent (the `critique` tier) reads the current diff and prints at most 5 findings ranked by severity — `SEVERITY — file:line — what is wrong — fix sketch` — never fixes anything. `focus` (default `correctness`) is what to optimize for: bugs, `elegance` (the simplest formulation the diff missed), `security`, `tests`, `perf`. Runs forced-foreground so findings print inline; the model runs the same review via the `critique` tool; **Ctrl+R** runs the no-arg form |
-| `/retro` | self-retro: scan this session's `usage.jsonl` for repeated friction (repairs, breaker trips, gates, retries, give-ups, failed tool calls), print the top patterns and save one `gotcha` memory per pattern (y/n first; deduped against existing project notes). The same pass runs automatically at exit — on by default, `NX_RETRO_ON_EXIT=0` silences it |
-| `/build <issue>` | the spec-driven build pipeline (nx feature #2): **user-triggered only** — there is no `build` tool, so the model can suggest `/build` in prose but never fire it. Needs `NX_SUBAGENTS=1` (it *is* a sub-agent harness: spec agent, one agent per work package, a reviewer) and refuses up front when they are off. One issue paragraph in, one reviewable feature branch (`nx/build-<YYMMDD-HHMMSS>`) out. Phase 1 runs ONE implement-tier sub-agent that writes `SPEC.md` (problem, approach, 2-3 work packages with files/done-means/verify, acceptance criteria) into the run dir — `<repo>/.nx/build/<run-id>/` when `.nx` is gitignored, else `$SESSION_HOME/build/<repo>/` — then PRINTS it and asks the one y/n gate before any code is written (`n`/esc aborts, deletes the run dir and returns to your branch). Phase 2 runs 2-3 write-tier sub-agents, one per package, each scoped to its package's paths and each in its own git worktree when a worktree is available, then merges/commits each package onto the feature branch (a merge conflict re-runs that package ONCE with the conflict as its spec, then stops). Phase 3 runs the existing scoped reviewer (`critique`) with the spec's acceptance criteria as the focus. Phase 4 fixes simple one-file findings inline and hands structural ones to ONE follow-up agent, then re-critiques at most once; anything still open is printed for you to judge, never looped. Phase 5 commits on the feature branch, prints branch/packages/critique rounds/remaining findings/diff stat, and leaves the branch checked out — it never pushes and never merges into the branch you started from. Parallel package agents need a yolo session (`--yolo`) so a worker thread never auto-denies a write; anywhere else (and whenever a worktree is unavailable) the packages run one after another on the parent thread, so every write hits the normal Y/n gate. Ctrl-C at any phase aborts cleanly: back to your starting branch, the run dir kept with `ABORTED.md`. Preflight refusals (nothing started, no partial state): a dirty working tree, a non-git project root, or another `/build` already in flight for this repo |
-| `/compress` / `/compact` | fold older turns into a summary (keep last 2 verbatim; `/context`-pinned turns survive). Folds reuse the previous summary append-only — one digest turn whose prefix never changes — so repeated folds stay prompt-cache-friendly |
-| `/context` (`/ctx`) `[pin\|unpin\|clear]` | per-message token breakdown (total includes the per-turn `tools=` schema cost, shown as its own `+ tools schema` line); pin turns so every later compress keeps them verbatim |
-| `/cost` | session usage totals + per-source scoreboard ($ when `NX_PRICE_<SOURCE>_*` is set) |
-| `/status` | one-screen snapshot of the session posture: source, model, tool-calling capability, budgets, write fence, approval mode (same state `nx config doctor` checks) |
-| `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold; every fold auto-pins the latest `todo_write` turn so the live task plan survives compression |
-| `/budget [<tokens\|off>]` | cap the model's reasoning phase in tokens (rides as `{"reasoning": {"max_tokens": N}}`; `off` clears; session-only unless `NX_REASONING_BUDGET` is set) |
-| `/verify [cmd\|off\|run]` | show/set/clear or force-run the post-edit verify command (`NX_VERIFY_CMD`) — when set, every edited `.py` also gets an in-process `ast.parse` whose verdict rides on the edit's own tool result |
-| `/undo` | revert the last write/edit/delete (LIFO; `--list` shows pending checkpoints). Since 0.47 the stack persists across crashes/restarts — per session under `~/.nx/undo/<session-id>.json` (the legacy shared `~/.nx/undo.json` only when no session id is known; 0.103.0) — and one tool call always costs one press — re-writing the same file or re-deleting a pending file updates its entry instead of stacking a duplicate. `/reset` clears it |
+| `/reset` | clear conversation, start a fresh session |
+| `/quit` | exit |
+| `/context [all\|pin\|unpin\|clear]` | context breakdown by message; pin/unpin turns against /compress |
+| `/cost` | session usage + per-source cost scoreboard |
+| `/status` | snapshot: source, model, caps, budgets, fence, approval |
+| `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory |
+| `/retro` | distill this session's friction (usage.jsonl) into gotcha memories |
+| `/todo` | show the model's current todo_write list |
+| `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |
+| `/compress` | summarize older turns into one, keep last 2 verbatim |
+| `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
-| `/bg [kill <pid>\|all]` | list this session's background `run_bash` jobs (and sub-agents), or kill one; `kill` only reaches jobs this session started — `all` lists every nx session's jobs on the machine (read-only, with each job's launch cwd) |
-| `/tabs` | live dashboard of running surfaces: main turn, bg jobs, sub-agents (Ctrl+T); type mid-turn to steer. On a tty it opens on the alternate screen (0.137.0): `j`/`k` move between rows, `Enter` steers the focused sub-agent (same steering queue), `r` refreshes, `?` shows the keys, `Esc`/`q` returns to scroll-chat; `NX_FULLSCREEN=0` or a non-tty keeps the one-shot print |
-| `/diff [path]` | full-screen review of the working-tree diff vs HEAD (0.137.0): the changed-file list with `+`/`-` counts, `Enter` opens one file's rendered diff, `Tab` goes back, `a` runs the reviewed commit flow (the same `git_commit` machinery: private staging index, secret scan, Y/n gate — the prompt appears after leaving the alternate screen), `r` refreshes, `Esc`/`q` returns to scroll-chat. `/diff <path>` prints just that file's diff. Distinct from `/review`, which runs the read-only critique sub-agent |
-| `/panel` | toggle the right status rail flag — the rail shows on the `/tabs` live region during turns (ctx utilization, bg-job/agent counts, pending steering); `NX_PANEL=1` defaults it on, `NX_PANEL_WIDTH` sets its width (12..40) |
-| `/resources` / `/resmon` | show this nx process's CPU% and RSS memory |
-| `/init` | generate/update an `AGENTS.md` for this project |
-| `/todo` | show the model's current `todo_write` list |
-| `/wip [note]` | snapshot work state (branch, dirty files, todos, optional note) into the session; `/resume` prints it in the banner so you pick up the *task*, not just the transcript |
-| `/plan [goal\|done\|off\|discard]` | plan mode: `/plan <goal>` writes `.nx/<slug>.md` and gates every mutating tool call (`write_file`, `edit_file`, `multi_edit`, `sed_edit`, `apply_patch`, `delete_file`, `run_bash`, `memory_write/delete`) behind a gate message until you run `/plan done`; the model refines the plan with `plan_edit` while gated; `discard` also deletes the file |
-| `/reset` / `/clear` / `/new` | clear conversation, start a fresh session |
-| `/quit` / `/exit` | exit |
+| `/source [name] [model]` | list sources, switch to one, or override its model |
+| `/provider [source] [order\|off]` | show or set OpenRouter provider-routing order |
+| `/budget [tokens\|off]` | show or set the reasoning token budget |
+| `/toolcalls [text\|native\|auto] [reset [tool]]` | tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show |
+| `/theme [name]` | list color themes, or switch to one |
+| `/resources` | show this nx process's CPU% and RSS memory |
+| `/tabs` | live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T |
+| `/panel` | toggle the right status rail on the live region |
+| `/reasoning on\|off\|last` | on|off|last — toggle or show reasoning trace |
+| `/tooloutput on\|off\|last` | on|off|last — toggle or show tool-call result |
+| `/bg [kill <pid>\|all]` | list this session's background run_bash jobs and sub-agents, or /bg kill <pid>; /bg all lists every session's |
+| `/diff [path]` | full-screen working-tree diff review; a commits via the reviewed git flow |
+| `/review [focus]` | scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R) |
+| `/build [issue]` | spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch |
+| `/plan [goal\|done\|off\|discard]` | start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard |
+| `/verify [cmd\|off\|run]` | set / clear / force-run the post-edit verify command (NX_VERIFY_CMD) |
+| `/undo [--list]` | revert the last write_file/edit_file/multi_edit |
+<!-- END GENERATED COMMANDS -->
 
 ### Keyboard shortcuts
 
