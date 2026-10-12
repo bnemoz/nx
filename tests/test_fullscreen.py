@@ -548,6 +548,166 @@ def test_no_new_command_was_added_to_review(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# view stack (0.148.9): push/pop and esc-pops
+# ---------------------------------------------------------------------------
+
+
+def _fullscreen_View():
+    from nx._fullscreen import View
+    return View
+
+
+class _CountingView(_fullscreen_View()):
+    surface = "tabs"
+    title = "counting"
+
+    def __init__(self, log, quit_on=("esc",)):
+        super().__init__()
+        self.log = log
+        self.quit_on = quit_on
+
+    def render(self, width, height):  # noqa: ARG002
+        self.log.append(("render", id(self)))
+        return ["view"]
+
+    def on_key(self, key, shell):
+        if key in self.quit_on:
+            return "quit"
+        return "repaint"
+
+
+def test_pushed_view_runs_on_top_and_esc_returns_to_the_view_below():
+    from nx import _fullscreen
+    log = []
+    bottom = _CountingView(log, quit_on=("esc",))
+    top = _CountingView(log, quit_on=("esc",))
+    pushed = []
+
+    orig_on_key = bottom.on_key
+
+    def _bottom_key(key, shell):
+        if not pushed:               # first key: stack the top view
+            pushed.append(top)
+            shell.push(top)
+            return "repaint"
+        return orig_on_key(key, shell)
+
+    bottom.on_key = _bottom_key
+    out = FakeOut()
+    # Fixed script (a reader that raises EOFError when dry, like _reader_for,
+    # so a missed step FAILS instead of looping forever):
+    #   "x"   -> bottom stacks `top` on top, repaint
+    #   "esc" -> stack depth 2: the loop pops back to bottom
+    #   "esc" -> stack depth 1: bottom itself quits, run ends
+    _fullscreen.run_view(bottom, fd=0, out=out,
+                         _reader=_reader_for(["x", "esc", "esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    ids = [entry[1] for entry in log]
+    # bottom, top, then bottom again after the pop — the view underneath resumed
+    assert ids == [id(bottom), id(top), id(bottom)]
+
+
+def test_quit_on_a_stacked_view_resumes_the_bottom_without_leaving():
+    from nx import _fullscreen
+    log = []
+    bottom = _CountingView(log, quit_on=("esc",))
+    top = _CountingView(log, quit_on=("q",))   # q, not esc: esc pops a stack
+    pushed = []
+
+    orig_on_key = bottom.on_key
+
+    def _bottom_key(key, shell):
+        if not pushed:               # first key: stack the top view
+            pushed.append(top)
+            shell.push(top)
+            return "repaint"
+        return orig_on_key(key, shell)
+
+    bottom.on_key = _bottom_key
+    out = FakeOut()
+    #   "x"   -> bottom stacks `top`, repaint
+    #   "q"   -> top quits: the bottom view resumes underneath (no esc-pop)
+    #   "esc" -> bottom quits, run ends
+    _fullscreen.run_view(bottom, fd=0, out=out,
+                         _reader=_reader_for(["x", "q", "esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    ids = [entry[1] for entry in log]
+    assert ids == [id(bottom), id(top), id(bottom)]
+    # and the run ended (bottom's own esc quit), not hung: the ALT_EXIT went out
+    assert out.getvalue().endswith(_fullscreen.ALT_EXIT)
+
+
+def test_esc_on_the_bottom_view_still_quits_normally():
+    from nx import _fullscreen
+    log = []
+    bottom = _CountingView(log)
+    out = FakeOut()
+    _fullscreen.run_view(bottom, fd=0, out=out, _reader=_reader_for(["esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    assert [entry[1] for entry in log] == [id(bottom)]
+    assert out.getvalue().endswith(_fullscreen.ALT_EXIT)
+
+
+# ---------------------------------------------------------------------------
+# view registry (0.148.9)
+# ---------------------------------------------------------------------------
+
+
+def test_the_five_builtin_views_are_registered():
+    from nx import _fullscreen
+    assert set(_fullscreen.view_names()) >= {
+        "tabs", "review", "sessions", "todos", "bgjobs"}
+
+
+def test_make_view_builds_registered_views_lazily():
+    from nx import _fullscreen
+    from nx._surfaces import TabsView
+    assert isinstance(_fullscreen.make_view("tabs"), TabsView)
+    with pytest.raises(KeyError):
+        _fullscreen.make_view("no-such-view")
+
+
+def test_register_view_is_idempotent_decorator_style():
+    from nx import _fullscreen
+
+    class V(_fullscreen.View):
+        pass
+
+    @_fullscreen.register_view("_test_v")
+    def _f():
+        return V()
+
+    @_fullscreen.register_view("_test_v")
+    def _g():
+        return V()
+
+    assert isinstance(_fullscreen.make_view("_test_v"), V)
+    del _fullscreen._VIEW_FACTORIES["_test_v"]
+
+
+# ---------------------------------------------------------------------------
+# contract: a reader that runs dry must end the run (suite wiring guard)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dry_reader_ends_the_run_instead_of_looping():
+    """The wiring contract that keeps a bad test from hanging `-n auto`: the
+    ONLY sanctioned way to drive run_view in tests is a scripted reader that
+    raises EOFError when its keys run out — and run_view must convert that
+    into a clean exit. (A reader that returns filler keys forever spins the
+    poll loop hot on its xdist worker and stalls the whole suite.)"""
+    from nx import _fullscreen
+    log = []
+    view = _CountingView(log, quit_on=("esc",))
+    out = FakeOut()
+    # The script runs dry after two keys: run_view must exit via EOFError.
+    _fullscreen.run_view(view, fd=0, out=out,
+                         _reader=_reader_for(["x", "x"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    assert out.getvalue().endswith(_fullscreen.ALT_EXIT)
+
+
+# ---------------------------------------------------------------------------
 # pty: the acceptance test for "enter/exit restores the terminal"
 # ---------------------------------------------------------------------------
 

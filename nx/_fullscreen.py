@@ -15,8 +15,8 @@ contract the spec spells out:
     never touch the normal one.
 
 Views are plain `View` objects implemented in the module that owns their data
-(`_surfaces.py` for /tabs, `_review.py` for /review, `_sessions_cmd.py` for
-/sessions) and they render EXCLUSIVELY through `_render.py` components: no raw
+(registered by name in `_VIEW_FACTORIES` here so the surface set is enumerable
+in one place) and they render EXCLUSIVELY through `_render.py` components: no raw
 palette reads, one glyph set, semantic roles (the Phase B grep-guard test
 covers every module in the package). Key lists come from `_keys.py` — the same
 registry behind the chatbox border hints and the `?` overlay — so a fullscreen
@@ -325,32 +325,61 @@ class View:
 
 class Shell:
     """The bridge a view uses for the two things the shell owns: drawing, and a
-    one-line prompt on the bottom row (`ask`) — the view's data stays its own."""
+    one-line prompt on the bottom row (`ask`) — the view's data stays its own.
 
-    def __init__(self, fd: int, out, width: int, height: int) -> None:
+    It also carries the view stack: `shell.push(view)` stacks a new view (the
+    caller's `on_key` then returns "repaint" to hand control over), and
+    `shell.pop()` returns to the view underneath without consuming a key.
+    """
+
+    def __init__(self, fd: int, out, width: int, height: int,
+                 _stack: Optional[list[View]] = None) -> None:
         self.fd = fd
         self.out = out
         self.width = width
         self.height = height
+        self._stack = _stack if _stack is not None else []
 
     def ask(self, label: str, initial: str = "") -> Optional[str]:
         return read_line(self.fd, self.out, label, initial=initial)
 
+    def push(self, view: "View") -> None:
+        """Stack `view` on top of the running one (Esc or its `quit` pops)."""
+        self._stack.append(view)
+
+    def pop(self) -> None:
+        """Return to the view underneath (no-op on the bottom view)."""
+        if len(self._stack) > 1:
+            self._stack.pop()
+
 
 def run_view(view: View, *, fd: Optional[int] = None, out=None,
              _reader: Optional[Callable[[int], str]] = None,
-             _notifier: Optional[_ResizeNotifier] = None) -> Optional[Callable[[], None]]:
+             _notifier: Optional[_ResizeNotifier] = None,
+             _stack: Optional[list[View]] = None) -> Optional[Callable[[], None]]:
     """Run one view until it quits; returns the deferred action (or None).
 
     The loop is the chatbox's discipline, not cursor arithmetic: each frame is
     `FRAME_HOME + FRAME_ERASE + lines`, and the next frame erases the previous
     one wholesale. Resizes repaint immediately (SIGWINCH wake pipe on POSIX,
     the poll slice elsewhere). `?` paints the `_keys` overlay for one frame.
+
+    `_stack` (normally not passed; `push_view`/`pop_view` manage it) makes the
+    loop a view STACK: a view's `on_key` may call `push_view(shell, next)` and
+    then return "repaint" to hand control to `next` — the previous view stays
+    alive underneath and resumes when the top view returns "quit". `pop_view`
+    (or a plain Esc, when the stack is deeper than one) returns to the view
+    below; quitting the BOTTOM view still ends the whole run and returns its
+    deferred action.
     """
     from ._tty import raw_mode, wait_ready, wait_ready_any
     out = out if out is not None else sys.stdout
     fd = fd if fd is not None else sys.stdin.fileno()
     reader = _reader or read_key
+    if _stack is None:
+        _stack = [view]
+    elif not _stack:
+        _stack.append(view)
 
     notifier = _notifier
     own_notifier = notifier is None
@@ -374,8 +403,11 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
             with (raw_mode(fd, icrnl=True) if _is_tty(fd)
                   else contextlib.nullcontext()):
                 width, height = _term_lines(_term_size())
-                shell = Shell(fd, out, width, height)
+                shell = Shell(fd, out, width, height, _stack)
                 while True:
+                    if not _stack:                 # every view popped: done
+                        break
+                    view = _stack[-1]
                     paint(_overlay_lines(view.surface) if overlay
                           else view.render(width, height))
                     if overlay:
@@ -405,9 +437,15 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
                     if key == OVERLAY_KEY:
                         overlay = True
                         continue
+                    if key == "esc" and len(_stack) > 1:
+                        _stack.pop()               # a stacked view: pop to below
+                        continue
                     verdict = view.on_key(key, shell)
                     if verdict == "quit":
-                        break
+                        _stack.pop()
+                        if _stack:
+                            continue               # resume the view underneath
+                        break                      # bottom view quit: leave
                     if verdict == "run":
                         action = view.take_action()
                         break
@@ -439,6 +477,46 @@ def _overlay_lines(surface: str) -> list[str]:
         f"keys · {surface} (any key closes)"))
 
 
+# --- view registry ------------------------------------------------------------
+# Views live in the module that owns their data, but their *identity* is
+# registered here (the same tiered-registry idiom as `_tool_gates._TOOL_GATES`):
+# one place enumerates the fullscreen surfaces, so dispatch, docs and tests can
+# walk them without importing each owner module eagerly (factories import
+# lazily, which keeps the `_surfaces` <-> `_fullscreen` cycle broken).
+_VIEW_FACTORIES: dict[str, Callable[..., View]] = {}
+
+
+def register_view(name: Optional[str] = None,
+                  factory: Optional[Callable[..., View]] = None) -> Callable[..., View]:
+    """Register a zero-or-more-arg view factory under `name` (e.g. "tabs").
+
+    Usable as a decorator on a factory function, or called directly. Returns
+    the factory unchanged.
+    """
+    if factory is None:                       # bare decorator form
+        return lambda f: register_view(name, f)
+    _VIEW_FACTORIES[name] = factory           # type: ignore[index]
+    return factory
+
+
+def view_names() -> list[str]:
+    """Registered fullscreen surface names, in registration order."""
+    return list(_VIEW_FACTORIES)
+
+
+def make_view(name: str, *args, **kwargs) -> View:
+    """Build the view registered under `name`, passing through arguments.
+
+    Raises KeyError for an unknown name — callers dispatch on names they own.
+    """
+    try:
+        factory = _VIEW_FACTORIES[name]
+    except KeyError:
+        raise KeyError(f"no fullscreen view registered as {name!r} "
+                       f"(known: {', '.join(_VIEW_FACTORIES) or 'none'})") from None
+    return factory(*args, **kwargs)
+
+
 # --- dispatch -----------------------------------------------------------------
 def wants_fullscreen() -> bool:
     """Should a view take the alternate screen right now?
@@ -460,26 +538,31 @@ def wants_fullscreen() -> bool:
     return not st._TURN_ACTIVE
 
 
+@register_view("tabs")
 def tabs():
     from ._surfaces import TabsView
     return TabsView()
 
 
+@register_view("review")
 def review(state=None):
     from ._review import ReviewView
     return ReviewView(state)
 
 
+@register_view("sessions")
 def sessions(state):
     from ._sessions_cmd import SessionsView
     return SessionsView(state)
 
 
+@register_view("todos")
 def todos():
     from ._todo import TodoView
     return TodoView()
 
 
+@register_view("bgjobs")
 def bgjobs():
     """The /bg view (background run_bash jobs). Lives in `_bg_completions`:
     the view module must not be `_surfaces`, which imports `_fullscreen` at
@@ -515,5 +598,5 @@ __all__ = [
     "View", "Shell", "read_key", "read_line",
     "alternate_screen", "run_view", "open_view",
     "wants_fullscreen", "owns_screen", "tabs", "review", "sessions", "todos",
-    "bgjobs",
+    "bgjobs", "register_view", "view_names", "make_view",
 ]
