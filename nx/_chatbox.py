@@ -1053,6 +1053,20 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     erase_stale_frame()
                     finish()
                     return "/tabs"
+                elif c == "\x07":
+                    # Ctrl+G -> /todo (GTD-style plan view, fullscreen). The
+                    # byte is genuinely free: the editor loop above consumes
+                    # ^C/^D/^L/^Q/^R/^S/^T/^U and printable chars only, \x07
+                    # hits no branch, nothing else reads it (the interrupt
+                    # watcher only runs mid-turn and discards non-Esc bytes;
+                    # the lone \a reader in _tty probes the OSC reply at
+                    # startup and drains its own window).
+                    # Erase the frame like Ctrl+T: the alternate screen
+                    # restores the normal screen byte-exact, so a leftover
+                    # prompt frame would reappear under the fresh one.
+                    erase_stale_frame()
+                    finish()
+                    return "/todo"
                 elif c == "\x13":
                     # Ctrl+S -> /compress. raw_mode clears IXON, so the
                     # terminal hands the byte over instead of using it as

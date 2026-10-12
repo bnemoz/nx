@@ -10,6 +10,7 @@ Surfaces:
   * "tabs"      — the full-screen /tabs dashboard (`_surfaces.TabsView`)
   * "diff"      — the full-screen /diff working-tree review (`_review.ReviewView`)
   * "sessions"  — the full-screen /sessions browser (`_sessions_cmd.SessionsView`)
+  * "todos"     — the full-screen /todo plan view (`_todo.TodoView`)
   * "fullscreen"— the fallback list for any view without its own entry
 
 Each entry is (key, meaning); `{mode}` in a meaning is substituted per
@@ -71,6 +72,11 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("/", "search"),
         ("enter", "preview"),
         ("R", "resume"),
+        ("esc", "back"),
+    ],
+    "todos": [
+        ("j/k", "move"),
+        ("?", "keys"),
         ("esc", "back"),
     ],
     # Any fullscreen view without its own entry degrades to this one (the

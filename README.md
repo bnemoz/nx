@@ -608,7 +608,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/status` | snapshot: source, model, caps, budgets, fence, approval |
 | `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory |
 | `/retro` | distill this session's friction (usage.jsonl) into gotcha memories |
-| `/todo` | show the model's current todo_write list |
+| `/todo` | show the model's current todo_write list, full screen; Ctrl+G |
 | `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |
 | `/compress` | summarize older turns into one, keep last 2 verbatim |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
@@ -642,7 +642,9 @@ In the REPL input box:
   old **Ctrl+Alt+C** was byte-split into Esc + Ctrl-C by some terminals
   and quit the REPL instead), **Ctrl+R** runs `/review` (the scoped
   reviewer; readline history-search convention does not apply here — history
-  recall here is Up/Down, so the byte is free)
+  recall here is Up/Down, so the byte is free), **Ctrl+G** opens `/todo` in
+  the full-screen plan view (`\x07` is free: no editor branch consumes it and
+  the OSC theme probe drains its own reply window before the prompt runs)
   (so you don't have to type the full command).
 - **Enter** submits; **Shift+Enter** (or **Ctrl+J**) inserts a newline.
 - **Up/Down** navigate history; **Left/Right** move within a line;

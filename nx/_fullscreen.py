@@ -475,6 +475,11 @@ def sessions(state):
     return SessionsView(state)
 
 
+def todos():
+    from ._todo import TodoView
+    return TodoView()
+
+
 def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> bool:
     """Run `view` in the alternate screen when `wants_fullscreen()`, else call
     `fallback` (the command's pre-Phase-D inline output) and return False.
@@ -501,5 +506,5 @@ __all__ = [
     "ALT_ENTER", "ALT_EXIT", "OVERLAY_KEY",
     "View", "Shell", "read_key", "read_line",
     "alternate_screen", "run_view", "open_view",
-    "wants_fullscreen", "owns_screen", "tabs", "review", "sessions",
+    "wants_fullscreen", "owns_screen", "tabs", "review", "sessions", "todos",
 ]

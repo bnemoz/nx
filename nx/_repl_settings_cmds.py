@@ -958,7 +958,20 @@ def _cmd_todo(user: str, state: _ReplState) -> None:
     current list with per-status colors via render_todos_display, the same
     coloring the todo_write tool output gets on screen (done=green,
     in_progress=yellow, pending=orange).
+
+    On a tty the list takes the ALTERNATE SCREEN (`_todo.TodoView`, the same
+    Phase-D pattern as /tabs; Ctrl+G enters it from the prompt), j/k scroll,
+    `?` for the key overlay, Esc back to chat. Off a tty or with
+    NX_FULLSCREEN=0 the pre-view inline print below runs byte-identical.
     """
+    from . import _fullscreen
+    from ._todo import todo_view
+    _fullscreen.open_view(todo_view(), fallback=_todo_inline_fallback)
+
+
+def _todo_inline_fallback() -> None:
+    """`/todo`'s inline output (off tty / NX_FULLSCREEN=0): the pre-view
+    command body, unchanged."""
     if not st._TODOS:
         print(f"{DIM}  (todo list empty){RESET}")
         return

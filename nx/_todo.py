@@ -19,6 +19,7 @@ import os
 from typing import Any
 
 from ._ansi import C, RESET, strip_ansi_for_display
+from . import _fullscreen
 from . import _state as st
 
 
@@ -152,3 +153,109 @@ def _latest_todo_turn(body: list[dict[str, Any]]) -> int | None:
             if isinstance(tc, dict) and (tc.get("function") or {}).get("name") == "todo_write":
                 return i
     return None
+
+
+# ---------------------------------------------------------------------------
+# /todo — alternate-screen view (same Phase-D pattern as /tabs, /diff,
+# /sessions: the view lives in the module that owns the data)
+# ---------------------------------------------------------------------------
+# Deliberately READ-ONLY, like every other view (`_fullscreen`'s contract: a
+# view never mutates state): the plan is owned by `todo_write`, so cycling a
+# status from here would duplicate that tool's whole rewrite-the-list logic.
+# The inline one-shot print stays as the command's fallback, byte-identical to
+# the pre-view `/todo` output.
+
+class TodoView(_fullscreen.View):
+    """The `/todo` view: the model's current todo_write list, full screen.
+
+    Renders through `_render.py` (`panel`, `role`) and `_keys.py` (`hint_line`);
+    the item lines are the SAME `render_todos_display` colors the tool output
+    and the inline command use (done=SUCCESS, in_progress=WARNING,
+    pending=TODO). j/k scroll the selection, counts per status ride in the
+    panel title, and an empty list gets an explicit empty state instead of a
+    blank box.
+    """
+
+    surface = "todos"
+    title = "todos"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sel = 0
+        self.items: list[dict] = []
+
+    def refresh(self) -> None:
+        """Re-read the live list (the poll-time repaint calls this, so a
+        todo_write from a background turn lands without reopening the view)."""
+        self.items = list(st._TODOS or [])
+        self.sel = min(self.sel, max(0, len(self.items) - 1))
+
+    def counts(self) -> dict:
+        """Items per status; an unknown status counts as pending (the same
+        fallback `_STATUS_MARK` applies)."""
+        out = {"done": 0, "in_progress": 0, "pending": 0}
+        for item in self.items:
+            status = item.get("status", "pending")
+            out[status if status in out else "pending"] += 1
+        return out
+
+    def _heading(self) -> str:
+        n = len(self.items)
+        if not n:
+            return "todos · empty"
+        c = self.counts()
+        return (f"todos · {n} item{'' if n == 1 else 's'} · "
+                f"{c['done']} done · {c['in_progress']} active · "
+                f"{c['pending']} pending")
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._ansi import clip_display
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        self.refresh()
+        lines = [f"{role('ACCENT')}todos{RESET}{role('MUTED')} — "
+                 f"{hint_line('todos')}{RESET}"]
+        chrome = 1 + 2  # title line + panel top/bottom
+        budget = max(1, height - chrome)
+        body: list[str] = []
+        if not self.items:
+            body.append(f"{role('MUTED')}  (todo list empty — the model "
+                        f"records its plan with todo_write; /todo prints the "
+                        f"same list inline){RESET}")
+        else:
+            # One body line per item, windowed on the selection so a long plan
+            # scrolls instead of clipping the row the cursor is on. The
+            # overflow note gets its own line only when something is hidden.
+            shown = budget if len(self.items) <= budget else max(1, budget - 1)
+            start = max(0, min(self.sel - shown + 1, len(self.items) - shown))
+            stop = min(len(self.items), start + shown)
+            for i in range(start, stop):
+                marker = "›" if i == self.sel else " "
+                body.append(clip_display(
+                    f"{role('ACCENT')}{marker}{RESET} "
+                    f"{render_todos_display([self.items[i]])}", width - 4))
+            hidden = len(self.items) - (stop - start)
+            if hidden > 0:
+                body.append(f"{role('MUTED')}  … {hidden} more item"
+                            f"{'s' if hidden != 1 else ''} (j/k to "
+                            f"scroll){RESET}")
+        lines.extend(panel(self._heading(), body, footer="q/esc back to chat"))
+        return lines[:height]
+
+    def on_key(self, key: str, shell) -> str:
+        self.notice = ""
+        if key in ("j", "down"):
+            self.sel = min(max(0, len(self.items) - 1), self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+
+def todo_view() -> "TodoView":
+    """The /todo view object the fullscreen shell runs (`_fullscreen.todos()`
+    is the thin alias the command path uses)."""
+    return TodoView()

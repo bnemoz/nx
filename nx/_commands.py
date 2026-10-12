@@ -112,7 +112,7 @@ _SPECS = [
     ("/build", "spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch",
      "[issue]", [], None, 1, "workflow"),
     ("/delete", "delete a saved session", "[target]", [], None, 1, "session"),
-    ("/todo", "show the model's current todo_write list", None, [], None, 1, "context"),
+    ("/todo", "show the model's current todo_write list, full screen; Ctrl+G", None, [], None, 1, "context"),
     ("/wip", "snapshot work state (branch, dirty files, todos, note) into the session",
      "[note]", [], None, 1, "context"),
     ("/plan", "start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard",
