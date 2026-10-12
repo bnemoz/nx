@@ -38,7 +38,7 @@ from ._ansi import BOLD, DIM, RESET, C
 # delete_file/spawn_agent etc. are listed explicitly so an unreviewed addition
 # to the toolset stays *in* the safe default (deny-by-default for the rest).
 PLAN_GATE_TOOLS = frozenset((
-    "write_file", "edit_file", "multi_edit", "sed_edit", "apply_patch",
+    "write_file", "edit_file", "sed_edit", "apply_patch",
     "delete_file", "run_bash", "run_tests", "memory_write", "memory_delete",
     "git_commit", "duckdb",
 ))

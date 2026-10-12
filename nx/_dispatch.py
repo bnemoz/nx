@@ -39,7 +39,8 @@ from ._approval import _EscToChat
 # in the T-9 conftest snapshot).
 from ._surfaces import write_lock
 from ._bash_jobs import run_bash, wait_background, kill_background
-from ._edit_tools import write_file, edit_file, multi_edit, sed_edit, apply_patch, delete_file
+from ._edit_tools import (write_file, edit_file, multi_edit, sed_edit,
+                          apply_patch, delete_file)
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
 from ._render import commit_line as _commit_line
@@ -449,7 +450,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             return cached.result
     # sed_edit snapshots its own (potentially multi-file) checkpoint internally,
     # since a glob path isn't a real file to snapshot here.
-    undo_snapshot = _undo_snapshot(args.get("path")) if name in ("write_file", "edit_file", "multi_edit", "delete_file") else None
+    undo_snapshot = (None if (name == "edit_file" and isinstance(args.get("diff"), str) and args.get("diff").strip())
+                     else _undo_snapshot(args.get("path"))) if name in ("write_file", "edit_file", "multi_edit", "delete_file") else None
     # newline so the tool arrow gets its own line — streamed text uses end=""
     # and would otherwise run straight into the indicator. The header and args
     # preview come from tool_display(), shared with the grouped renderer.
@@ -743,7 +745,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # entry cap and the byte cap, oldest first.
     elif name in ("write_file", "edit_file", "multi_edit", "delete_file",
                   "sed_edit", "apply_patch") and not result.startswith("ERROR"):
-        _invalidate_tool_cache_path(args.get("path"))
+        if isinstance(args.get("diff"), str) and args.get("diff").strip():
+            from ._edit_tools import _patch_affected_files
+            base = args.get("path") or "."
+            for _f in _patch_affected_files(args["diff"]):
+                _invalidate_tool_cache_path(os.path.join(base, _f))
+        else:
+            _invalidate_tool_cache_path(args.get("path"))
         # PF-18: the pre-body path drop is deterministic (the write is not on
         # disk yet); the post-commit sweep is what catches every-other-path
         # anchors and a commit-dirtied search_files tree stamp.
@@ -787,13 +795,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # completion scan's alive-check already skips it — and if it exits before
     # the next scan, announcing "exited (code N)" is exactly what the model
     # needs to hear, since it was told the job was backgrounded.)
-    if name == "edit_file" and not result.startswith("ERROR"):
+    if (name == "edit_file" and not (isinstance(args.get("diff"), str) and args.get("diff").strip())
+            and not isinstance(args.get("edits"), list) and not result.startswith("ERROR")):
         st._CONSECUTIVE_EDITS += 1
         if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_NUDGE_THRESHOLD and not st._MULTI_EDIT_NUDGED:
             st._MULTI_EDIT_NUDGED = True
             from . import _notices
             _notices.set_("_PENDING_MULTI_EDIT_NOTICE", MULTI_EDIT_GUIDANCE)
-    elif name != "edit_file":
+    elif not (name == "edit_file" and not (isinstance(args.get("diff"), str) and args.get("diff").strip())
+              and not isinstance(args.get("edits"), list)):
         st._CONSECUTIVE_EDITS = 0
     # read_file just returned a bg job's log in full? If the job has already
     # exited, its output now sits in the transcript — mark it seen so the

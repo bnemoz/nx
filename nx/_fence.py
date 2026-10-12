@@ -133,7 +133,19 @@ def _fence_candidates(name: str, args: dict[str, Any]) -> list[tuple[str, str]]:
             return
         cands.append((raw, os.path.realpath(os.path.expanduser(raw))))
 
-    if name in _TOOL_PATH_TOOLS:
+    _diff = args.get("diff")
+    if isinstance(_diff, str) and _diff.strip():
+        # diff mode (merged edit_file, or the legacy apply_patch name): the
+        # patch headers name the real targets, `path` is only the base dir.
+        base = args.get("path") or "."
+        add(base)
+        import re as _re
+        for m in _re.finditer(r"^\+\+\+ (?:b/)?(\S+)", _diff, _re.M):
+            tgt = m.group(1)
+            if tgt == "/dev/null":
+                continue
+            add(os.path.join(base, tgt))
+    elif name in _TOOL_PATH_TOOLS:
         add(args.get("path"))
     elif name == "sed_edit":
         # The body globs `path` itself; fence the literal and every file the
@@ -152,17 +164,6 @@ def _fence_candidates(name: str, args: dict[str, Any]) -> list[tuple[str, str]]:
                     # above; no matches at all means nothing to write.
                 except Exception:
                     pass
-    elif name == "apply_patch":
-        base = args.get("path") or "."
-        add(base)
-        diff = args.get("diff")
-        if isinstance(diff, str):
-            import re as _re
-            for m in _re.finditer(r"^\+\+\+ (?:b/)?(\S+)", diff, _re.M):
-                tgt = m.group(1)
-                if tgt == "/dev/null":
-                    continue
-                add(os.path.join(base, tgt))
     return cands
 
 
@@ -170,8 +171,8 @@ def check_write_fence(name: str, args: dict[str, Any]) -> str:
     """The fence verdict for a tool call: "" = allow, else the ERROR refusal.
 
     Never raises, never prompts, never calls the model. Called from run_tool()
-    for every tool with a structured write surface (the `path` tools,
-    sed_edit, apply_patch). run_bash is deliberately NOT fenced here — no
+    for every tool with a structured write surface (the `path` tools, sed_edit,
+    and any call carrying a `diff`). run_bash is deliberately NOT fenced here — no
     static analysis covers shell without either bypasses or false refusals;
     it keeps its classifier+approval story (see P3-1 for the real fix).
     """

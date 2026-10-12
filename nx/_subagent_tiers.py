@@ -467,7 +467,7 @@ def _scope_target(name: str, args: dict[str, Any]) -> str | None:
         v = args.get(key)
         if isinstance(v, str) and v.strip():
             return v
-    if name == "multi_edit":
+    if name == "edit_file":
         files = args.get("path") or args.get("files")
         if isinstance(files, str):
             return files

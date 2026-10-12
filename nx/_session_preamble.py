@@ -146,8 +146,8 @@ YOLO_ASYNC_GUIDANCE = (
 MULTI_EDIT_GUIDANCE = (
     "[Runtime note: you've made several edit_file calls in a row. If you have "
     "more literal find/replace changes left to make in a file (even just 2-3 "
-    "more), batch them into ONE multi_edit call (edits=[{old,new},...]) "
-    "instead of continuing with separate edit_file calls — it's one approval "
+    "more), batch them into ONE edit_file call (edits=[{old,new},...]) "
+    "instead of continuing with separate calls — it's one approval "
     "instead of several, and applies atomically.]"
 )
 

@@ -233,7 +233,28 @@ def _whitespace_tolerant_match(src: str, old: str) -> str | None:
 
 
 def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False,
-              old_lines: str = "", **_: Any) -> str:
+              old_lines: str = "", edits: list[dict[str, str]] | None = None,
+              diff: str = "", **_: Any) -> str:
+    """The one file-edit tool, three modes by args:
+    - `diff` set -> apply_patch body (unified diff, possibly multi-file).
+    - `edits` set -> multi_edit body (atomic batch of literal replacements).
+    - otherwise -> the literal `old`/`old_lines`/`new` replace.
+    (The historical standalone bodies are kept below and re-exported; the
+    dispatcher, fence, and undo plumbing all read this merged signature.)"""
+    if isinstance(diff, str) and diff.strip():
+        if edits or old or old_lines:
+            return "ERROR: pass `diff` alone, or old/old_lines/edits — not both"
+        return apply_patch(diff, path=path or ".")
+    if edits is not None:
+        if old or old_lines:
+            return "ERROR: pass either `edits` or `old`/`old_lines`, not both"
+        return multi_edit(path, edits)
+    return _edit_file_literal(path, old=old, new=new, replace_all=replace_all,
+                              old_lines=old_lines)
+
+
+def _edit_file_literal(path: str, old: str = "", new: str = "", replace_all: bool = False,
+                       old_lines: str = "", **_: Any) -> str:
     """Replace `old` with `new` in `path`. By default `old` must match exactly
     once (ambiguous matches error rather than guessing). Pass replace_all=True
     to replace every occurrence instead — e.g. renaming a variable throughout
