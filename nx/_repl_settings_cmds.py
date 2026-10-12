@@ -20,7 +20,7 @@ import signal
 import sys
 
 from . import _ansi
-from ._ansi import DIM, BOLD, RESET, C, hex_of, luma_ramp
+from ._ansi import DIM, BOLD, RESET, C
 from ._approval import _EscToChat, _normalize_approval, _apply_approval, _approval_display
 from ._env import _set_env_var
 from ._metrics import _abbr
@@ -254,12 +254,8 @@ def _cmd_tooloutput(user: str, state: _ReplState) -> None:
         print(f"{BOLD}{C.WARNING}  → tool output: visible{RESET} {DIM}(saved to ~/.env){RESET}")
         if sub == "show" and st._LAST_TOOL_OUTPUT:
             print(f"{C.ACCENT}  ┌─ {st._LAST_TOOL_NAME}{RESET}")
-            # Body lines fade to the faintest luma-ramp step of TOOL_OUTPUT
-            # (same layering as the live tool box) so the replay recedes too.
-            _body_dim = luma_ramp(hex_of(C.TOOL_OUTPUT), 3,
-                                  to_dark=not C.light_bg)[-1]
             for _ln in str(st._LAST_TOOL_OUTPUT).splitlines():
-                print(f"{C.ACCENT}  └─{RESET} {_body_dim}{_ln}{RESET}")
+                print(f"{C.ACCENT}  └─{RESET} {C.TOOL_OUTPUT}{_ln}{RESET}")
     elif sub in ("off", "hide", "collapse"):
         st.TOOL_OUTPUT_VISIBLE = False
         _set_env_var("NX_TOOL_OUTPUT_VISIBLE", "0")
@@ -268,10 +264,8 @@ def _cmd_tooloutput(user: str, state: _ReplState) -> None:
     elif sub in ("last",):
         if st._LAST_TOOL_OUTPUT:
             print(f"{C.ACCENT}  ┌─ {st._LAST_TOOL_NAME}{RESET}")
-            _body_dim = luma_ramp(hex_of(C.TOOL_OUTPUT), 3,
-                                  to_dark=not C.light_bg)[-1]
             for _ln in str(st._LAST_TOOL_OUTPUT).splitlines():
-                print(f"{C.ACCENT}  │ {RESET}{_body_dim}{_ln}{RESET}")
+                print(f"{C.ACCENT}  │ {RESET}{C.TOOL_OUTPUT}{_ln}{RESET}")
             print(f"{C.ACCENT}  └─{RESET}")
         else:
             print(f"{DIM}  no tool output captured yet{RESET}")

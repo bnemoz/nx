@@ -501,20 +501,8 @@ twelve hues above, resolved against the *active* theme so it tracks
 `NX_TOOL_OUTPUT_COLOR=#fdfd96` pins tool output to an exact hex regardless of
 theme. Invalid values are ignored with a warning.
 
-Tool dump bodies are layered for legibility: the first line (and any
-ERROR/DENIED block) renders at the full `TOOL_OUTPUT` hue, while continuing
-body lines render a fainter luma-ramped step of the same hue, so streamed
-chatter recedes while the parts you scan for stay strong. The ramp is derived
-from the active theme — no configuration needed, and `NX_TOOL_OUTPUT_COLOR`
-still pins the base hue the ramp starts from.
-
-On truecolor terminals, tool-call box borders additionally carry a faint
-same-hue *background fill* (the accent pre-blended at ~16% over the terminal
-background — truecolor SGR has no alpha channel, so the blend is baked into
-the RGB), the same large-block declutter Catppuccin's style guide uses for
-selection backgrounds. Off by default since 0.142.4; opt in with
-`NX_BG_TINT=1`. It is off on 256-color
-or non-tty output, where a baked fill would quantize badly.
+Tool dump bodies render at the full `TOOL_OUTPUT` hue; `NX_TOOL_OUTPUT_COLOR`
+pins that hue.
 
 The assistant's final answer is rendered as markdown through rich; its
 heading/code/link/bullet colors come from the same active theme (headings and

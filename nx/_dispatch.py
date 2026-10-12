@@ -26,8 +26,7 @@ import time
 from typing import Any
 
 from . import _state as st
-from ._ansi import (DIM, RESET, C, LifeSpinner, hex_of, luma_ramp,
-                    strip_ansi_for_display)
+from ._ansi import DIM, RESET, C, LifeSpinner, strip_ansi_for_display
 from ._tool_cache import (
     cache_touch, cache_valid, drop_changed_entries,
     drop_vcs_entries, store_cacheable_result,
@@ -695,17 +694,8 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
             if name == "todo_write":
                 body = render_todos_display().splitlines()
             else:
-                # Layered stream dump: the first line keeps the full TOOL_OUTPUT
-                # hue (it carries the result's summary/error head); continuing
-                # body lines fade to the faintest luma-ramp step of the same hue
-                # so background chatter recedes. Error-ish lines (ERROR/DENIED
-                # results) stay at full strength throughout — they're the point.
-                failed_body = isinstance(result, str) and result.startswith(("ERROR", "DENIED"))
-                body_dim = luma_ramp(hex_of(C.TOOL_OUTPUT), 3,
-                                     to_dark=not C.light_bg)[-1]
-                body = [f"{(C.TOOL_OUTPUT if (i == 0 or failed_body) else body_dim)}"
-                        f"{strip_ansi_for_display(line)}{RESET}"
-                        for i, line in enumerate(preview_lines)]
+                body = [f"{C.TOOL_OUTPUT}{strip_ansi_for_display(line)}{RESET}"
+                        for line in preview_lines]
         failed = isinstance(result, str) and result.startswith(("ERROR", "DENIED"))
         note = ""
         if failed:
