@@ -327,7 +327,6 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     # `finally` may run while siblings are mid-loop — the guard keeps the
     # slot quiet until the LAST batch task on any thread finishes.
     _ASYNC_QUIET_SLOTS.quiet = True
-    global _QUIET_HOLDERS
     with _QUIET_GUARD:
         _QUIET_HOLDERS += 1
     _TASK_TLS.task = task

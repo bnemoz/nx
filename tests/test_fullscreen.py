@@ -810,12 +810,10 @@ def test_context_subcommands_keep_their_inline_behaviour(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def _fullscreen_View():
-    from nx._fullscreen import View
-    return View
+from nx._fullscreen import View
 
 
-class _CountingView(_fullscreen_View()):
+class _CountingView(View):
     surface = "tabs"
     title = "counting"
 

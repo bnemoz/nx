@@ -45,6 +45,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from typing import Callable
 
 API_BASE = "https://api.telegram.org"
 # Telegram hard limit on one message's text.
@@ -312,7 +313,7 @@ def _compose_status(ask: str, lines: list[str], tool_n: int,
             + (f"\n\U0001f4ac {note}" if note else ""))
 
 
-def _typing(api: callable, chat_id: int) -> None:
+def _typing(api: Callable, chat_id: int) -> None:
     """sendChatAction: typing — fail-soft; keeps the phone from looking dead
     during a long turn."""
     try:
@@ -321,7 +322,7 @@ def _typing(api: callable, chat_id: int) -> None:
         pass
 
 
-def _edit_status(api: callable, chat_id: int, message_id: int,
+def _edit_status(api: Callable, chat_id: int, message_id: int,
                  text: str) -> bool:
     """One editMessageText on the status bubble. Returns False on any
     failure (message deleted, too old, network) so callers can fall back to
@@ -335,7 +336,7 @@ def _edit_status(api: callable, chat_id: int, message_id: int,
         return False
 
 
-def _send(api: callable, chat_id: int, text: str) -> dict:
+def _send(api: Callable, chat_id: int, text: str) -> dict:
     """Send (chunked). Fail-soft: the returned dict records ok/error instead
     of raising, but failures are never silently indistinguishable from
     success. Chunks are throttled to stay under the per-chat flood limit."""
@@ -400,7 +401,7 @@ def _message_instruction(msg: dict) -> str | None:
 _TURN_LOCK = threading.Lock()
 
 
-def _run_turn(api: callable, chat_id: int, instruction: str,
+def _run_turn(api: Callable, chat_id: int, instruction: str,
               messages: list) -> None:
     """Run one model turn for `instruction`, editing a status message with
     step progress, then sending the final answer. Mutates `messages` (the

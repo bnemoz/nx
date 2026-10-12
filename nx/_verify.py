@@ -111,7 +111,7 @@ def _launch_verify(command: str) -> bool:
     if fn is None:
         print("[verify] run_bash unavailable — NX_VERIFY_CMD not run")
         return False
-    out = fn(command)  # ty: ignore[missing-argument, invalid-argument-type]  # run_bash(command)
+    out = fn(command)  # ty: ignore[missing-argument, invalid-argument-type]  # run_bash(command)  # pyrefly: ignore[missing-argument]
     if not isinstance(out, str) or out.startswith("ERROR") or out.startswith("DENIED"):
         print(f"[verify] NX_VERIFY_CMD did not start: {out if isinstance(out, str) else type(out).__name__}")
         return False

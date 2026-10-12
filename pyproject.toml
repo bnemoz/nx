@@ -106,3 +106,6 @@ rules.not-iterable = "ignore"
 rules.unsupported-operator = "ignore"
 rules.unresolved-import = "ignore"
 rules.possibly-missing-submodule = "ignore"
+
+[tool.pyrefly]
+project-includes = ["nx/**", "tests/**"]
