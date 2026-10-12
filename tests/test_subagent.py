@@ -2,7 +2,6 @@
 read-only dispatch enforcement inside the sub-loop, answer extraction, and
 turn-cap handling.
 """
-import importlib
 import os
 import sys
 import threading
@@ -30,11 +29,9 @@ os.environ["NX_SUBAGENT_SYNC_INLINE"] = "1"
 @pytest.fixture(autouse=True)
 def _sync_inline(monkeypatch):
     # Load-bearing (not a no-op): nx/_subagent._sync_inline prefers the module
-    # attr _m.NX_SUBAGENT_SYNC_INLINE over the env. nx_fresh's reload()
-    # re-executes nx/__init__ in the SAME module dict without defining this
-    # name, so setting it here (autouse runs before nx_fresh) survives the
-    # reload and pins inline mode. raising=False because the attr is not
-    # defined at import time.
+    # attr _m.NX_SUBAGENT_SYNC_INLINE over the env, and that attr does not exist
+    # at import time, so the module-scope os.environ line alone would not pin
+    # inline mode. raising=False because the attr is not defined at import time.
     import nx as _nx
     monkeypatch.setattr(_nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
     yield
@@ -51,23 +48,40 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
-    monkeypatch.setattr(nx_fresh if False else sys, "argv", ["nx"])
+    monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
-    importlib.reload(nx)
+    # The old `importlib.reload(nx)` here rebuilt nx's import-time state from
+    # this fixture's env — most importantly the model source: conftest imports
+    # nx once under a scrubbed env, so st.client/st.MODEL stay None (no active
+    # source) and every spawn would answer "ERROR: no active model source".
+    # Instead of a reload, rebuild just that wiring: re-discover sources from
+    # the env we just set and switch to the first one (binds st.client +
+    # st.MODEL). resolve_model() reads NX_MODEL ("test-model"), so no network
+    # round-trip happens; the dead 127.0.0.1:9 endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # nx reads these knobs through the MODULE ATTR first, falling back to the
+    # env (see _subagent._is_async_default / _sync_inline), and the attr holds
+    # the import-time default. The reload used to rebuild the attrs from this
+    # fixture's env; with the reload gone, state the one behavior-changing knob
+    # the env alone can no longer reach as a per-test monkeypatch
+    # (auto-restored). NX_SUBAGENT_ASYNC=0 = foreground sub-loop.
+    monkeypatch.setattr(nx, "NX_SUBAGENT_ASYNC", 0, raising=False)
     yield nx
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS", "NX_SUBAGENT_ASYNC"):
-        os.environ.pop(k, None)
+    # env rewind is universal (conftest), so no manual pop here; nx globals a
+    # test mutates go through monkeypatch (per-test, auto-restored).
 
 
-def test_schema_gated_by_env(nx_fresh):
+def test_schema_gated_by_env(nx_fresh, monkeypatch):
     from nx._dispatch import _active_tools
     names = [t["function"]["name"] for t in _active_tools()]
     assert "spawn_agent" in names  # default ON since 0.77.0
     assert any(t["function"]["name"] == "spawn_agent" for t in nx_fresh.TOOLS)
-    nx_fresh.NX_SUBAGENTS = 0
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 0)
     names = [t["function"]["name"] for t in _active_tools()]
     assert "spawn_agent" not in names  # explicit opt-out still honored
-    nx_fresh.NX_SUBAGENTS = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1)
 
 
 def test_subagent_loop_uses_readonly_dispatch(nx_fresh, monkeypatch):
@@ -294,7 +308,7 @@ def test_concurrent_spawn_agents_overlap(nx_fresh, monkeypatch, tmp_path):
     restricted dispatch table (thread-local), and results map back in order."""
     from nx import _dispatch
     from nx._turn import _should_parallelize, _run_read_only_parallel
-    nx_fresh.NX_SUBAGENTS = 1  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1)  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
     lock = threading.Lock()
     state = {"cur": 0, "max": 0}
     barrier = threading.Barrier(2, timeout=10)
@@ -335,7 +349,7 @@ def test_native_path_fans_out_two_spawns(nx_fresh, monkeypatch):
     """_handle_native_tool_calls routes a 2-spawn turn through the parallel
     executor: one assistant tool_calls turn, two ordered tool results."""
     from nx._turn import _handle_native_tool_calls
-    nx_fresh.NX_SUBAGENTS = 1  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1)  # run_tool() refuses a gated spawn (0.28.1); this tests the fan-out
     tcs = {0: {"id": "a1", "name": "spawn_agent", "args": '{"instruction": "find A"}'},
            1: {"id": "a2", "name": "spawn_agent", "args": '{"instruction": "find B"}'}}
 
@@ -499,7 +513,7 @@ def test_foreground_spawn_pauses_parent_spinner(nx_fresh, monkeypatch):
                 super().stop()
 
     tracked = TrackedSpinner(label="running spawn_agent")
-    nx_fresh._state._ACTIVE_SPINNER = tracked
+    monkeypatch.setattr(nx_fresh._state, "_ACTIVE_SPINNER", tracked)
 
     def fake_loop(messages, *a, **kw):
         # mid-sub-loop: the parent spinner must be stopped NOW
@@ -518,7 +532,7 @@ def test_foreground_spawn_pauses_parent_spinner(nx_fresh, monkeypatch):
     # quiet (background worker) path: no parent spinner ownership, no pause
     from nx._subagent import _ASYNC_QUIET_SLOTS
     events.clear()
-    _ASYNC_QUIET_SLOTS.quiet = True
+    monkeypatch.setattr(_ASYNC_QUIET_SLOTS, "quiet", True, raising=False)
 
     def quiet_loop(messages, *a, **kw):
         assert not events  # a quiet agent owns no spinner and pauses nothing
@@ -526,10 +540,6 @@ def test_foreground_spawn_pauses_parent_spinner(nx_fresh, monkeypatch):
         return {"status": "done", "turns": 1}
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", quiet_loop)
-    try:
-        out = spawn_agent("q")
-        assert out == "done"
-        assert events == []  # never touched a spinner it doesn't own
-    finally:
-        _ASYNC_QUIET_SLOTS.quiet = False
-        nx_fresh._state._ACTIVE_SPINNER = None
+    out = spawn_agent("q")
+    assert out == "done"
+    assert events == []  # never touched a spinner it doesn't own
