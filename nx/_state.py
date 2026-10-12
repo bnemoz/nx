@@ -232,6 +232,14 @@ _PENDING_YOLO_ASYNC_NOTICE: str | None = None
 # _resume._apply_resumed_nudge_flags).
 _READ_STREAK: int = 0
 _DELEGATION_NUDGE_COUNT: int = 0
+# Same-failing-path loop breaker state (assigned in _dispatch.py; see the
+# comment there). tuple[str, str] | None — the (tool, path) key of the last
+# existence-type failure — and its consecutive run.
+_PATH_FAIL_LAST: tuple[str, str] | None = None
+_PATH_FAIL_RUN: int = 0
+# OCC reminder slots (assigned in _sessionlock.py / _compress.py).
+_PENDING_OCC_REMINDER: str | None = None
+_OCC_NATIVE_COMPACTIONS: int = 0
 _PENDING_DELEGATION_NOTICE: str | None = None
 
 # --- native tool-call malformed-args circuit breaker --------------------------

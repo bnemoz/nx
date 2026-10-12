@@ -44,10 +44,11 @@ def exclusive_file_lock(fd: int, *, blocking: bool = True) -> Iterator[bool]:
         fobj = fd if hasattr(fd, "seek") else os.fdopen(fd, "a+", encoding="utf-8")
         owned = fobj is not fd
         try:
-            fobj.seek(0)
+            fobj.seek(0)  # type: ignore[union-attr]  # guarded by hasattr above
             try:
-                msvcrt.locking(fobj.fileno(),
-                               msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(fobj.fileno(),  # pyrefly: ignore[missing-attribute]  # Windows-only branch
+                               # pyrefly: ignore [missing-attribute]
+                               (msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK), 1)
             except OSError:
                 yield False
                 return
@@ -55,12 +56,13 @@ def exclusive_file_lock(fd: int, *, blocking: bool = True) -> Iterator[bool]:
                 yield True
             finally:
                 try:
-                    fobj.seek(0)
-                    msvcrt.locking(fobj.fileno(), msvcrt.LK_UNLCK, 1)
+                    fobj.seek(0)  # type: ignore[union-attr]  # guarded by hasattr above
+                    msvcrt.locking(fobj.fileno(), msvcrt.LK_UNLCK, 1)  # pyrefly: ignore[missing-attribute]  # Windows-only branch
                 except OSError:
                     pass
         finally:
             if owned:
+                # pyrefly: ignore [missing-attribute]
                 fobj.close()
         return
 
@@ -94,7 +96,7 @@ def try_lock_fd(fd: int) -> bool:
             return False
         try:
             fobj.seek(0)
-            msvcrt.locking(fobj.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(fobj.fileno(), msvcrt.LK_NBLCK, 1)  # pyrefly: ignore[missing-attribute]  # Windows-only branch
             return True
         except OSError:
             fobj.close()
@@ -137,7 +139,7 @@ def pid_is_alive(pid: int, expected_start_time: str | None = None) -> bool:
         SYNCHRONIZE = 0x00100000
         STILL_ACTIVE = 259
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyrefly: ignore[missing-attribute]  # Windows-only branch
         h = k32.OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
         if not h:
@@ -207,8 +209,8 @@ def bash_launch_args() -> dict:
         # No setsid on Windows; CREATE_NEW_PROCESS_GROUP detaches from the
         # console group so terminal Ctrl+C (which signals a group) can't
         # reach the job, and CREATE_NO_WINDOW stops a console flash.
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.CREATE_NO_WINDOW}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP  # pyrefly: ignore[missing-attribute]  # Windows-only branch
+                | subprocess.CREATE_NO_WINDOW}  # pyrefly: ignore[missing-attribute]  # Windows-only branch
     return {"start_new_session": True}
 
 

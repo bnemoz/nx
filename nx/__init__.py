@@ -895,6 +895,15 @@ NX_SUBAGENT_MAX_CONCURRENT = _env_int("NX_SUBAGENT_MAX_CONCURRENT", 12)
 # every sub-agent write still crosses the parent's own _confirm() (risk gate +
 # Y/n prompt with a diff preview), tagged (sub-agent) in the tool box.
 NX_SUBAGENT_WRITE = _env_int("NX_SUBAGENT_WRITE", 0)
+# 0.96.0: sub-agent results land as a [Runtime note] + report file instead of
+# inline. NX_SUBAGENT_SYNC_INLINE=1 restores the old inline behavior (read at
+# call time by _subagent._sync_inline; only set when a session opts in).
+NX_SUBAGENT_SYNC_INLINE = _env_int("NX_SUBAGENT_SYNC_INLINE", 0)
+# Per-agent git worktree for write-tier sub-agents (0.97.0, _worktree.py) and a
+# whole-session worktree (`nx --isolate`, 0.103.0). Declared so the live-attr
+# reads in _worktree.py/_subagent.py resolve statically; defaults off.
+NX_SUBAGENT_WORKTREE = _env_int("NX_SUBAGENT_WORKTREE", 0)
+NX_SESSION_WORKTREE = _env_int("NX_SESSION_WORKTREE", 0)
 # Sub-agent budget knobs (read in nx/_subagent.py at spawn time): the default
 # turn budget the schema advertises (NX_SUBAGENT_DEFAULT_TURNS, 100 — the old
 # 12 left real investigations capping out with no answer) and the hard ceiling

@@ -31,8 +31,9 @@ os.environ["NX_SUBAGENT_SYNC_INLINE"] = "1"
 @pytest.fixture(autouse=True)
 def _sync_inline(monkeypatch):
     # Load-bearing (see tests/test_subagent.py): nx/_subagent._sync_inline
-    # prefers the module attr over the env, and nx_fresh's reload() re-executes
-    # nx/__init__ in the same module dict without defining it.
+    # prefers the module attr over the env. Patched in nx_fresh AFTER the
+    # reload too (a reload re-resolves the attr from the scrubbed env, wiping
+    # this patch); the autouse pre-patch covers the Tier-A files that don't.
     import nx as _nx
     monkeypatch.setattr(_nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
     yield
@@ -52,6 +53,10 @@ def nx_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
     importlib.reload(nx)
+    # Reload re-resolves NX_SUBAGENT_SYNC_INLINE from the scrubbed env (= 0),
+    # wiping the autouse pre-patch — re-apply after (pattern of
+    # test_subagent_exit_state.py).
+    monkeypatch.setattr(nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
     yield nx
     from nx import _subagent
     with _subagent._ASYNC_LOCK:

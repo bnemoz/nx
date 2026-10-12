@@ -76,7 +76,7 @@ try:
         tree_stamp: str | None = None  # set only for search_files entries
         hits: int = 0                  # times this entry served a cache hit
 except ImportError:  # pragma: no cover
-    _CacheEntry = None  # ty: ignore[invalid-assignment]  # py3.6- fallback
+    _CacheEntry = None  # ty: ignore[invalid-assignment]  # pyrefly: ignore[invalid-assignment, not-callable, missing-attribute]  # py3.6- fallback
 
 
 def _mtime_ns_of(path: str) -> int | None:
@@ -203,8 +203,9 @@ def cache_store_entry(
 ) -> _CacheEntry:
     """Build a cache entry for a completed read-only tool call. path_arg is the
     raw args["path"] value (str, list -> every element, or absent)."""
-    paths = _abs_paths(path_arg)
+    paths = _abs_paths(path_arg)  # always non-empty: _abs_paths falls back to "."
     mtimes = tuple(_mtime_ns_of(p) for p in paths)
+    # pyrefly: ignore [not-callable]
     return _CacheEntry(result, paths[0], mtimes[0], git_stamp, paths, mtimes, None)
 
 
@@ -215,8 +216,10 @@ def cache_store_tree_entry(
 ) -> _CacheEntry:
     """Build a cache entry for a subtree-wide read (search_files): one anchor
     path plus the bounded tree_stamp that sees changes anywhere below it."""
-    root_abs = _abs_paths(root)[0]
+    root_paths = _abs_paths(root)
+    root_abs = root_paths[0]
     m = _mtime_ns_of(root_abs)
+    # pyrefly: ignore [not-callable]
     return _CacheEntry(result, root_abs, m, git_stamp, (root_abs,), (m,),
                        tree_stamp(root_abs))
 
@@ -226,19 +229,22 @@ def cache_valid(entry: _CacheEntry) -> bool:
     valid. A path stored as absent (mtime None) stays valid only while it is
     still absent — its appearance is a change. A tree-stamped entry re-walks
     the subtree. OSError/unreadable -> invalid."""
+    # pyrefly: ignore [missing-attribute]
     paths = getattr(entry, "paths", None) or (entry.path,)
     mtimes = getattr(entry, "mtimes", None)
     if not mtimes or len(mtimes) != len(paths):
         # Entries built positionally by older callers/tests carry only the
         # single anchor; degrade to the pre-0.61 check.
+        # pyrefly: ignore [missing-attribute]
         mtimes = (entry.mtime_ns,) * len(paths)
     for p, m in zip(paths, mtimes):
         if _mtime_ns_of(p) != m:
             return False
     stamp = getattr(entry, "tree_stamp", None)
     if stamp is not None:
-        return tree_stamp(entry.path) == stamp
-    if entry.git_stamp is not None:
+        return tree_stamp(entry.path) == stamp  # pyrefly: ignore[missing-attribute]  # py3.6- fallback makes _CacheEntry None
+    if entry.git_stamp is not None:  # pyrefly: ignore[missing-attribute]  # py3.6- fallback makes _CacheEntry None
+        # pyrefly: ignore [missing-attribute]
         return git_state_stamp(entry.path) == entry.git_stamp
     return True
 
@@ -296,9 +302,10 @@ def cache_touch(cache: dict, key: Any) -> None:
         except Exception:
             pass
         try:
+            # pyrefly: ignore [missing-attribute]
             cache.move_to_end(key)
         except AttributeError:
-            cache[key] = cache.pop(key)
+            cache[key] = cache.pop(key)  # pyrefly: ignore[missing-attribute, unsupported-operation]  # plain dict: re-insert for recency
 
 
 def _entry_cost(e: _CacheEntry) -> int:
@@ -306,6 +313,7 @@ def _entry_cost(e: _CacheEntry) -> int:
     stamp holds up to NX_TOOL_CACHE_TREE_FILES "name:mtime" tokens — hundreds
     of KB per entry, unmetered before 0.108.3, so a search-heavy swarm could
     blow the byte cap several times over)."""
+    # pyrefly: ignore [missing-attribute]
     return len(e.result or "") + len(getattr(e, "tree_stamp", None) or "")
 
 
