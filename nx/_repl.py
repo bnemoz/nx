@@ -127,8 +127,11 @@ def _cmd_bg_view(user: str, state: _ReplState) -> None:
 
 def _cmd_bg_inline_fallback() -> None:
     """`/bg`'s inline output (off tty / NX_FULLSCREEN=0): the pre-view command
-    body, byte-identical (`_cmd_bg` with no arguments)."""
-    _cmd_bg("/bg", None)
+    body, byte-identical (`_cmd_bg` with no arguments). The fallback never
+    touches session state, so a fresh empty `_ReplState` stands in."""
+    from ._repl_state import _ReplState
+    _cmd_bg("/bg", _ReplState(messages=[], session_id="", session_dirty=False,
+                              history=[]))
 
 
 @command("/diff")
