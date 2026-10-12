@@ -137,6 +137,98 @@ def test_searx_preferred_when_configured():
     assert "https://s.example/" in out and "DuckDuckGo" not in out
 
 
+def test_searx_answer_infobox_suggestions_and_notes():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:9"
+    body = ('{"results": [{"title": "R", "url": "https://r.example/", "content": "c"}],'
+            ' "answers": [{"answer": "2 + 2 = 4"}],'
+            ' "infoboxes": [{"infobox": "Python", "content": "A programming language."}],'
+            ' "suggestions": ["py", "python3"],'
+            ' "number_of_results": 4242,'
+            ' "unresponsive_engines": [["bing", "timeout"]]}')
+    try:
+        with unittest.mock.patch.object(w, "_http_get", return_value=body):
+            out = w.web_fetch(query="python")
+    finally:
+        w.SEARX_URL = saved
+    assert "= 2 + 2 = 4" in out          # instant answer leads
+    assert "[info] A programming language." in out
+    assert "Related queries: py; python3" in out
+    assert "~4242 total results" in out
+    assert "unresponsive engines: bing" in out
+
+
+def test_searx_auto_routing_it_and_fresh():
+    _clean()
+    saved = w.SEARX_URL
+    w.SEARX_URL = "http://127.0.0.1:9"
+    urls = []
+
+    def fake_get(url, headers=None):
+        urls.append(url)
+        return '{"results": [{"title": "R", "url": "https://r.example/", "content": ""}]}'
+
+    try:
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+            w.web_fetch(query="pypi package flask")
+            w.web_fetch(query="latest release of numpy")
+            w.web_fetch(query="plain query", engines="google", categories="science")
+    finally:
+        w.SEARX_URL = saved
+    assert "categories=it" in urls[0]                       # package query → it
+    assert "time_range=day" in urls[1]                      # recency query → day
+    assert "categories=science" in urls[2] and "engines=google" in urls[2]
+    assert "time_range" not in urls[2]  # explicit engines suppress auto-fresh
+
+
+def test_searx_basic_auth_header():
+    _clean()
+    saved = w.SEARX_URL
+    saved_auth = w.SEARX_AUTH
+    w.SEARX_URL = "http://127.0.0.1:9"
+    w.SEARX_AUTH = "user:pass"
+    seen = {}
+
+    def fake_get(url, headers=None):
+        seen.update(headers or {})
+        return '{"results": [{"title": "R", "url": "https://r.example/", "content": ""}]}'
+
+    try:
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+            w.web_fetch(query="authed")
+    finally:
+        w.SEARX_URL = saved
+        w.SEARX_AUTH = saved_auth
+    assert seen.get("Authorization", "").startswith("Basic ")
+
+
+def test_searx_pageno_and_max_results():
+    _clean()
+    saved = w.SEARX_URL
+    saved_max = w.MAX_SEARCH_RESULTS
+    w.SEARX_URL = "http://127.0.0.1:9"
+    w.MAX_SEARCH_RESULTS = 3
+    urls = []
+    body = ('{"results": [' + ",".join(
+        f'{{"title": "R{i}", "url": "https://r{i}.example/", "content": ""}}'
+        for i in range(4)) + "]}")
+
+    def fake_get(url, headers=None):
+        urls.append(url)
+        return body
+
+    try:
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+            w.web_fetch(query="page one")
+            out = w.web_fetch(query="page two", pageno=2)
+    finally:
+        w.SEARX_URL = saved
+        w.MAX_SEARCH_RESULTS = saved_max
+    assert "pageno=2" in urls[1]          # second call paginates
+    assert "r3.example" in out            # pageno fetches are not clipped to 3
+
+
 def test_searx_unreachable_falls_back_to_ddg():
     _clean()
     saved = w.SEARX_URL

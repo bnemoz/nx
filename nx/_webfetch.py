@@ -28,6 +28,7 @@ URL) — never an exception into the turn loop.
 """
 from __future__ import annotations
 
+import base64
 import html as _html
 import ipaddress
 import json
@@ -82,8 +83,22 @@ SEARCH_URL = "https://html.duckduckgo.com/html/"
 # engines do the upstream querying, so nx adds exactly one request. DDG lite
 # stays as the fallback when NX_SEARX_URL is unset or unreachable.
 SEARX_URL = os.environ.get("NX_SEARX_URL", "").rstrip("/")
+# Optional Basic-auth credentials ("user:pass") for instances that run the
+# limiter or sit behind auth — without them such instances 403 on the JSON
+# format and nx silently falls back to DDG (0.148.9).
+SEARX_AUTH = os.environ.get("NX_SEARX_AUTH", "")
 TIMEOUT_SECS = 15
-MAX_SEARCH_RESULTS = 10
+MAX_SEARCH_RESULTS = _env_int("NX_SEARX_MAX_RESULTS", 10)
+
+# Auto-routing heuristics (0.148.9): shape the query for the instance's
+# engines instead of always hitting the general pool. `categories=it` pins
+# github/stackoverflow/pypi/npm/docker_hub; recency words get time_range=day.
+_SEARX_IT_RE = re.compile(
+    r"\b(pip|pypi|npm|package|library|dependency|import|module|github|gitlab|"
+    r"api|sdk|docker|cargo|crate|stack\s?trace|traceback|cli|venv)\b", re.I)
+_SEARX_FRESH_RE = re.compile(
+    r"\b(latest|newest|current version|release|released|changelog|upgrade|"
+    r"breaking|cve|security advisory|patch|this week|today)\b", re.I)
 # SSRF guard (0.92.1): web_fetch is an approval-free tool, so `url=` must never
 # become a pivot to internal services (loopback SearXNG, cloud metadata
 # 169.254.169.254, RFC1918). Set NX_WEBFETCH_ALLOW_PRIVATE=1 to lift this for
@@ -298,8 +313,9 @@ def _html_to_text(body: str) -> str:
 _OPENER = urllib.request.build_opener(_SsrfRedirectHandler())
 
 
-def _http_get(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
+def _http_get(url: str, headers: dict[str, str] | None = None) -> str:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": UA, **(headers or {})}, method="GET")
     with _OPENER.open(req, timeout=TIMEOUT_SECS) as resp:  # noqa: S310
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read(FETCH_MAX_BYTES * 4).decode(charset, errors="replace")
@@ -484,21 +500,50 @@ def _parse_results(body: str) -> list[dict[str, str]]:
     return out
 
 
-def _searx_search(query: str) -> str | None:
+def _searx_params(query: str, engines: str, categories: str,
+                  time_range: str, pageno: int) -> dict[str, Any]:
+    """Build the /search params: explicit tool arguments win; otherwise the
+    query shape picks categories (it) and a time_range (day) automatically."""
+    params: dict[str, Any] = {"q": query, "format": "json"}
+    if engines:
+        params["engines"] = engines
+    if categories:
+        params["categories"] = categories
+    elif _SEARX_IT_RE.search(query):
+        params["categories"] = "it"
+    if time_range:
+        params["time_range"] = time_range
+    elif not engines and _SEARX_FRESH_RE.search(query):
+        params["time_range"] = "day"
+    if pageno > 1:
+        params["pageno"] = pageno
+    return params
+
+
+def _searx_search(query: str, engines: str = "", categories: str = "",
+                  time_range: str = "", pageno: int = 1) -> str | None:
     """SearXNG JSON-API search; None when unset/unreachable/broken (caller
     falls back to DDG lite). One GET to the user's own instance — the DDG
-    throttle does not apply (it exists to spare a SHARED free endpoint)."""
+    throttle does not apply (it exists to spare a SHARED free endpoint).
+    Beyond `results`, instant answers, infoboxes and query suggestions from
+    the response are surfaced when present (0.148.9)."""
     if not SEARX_URL or not _searx_usable():
         return None
-    qs = urllib.parse.urlencode({"q": query, "format": "json"})
+    params = _searx_params(query, engines, categories, time_range, pageno)
+    qs = urllib.parse.urlencode(params)
+    headers: dict[str, str] = {}
+    if SEARX_AUTH:
+        token = base64.b64encode(SEARX_AUTH.encode()).decode()
+        headers["Authorization"] = f"Basic {token}"
     try:
-        body = _http_get(f"{SEARX_URL}/search?{qs}")
+        body = _http_get(f"{SEARX_URL}/search?{qs}", headers=headers)
         data = json.loads(body)
         results = data.get("results") or []
     except Exception:
         return None  # unreachable or bad JSON: fall through to DDG lite
+    limit = 20 if pageno > 1 else MAX_SEARCH_RESULTS
     out = []
-    for r in results[:MAX_SEARCH_RESULTS]:
+    for r in results[:limit]:
         url = str(r.get("url") or "")
         if not url.startswith(("http://", "https://")):
             continue
@@ -507,12 +552,37 @@ def _searx_search(query: str) -> str | None:
         title = str(r.get("title") or "").strip()
         content = str(r.get("content") or "").strip()
         out.append(f"- {title} — {url}" + (f"\n  {content}" if content else ""))
+    # Instant answers (calculator, special engines) lead the result list;
+    # infoboxes are free definitional context (wikipedia/wikidata).
+    for ans in (data.get("answers") or [])[:3]:
+        text = ans.get("answer") if isinstance(ans, dict) else str(ans)
+        if text:
+            out.insert(0, f"= {str(text).strip()}")
+    for box in (data.get("infoboxes") or [])[:1]:
+        inf = str(box.get("content") or box.get("infobox") or "").strip()
+        if inf:
+            out.insert(0, f"[info] {inf[:600]}")
+    sugg = [str(s) for s in (data.get("suggestions") or [])[:5] if s]
+    if sugg:
+        out.append("Related queries: " + "; ".join(sugg))
+    n_total = data.get("number_of_results")
+    unresp = data.get("unresponsive_engines") or []
+    notes = []
+    if isinstance(n_total, int) and n_total > 0:
+        notes.append(f"~{n_total} total results")
+    if unresp:
+        names = ", ".join(
+            (u[0] if isinstance(u, (list, tuple)) else str(u)) for u in unresp)
+        notes.append(f"unresponsive engines: {names}")
+    if notes:
+        out.append("(" + "; ".join(notes) + ")")
     if not out:
         return "(SearXNG returned no results for this query.)"
     return "\n".join(out)
 
 
-def _web_search(query: str) -> str:
+def _web_search(query: str, engines: str = "", categories: str = "",
+                time_range: str = "", pageno: int = 1) -> str:
     # courtesy throttle for the shared free endpoint (DDG lite); the user's
     # own SearXNG instance, when configured, is exempt.
     if not SEARX_URL:
@@ -522,7 +592,8 @@ def _web_search(query: str) -> str:
             time.sleep(wait)
         _LAST_SEARCH[0] = time.monotonic()
 
-    cache_key = "q:" + query.lower().strip()
+    cache_key = ("q:" + query.lower().strip()
+                 + f"|{engines}|{categories}|{time_range}|{pageno}")
     _ensure_cache()
     if (hit := _cache_get(cache_key)) is not None:
         return "[cached] " + hit[0]
@@ -530,7 +601,8 @@ def _web_search(query: str) -> str:
     # SearXNG first (preferred); DDG lite is the fallback. A fallback while
     # NX_SEARX_URL is set usually means the instance is misconfigured (json
     # format off) or down — say so instead of failing silently (0.113.0).
-    searx = _searx_search(query)
+    searx = _searx_search(query, engines=engines, categories=categories,
+                          time_range=time_range, pageno=pageno)
     searx_hint = ""
     if searx is None and SEARX_URL:
         searx_hint = (" (note: NX_SEARX_URL is set but the instance returned "
@@ -658,11 +730,17 @@ def _web_fetch_url(url: str) -> str:
 
 # --- tool body ---------------------------------------------------------------
 
-def web_fetch(query: str = "", url: str = "") -> str:
-    """Tool body for the web_fetch tier-1 tool. Exactly one of query/url."""
+def web_fetch(query: str = "", url: str = "", engines: str = "",
+              categories: str = "", time_range: str = "", pageno: int = 1) -> str:
+    """Tool body for the web_fetch tier-1 tool. Exactly one of query/url.
+    The SearXNG-only knobs (engines/categories/time_range/pageno) scope the
+    search when an instance is configured; ignored by the DDG fallback."""
     if bool(query) == bool(url):
-        return "ERROR: pass exactly one of `query` (DuckDuckGo search) or `url` (fetch a page)"
-    return _web_search(query) if query else _web_fetch_url(url)
+        return "ERROR: pass exactly one of `query` (web search) or `url` (fetch a page)"
+    if query:
+        return _web_search(query, engines=engines, categories=categories,
+                           time_range=time_range, pageno=pageno)
+    return _web_fetch_url(url)
 
 
 WEB_FETCH_TOOL = {
@@ -673,7 +751,11 @@ WEB_FETCH_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Web search string (DuckDuckGo lite); returns up to 10 title/URL/snippet results to follow up with a url fetch"},
+                "query": {"type": "string", "description": "Web search string (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo lite); returns title/URL/snippet results to follow up with a url fetch"},
+                "engines": {"type": "string", "description": "SearXNG only: comma-separated engines to pin (e.g. 'github,stackoverflow,pypi')"},
+                "categories": {"type": "string", "description": "SearXNG only: comma-separated categories (e.g. 'it', 'science', 'news'); 'it' is auto-picked for package/API queries"},
+                "time_range": {"type": "string", "enum": ["day", "month", "year"], "description": "SearXNG only: freshness filter; 'day' is auto-picked for release/CVE queries"},
+                "pageno": {"type": "integer", "description": "SearXNG only: result page number (1-based), for digging past the first page"},
                 "url": {"type": "string", "description": "Absolute http(s) URL to fetch and convert to readable text; truncated at NX_WEBFETCH_MAX_BYTES"},
             },
             # The body has always required exactly one operation.  Encode the
