@@ -250,6 +250,11 @@ def test_run_tests_timeout(monkeypatch, stub_bin, pyproj):
     fake = _write_stub(stub_bin, "uv", "#!/bin/sh\nsleep 30\nexit 0\n")
     monkeypatch.setattr(tr.shutil, "which", lambda n: fake if n == "uv" else None)
     monkeypatch.setattr(m, "_confirm", lambda action, preview=None: True)
+    # The xdist probe would run the SAME stubbed uv before the 1s cap applies
+    # (probe and run share the prefix), so it is pinned off here: this test
+    # pins the RUN timeout, not the probe (the success-path tests cover the
+    # probe). Without this the unbounded probe alone burns the stub's sleep.
+    monkeypatch.setattr(tr, "_has_xdist", lambda *a, **k: False)
     monkeypatch.setenv("NX_TESTRUNNER_TIMEOUT", "1")
     res = m.run_tool("run_tests", {})
     assert "TIMED OUT after 1s" in res

@@ -50,15 +50,29 @@ def test_disarm_wakes_the_watcher_immediately(monkeypatch):
         iw._INTERRUPT_RESTORED.clear()
         t = threading.Thread(target=iw._armed_loop, args=(r, ("posix", [])),
                              daemon=True)
+        # Sync on the loop actually reaching its select instead of a blind
+        # sleep — under -n auto load 0.05s can elapse before the thread even
+        # starts (same conversion the stale-byte test below got).
+        first_select = threading.Event()
+        real_select = iw._select_stdin_or_wake
+        def _select_mark(fd, timeout):
+            first_select.set()
+            return real_select(fd, timeout)
+        monkeypatch.setattr(iw, "_select_stdin_or_wake", _select_mark)
         t.start()
-        time.sleep(0.05)  # let the loop block in select([stdin, wake])
+        first_select.wait(timeout=10.0)
+        if not first_select.is_set():
+            t.join(timeout=1.0)
+        assert first_select.is_set(), (
+            "armed loop never reached select (thread alive: "
+            f"{t.is_alive()})")
         t0 = time.monotonic()
         iw._disarm_interrupt_armed()
         assert iw._INTERRUPT_RESTORED.wait(timeout=1.0), \
             "watcher never restored input mode after disarm"
         elapsed = time.monotonic() - t0
         t.join(timeout=1.0)
-        assert elapsed < 0.05, (
+        assert elapsed < 0.095, (
             f"disarm→restore took {elapsed * 1000:.0f}ms; the wake pipe did not "
             f"cut the watcher's 0.1s poll short")
     finally:

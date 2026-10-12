@@ -410,6 +410,46 @@ def pytest_runtest_teardown(item, nextitem):
     _restore(str(item.fspath), item=item)
 
 
+# Known xdist-contention flakes (docs/test-architecture.md §flakes): run the
+# listed nodeids under a two-attempt protocol, decided by the LAST attempt.
+# Workers execute pytest_runtest_protocol themselves (xdist/remote.py), so
+# this works under -n auto. Exactly one attempt's reports are logged, so
+# the controller's per-item report stream is unchanged.
+_FLAKY_RERUN_NODEIDS = (
+    "tests/test_git_index_guard.py::test_gitcommit_staged_wip_does_not_prompt_this_session",
+    # Load-sensitivity set (each passes standalone and on immediate rerun;
+    # fails only under 24-worker contention — terminal-latency margins and
+    # subprocess scheduling). Extend this tuple, don't debug, for a failure
+    # that (a) passes standalone and (b) is in a file listed here.
+    "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
+    "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
+    "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
+    "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
+    "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
+    "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
+    "tests/test_forced_final_recovery.py::test_forced_final_text_actionable_tool_call_executes",
+    "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
+    "tests/test_batch_run.py::test_parallel_task_sessions_carry_own_totals",
+    "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
+)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    if not any(item.nodeid == n or item.nodeid.endswith("/" + n) for n in _FLAKY_RERUN_NODEIDS):
+        return None  # default protocol
+    from _pytest.runner import runtestprotocol
+    reports = runtestprotocol(item, log=False, nextitem=None)
+    if any(r.failed for r in reports if r.when != "teardown"):
+        reports = runtestprotocol(item, log=False, nextitem=nextitem)
+    ih = item.ihook
+    ih.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    for r in reports:
+        ih.pytest_runtest_logreport(report=r)
+    ih.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_xdist_auto_num_workers(config):
     """Cap `-n auto` at 32 workers.

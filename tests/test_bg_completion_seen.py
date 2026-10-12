@@ -40,6 +40,11 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     os.environ["NX_WAKE_PROMPT"] = "1"
+    # A 3s poll window backgrounds any command that hasn't exited yet, and a
+    # backgrounded `echo` never carries the inline `[exit 0]` these tests
+    # assert on (it fails under load). 30s keeps trivial commands inline; no
+    # test in this file depends on poll-window expiry to background anything.
+    monkeypatch.setenv("NX_BASH_POLL_SECONDS", "30")
     monkeypatch.chdir(tmp_path)
     import nx
     # Tier A: conftest imported nx once under a scrubbed env, so the reload that
@@ -69,6 +74,20 @@ def nx_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(nx.st, "_BG_SCAN_DONE", False)
     monkeypatch.setattr(nx.st, "_WAKE_ARMED", False)
     monkeypatch.setattr(nx.st, "_TURN_ACTIVE", False)
+    # Every slot _autowake._any_pending_notice() consults is pinned empty too:
+    # the no-wake asserts below ("the sweep finds no unstaged work") are only
+    # meaningful with nothing staged, and an earlier file in the same worker can
+    # leave e.g. _PENDING_DELEGATION_NOTICE set (the read-streak nudge, staged
+    # and never flushed because no parent turn ran). Without this, wake_due()
+    # short-circuits on that stale note and the asserts fail for a reason that
+    # has nothing to do with this file's subject.
+    for _slot in ("_PENDING_BACKGROUND_NOTICE", "_PENDING_BG_COMPLETION_NOTICE",
+                  "_PENDING_SUBAGENT_NOTICE", "_PENDING_MULTI_EDIT_NOTICE",
+                  "_PENDING_VERIFY_NOTICE", "_PENDING_DELEGATION_NOTICE",
+                  "_PENDING_YOLO_ASYNC_NOTICE"):
+        monkeypatch.setattr(nx.st, _slot, None, raising=False)
+    monkeypatch.setattr(nx.st, "_WAKE_DUE", False, raising=False)
+    monkeypatch.setattr(nx.st, "_WAKE_STREAK", 0, raising=False)
     yield nx
     # NX_* env rewind is universal (conftest); nx globals are restored by the
     # monkeypatch pins above.
@@ -116,7 +135,7 @@ def test_read_file_of_finished_log_marks_seen(nx_fresh, monkeypatch):
     m = nx_fresh
     import nx._bash_jobs as bj
     pid, log_path = bj._run_bash("echo read-file-9901")
-    assert bj._poll_pid(pid, 3.0) == "exited"
+    assert bj._poll_pid(pid, 30.0) == "exited"
     # The log still exists here (no _finish_bg_job ran) — exactly the state
     # after the model's previous turn read it mid-run and the job then exited.
     m.run_tool("read_file", {"path": log_path})
@@ -132,7 +151,7 @@ def test_read_file_of_running_log_does_not_mark_seen(nx_fresh):
     m.run_tool("read_file", {"path": log_path})
     assert m.st._BG_NOTICE_SEEN in (None, set()), \
         "reading a RUNNING job's log must not pre-consume its exit notice"
-    m._bash_jobs._poll_pid(pid, 4.0)
+    m._bash_jobs._poll_pid(pid, 30.0)
     assert m._dispatch._scan_background_completions() is not None, \
         "the exit after a mid-run read is still worth announcing"
     assert "9902" not in "".join(m.st._PENDING_BG_COMPLETION_NOTICE or "")

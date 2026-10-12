@@ -26,7 +26,7 @@ Use `uv` for local development:
 
 ```bash
 uv pip install -e .                 # install the CLI and runtime dependencies
-uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~20s; workers capped at 32)
+uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~14s; workers capped at 32)
 uv run python3 tests/test_sources.py # run a standalone assertion-style test
 uv run ruff check .                 # lint gate — must be clean before committing
 uv run ty check nx                  # type check; no new diagnostics in touched files

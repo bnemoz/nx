@@ -214,6 +214,42 @@ def nx_state_reset():
         reset = getattr(rec, "_reset_store", None)
         if reset is not None:
             reset()  # recovery store (class-owned, out of dict reach)
+    # run_tool's read-result cache is a hidden home keyed by absolute path:
+    # a prior file's cached read (often a tmp_path file that no longer
+    # exists) survives into the next test and breaks exact-shape asserts
+    # (len(cache) == N) or serves stale content under arbitrary file
+    # packing. Single writer is run_tool, so a clear() here is race-free.
+    st = sys.modules.get("nx._state")
+    if st is not None:
+        cache = getattr(st, "_TOOL_RESULT_CACHE", None)
+        if cache is not None:
+            cache.clear()
+    # A wake poller left running by an async-agent test keeps sweeping after
+    # its file ends and flips st._WAKE_DUE mid-LATER test (the exact
+    # subagent_async → bg_completion_seen poison: wake_due() asserts read
+    # True). Same treatment test_autowake/test_wake_streak apply locally:
+    # stop the daemon, then forget it. _WAKE_DUE itself is swept with the
+    # state block below.
+    aw = sys.modules.get("nx._autowake")
+    if aw is not None:
+        poller = getattr(aw, "_POLLER", None)
+        if poller is not None:
+            try:
+                poller.stop()
+            except Exception:
+                pass
+        aw._POLLER = None
+    # Background-completion scan state: st._BG_NOTICE_SEEN is read as "pids
+    # already announced" but None means "re-seed from the baseline", and
+    # _BG_SCAN_DONE gates the sweep — neither is rewound by anything else.
+    # A bare-fixture test (no nx_fresh) runs with whatever SESSION_HOME the
+    # module holds (the developer's real ~/.nx when conftest scrubbed it),
+    # so the sweep can announce a REAL just-finished bg job as a
+    # [Runtime note] mid-test (seen live: test_forced_final_recovery's
+    # messages[-1] was a heredoc job's completion note).
+    if st is not None:
+        st._BG_NOTICE_SEEN = None
+        st._BG_SCAN_DONE = False
     if no is not None:
         no._CURRENT.set(None)
         # Drain the module-level pending-note slots too. A worker that finished
@@ -224,7 +260,9 @@ def nx_state_reset():
         # tests fail) and the notice flush appends it (yolo/background-gating
         # plumbing tests fail).
         for slot in ("_PENDING_SUBAGENT_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
-                     "_PENDING_BG_COMPLETION_NOTICE", "_PENDING_BACKGROUND_NOTICE"):
+                     "_PENDING_BG_COMPLETION_NOTICE", "_PENDING_BACKGROUND_NOTICE",
+                     "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_DELEGATION_NOTICE",
+                     "_PENDING_VERIFY_NOTICE", "_PENDING_OCC_REMINDER"):
             no.set_(slot, None)
     # A Live leaked by a dashboard test stays on the shared console's stack,
     # which reroutes every later cprint through rich — invisible to the

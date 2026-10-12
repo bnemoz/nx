@@ -36,6 +36,12 @@ from ._env import _env_int
 # TIMEOUT=0 disables the cap (the process must then be trusted to exit).
 _DEFAULT_TIMEOUT = 600
 
+# Ceiling for the `import xdist` environment probe: it runs before the
+# suite's own timeout applies, so an unbounded probe could stall run_tests
+# on a hung interpreter even with NX_TESTRUNNER_TIMEOUT set. A probe this
+# slow answers "no xdist" — the serial fallback — after 10s.
+_PROBE_TIMEOUT_SECS = 10
+
 # Test-impact map (0.94.0): per-project JSONL of {file -> [node ids]} recorded
 # from each run's failures, so a scoped re-run after editing one file can
 # propose the tests that failed there last time instead of the whole suite.
@@ -113,8 +119,11 @@ def _has_xdist(prefix: list[str]) -> bool:
         probe = prefix + (["python"] if prefix and prefix[0].endswith("uv")
                           else [sys.executable]) + ["-c", "import xdist"]
         try:
-            cached = subprocess.run(probe, capture_output=True).returncode == 0
-        except OSError:
+            # Bounded: a hung environment probe must never block the tool — a
+            # timeout answers "no xdist" (serial fallback), not a stall.
+            cached = subprocess.run(probe, capture_output=True,
+                                    timeout=_PROBE_TIMEOUT_SECS).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
             cached = False
         _XDIST_CACHE[key] = cached
     return cached

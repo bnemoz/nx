@@ -377,7 +377,7 @@ def test_concurrent_async_agents_merge_into_one_note(nx_fresh, monkeypatch):
     """Two agents finishing before the next flush announce together (one
     merged note), each exactly once."""
     from nx._subagent import spawn_agent
-    gate = threading.Barrier(3, timeout=5)  # parent + 2 agents
+    gate = threading.Barrier(3, timeout=30)  # parent + 2 agents
 
     def fake_loop(messages, *a, **kw):
         content = messages[1]["content"]
@@ -388,14 +388,23 @@ def test_concurrent_async_agents_merge_into_one_note(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     spawn_agent("task A", async_=True)
     spawn_agent("task B", async_=True)
-    gate.wait(timeout=5)  # both agents are past their turn loops
-    note = _wait_for(
-        lambda: next(
-            (n for n in [_drain(nx_fresh)] if n and "task A" in n and "task B" in n),
-            None,
-        ),
-        "merged note announcing both agents",
-    )
+    gate.wait(timeout=30)  # both agents are past their turn loops
+    from nx._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+
+    def _both_announced() -> bool:
+        # NON-destructive poll: _drain() CLEARS the slot, so polling through it
+        # could consume agent A's half-note before B merges into the same slot,
+        # leaving the merged note unobservable. Staging the note and setting
+        # `announced` happen under one _ASYNC_LOCK hold, so "every record
+        # announced" implies the merged note is complete in the slot (records
+        # are only evicted after that hold ends).
+        with _ASYNC_LOCK:
+            flags = [rec.get("announced") for rec in _ASYNC_AGENTS.values()]
+        return bool(flags) and all(flags)  # bool(): empty dict is not "announced"
+
+    _wait_for(_both_announced, "both agents announced")
+    note = _drain(nx_fresh)  # one destructive read, after both announced
+    assert note and "task A" in note and "task B" in note, note
     assert "ans:task A" in note and "ans:task B" in note
     assert note.count("[Runtime note: background sub-agent") == 2
 

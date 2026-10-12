@@ -8,6 +8,7 @@ the contract under test, not incidental behavior.
 import os
 import sys
 import tempfile
+import socket
 import threading
 import time
 import unittest.mock
@@ -50,7 +51,7 @@ PAGE = """
 
 def _clean():
     w._CACHE.clear()
-    w._LAST_SEARCH[0] = 0.0
+    w._LAST_SEARCH[0] = time.monotonic() - w.DDG_MIN_INTERVAL_SECS  # throttle already elapsed
     # 0.113.0: robots.txt would do a REAL network call for example.org hosts;
     # the suite is offline, so tests that exercise robots do so explicitly.
     w.ROBOTS_ENABLED = 0
@@ -89,14 +90,21 @@ def test_search_parses_lite_html_and_unwraps_redirects():
 
 def test_search_is_cached():
     _clean()
-    calls = []
-    def fake_get(url):
-        calls.append(url)
-        return DDG_PAGE
-    with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
-        w.web_fetch(query="cached")
-        assert "[cached]" in w.web_fetch(query="cached")
-    assert len(calls) == 1  # second call never touched the endpoint
+    # the courtesy throttle fires before the cache lookup on the 2nd call;
+    # silence the real sleep like test_search_throttle_enforces_interval does
+    real_sleep = w.time.sleep
+    w.time.sleep = lambda s: None
+    try:
+        calls = []
+        def fake_get(url):
+            calls.append(url)
+            return DDG_PAGE
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+            w.web_fetch(query="cached")
+            assert "[cached]" in w.web_fetch(query="cached")
+        assert len(calls) == 1  # second call never touched the endpoint
+    finally:
+        w.time.sleep = real_sleep
 
 
 def test_search_throttle_enforces_interval():
@@ -120,7 +128,9 @@ def test_searx_preferred_when_configured():
     w.SEARX_URL = "http://127.0.0.1:9"
     try:
         with unittest.mock.patch.object(w, "_http_get",
-                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'):
+                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             out = w.web_fetch(query="searx first")
     finally:
         w.SEARX_URL = saved
@@ -248,28 +258,35 @@ def test_fetch_pdf_routed_to_extractor():
     """0.79.0: a URL that serves a PDF (arXiv/PMC download links) routes
     through extract_pdf instead of decode-as-html garbage."""
     _clean()
-    pdf_bytes = b"%PDF-1.4 fake body"
-    with unittest.mock.patch.object(w, "_http_get_bytes",
-                                    return_value=(pdf_bytes, "application/pdf", "", "")), \
-         unittest.mock.patch("nx._pdf.extract_pdf",
-                             return_value="--- @pdf ---\nExtracted paper text") as ex:
-        out = w.web_fetch(url="https://arxiv.org/pdf/2401.00001")
-    assert ex.called
-    assert "Extracted paper text" in out
-    # magic-byte sniff when the server mislabels the content type
-    _clean()
-    with unittest.mock.patch.object(w, "_http_get_bytes",
-                                    return_value=(pdf_bytes, "application/octet-stream", "", "")), \
-         unittest.mock.patch("nx._pdf.extract_pdf",
-                             return_value="--- @pdf ---\nExtracted paper text"):
-        out = w.web_fetch(url="https://example.org/paper.pdf")
-    assert "Extracted paper text" in out
-    # HTML still goes through the normal text extractor
-    _clean()
-    with unittest.mock.patch.object(w, "_http_get_bytes",
-                                    return_value=(PAGE.encode(), "text/html", "", "")):
-        out = w.web_fetch(url="https://example.org/page2")
-    assert "Heading" in out
+    # the sub-fetches hit the same host back-to-back; drop the per-host
+    # courtesy sleep for the duration of this test
+    old_interval = w.HOST_MIN_INTERVAL_SECS
+    w.HOST_MIN_INTERVAL_SECS = 0.0
+    try:
+        pdf_bytes = b"%PDF-1.4 fake body"
+        with unittest.mock.patch.object(w, "_http_get_bytes",
+                                        return_value=(pdf_bytes, "application/pdf", "", "")), \
+             unittest.mock.patch("nx._pdf.extract_pdf",
+                                 return_value="--- @pdf ---\nExtracted paper text") as ex:
+            out = w.web_fetch(url="https://arxiv.org/pdf/2401.00001")
+        assert ex.called
+        assert "Extracted paper text" in out
+        # magic-byte sniff when the server mislabels the content type
+        _clean()
+        with unittest.mock.patch.object(w, "_http_get_bytes",
+                                        return_value=(pdf_bytes, "application/octet-stream", "", "")), \
+             unittest.mock.patch("nx._pdf.extract_pdf",
+                                 return_value="--- @pdf ---\nExtracted paper text"):
+            out = w.web_fetch(url="https://example.org/paper.pdf")
+        assert "Extracted paper text" in out
+        # HTML still goes through the normal text extractor
+        _clean()
+        with unittest.mock.patch.object(w, "_http_get_bytes",
+                                        return_value=(PAGE.encode(), "text/html", "", "")):
+            out = w.web_fetch(url="https://example.org/page2")
+        assert "Heading" in out
+    finally:
+        w.HOST_MIN_INTERVAL_SECS = old_interval
 
 
 def test_fetch_error_is_actionable():
@@ -484,7 +501,9 @@ def test_searx_remote_https_ok():
     w.SEARX_URL = "https://searx.example.com"
     try:
         with unittest.mock.patch.object(w, "_http_get",
-                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'):
+                                        return_value='{"results": [{"title": "S", "url": "https://s.example/", "content": "c"}]}'), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             out = w.web_fetch(query="https ok")
     finally:
         w.SEARX_URL = saved
@@ -500,7 +519,9 @@ def test_searx_results_private_urls_dropped():
             '{"results": ['
             '{"title": "public", "url": "https://ok.example/", "content": "c"},'
             '{"title": "pivot", "url": "http://127.0.0.1:8080/admin", "content": "c"},'
-            '{"title": "metadata", "url": "http://169.254.169.254/", "content": "c"}]}')):
+            '{"title": "metadata", "url": "http://169.254.169.254/", "content": "c"}]}')), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             out = w.web_fetch(query="filter")
     finally:
         w.SEARX_URL = saved
@@ -604,7 +625,9 @@ def test_robots_disallow_refuses_fetch():
             def crawl_delay(self, ua): return None
             def can_fetch(self, ua, url): return False
         with unittest.mock.patch.object(w, "RobotFileParser", return_value=FakeRp()), \
-             unittest.mock.patch.object(w, "_http_get_bytes") as g:
+             unittest.mock.patch.object(w, "_http_get_bytes") as g, \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             out = w.web_fetch(url="https://blocked.example/private")
             fetched = g.called
         assert "robots.txt" in out and "ERROR" in out

@@ -1044,7 +1044,9 @@ def test_optimize_merges_run_concurrently():
     # Barrier, not sleep: both merge workers must be inside create() at once
     # before either returns, so the overlap is proven deterministically (a
     # serial pool deadlocks the barrier → BrokenBarrierError, also a proof).
-    merge_barrier = threading.Barrier(2, timeout=10)
+    # 1.5s bound: a satisfied barrier releases in ms; the timeout only
+    # bounds how long a serialized (broken) barrier costs the test.
+    merge_barrier = threading.Barrier(2, timeout=1.5)
 
     class _Completions:
         @staticmethod
@@ -1091,7 +1093,9 @@ def test_merge_workers_env_caps_concurrency():
     oversized value is clamped to the number of merges actually planned.
     Each run gets its own fresh store (a run consumes the notes it merges)."""
     state = {"in_flight": 0, "peak": 0, "merge_calls": 0}
-    merge_barrier = threading.Barrier(2, timeout=10)
+    # 1.5s bound: a satisfied barrier releases in ms; the timeout only
+    # bounds how long a serialized (broken) barrier costs the test.
+    merge_barrier = threading.Barrier(2, timeout=1.5)
 
     class _Completions:
         @staticmethod

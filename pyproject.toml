@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx"
-version = "0.145.0"
+version = "0.145.1"
 description = "A deliberately tiny coding agent for self-hosted models."
 readme = "README.md"
 license = "MIT"
@@ -47,9 +47,11 @@ nx = "nx:main"
 
 [tool.pytest.ini_options]
 # --dist loadfile: an entire test module lands on one xdist worker. Arbitrary
-# packing re-exposed cross-file residue during migration (15 flaky failures →
-# ≤1, ~+14s wall); per-file packing is deterministic and matches the suite's
-# isolation rules. Revisit after phase 4 of docs/test-architecture.md.
+# packing re-exposed cross-file residue during migration (15 flaky failures);
+# per-file packing is deterministic and matches the suite's isolation rules.
+# (0.145.1: the old ~+14s wall tax was straggler sleeps, not the packing —
+# with them removed loadfile runs ~14s, so this stays the default. See
+# docs/test-architecture.md §2.)
 addopts = "--dist loadfile"
 markers = [
     # Tier B (docs/test-architecture.md §4): file reloads nx, writes NX_* env

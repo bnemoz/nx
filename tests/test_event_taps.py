@@ -139,10 +139,17 @@ def test_sink_registered_before_worker_and_dropped_after(nx_fresh, monkeypatch):
     started.wait(timeout=10)
     # registered, and BEFORE the first event could be dropped on the floor
     assert es.sink_for(job) is not None, "sink must exist while the agent runs"
-    assert es.sink_for(job).tail(job) == ["[stream] investigating the thing"]
+    # `started` is set BEFORE the worker's tap_event call, so under load the
+    # tail can still be empty here — poll for the line instead of reading once.
+    _wait_for(lambda: (s := es.sink_for(job)) is not None
+              and s.tail(job) == ["[stream] investigating the thing"],
+              "first sink line")
     release.set()
     _wait_for(lambda: _drain(nx_fresh), "the agent's staged runtime note")
-    # dropped: gone from the live registry, present as the retained copy
+    # dropped: gone from the live registry, present as the retained copy. The
+    # drop runs in the worker's `finally`, AFTER the note is staged, so it needs
+    # its own wait (the drain above can win that race).
+    _wait_for(lambda: es.sink_for(job) is None, "sink drop in the worker finally")
     assert es.sink_for(job) is None, "sink must be dropped once the job ends"
     assert "[stream] investigating the thing" in es.retained_tail(job), \
         "drop_sink must retain the final tail (Phase 1 contract)"

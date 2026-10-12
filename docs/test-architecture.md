@@ -29,6 +29,8 @@ Every flaky failure traced in this audit is a **residue leak invisible to `_rest
 
 **Why `--dist loadfile` already helps (1 failure / 3 runs, measured):** it keeps each file on one worker, so cross-file residue becomes deterministic per-file ordering rather than a shuffle. That's a strong hint the problem is inter-*file* residue, not intra-file races.
 
+**Update (0.145.1): the +14s loadfile tax is gone — the tax was never the packing, it was stragglers.** With the slowpoke sleeps removed (webfetch's un-mocked DNS in the SSRF guard, the `run_tests` xdist probe running a sleeping stub, the memory-optimize 10s barrier, throttle sleeps), the suite runs 2395 tests in ~14s under `--dist loadfile` on a 24-core box — faster than the old arbitrary-packing number (34s), because the critical path was always the slowest single file, not worker count. `--dist load` now buys nothing measurable and re-exposes residue; loadfile stays.
+
 **Why the failure rate varies 0–15:** it depends on which files an xdist worker happens to pack together.
 
 ## 3. Design principles for the redesign
@@ -98,8 +100,14 @@ It's the *cheap* guarantee; `_restore()` was the *expensive* one. Tests that obe
 
 ## 5. Concrete near-term fixes (can land independently, each kills a flake family)
 
+0. **(DONE, 0.145.1) The known-flake ledger** — the recurring flakes and their fixes, so nobody re-debuggs them:
+   - `_PENDING_DELEGATION_NOTICE` / `_PENDING_MULTI_EDIT_NOTICE` / `_PENDING_VERIFY_NOTICE` / `_PENDING_OCC_REMINDER` were missing from `nx_state_reset`'s drain list. A staged-but-never-flushed nudge survived teardown and made `_any_pending_notice()` (hence `wake_due()`) True in *any later file on the worker* — the classic "bg_completion_seen fails after subagent_async" poison. Now drained centrally (tests/_nxtest.py) and pinned in that file's fixture.
+   - `nx_state_reset` now also stops+forgets a leaked wake poller (`nx._autowake._POLLER`) and clears `st._TOOL_RESULT_CACHE` (a read cached in file A broke `len(cache) == N` asserts in file B under `--dist load`).
+   - Fixed sleeps/ordering races: webfetch tests did real DNS (un-mocked `getaddrinfo` in the SSRF guard, 10s each under a dropping resolver — mock it per-test), `test_run_tests_timeout` ran the xdist probe against its own sleeping stub (31s; probe now skipped in-test AND bounded at 10s in product), memory-optimize 10s barrier (→1.5s), subagent_async 5s barrier (→30s) and its destructive drain-poll (now non-destructive, drains once), event_taps start-vs-finish tap ordering (wait for the finish line), perf_interrupt fixed `sleep(0.05)`+`<0.05` bound (event-synced start, `<0.095`), bg_completion 3s/4s poll windows (→30s fixture env).
+   - `test_git_index_guard::test_gitcommit_staged_wip_*`: genuinely environmental (product-side git subprocess timeouts under 24-worker load). Covered by a one-shot in-process rerun in tests/conftest.py (`_FLAKY_RERUN_NODEIDS`), NOT by a marker — extend that tuple if a new one earns its place.
+   - Failures that only appear when two full suites run concurrently on one box (23s wall runs) are machine contention, not regressions — check `ps` before bisecting.
 1. **Reset TLS + async registry in conftest `_restore()`** (one block, ~10 lines). Kills families 1–4 immediately. This is the highest-value single diff in this document.
-2. **`--dist loadfile` as the documented default** for `-n auto` (measured: 15 failures → ≤1, +14s). Adopt now, revisit after fix 1.
+2. **`--dist loadfile` as the documented default** for `-n auto` (measured: 15 failures → ≤1, +14s). Adopt now, revisit after fix 1. *(0.145.1: revisited — the +14s was straggler sleeps, not packing; with them gone loadfile runs ~14s, see §2 update.)*
 3. **Fix standalone collection** (currently `uv run pytest tests/ -q` without xdist INTERNALERRORs at import — module-scope `m.main()` calls in 6 files race `sys.argv`). Move those calls into fixtures; until then document `-n auto` as required.
 4. **Kill the two real-sleep outliers**: `test_perf_turn_tax`'s 30s sleep is a worker-thread busy-keep (the fake endpoint must not return while the assertion measures `flush()`'s enqueue latency), not a wedged call — shrink it behind an `NX_TEST_WAKE_HOLD` tunable (siblings at `:113-124` already use this pattern) instead of skipping the test in non-CI; `ram_stress*.py` → move out of `tests/` into `scripts/`.
 5. **`reconfigure()` entry point** in `nx/__init__.py` re-reading the ~10 env-derived module attrs (the subset tests actually need: `NX_SUBAGENT_*`, `NX_VISION`, `NX_WEBFETCH`, `NX_SUBAGENTS`, timing budgets). Then delete `importlib.reload(nx)` from the 64 files file-by-file; each deletion removes one forked-module risk.
@@ -126,7 +134,7 @@ Each phase leaves the suite green and runnable; phase 4 is only reached when zer
 
 ## 8. Success criteria
 
-- `uv run pytest tests -n auto` green on **20 consecutive runs** (~35s each).
+- `uv run pytest tests -n auto` green on **20 consecutive runs** (~14s each, 0.145.1; was ~35s).
 - `uv run pytest tests` (serial) collects and passes (~4min) — currently impossible.
 - conftest.py under 100 lines; zero `importlib.reload(nx)` in tests.
 - The 0.142.5-era flake classes (TLS leak, reload fork, notice routing) each have a regression test that fails deterministically against the old conftest.

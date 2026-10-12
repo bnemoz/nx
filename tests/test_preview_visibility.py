@@ -33,6 +33,17 @@ import pytest
 import nx  # noqa: E402  (conftest laid the safe NX_* baseline already)
 
 
+@pytest.fixture(autouse=True)
+def _no_live(monkeypatch):
+    """Force a fresh console with an empty _live_stack so the approval notice
+    always takes the plain-print branch (a Live leaked mid-test by a dashboard
+    test on the same xdist worker would otherwise reroute print through rich,
+    invisible to capture_stdout)."""
+    import rich.console
+    monkeypatch.setattr(nx._rich, "shared_console",
+                        lambda: rich.console.Console(), raising=False)
+
+
 @contextlib.contextmanager
 def capture_stdout():
     """Capture print() output the same way test_tool_output_toggle.py does."""
