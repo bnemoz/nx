@@ -1,41 +1,29 @@
 """F8: line-anchored edit_file (old_lines), whitespace-tolerant fallback,
 and delete_file with undo support.
 """
-import importlib
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
-for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR"):
-    os.environ.pop(k, None)
 
 import pytest
+
+import nx  # Tier A: import once, monkeypatch only — no module-dict rewind
 
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
-    os.environ["NX_HOME"] = str(tmp_path / "nxhome")
-    os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
-    os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
+    monkeypatch.setenv("NX_HOME", str(tmp_path / "nxhome"))
+    monkeypatch.setenv("NX_ENV_FILE", str(tmp_path / "env"))
+    monkeypatch.setenv("NX_SESSIONS_DIR", str(tmp_path / "nxhome" / "sessions"))
     monkeypatch.chdir(tmp_path)
-    import nx
-    importlib.reload(nx)
-    nx.YOLO = True
-    # snapshot the project-root globals we mutate (risk hint tests read them)
-    saved_root = nx._state.PROJECT_ROOT
-    saved_is_git = getattr(nx._state, "PROJECT_ROOT_IS_GIT", None)
-    nx._state.PROJECT_ROOT = str(tmp_path)
-    nx._state.PROJECT_ROOT_IS_GIT = True
+    monkeypatch.setattr(nx, "YOLO", True, raising=False)
+    monkeypatch.setattr(nx._state, "YOLO", True)
+    # project-root globals the risk-hint path reads
+    monkeypatch.setattr(nx._state, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(nx._state, "PROJECT_ROOT_IS_GIT", True)
     yield nx, tmp_path
-    nx.YOLO = False
     nx._state._UNDO_STACK.clear()
     nx._state._TOOL_RESULT_CACHE.clear()
-    nx._state.PROJECT_ROOT = saved_root
-    if saved_is_git is not None:
-        nx._state.PROJECT_ROOT_IS_GIT = saved_is_git
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
 
 
 SAMPLE = "alpha\nbeta\ngamma\ndelta\nepsilon\n"

@@ -2,7 +2,6 @@
 rules auto-allow before the risk classifier, /approval allow list/forget
 manages them, and scope keeps project rules from leaking to other projects.
 """
-import importlib
 import json
 import os
 import sys
@@ -22,25 +21,20 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_ALLOWED_FILE"] = str(tmp_path / "nxhome" / "allowed.json")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
     import nx
-    importlib.reload(nx)
-    # snapshot the process-wide project-root globals this suite mutates, so
-    # later test files (e.g. test_local_risk_hint) see the originals
-    saved_root = nx._state.PROJECT_ROOT
-    saved_is_git = getattr(nx._state, "PROJECT_ROOT_IS_GIT", None)
-    nx._risk.PROJECT_ROOT = str(tmp_path)
-    nx._risk.PROJECT_ROOT_IS_GIT = True
-    nx._state.PROJECT_ROOT = str(tmp_path)
+    # Tier A: no reload — monkeypatch the module attrs the reload used to rebuild
+    monkeypatch.setattr(nx._risk, "PROJECT_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(nx._risk, "PROJECT_ROOT_IS_GIT", True, raising=False)
+    monkeypatch.setattr(nx._state, "PROJECT_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(nx, "YOLO", False, raising=False)
+    monkeypatch.setattr(nx, "APPROVE_LEVEL", None, raising=False)
+    monkeypatch.setattr(nx, "DEFAULT_APPROVE_LEVEL", None, raising=False)
     yield nx
-    os.environ["NX_ENV_FILE"] = "/dev/null"
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_ALLOWED_FILE", "NX_APPROVAL"):
-        os.environ.pop(k, None)
+    # teardown the attrs monkeypatch can't reach (they were plain assignments,
+    # not monkeypatched, so no restore was needed before; keep semantics safe)
     nx.YOLO = False
     nx.APPROVE_LEVEL = None
     nx.DEFAULT_APPROVE_LEVEL = None
-    nx._risk.PROJECT_ROOT = saved_root
-    nx._state.PROJECT_ROOT = saved_root
-    if saved_is_git is not None:
-        nx._risk.PROJECT_ROOT_IS_GIT = saved_is_git
+    os.environ["NX_ENV_FILE"] = "/dev/null"
 
 
 def _rules(nx, tmp_path):

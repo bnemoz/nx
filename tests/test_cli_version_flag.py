@@ -2,13 +2,14 @@
 it used to fall through to the interactive REPL because only the long flag
 was recognized (both in main()'s short-circuit and in nx/__init__.py's
 import-time guard that skips switch_source()'s network probes)."""
-import importlib
 import os
+import subprocess
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
 for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SOURCES", "NX_ACTIVE"):
     os.environ.pop(k, None)
@@ -132,28 +133,42 @@ def test_help_colored_no_color_env(monkeypatch):
 
 # --- import-time guard skips source setup for -v -----------------------------
 
-def test_import_time_guard_skips_switch_source_for_v(monkeypatch, tmp_path):
+def test_import_time_guard_skips_switch_source_for_v(tmp_path):
     """With a source configured, importing nx under `-v` must not call
-    switch_source() (which would hit the network before main() runs)."""
-    os.environ["NX_ENV_FILE"] = "/dev/null"
-    os.environ["NX_HOME"] = str(tmp_path / "nxhome")
-    # a dummy, unreachable source: if the guard regresses, switch_source()
-    # would try a real network round-trip to it
-    os.environ["NX_BASE_URL"] = "http://127.0.0.1:9"
-    os.environ["NX_MODEL"] = "dummy"
-    os.environ["NX_API_KEY"] = "dummy"
+    switch_source() (which would hit the network before main() runs).
 
-    import nx._sources as _sources
-    calls = []
-    monkeypatch.setattr(_sources, "switch_source",
-                        lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(
-                            AssertionError("switch_source called for -v")))
-
-    monkeypatch.setattr(sys, "argv", ["nx", "-v"])
-    import nx
-    importlib.reload(nx)
-    assert calls == []
-    os.environ["NX_ENV_FILE"] = "/dev/null"
-    for k in ("NX_HOME", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
-        os.environ.pop(k, None)
-    importlib.reload(nx)
+    Tier A: this asserts import-time behavior, so it runs in a subprocess
+    instead of `importlib.reload(nx)` — the parent `nx` module is never
+    touched and no module-dict rewind is needed. The guard leaves
+    st.ACTIVE/st.MODEL unwired (switch_source() is what binds them); if it
+    regressed, the dummy source would be discovered AND switched to, so the
+    printed flags flip to False/False. NX_SKIP_STARTUP_PROBES=1 (inherited
+    from conftest, pinned here) keeps the subprocess offline either way —
+    the wiring, not a network timeout, is what we assert, so a regression
+    fails instantly instead of after TCP timeouts. (The old test patched
+    nx._sources.switch_source and relied on reload re-executing nx's
+    `from ._sources import switch_source` to pick the patch up; with no
+    reload there is no re-import to intercept, hence the subprocess.)
+    """
+    env = dict(os.environ)
+    for k in ("NX_SOURCES", "NX_ACTIVE"):
+        env.pop(k, None)  # exercise only the legacy NX_* single-source fallback
+    env.update({
+        "NX_ENV_FILE": "/dev/null",
+        "NX_HOME": str(tmp_path / "nxhome"),
+        # a dummy, unreachable source: if the guard regresses, switch_source()
+        # would wire it in (and, in production, probe it for real)
+        "NX_BASE_URL": "http://127.0.0.1:9",
+        "NX_MODEL": "dummy",
+        "NX_API_KEY": "dummy",
+        "NX_SKIP_STARTUP_PROBES": "1",
+    })
+    # `python -c CODE -v` lands "-v" in sys.argv[1:] — exactly the argv the
+    # import-time guard in nx/__init__.py short-circuits on.
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import nx; print(nx._state.ACTIVE is None, nx._state.MODEL is None)",
+         "-v"],
+        capture_output=True, text=True, env=env, cwd=_ROOT)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "True True"

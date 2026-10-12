@@ -17,7 +17,6 @@ Contract under test:
 
 The suite is offline: the OpenAI client is faked, never a real endpoint.
 """
-import importlib
 import io
 import json
 import os
@@ -38,25 +37,48 @@ class _Boom(Exception):
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
-    os.environ["NX_HOME"] = str(tmp_path / "nxhome")
+    """Tier A: import nx once, monkeypatch only — no importlib.reload.
+
+    The reload used to rebuild nx's import-time state from this fixture's
+    env and (via its teardown twin) wipe what the tests left behind. Rebuild
+    exactly the knobs that depended on it:
+    - SESSION_HOME: the reload recomputed it from NX_HOME; its teardown
+      reload restored the old value. Pin the nx / nx._state mirrors with
+      monkeypatch instead (auto-restored). _sessions_fs re-reads
+      NX_SESSIONS_DIR/NX_HOME from the env at call time, so the env writes
+      below keep session writes pointed at tmp either way.
+    - st._LAST_API_ERROR / st._LAST_CONTEXT_OVERRUN: the tests latch these
+      by hand (fake open_stream, stale-latch test); with no module-dict
+      rewind, pin them None per-test so the first test's starts-clean
+      assert holds against sibling Tier A files and every in-test latch
+      unwinds at teardown.
+    Env writes stay bare os.environ: conftest's env rewind is universal, so
+    the manual teardown pops are unnecessary.
+    """
+    home = str(tmp_path / "nxhome")
+    os.environ["NX_HOME"] = home
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
-    os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
+    os.environ["NX_SESSIONS_DIR"] = os.path.join(home, "sessions")
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
+    monkeypatch.setattr(nx, "SESSION_HOME", home, raising=False)
+    monkeypatch.setattr(nx.st, "SESSION_HOME", home, raising=False)
+    monkeypatch.setattr(nx.st, "_LAST_API_ERROR", None, raising=False)
+    monkeypatch.setattr(nx.st, "_LAST_CONTEXT_OVERRUN", None, raising=False)
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
-    nx.st._LAST_API_ERROR = None
-    importlib.reload(nx)
+    # env rewind is universal (conftest); monkeypatch unwinds the pins above.
 
 
-def _install_source(nx):
+def _install_source(nx, monkeypatch):
+    """Inject a dead fake source. Tier A: swap the CONTAINER VALUES through
+    monkeypatch (copy-on-write) instead of mutating st.SOURCES /
+    st.SOURCE_ORDER in place — Tier A files have no module-dict rewind, so
+    an in-place append would leak the fake source into later files."""
     from nx import _sources as _sources_mod
     src = _sources_mod.Source("fake", "http://127.0.0.1:9/v1", "k", "fake-model")
-    nx.st.SOURCES["fake"] = src
-    nx.st.SOURCE_ORDER.append("fake")
-    nx.st.ACTIVE = src
+    monkeypatch.setattr(nx.st, "SOURCES", {**nx.st.SOURCES, "fake": src})
+    monkeypatch.setattr(nx.st, "SOURCE_ORDER", [*nx.st.SOURCE_ORDER, "fake"])
+    monkeypatch.setattr(nx.st, "ACTIVE", src)
     return src
 
 
@@ -97,7 +119,7 @@ def _fake_client(monkeypatch, exc):
 
 def test_open_stream_latches_last_api_error(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     assert nx.st._LAST_API_ERROR is None
     monkeypatch.setattr(nx.st, "client", _fake_client(monkeypatch, _Boom("context length exceeded"))[0])
     monkeypatch.setattr(nx.st, "MODEL", "fake-model")
@@ -111,7 +133,7 @@ def test_open_stream_latches_last_api_error(nx_fresh, monkeypatch):
 
 def test_model_turn_maps_none_plus_error_to_api_error(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     calls = []
     _fail_open_stream(nx, monkeypatch, calls)
@@ -125,7 +147,7 @@ def test_empty_turn_still_not_api_error(nx_fresh, monkeypatch):
     never be misread as a hard API failure (the latch is cleared before every
     open, so a stale error from a previous turn can't poison this one)."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     monkeypatch.setattr(nx, "open_stream", lambda *a, **k: iter([]))
     nx.st._LAST_API_ERROR = "APIConnectionError: stale latch from earlier"
@@ -137,7 +159,7 @@ def test_empty_turn_still_not_api_error(nx_fresh, monkeypatch):
 
 def test_loop_summary_status_error_no_retry_burn(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     calls = []
     _fail_open_stream(nx, monkeypatch, calls)
@@ -152,7 +174,7 @@ def test_loop_error_mid_task_keeps_turn_count(nx_fresh, monkeypatch):
     """The endpoint dying after real progress still reports error, with turns
     counting the turns that ran before the failure."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     n = {"i": 0}
 
@@ -171,7 +193,7 @@ def test_loop_error_mid_task_keeps_turn_count(nx_fresh, monkeypatch):
 def test_forced_final_cap_path_reports_error(nx_fresh, monkeypatch):
     """A turn-cap rescue turn that hard-fails is an error, not a cap."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     monkeypatch.setattr(nx, "model_turn", lambda *a, **k: nx._turn.TURN_API_ERROR)
     messages = nx._initial_messages() + [{"role": "user", "content": "x"}]
@@ -183,7 +205,7 @@ def test_forced_final_cap_path_reports_error(nx_fresh, monkeypatch):
 
 def test_batch_dead_endpoint_is_exit_4_not_clean_pass(nx_fresh, monkeypatch, tmp_path):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     out, err = _quiet(monkeypatch)
     _fail_open_stream(nx, monkeypatch, [])
     f = tmp_path / "tasks.jsonl"
@@ -201,7 +223,7 @@ def test_batch_dead_endpoint_is_exit_4_not_clean_pass(nx_fresh, monkeypatch, tmp
 
 def test_batch_result_line_is_error_with_exit_4(nx_fresh, monkeypatch, tmp_path):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     _fail_open_stream(nx, monkeypatch, [])
     f = tmp_path / "tasks.jsonl"
@@ -216,7 +238,7 @@ def test_batch_result_line_is_error_with_exit_4(nx_fresh, monkeypatch, tmp_path)
 
 def test_batch_continue_on_error_still_counts_api_failures(nx_fresh, monkeypatch, tmp_path):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     out, err = _quiet(monkeypatch)
     calls = []
     _fail_open_stream(nx, monkeypatch, calls)
@@ -235,7 +257,7 @@ def test_batch_continue_on_error_still_counts_api_failures(nx_fresh, monkeypatch
 
 def test_one_shot_json_reports_error_and_exit_4(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     _fail_open_stream(nx, monkeypatch, [])
     # _run_one_shot reads nx._PROMPT_FILE and sys.exits; drive the pieces it
@@ -254,7 +276,7 @@ def test_one_shot_json_ok_payload_has_no_error_key_leak(nx_fresh, monkeypatch):
     """A genuinely completed run's payload carries error=None (new field) and
     stays exit-0."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     messages = nx._initial_messages() + [{"role": "user", "content": "x"}]
     summary = {"status": "done", "turns": 1}

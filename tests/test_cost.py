@@ -1,5 +1,4 @@
 """F10: /cost — per-source usage bucketing + price-driven $ scoreboard."""
-import importlib
 import os
 import sys
 
@@ -21,12 +20,21 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
-    yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
-              "NX_PRICE_LOCAL_INPUT", "NX_PRICE_LOCAL_OUTPUT", "NX_PRICE_LOCAL_CACHE",
-              "NX_PRICE_ZAI_INPUT", "NX_PRICE_ZAI_OUTPUT"):
-        os.environ.pop(k, None)
+    # Tier A: no importlib.reload. The conftest imports nx once under a scrubbed
+    # env, so instead of a reload rebuild just the model-source wiring from the
+    # env set above: re-discover sources and switch to the first one (binds
+    # st.client + st.MODEL). resolve_model() reads NX_MODEL ("test-model"), so
+    # no network round-trip happens; 127.0.0.1:9 is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # Tests below swap nx._state.ACTIVE for fake source objects; the conftest
+    # module-dict rewind used to clean that up, so restore it explicitly here.
+    _prev_active = nx._state.ACTIVE
+    try:
+        yield nx, tmp_path
+    finally:
+        nx._state.ACTIVE = _prev_active
 
 
 def _metrics(nx, active_name):

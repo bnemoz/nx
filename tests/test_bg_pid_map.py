@@ -8,7 +8,6 @@ in some log's head must not resolve a model-supplied pid to *another*
 job's log), and ``wait_background`` answers a non-numeric pid with an
 ``[error]`` result instead of an unhandled ValueError.
 """
-import importlib
 import json
 import os
 import sys
@@ -29,17 +28,39 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
-    nx.YOLO = True
+    from nx import _state as st
+    # Tier A: no importlib.reload(nx) here. The reload rebuilt two things from
+    # this fixture's env, and both are now rebuilt explicitly:
+    #  1. the model source (st.client / st.MODEL) — re-discover sources from the
+    #     env we just set and switch to the first one. resolve_model() reads
+    #     NX_MODEL ("test-model"), so no network round-trip happens; the dead
+    #     127.0.0.1:9 endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    #  2. the state home: every bg-logs path is derived from st.SESSION_HOME at
+    #     call time, so pin it at this test's NX_HOME. Without the reload the
+    #     attr keeps conftest's per-worker home, which every test in the worker
+    #     shares — and since owner_pid filtering compares against the shared
+    #     worker pid, a previous file's maps would show up as "mine". Pinning
+    #     gives each test a private bg-logs dir (both spellings of the attr;
+    #     production reads the _state one, some callers the top-level one).
+    monkeypatch.setattr(st, "SESSION_HOME", str(tmp_path / "nxhome"), raising=False)
+    monkeypatch.setattr(nx, "SESSION_HOME", str(tmp_path / "nxhome"), raising=False)
+    monkeypatch.setattr(nx, "YOLO", True, raising=False)
+    # Background-job notice state the module-dict rewind used to wipe (and this
+    # fixture's teardown used to reset by hand): pin fresh values per test so a
+    # previous test's staged notice / scan latch cannot leak in. monkeypatch
+    # auto-restores them, so no manual teardown is needed.
+    monkeypatch.setattr(st, "_SESSION_HAS_BACKGROUNDED", False, raising=False)
+    monkeypatch.setattr(st, "_PENDING_BACKGROUND_NOTICE", None, raising=False)
+    monkeypatch.setattr(st, "_BG_SCAN_DONE", False, raising=False)
+    monkeypatch.setattr(st, "_PENDING_BG_COMPLETION_NOTICE", None, raising=False)
+    monkeypatch.setattr(st, "_BG_NOTICE_SEEN", None, raising=False)
+    monkeypatch.setattr(st, "_PENDING_SUBAGENT_NOTICE", None, raising=False)
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
-        os.environ.pop(k, None)
-    nx.YOLO = False
-    nx._state._SESSION_HAS_BACKGROUNDED = False
-    nx._state._PENDING_BACKGROUND_NOTICE = None
-    nx._state._BG_SCAN_DONE = False
-    nx._state._PENDING_BG_COMPLETION_NOTICE = None
-    nx._state._BG_NOTICE_SEEN = None
+    # env rewind is universal (conftest), so no manual pop here; nx globals a
+    # test mutates go through monkeypatch (per-test, auto-restored).
 
 
 def _bg_dir(nx):

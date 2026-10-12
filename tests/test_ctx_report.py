@@ -1,5 +1,4 @@
 """F3: /ctx token report + pinned turns surviving compress."""
-import importlib
 import os
 import sys
 
@@ -20,11 +19,26 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     import nx
-    importlib.reload(nx)
+    # The old `importlib.reload(nx)` here rebuilt nx's import-time state from
+    # this fixture's env — most importantly the model source: conftest imports
+    # nx once under a scrubbed env, so st.client/MODEL are bound to whatever the
+    # baseline discovered. Instead of a reload, rebuild just that wiring:
+    # re-discover sources from the env we just set and switch to the first one
+    # (binds st.client + st.MODEL). resolve_model() reads NX_MODEL
+    # ("test-model"), so no network round-trip happens; the dead 127.0.0.1:9
+    # endpoint is never contacted (and the compress tests monkeypatch create).
+    # See tests/test_subagent.py's nx_fresh for the canonical form.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # st._CTX_PINNED used to be wiped for free by conftest's module-dict rewind
+    # (Tier B). Tier A files skip that walk, and /ctx pin reads the existing
+    # set, so a left-over pin from an earlier test would change results: pin it
+    # per-test (monkeypatch auto-restores the pre-fixture value at teardown).
+    monkeypatch.setattr(nx._state, "_CTX_PINNED", [], raising=False)
     yield nx
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
-        os.environ.pop(k, None)
-    nx._state._CTX_PINNED = []
+    # env rewind is universal (conftest) and the pin is monkeypatch-owned, so
+    # no manual pop/restore here.
 
 
 def _msgs(n=12, big_every=3):
@@ -118,7 +132,7 @@ def test_compress_keeps_pinned_turns_verbatim(nx_fresh, monkeypatch):
     from nx._compress import compress
     msgs = _msgs(14)
     pin_target = 1  # the first big user turn (early — always in the fold range)
-    nx_fresh._state._CTX_PINNED = [pin_target]
+    monkeypatch.setattr(nx_fresh._state, "_CTX_PINNED", [pin_target])
     original = msgs[pin_target]["content"]
 
     def fake_create(model, messages, stream=False, **kw):
@@ -152,7 +166,7 @@ def test_compress_pin_on_tool_result_pulls_its_call(nx_fresh, monkeypatch):
                                      "function": {"name": "read_file", "arguments": '{"path": "x"}'}}]})
         msgs.append({"role": "tool", "content": f"t{i} " + "y" * 200})
     # pin ONLY the first tool result (index 3); its call turn (index 2) must ride along
-    nx_fresh._state._CTX_PINNED = [3]
+    monkeypatch.setattr(nx_fresh._state, "_CTX_PINNED", [3])
 
     def fake_create(model, messages, stream=False, **kw):
         resp = type("Resp", (), {})()

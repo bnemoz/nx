@@ -15,7 +15,6 @@ they fork NOWHERE ELSE:
 - the /tabs snapshot row for a running agent carries the sink tail;
 - nothing prints, and nothing reaches `messages` / the model.
 """
-import importlib
 import os
 import re
 import sys
@@ -46,32 +45,49 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
-    importlib.reload(nx)
+    # Tier A: no reload(nx). The reload used to rebuild nx's import-time state
+    # from this fixture's env — most importantly the model source: conftest
+    # imports nx once under a scrubbed env, so st.client/st.MODEL stay None (no
+    # active source). Rebuild just that wiring: re-discover sources from the env
+    # set above and switch to the first one (binds st.client + st.MODEL).
+    # resolve_model() reads NX_MODEL ("test-model"), so no network round-trip
+    # happens; the dead 127.0.0.1:9 endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # The reload also wiped nx's staged runtime notice, which the module-dict
+    # rewind used to undo; without either, a previous test's note would leak
+    # into this test's _drain(). Pin it per-test (auto-restored).
+    from nx import _state as st
+    monkeypatch.setattr(st, "_PENDING_SUBAGENT_NOTICE", None, raising=False)
     yield nx
-    from nx import _subagent
-    with _subagent._ASYNC_LOCK:
-        _subagent._ASYNC_AGENTS.clear()
-    # Sinks are process-global; a leftover row must not leak into another test.
-    from nx import _eventsink as es
-    with es._LOCK:
-        es._SINKS.clear()
-        es._RETAINED_TAILS.clear()
-    es._TAIL_LINES = None
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL",
-              "NX_API_KEY", "NX_SUBAGENT_ASYNC"):
-        os.environ.pop(k, None)
+    # Agent state (_ASYNC_AGENTS, quiet slots, TLS) is reset by the universal
+    # nx_state_reset autouse fixture and env rewind is universal (conftest), so
+    # no manual cleanup here; the sink registry is restored by the _empty_sinks
+    # autouse fixture below.
 
 
 @pytest.fixture(autouse=True)
-def _empty_sinks():
+def _empty_sinks(monkeypatch):
     """Every test starts with an empty registry: tap_event's zero-cost fast
     path (`if not _es._SINKS`) means a leftover sink from a sibling test would
-    silently change what a tap does."""
+    silently change what a tap does.
+
+    Tier A: the module-dict rewind no longer restores nx._eventsink's
+    module-level registry, so those object globals are swapped through
+    monkeypatch (restored to the baseline objects per-test, after teardown).
+    Every reader reaches them through the module attr (_subagent_tls._SINKS,
+    _eventsink.sink_for/register_sink/...), so a rebind is observed. The
+    in-place clear keeps the OLD guarantee too: whatever row an earlier file
+    left on the shared baseline objects is gone for us AND for whoever runs
+    after us (the baseline objects are what monkeypatch restores)."""
     from nx import _eventsink as es
     with es._LOCK:
         es._SINKS.clear()
         es._RETAINED_TAILS.clear()
-    es._TAIL_LINES = None
+    monkeypatch.setattr(es, "_SINKS", {}, raising=False)
+    monkeypatch.setattr(es, "_RETAINED_TAILS", {}, raising=False)
+    monkeypatch.setattr(es, "_TAIL_LINES", None, raising=False)
     yield
 
 
