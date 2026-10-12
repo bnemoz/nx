@@ -1046,6 +1046,11 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # shorthand pattern as Ctrl+S (raw_mode clears IXON, so
                     # the byte reaches the editor instead of the terminal's
                     # flow control).
+                    # Erase our own frame first: the alternate screen restores
+                    # the normal screen byte-exact on exit, so a frame left as
+                    # "history" here would reappear and stack under the fresh
+                    # prompt (nothing is printed between /tabs and the repaint).
+                    erase_stale_frame()
                     finish()
                     return "/tabs"
                 elif c == "\x13":
