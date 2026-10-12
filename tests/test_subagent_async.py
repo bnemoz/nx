@@ -7,7 +7,6 @@ finalization (a dead agent still produces exactly one note), the sub-agent
 loop never consuming the parent's staged notice, string-boolean `async`
 acceptance, /bg listing, and the NX_SUBAGENTS gate carrying over.
 """
-import importlib
 import os
 import sys
 import threading
@@ -60,13 +59,26 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
-    importlib.reload(nx)
+    # The old `importlib.reload(nx)` rebuilt nx's import-time state from this
+    # fixture's env — most importantly the model source. Without a reload,
+    # rewire just that: re-discover sources from the env we just set and switch
+    # to the first one (binds st.client + st.MODEL). resolve_model() reads
+    # NX_MODEL ("test-model"), so no network round-trip happens.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # nx reads these knobs through the MODULE ATTR first, falling back to the
+    # env (see _subagent._is_async_default / _sync_inline); the attr holds the
+    # import-time default, which the reload used to rebuild from the env.
+    monkeypatch.setattr(nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
+    monkeypatch.setattr(nx, "NX_SUBAGENT_ASYNC", 0, raising=False)
+    # The reload also wiped nx's staged runtime notice; without it a previous
+    # test's note leaks into this test's _drain(). Reset it per-test.
+    from nx import _state as st
+    monkeypatch.setattr(st, "_PENDING_SUBAGENT_NOTICE", None, raising=False)
     yield nx
-    from nx import _subagent
-    with _subagent._ASYNC_LOCK:
-        _subagent._ASYNC_AGENTS.clear()
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SUBAGENTS", "NX_SUBAGENT_ASYNC"):
-        os.environ.pop(k, None)
+    # env rewind is universal (conftest); async-agent state (_ASYNC_AGENTS,
+    # quiet slots, TLS) is reset by the universal nx_state_reset autouse fixture.
 
 
 def _drain(nx):

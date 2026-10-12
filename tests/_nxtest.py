@@ -176,7 +176,6 @@ _GLOBALS_FILES = [
     "test_stream_tag_scan_watermark.py",
     "test_stream_timeout_retry.py",
     "test_subagent_advisor.py",
-    "test_subagent_async.py",
     "test_subagent_budget.py",
     "test_subagent_budget_108.py",
     "test_subagent_error_status.py",
