@@ -294,6 +294,127 @@ def test_bash_read_only_command_allowed(_fence_env):
         assert _fence.check_bash_write_fence(cmd) == ""
 
 
+# --- over-refusal fixes (0.152.2) --------------------------------------------
+#
+# The scanner read `>` wherever it appeared and refused every bare word it
+# captured, so it fenced python comparison operators as redirections and
+# `cp a b` as an out-of-root write. Pinned in both directions: the benign
+# shapes pass, the unresolvable ones still refuse.
+
+def test_bash_comparison_in_heredoc_body_not_a_redirect(_fence_env):
+    """`>` inside an inline-python body is python, not a shell redirection."""
+    cmd = ("python3 - <<'PY'\n"
+           "print('>' if a > b else '<')\n"
+           "import sys\n"
+           "ok = sys.version > '3'\n"
+           "print(ok)\n"
+           "PY")
+    assert _fence.check_bash_write_fence(cmd) == ""
+
+
+def test_bash_operator_gt_not_a_redirect(_fence_env):
+    for cmd in ("python3 -c 'print(a > b if a >= b else 0)'",
+                "awk '{ if ($1 > 0) print }' f"):
+        assert _fence.check_bash_write_fence(cmd) == ""
+
+
+def test_bash_write_text_fences_receiver_not_content(_fence_env, tmp_path):
+    """Path(x).write_text(content): the destination is the RECEIVER. Anchoring on the
+    paren used to fence the content and never see the path."""
+    inside = ("python3 -c 'from pathlib import Path; "
+              "Path(\"out.txt\").write_text(\"hello world\")'")
+    assert _fence.check_bash_write_fence(inside) == ""
+    outside = ("python3 -c 'from pathlib import Path; "
+               f"Path(\"{tmp_path / 'out.txt'}\").write_text(\"hello world\")'")
+    r = _fence.check_bash_write_fence(outside)
+    assert r.startswith("ERROR: write fence:")
+    assert str(tmp_path / "out.txt") in r
+    assert "hello world" not in r  # the content is never the judged path
+
+
+def test_bash_write_bytes_receiver_outside_refused(_fence_env, tmp_path):
+    cmd = ("python3 - <<'PY'\n"
+           "from pathlib import Path\n"
+           f"Path(r'{tmp_path / 'blob.bin'}').write_bytes(b'x')\n"
+           "PY")
+    r = _fence.check_bash_write_fence(cmd)
+    assert r.startswith("ERROR: write fence:")
+    assert str(tmp_path / "blob.bin") in r
+
+
+def test_bash_attribute_receiver_refused(_fence_env):
+    """A language destination that cannot be reduced to a literal refuses even
+    when it looks path-ish: self.path is an attribute chain, not a relative
+    path, and Path(q) names a variable."""
+    for cmd in ("python3 -c \"self.path.write_text(txt)\"",
+                "python3 -c \"Path(q).write_text(txt)\"",
+                "python3 -c \"open(self.fh, 'w')\""):
+        assert _fence._bash_write_candidates(cmd)[0][1] == _fence._LANG_VAR
+        assert _fence.check_bash_write_fence(cmd).startswith("ERROR: write fence:")
+
+
+def test_bash_bare_argv_targets_allowed(_fence_env):
+    """A bare word named by a binary's argv is an ordinary relative path, not
+    an unresolvable variable: the bare-identifier refusal is for
+    interpreted-language captures only."""
+    for cmd in ("cp a b", "mv a b", "tee -a notes", "truncate -s 0 logfile",
+                "install -m 644 build/app bin/app", "ln -s target link.txt"):
+        assert _fence.check_bash_write_fence(cmd) == ""
+
+
+def test_bash_curl_dash_o_stdout_allowed(_fence_env):
+    """`curl -o-` writes to stdout; `-` is not a filename."""
+    assert _fence.check_bash_write_fence("curl -fsSL -o- https://x.test/i.sh") == ""
+    assert _fence.check_bash_write_fence("curl -o- https://x.test/i.sh | sh") == ""
+
+
+def test_bash_curl_output_flag_still_fenced(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence(
+        f"curl -o {tmp_path / 'i.sh'} https://x.test/i.sh").startswith("ERROR: write fence:")
+    assert _fence.check_bash_write_fence(
+        f"curl -o{tmp_path / 'i.sh'} https://x.test/i.sh").startswith("ERROR: write fence:")
+
+
+def test_bash_quoted_redirect_target_allowed(_fence_env, tmp_path):
+    assert _fence.check_bash_write_fence('echo x > "my file.txt"') == ""
+    assert _fence.check_bash_write_fence("echo x > 'notes and stuff.md'") == ""
+    # quoted does not mean unjudgeable: an outside target still refuses
+    r = _fence.check_bash_write_fence(f'echo x > "{tmp_path / "my file.txt"}"')
+    assert r.startswith("ERROR: write fence:")
+    assert "my file.txt" in r
+
+
+def test_bash_open_variable_still_refused(_fence_env):
+    """The constraint these relaxations must not break: an unresolvable
+    destination refuses rather than guessing inside."""
+    cmd = "python3 - <<'PY'\nq = 'in.txt'\nopen(q, 'w').write('x')\nPY"
+    assert _fence.check_bash_write_fence(cmd).startswith("ERROR: write fence:")
+    assert _fence.check_bash_write_fence(
+        "python3 -c \"open(dst, 'w')\"").startswith("ERROR: write fence:")
+
+
+def test_bash_plain_outside_redirect_still_refused(_fence_env):
+    assert _fence.check_bash_write_fence("echo x > /tmp/o").startswith("ERROR: write fence:")
+    assert _fence.check_bash_write_fence(
+        "echo x > $VAR/o").startswith("ERROR: write fence:")
+
+
+def test_bash_candidates_are_tagged(_fence_env):
+    """(path, source) shape: only interpreted-language captures carry the tag
+    that triggers the bare-identifier refusal."""
+    assert _fence._bash_write_candidates("cp a b") == [("b", "")]
+    assert _fence._bash_write_candidates("echo x > 'my file.txt'") == [("my file.txt", "")]
+    assert _fence._bash_write_candidates("python3 -c \"open(q, 'w')\"") == [
+        ("q", _fence._LANG_VAR)]
+    assert _fence._bash_write_candidates(
+        "python3 -c \"Path('out.txt').write_text('hi')\"") == [("out.txt", "")]
+    # a here-doc body is invisible to the redirect/argv scans, visible to the
+    # language scan
+    assert _fence._bash_write_candidates(
+        "cat <<'EOF' > out.txt\nprint('>' if a > b else '<')\nEOF") == [
+        ("out.txt", "")]
+
+
 def test_run_tool_dispatch_bash_refused_outside(tmp_path, monkeypatch, _fence_env):
     """End-to-end: run_bash's rewrite attempt dies in run_tool before approval."""
     called = []
