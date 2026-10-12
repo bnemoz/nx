@@ -107,6 +107,19 @@ _REDACT_PATTERNS = (
      "bearer-token"),
     (re.compile(r"(?i)\b((?:x-api-key|api-key|api_key)\s*[:=]\s*)[A-Za-z0-9._~+/=-]{16,}"),
      "api-key"),
+    # 0.147.0: bare env-assignment dumps (printenv/cat .env output) carry
+    # arbitrary values with no recognizable prefix, so a value is redacted
+    # when its NAME names a credential class (…PASSWORD/SECRET/TOKEN/KEY…) —
+    # a shape no legitimate tool output needs verbatim — or when an
+    # UPPERCASE_NAME= carries a long opaque value (24+ chars, no path
+    # separators: covers *KEY=base64 material without eating PATH/HOME/URLs).
+    # The trailing-char guards keep an existing [redacted:…] label from being
+    # wrapped again on a second pass.
+    (re.compile(r"\b((?:[A-Z][A-Z0-9_]{2,}=(?:[A-Za-z0-9+/_-]{24,}|"
+                r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,})|"
+                r"[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY"
+                r"|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*=[^.\s\]\[][^.\s\]]*))"),
+     "env-value"),
 )
 
 

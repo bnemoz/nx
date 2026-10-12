@@ -22,7 +22,7 @@ Most agent harnesses burn 20K-50K+ tokens of system prompt and tool schemas
 before your first message even lands — a large slice of a modern context
 window spent before you've typed anything, and paid on *every turn*.
 
-nx holds the floor under a **hard, recorded budget of ~5K tokens** (5320): a
+nx holds the floor under a **hard, recorded budget of ~5K tokens** (5450): a
 `SYSTEM` prompt plus the always-on tool schemas, and nothing else. That is
 roomy enough for genuinely descriptive schemas — every argument the model can
 pass is documented, tools name each other, and self-healing behavior is

@@ -632,6 +632,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # megabytes it cannot trim).
     if isinstance(result, list):
         from ._images import _parts_preview
+        # 0.147.0: text parts inside a content-parts result still go through
+        # secret redaction (they may carry a caption/summary echoing file
+        # content); non-string parts (images) are untouched.
+        result = [
+            _sanitize_tool_result(part) if isinstance(part, str) else part
+            for part in result
+        ]
         preview_lines = [_parts_preview(result)]
     else:
         result = _sanitize_tool_result(result)

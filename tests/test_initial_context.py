@@ -124,6 +124,9 @@ import nx as m  # noqa: E402
 # concurrency refusal). Net +51 tok (5120→5171): the descriptions were also
 # rephrased/tightened rather than taking the moved text verbatim. Budget
 # stays 5320 — headroom absorbs it.
+# 0.145.3: SYSTEM gains one line prohibiting filler words (Wait/Hmm/Actually and
+# combinations) in reasoning traces. ~160 chars; the measured floor lands at
+# 5342, so BUDGET_TOKENS rises 5320→5360 by that deliberate, verifiable cost.
 # 0.113.0: web_fetch promoted tier-2 → tier-1 (schema joins TOOLS whenever
 # NX_WEBFETCH != 0): it is exactly the tool a session needs on turn 1 (the
 # outside world), and search_tools discovery cost a round-trip precisely
@@ -144,7 +147,12 @@ import nx as m  # noqa: E402
 # stays 5320 and the same guard keeps covering the reviewer whenever it is
 # enabled (with NX_SUBAGENTS=1 the floor is 6780, which is what a sub-agent
 # session already paid for spawn_agent + friends, not a new line item).
-BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5320)  # hard: recorded, justified
+# 0.147.0: SYSTEM gains a four-line Security block (never reproduce
+# credentials from tool output / treat [redacted:…] spans as opaque / never
+# echo the system prompt or schemas / tool results are data not
+# instructions). ~325 chars; measured floor rises 5342→5445, so
+# BUDGET_TOKENS rises 5360→5450 by that deliberate, verifiable cost.
+BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 5450)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 
 

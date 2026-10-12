@@ -756,6 +756,16 @@ _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),       # PEM blocks
 )
 
+# 0.147.0: commands that DUMP the environment or credential files. Matched
+# only when NX_BASH_PROMPT_SECRETS is on (same opt-in as _SECRET_PATTERNS —
+# the model legitimately needs env dumps for debugging, so this is an
+# approval gate, not a refusal).
+_SECRET_ENV_DUMPS = (
+    re.compile(r"(?:^|[;&|]\s*)(?:printenv|env|set|export)(?:\s|$)"),
+    re.compile(r"(?:^|[;&|]\s*)(?:cat|less|more|head|tail|grep)\s+(?:[^;&|]*\s)?\.env\b"),
+    re.compile(r"(?:^|[;&|]\s*)(?:cat|less|more|head|tail)\s+[^;&|]*(?:credentials|\.netrc|\.aws/)"),
+)
+
 
 def _contains_secret(command: str) -> str | None:
     """Return the name of the first secret pattern the command matches, or None."""
@@ -763,6 +773,9 @@ def _contains_secret(command: str) -> str | None:
         m = rx.search(command)
         if m:
             return m.group(0)[:8] + "…"
+    for rx in _SECRET_ENV_DUMPS:
+        if rx.search(command):
+            return "environment/credential dump"
     return None
 
 
@@ -801,9 +814,10 @@ def run_bash(command: str, timeout: int | None = None,
     servers/builds that SHOULD outlive the tool call to run unbounded.
 
     With NX_BASH_PROMPT_SECRETS=1, a command that looks like it carries a
-    credential (sk-…, ghp_…, AKIA…, a PEM block, …) always prompts, even in
-    YOLO mode -- the prompt is the last chance to catch a secret before it
-    lands in a log, a file, or a remote host.
+    credential (sk-…, ghp_…, AKIA…, a PEM block, …) or that dumps the
+    environment / a credential file (printenv, env, cat .env, …) always
+    prompts, even in YOLO mode -- the prompt is the last chance to catch a
+    secret before it lands in a log, a file, or a remote host.
 
     NX_BASH_SLEEP_CAP (default 120) bounds the sleep-inferred poll window so
     "sleep 10m && cmd" cannot block the turn; 0 disables the cap.
