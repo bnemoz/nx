@@ -63,6 +63,7 @@ result the sub-loop continues from.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -70,6 +71,7 @@ import time
 from typing import Any
 
 from ._private import atomic_write_private, private_dir
+from ._bash_jobs import _pid_is_alive, _pid_start_time
 from . import _state as st
 from ._env import _env_int
 from . import _notices
@@ -322,6 +324,74 @@ def _agents_report_dir() -> str:
     by exact path (nothing filters them); the purge drains that dir."""
     import nx as _m
     return os.path.join(st.SESSION_HOME, "agents", _m.project_store_slug())
+
+
+# Durable intent record (0.147.2, the "effect sandwich"): before an async
+# agent's worker thread starts, a small JSON file is written recording the
+# job id, instruction, tier, and owner PID + PID start time. On finalize the
+# file is removed. An intent file left behind by a dead process is the
+# crash-residue signal the completion sweep turns into a note — without it,
+# a mid-flight agent simply vanished with the process, leaving no trace.
+
+
+def _intent_path(job_id: str) -> str:
+    return os.path.join(_agents_report_dir(), f"{job_id}.intent.json")
+
+
+def _write_agent_intent(job_id: str, instruction: str, tier: str) -> None:
+    """Persist the intent record for an about-to-run async agent (best-effort:
+    durability must never break the spawn)."""
+    try:
+        d = _agents_report_dir()
+        private_dir(d)
+        payload = {
+            "job_id": job_id,
+            "instruction": instruction,
+            "tier": tier,
+            "owner_pid": os.getpid(),
+            "owner_pid_start_time": _pid_start_time(os.getpid()),
+            "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        atomic_write_private(_intent_path(job_id), json.dumps(payload, indent=1))
+    except Exception:  # noqa: BLE001 — best-effort by design
+        pass
+
+
+def _clear_agent_intent(job_id: str) -> None:
+    """Remove the intent record once the result is durably persisted."""
+    try:
+        os.remove(_intent_path(job_id))
+    except OSError:
+        pass
+
+
+def _scan_orphan_agent_intents() -> list[str]:
+    """Find intent files whose owner process is dead: the effect-sandwich
+    residue class. Returns human-readable lines for the sweep to stage."""
+    lines: list[str] = []
+    try:
+        names = os.listdir(_agents_report_dir())
+    except OSError:
+        return lines
+    for name in names:
+        if not name.endswith(".intent.json"):
+            continue
+        path = os.path.join(_agents_report_dir(), name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                rec = json.load(f)
+            pid = int(rec.get("owner_pid") or 0)
+            if _pid_is_alive(pid, rec.get("owner_pid_start_time")):
+                continue  # another live session owns it — hands off
+            lines.append(
+                f"  sub-agent {rec.get('job_id', name)} ({rec.get('tier', '?')} "
+                f"tier, started {rec.get('started', '?')}) was killed mid-run "
+                "when its nx process died — it never finished. Instruction "
+                f"was: {str(rec.get('instruction', ''))[:160]}")
+            os.remove(path)  # announce once
+        except Exception:  # noqa: BLE001 — one bad file must not kill the sweep
+            continue
+    return lines
 
 
 def _write_agent_report(job_id: str, instruction: str, status: str,
@@ -705,6 +775,9 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
         path = None
     if rec is not None:
         rec["report"] = path
+    # Effect sandwich, step 3 (0.147.2): the result is on disk — retire the
+    # intent so a live process never sees its own agent as crash residue.
+    _clear_agent_intent(job_id)
     _stage_subagent_answer(job_id)
 
 
@@ -832,6 +905,10 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
         _es.register_sink(job_id)
     except Exception:  # noqa: BLE001 — see above: display-only, never fatal
         pass
+
+    # Effect sandwich, step 1 (0.147.2): record intent BEFORE the worker can
+    # start — if the process dies mid-run, the sweep below finds the residue.
+    _write_agent_intent(job_id, instruction, tier)
 
     # A background agent's whole point is that its answer lands later; without
     # this the finish notice would sit staged until the user typed something.

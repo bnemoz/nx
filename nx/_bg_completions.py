@@ -140,3 +140,22 @@ def _run_bg_completion_scan(jobs=None) -> None:
         _stage_bg_note(note)
     _stage_verify_outcome_safe(jobs=jobs)
     _stage_subagent_completions_safe()
+    _stage_orphan_agent_intents_safe()
+
+
+def _stage_orphan_agent_intents_safe() -> None:
+    """The crash-residue half of the sweep (0.147.2, effect sandwich): intent
+    records for async agents whose owner process died mid-run are announced
+    once as a [Runtime note], then deleted. A live process's own agents are
+    skipped (their intents are cleared at finalize, and liveness is checked
+    before announcing anything)."""
+    from ._subagent import _scan_orphan_agent_intents
+    try:
+        lines = _scan_orphan_agent_intents()
+    except Exception:  # noqa: BLE001 — the sweep must never break the turn
+        return
+    if lines:
+        _stage_bg_note(
+            "[Runtime note: sub-agent(s) from a crashed nx session were killed "
+            "mid-run and never finished:\n" + "\n".join(lines) + "\n"
+            "Re-spawn deliberately if the work still matters.]")

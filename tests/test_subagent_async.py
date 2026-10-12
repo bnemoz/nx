@@ -559,3 +559,53 @@ def test_bg_lists_report_path(nx_fresh, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "report: /tmp/fake/agents/agent-1-cccccc.md" in out
     assert out.count("report:") == 1  # the running agent has no report yet
+def test_async_agent_writes_intent_at_spawn_and_clears_at_finalize(nx_fresh, monkeypatch):
+    """0.147.2 effect sandwich, steps 1+3: an intent record exists while the
+    worker is mid-flight, and is gone once the result is durably persisted."""
+    import json
+    from nx._subagent import _agents_report_dir, spawn_agent
+
+    def fake_loop(messages, *a, **kw):
+        ipath = os.path.join(_agents_report_dir(), jid + ".intent.json")
+        assert os.path.exists(ipath)  # worker mid-flight: intent exists NOW
+        rec = json.load(open(ipath, encoding="utf-8"))
+        assert rec["instruction"] == "crash probe"
+        assert rec["tier"] == "read"
+        assert rec["owner_pid"] == os.getpid()
+        messages.append({"role": "assistant", "content": "done"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("crash probe", async_=True)
+    jid = out.split("job ")[1].split("\n")[0]
+    _wait_for(lambda: _drain(nx_fresh), "agent's runtime note")
+    # Finalized: the result is on disk, the intent is retired.
+    assert not os.path.exists(os.path.join(_agents_report_dir(),
+                                           jid + ".intent.json"))
+    assert os.path.exists(os.path.join(_agents_report_dir(), jid + ".md"))
+
+
+def test_orphan_intent_scan_announces_dead_owner_once(nx_fresh):
+    """The sweep finds an intent whose owner PID is dead, announces it with
+    the instruction, deletes the file, and is silent on a second pass."""
+    import json
+    from nx._subagent import (_agents_report_dir, _scan_orphan_agent_intents,
+                              _write_agent_intent)
+    dead_pid = 2**22 - 7  # above Linux's default pid_max (4194304)
+    rec = {"job_id": "agent-orphan1", "instruction": "investigate the flake",
+           "tier": "read", "owner_pid": dead_pid,
+           "owner_pid_start_time": None, "started": "2026-10-11 12:00:00"}
+    os.makedirs(_agents_report_dir(), exist_ok=True)
+    path = os.path.join(_agents_report_dir(), "agent-orphan1.intent.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    lines = _scan_orphan_agent_intents()
+    assert len(lines) == 1
+    assert "agent-orphan1" in lines[0]
+    assert "investigate the flake" in lines[0]
+    assert not os.path.exists(path)  # announced once, then removed
+    assert _scan_orphan_agent_intents() == []  # silent on the second pass
+    # A live owner (this process) is never announced.
+    _write_agent_intent("agent-live1", "still running elsewhere", "read")
+    assert _scan_orphan_agent_intents() == []
+    os.remove(os.path.join(_agents_report_dir(), "agent-live1.intent.json"))
