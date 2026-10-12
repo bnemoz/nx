@@ -184,7 +184,7 @@ def test_tool_status_line_uses_the_component_and_keeps_both_modes():
     import nx._stream_parse as sp
     src = open(sp.__file__, encoding="utf-8").read()
     assert "status_line(" in src
-    assert "emit(text, inplace=True)" in src
+    assert "emit(CLEAR_LINE + text, inplace=True, end=\"\")" in src
     assert "emit(text)" in src
     # the old hand-rolled f-string + CLEAR_LINE concat is gone
     assert "generating tool call{RESET} " not in src

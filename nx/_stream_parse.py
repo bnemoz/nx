@@ -320,10 +320,14 @@ class StreamParser:
                 # No Live open: the classic in-place repaint, byte-identical
                 # to pre-0.128 (the mode switch is `_render.emit(inplace=True)`,
                 # UIUX_SPEC B1 — this call site no longer branches on it). The
-                # in-place shape (no trailing newline) matters: a committed
-                # line per 0.2s tick is the staircase 0.129.1/0.129.2 chased.
-                # The line is erased again by clear_tool_status().
-                emit(text, inplace=True)
+                # CLEAR_LINE lead and end="" both matter: without the lead the
+                # raw repaint lands at the current cursor column and each 0.2s
+                # tick APPENDS to the previous frame (the horizontal smear; the
+                # spinner carries the lead inside its own _render(),
+                # status_line() does not), and without end="" the live-flap
+                # fallback in emit() commits a fresh line per tick (the
+                # staircase 0.129.1-4 chased). Erased by clear_tool_status().
+                emit(CLEAR_LINE + text, inplace=True, end="")
         self.tool_status_active = True
         self.last_tool_status = now
 
