@@ -768,10 +768,11 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # stats footer — prefer llama.cpp timings if present (server-measured tok/s);
     # otherwise divide the server's completion_tokens by the client-side
     # generation window (parser.gen_window(): first→last token span, not
-    # wall-clock — the prefill head + render/teardown tail used to be included
-    # and made short turns and just-read-a-file turns swing wildly). TTFT is
-    # shown when available — for local it comes from llama.cpp timings, for
-    # remote we measure it client-side.
+    # wall-clock). 0.148.2: this call now RECORDS the step's numbers into the
+    # user-turn accumulator begun by _run_model_turn_loop; the loop's finally
+    # prints ONE aggregated footer per user turn instead of a stacked row per
+    # step. TTFT is shown when available — for local it comes from llama.cpp
+    # timings, for remote we measure it client-side.
     _print_stats_footer(parser.usage, parser.timings, parser.streamed_chars, parser.t_first,
                          elapsed, text, parser.tcs, messages=messages, parser=parser,
                          quiet=_subagent_quiet())
@@ -947,10 +948,19 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
     # enclosing loop by _notices, so nesting behaves exactly as before.
     from . import _notices
     _notice_frame = _notices.install_notice_ctx()
+    # 0.148.2: bracket the user-turn footer accumulation. Every step of the
+    # loop records its numbers (quiet turns record nothing); the finally
+    # below flushes ONE aggregated footer when the loop settles — covering
+    # all exit statuses (done/esc/cap/error/timeout and the rescue
+    # forced-final turns after the loop) with a single call site. Thread-local
+    # state, so concurrent sub-agent loops never touch this accumulator.
+    from ._turn_footer import begin_user_turn_footer, end_user_turn_footer
+    begin_user_turn_footer()
     try:
         return _run_model_turn_loop_inner(messages, force_final, recovery_sampling,
                                           on_step, max_turns_override)
     finally:
+        end_user_turn_footer()
         # PF-05 (0.61.0): amortized undo persistence. A turn is the natural
         # boundary — the loop is shared by the REPL, batch tasks and sub-agent
         # loops, so flushing here keeps every driver's crash-durability window

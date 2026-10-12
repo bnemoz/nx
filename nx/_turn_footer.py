@@ -182,6 +182,107 @@ def _window_tps(gen_n: float, window: float) -> float:
     return gen_n / window if window > 0 else 0.0
 
 
+# --- per-user-turn footer accumulation ---------------------------------------
+# (0.148.2) model_turn() runs once per step of the user turn's loop, and every
+# step used to print its own stats row — a staircase of footers whenever a
+# turn spanned several model calls. Now the loop brackets accumulation
+# (begin/end_user_turn_footer in _run_model_turn_loop): every step RECORDS its
+# numbers instead of rendering, and ONE aggregated footer flushes when the
+# loop settles — covering every exit status through the loop's single finally.
+# Keyed per-thread: concurrent sub-agent loops call model_turn via their own
+# threads; they are quiet=True so they record nothing, but thread-locality
+# guarantees their tallies can never mix with the parent's. Outside a
+# bracketed loop (tests, model_turn called directly) the footer renders
+# exactly as before — the accumulator is simply absent.
+_FOOTER_ACC = threading.local()
+
+
+class _StepAcc:
+    """One user turn's accumulated step numbers."""
+
+    __slots__ = ("gen_n", "chars", "wall", "t_first", "ttft_ms", "prompt_n",
+                 "steps", "last")
+
+    def __init__(self) -> None:
+        self.gen_n = 0       # sum of token counts from real token sources
+        self.chars = 0       # streamed chars from steps with no token source
+        self.wall = 0.0      # sum of per-step elapsed
+        self.t_first = None  # FIRST token-bearing step's first-token time
+        self.ttft_ms = 0.0   # FIRST server-reported ttft (0 = none reported)
+        self.prompt_n = 0    # LAST token-bearing step's prompt size
+        self.steps = 0
+        self.last = None     # last step's raw footer args, for the flush
+
+
+def _acc() -> Optional[_StepAcc]:
+    return getattr(_FOOTER_ACC, "acc", None)
+
+
+def begin_user_turn_footer() -> None:
+    """Start accumulating this thread's user turn (called by the turn loop)."""
+    if _acc() is None:
+        _FOOTER_ACC.acc = _StepAcc()
+
+
+def end_user_turn_footer() -> None:
+    """Flush the accumulated user-turn footer (the loop's finally calls it).
+
+    Renders nothing when the turn was quiet (sub-agents) or recorded no steps
+    (the turn died before the first stream settled — the give-up paths that
+    never reached a footer). A single-step turn re-renders exactly that
+    step's footer — byte-identical to the pre-0.148.2 per-step row. A
+    multi-step turn aggregates: gen tokens sum over the steps that had a real
+    token source (steps mixing sources still sum — a conservative
+    approximation), wall is the summed step elapsed, tok/s is recomputed over
+    the total and marked untrusted (`~` — a sum of decode windows is not a
+    server measurement), ttft keeps the FIRST step's value, and ctx keeps the
+    LAST step's prompt size (the most recent reading). The cache-hit field
+    already reads st._LAST_CACHE_HIT, which _capture_last_prompt_tokens keeps
+    at the last settled step."""
+    acc = _acc()
+    if acc is None:
+        return
+    _FOOTER_ACC.acc = None
+    if acc.steps == 0:
+        return
+    if acc.steps == 1:
+        _render_footer(*acc.last)
+        return
+    usage, timings, chars, t_first, elapsed, text, tcs, parser = acc.last
+    if acc.gen_n:
+        timings = {"prompt_n": acc.prompt_n, "predicted_n": acc.gen_n,
+                   "predicted_per_second": _window_tps(acc.gen_n, acc.wall),
+                   "prompt_ms": acc.ttft_ms * 1000.0,
+                   "predicted_per_second_trusted": False}
+        usage, chars = None, 0
+    elif acc.chars:
+        usage, timings, chars = None, None, acc.chars
+    _render_footer(usage, timings, chars, acc.t_first, acc.wall, text, tcs,
+                   parser, aggregated=True)
+
+
+def _acc_record(acc: _StepAcc, usage: Any, timings: Optional[dict],
+                streamed_chars: int, t_first: Optional[float], elapsed: float,
+                text: str, tcs: dict, parser: Optional[Any]) -> None:
+    """Fold one settled step's numbers into the user-turn accumulator."""
+    acc.steps += 1
+    acc.wall += max(0.0, elapsed)
+    if acc.t_first is None and t_first is not None:
+        acc.t_first = t_first
+    if timings and timings.get("predicted_n"):
+        acc.gen_n += int(timings["predicted_n"])
+        if timings.get("prompt_ms") and acc.ttft_ms == 0.0:
+            acc.ttft_ms = timings["prompt_ms"] / 1000.0
+        acc.prompt_n = int(timings.get("prompt_n") or 0)
+    elif usage and (usage.completion_tokens or 0):
+        acc.gen_n += int(usage.completion_tokens or 0)
+        acc.prompt_n = int(usage.prompt_tokens or 0)
+    else:
+        acc.chars += streamed_chars
+    acc.last = (usage, timings, streamed_chars, t_first, elapsed, text, tcs,
+                parser)
+
+
 def _footer_row(parts: list[str], tally: str) -> None:
     """Emit the per-turn stats footer row (UIUX_SPEC B1).
 
@@ -200,9 +301,12 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
                          parser: Optional[Any] = None, quiet: bool = False) -> None:
     """Render the per-turn stats footer.
 
-    A turn whose only visible output was collapsed reasoning (no prose, no
-    tool calls) renders a dim divider + `(step: reasoning)` label above the
-    footer, so a run of such steps doesn't read as bare stacked footers.
+    Inside a bracketed turn loop (one user turn), each step RECORDS its
+    numbers and the loop's finally prints ONE aggregated footer — a
+    multi-step turn no longer stacks a stats row per step. A step whose only
+    visible output was collapsed reasoning (no prose, no tool calls) still
+    renders a dim divider + `(step: reasoning)` label above the final footer
+    so that step stays visible.
 
     Prefers llama.cpp `timings` (server-measured, real tok/s) when present;
     falls back to the standard streaming `usage` object (OpenAI/Z.ai/vLLM)
@@ -218,9 +322,30 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
     """
     if quiet:
         return
+    acc = _acc()
+    if acc is not None:
+        # Bracketed turn loop: record, never render — the loop's finally
+        # flushes one aggregated footer (end_user_turn_footer).
+        _acc_record(acc, usage, timings, streamed_chars, t_first, elapsed,
+                    text, tcs, parser)
+        return
+    _render_footer(usage, timings, streamed_chars, t_first, elapsed, text,
+                   tcs, parser)
+
+
+def _render_footer(usage: Any, timings: Optional[dict], streamed_chars: int,
+                   t_first: Optional[float], elapsed: float, text: str, tcs: dict,
+                   parser: Optional[Any], aggregated: bool = False) -> None:
+    """The footer's render ladder (usage → timings → char estimate → bare
+    wall), unchanged since 0.30.0 except where noted. `aggregated` marks a
+    multi-step user-turn flush: skip the trivial-turn short-circuit (a cheap
+    final step still rides on real earlier work) and read the timings trust
+    flag, which the aggregated synthesis sets to False (see
+    end_user_turn_footer — a sum of decode windows is not a server
+    measurement)."""
     # Trivial turn: a bare few tokens of tool-call args (a quick router step)
     # earns no full stats ladder — the wall time is the only useful number.
-    if (not text.strip() and not getattr(parser, "reasoning_only_chars", 0)
+    if (not aggregated and not text.strip() and not getattr(parser, "reasoning_only_chars", 0)
             and usage is not None and (usage.completion_tokens or 0) < 100
             and not st._TALLY_ARG_REPAIRS and not st._TALLY_RETRIES):
         _commit_line(kv_line([("", f"{DIM}{elapsed:4.1f}s wall")]))
@@ -253,10 +378,11 @@ def _print_stats_footer(usage: Any, timings: Optional[dict], streamed_chars: int
         prompt_n = timings.get("prompt_n", 0)
         gen_n = timings["predicted_n"]
         tps = timings.get("predicted_per_second", 0)
+        trusted = timings.get("predicted_per_second_trusted", True)
         ctx = _ctx_field(prompt_n)
         prompt_ms = timings.get("prompt_ms", 0)
         ttft = (prompt_ms / 1000.0) if prompt_ms else t_first
-        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", _tps_field(tps, True), ctx]
+        parts = [f"{C.STATUS_BAR}{gen_n}{RESET}{DIM} tok", _tps_field(tps, trusted), ctx]
         if st.MODEL:
             parts.append(f"{C.STATUS_BAR}{st.MODEL}{RESET}")
         cached = _cache_hit_field(st._LAST_CACHE_HIT)
