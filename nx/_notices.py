@@ -124,6 +124,19 @@ def pop_notice_ctx(fr: NoticeFrame) -> None:
                 # neither is lost.
                 setattr(st, name, cur + fr.slots[name])
                 continue
+            if (not fr.slots[name] and fr.seed[name]
+                    and isinstance(cur, str) and cur != fr.seed[name]):
+                # 0.152.6: the frame DELIVERED its seed mid-turn (the flush set
+                # the frame slot back to None) and a worker staged a NEW note
+                # into the module store afterwards. The frame slot holds
+                # nothing new (it was cleared on delivery), the concat guard
+                # above is skipped because the seed was non-empty, so the plain
+                # overwrite at the bottom would clobber the worker's note,
+                # whose `announced` flag is already burned and could never be
+                # re-staged (the "all agents done, never woken" report). Keep
+                # the worker's note.
+                setattr(st, name, cur)
+                continue
             # Write the plain module-global default (no dict-entry dance here:
             # notice slots have no hot read site, and tests rewind vars(st)).
             setattr(st, name, fr.slots[name])
