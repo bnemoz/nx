@@ -1,15 +1,17 @@
-"""The sub-agent read-only bash tier: run_bash behind a single-command
-read-only allowlist.
+"""The sub-agent read-only bash tier: run_bash behind a read-only allowlist.
 
 Split out of `_subagent.py`. run_bash IS offered to a sub-agent, but the
-command must pass `_subagent_bash_allowed()` — a single bare command from an
-allowlist anchored on `_risk.py`'s own safe-command table (grep/ls/du/ps/git
-log/...). Any metacharacter, write-shaped command, or unknown binary is
-refused before it ever reaches run_bash, so a sub-agent can scan logs and
-process state without write capability. wait_background stays excluded
-(nothing it runs can background)."""
+command must pass `_subagent_bash_allowed()`: each pipeline stage must be a
+single bare command from an allowlist anchored on `_risk.py`'s own
+safe-command table (grep/ls/du/ps/git log/...), and shell globs (`*`, `?`,
+`~`, braces) are allowed — expansion is read-only. Any non-pipeline
+metacharacter (`;`, `&`, redirection, command substitution), write-shaped
+command, or unknown binary is refused before it ever reaches run_bash, so a
+sub-agent can scan logs and process state without write capability.
+wait_background stays excluded (nothing it runs can background)."""
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Any
 
@@ -21,6 +23,33 @@ from typing import Any
 # user watching a Y/n prompt, so the allowlist itself is the safety.
 # git commands are resolved through _local_risk_hint_bash() instead (see
 # _subagent_bash_allowed) so only its read-only verdicts pass.
+# Same shape as _risk.py's _SHELL_METACHARACTERS_RE but WITHOUT the glob
+# characters: `*`, `?`, `~`, `{`, `}` are read-only shell expansion, and
+# refusing them forced sub-agents into one-file-at-a-time greps.
+_SHELL_METACHARACTERS_RE_GLOBS_OK = re.compile(r"[;&<>`$()]")
+
+
+def _split_pipeline(cmd: str) -> list[str]:
+    """Split on `|` that is not inside single or double quotes (a quoted `|`
+    is an argument character, not a pipe — bash never splits on it)."""
+    stages, buf, quote = [], [], None
+    for ch in cmd:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == "|":
+            stages.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    stages.append("".join(buf).strip())
+    return stages
+
+
 _SUBAGENT_BASH_ALLOW = frozenset((
     "grep", "egrep", "fgrep", "rg", "ls", "pwd", "cat", "head", "tail", "wc",
     "find", "du", "df", "stat", "file", "diff", "tree", "realpath", "basename",
@@ -34,19 +63,31 @@ _SUBAGENT_BASH_ALLOW = frozenset((
 
 
 def _subagent_bash_allowed(command: str) -> bool:
-    """True when `command` is a single bare read-only command the sub-agent
-    tier may run: one allowlisted binary (_SUBAGENT_BASH_ALLOW) or a git
-    invocation the parent's own _risk.py classifier scores "low"
-    (status/diff/log/show/tag/blame, listing-only branch/remote). Anything
-    else — pipes, &&, redirection, globs, env-prefixing, unknown binaries,
-    write-shaped commands — is refused; the sub-agent reports what it needs
-    and the parent runs it."""
+    """True when `command` is read-only work the sub-agent tier may run: a
+    pipeline whose every stage is one allowlisted binary
+    (_SUBAGENT_BASH_ALLOW) or a git invocation the parent's own _risk.py
+    classifier scores "low" (status/diff/log/show/tag/blame, listing-only
+    branch/remote). Globs are allowed (read-only expansion). Anything else —
+    `;`/`&` sequencing or backgrounding, redirection, command substitution,
+    env-prefixing, unknown binaries, write-shaped commands — is refused; the
+    sub-agent reports what it needs and the parent runs it."""
     if not isinstance(command, str) or not command.strip():
         return False
-    from ._risk import (_local_risk_hint_bash, _strip_shell_comment,
-                        _SHELL_METACHARACTERS_RE)
+    from ._risk import (_local_risk_hint_bash, _strip_shell_comment)
     cmd = _strip_shell_comment(command.strip())
-    if _SHELL_METACHARACTERS_RE.search(cmd):
+    if "|" in cmd:
+        # Pipeline: every stage must independently pass the single-command
+        # rule — the allowlist itself is the safety, not the chain length.
+        # A `|` inside quotes never splits here, so a command like
+        # grep 'a|b' f comes back as one stage and falls through to the
+        # single-command path below.
+        stages = _split_pipeline(cmd)
+        if len(stages) > 1:
+            return all(_subagent_bash_allowed(stage) for stage in stages)
+    # Remaining metacharacters are refused outright: `;`/`&` sequencing or
+    # backgrounding, `<>` redirection, `` ` ``/`$`/`(`/`)` command
+    # substitution. Globs are read-only and permitted.
+    if _SHELL_METACHARACTERS_RE_GLOBS_OK.search(cmd):
         return False
     try:
         parts = shlex.split(cmd)
@@ -96,8 +137,9 @@ def _subagent_bash(command: str, **_: Any) -> str:
         cwd = getattr(ctx, "worktree", None) or None
         return _real_run_bash(command, _cwd=cwd)
     if not _subagent_bash_allowed(command):
-        return ("ERROR: sub-agent bash is limited to single read-only commands "
-                f"(grep/ls/du/ps/pgrep/git log/git status/...); refused: {command!r}. "
+        return ("ERROR: sub-agent bash is limited to read-only commands — "
+                "pipelines of grep/ls/du/ps/pgrep/git log/git status/... are "
+                f"fine; refused: {command!r}. "
                 "Report what you need and let the parent run it.")
     from ._bash_jobs import run_bash
     return run_bash(command)

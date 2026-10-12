@@ -189,15 +189,29 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         # git read-only forms resolved through _risk.py's own classifier
         "git status", "git diff", "git log --oneline", "git show HEAD",
         "git tag", "git blame nx/_risk.py", "git branch -a", "git remote -v",
+        # 0.146.0: pipelines of allowlisted read-only stages are allowed
+        "grep -rn TODO nx/ | wc -l", "ps aux | grep x",
+        "cat a | head -20 | tail -5", "git log --oneline | head -5",
+        "grep a f | sort | uniq -c", "ls -la | wc -l",
+        # 0.146.0: globs allowed (read-only expansion)
+        "grep TODO nx/*.py", "wc -l tests/*.py", "du -sh nx/*", "ls *",
+        # quoted pipe is an argument character, not a pipeline separator
+        "grep 'a|b' f",
     ]
     bad = [
         "", "   ",
         # write-shaped / mutating
         "rm -rf /", "mkdir d", "touch f", "echo x > f", "cp a b", "mv a b",
         "pytest -q", "dd if=/dev/zero of=x",
-        # shell tricks (even between allowlisted commands)
-        "cat a && cat b", "grep a | grep b", "ps aux | grep x",
-        "git status; git log", "ls *", "du -sh nx/*",
+        # shell tricks (even between allowlisted commands) — 0.146.0 allows
+        # pipelines of allowlisted stages, so only non-pipe tricks are bad
+        "cat a && cat b", "ps aux; grep x",
+        "git status; git log", "grep x > f", "ps aux & grep x",
+        # `||` and command substitution still refused
+        "cat a || cat b", "grep $(cat f) x", "grep `cat f` x",
+        # (globs are now allowed — see the ok list)
+        # ...but a pipeline containing a non-allowlisted or write stage is not
+        "cat a | rm -rf /", "grep x f | python -c 'x'", "cat a ||| cat b",
         # find's destructive/exec forms
         "find . -delete", "find . -exec rm {} \\;", "find . -okdir x",
         # arbitrary / unknown binaries
@@ -265,8 +279,8 @@ def test_subagent_bash_tier_dispatch(nx_fresh, monkeypatch):
         assert ok == "ran:grep -rn spawn nx/", ok
         ok2 = _dispatch.run_tool("run_bash", {"command": "ps aux"})
         assert ok2 == "ran:ps aux"
-        for bad in ("rm -rf x", "echo hi > f", "git push", "ps aux | grep x",
-                    "mkdir d", "find . -delete"):
+        for bad in ("rm -rf x", "echo hi > f", "git push", "ps aux; grep x",
+                    "mkdir d", "find . -delete", "cat a | python -c 'x'"):
             out = _dispatch.run_tool("run_bash", {"command": bad})
             assert out.startswith("ERROR"), (bad, out)
         # the redirection case now dies at the write fence before the

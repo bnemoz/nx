@@ -27,6 +27,9 @@ _ALLOWLIST = {
     "NX_FOO": "test fixture",
     "NX_MY": "test fixture",
     "NX_TEST_URLOPEN_HOLD": "test-suite only: shrinks the busy-keep sleep in test_perf_turn_tax",
+    # matched inside the private module global _NX_STATE_DIR_RE in
+    # nx/_clobber.py — a regex object, not an env var (0.145.4 residue)
+    "NX_STATE_DIR_RE": "private identifier substring, not an env var",
     "NX_MY_TOKEN": "test fixture",
     "NX_OTHER": "test fixture",
     "NX_MISSING_API_KEY": "test fixture",
