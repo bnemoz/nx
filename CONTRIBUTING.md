@@ -265,6 +265,18 @@ tests/test_test_speed_tunables.py).
   resolved at import; now the module attribute is the default and
   _env_int runs inside read_image.)
 
+- A test that drives an input/event loop (run_view, the chatbox loop, a
+  poller) must be able to end the run by itself: feed it a scripted reader
+  built on `_reader_for` (StopIteration → EOFError; `run_view` converts a dry
+  reader into a clean break), and pick script keys that don't collide with
+  loop-level intercepts (`esc` pops a view stack deeper than one, `?` is the
+  overlay gesture). A reader that returns filler keys forever once its trigger
+  is missed spins its xdist worker at 100% CPU and stalls the whole suite —
+  this hung `-n auto` at 95% for real (0.148.9). conftest's per-test watchdog
+  (20s, `@pytest.mark.watchdog(seconds)` to raise) turns such a runaway into a
+  named TimeoutError instead; the contract is pinned by
+  `tests/test_fullscreen.py::test_a_dry_reader_ends_the_run_instead_of_looping`.
+
 ## Choosing what tests to run
 
 ### Lint and type check (ruff + ty)

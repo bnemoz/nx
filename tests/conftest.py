@@ -31,6 +31,7 @@ Three jobs, all about keeping the suite fast, hermetic, and xdist-safe:
 import atexit
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -383,6 +384,53 @@ def _restore(fspath, item=None):
         _nx.SESSION_HOME = _home
         if "nx._state" in sys.modules:
             sys.modules["nx._state"].SESSION_HOME = _home
+
+
+# --- per-test watchdog ---------------------------------------------------------
+# No test may hang the suite (docs/test-architecture.md: a stall at ~95% with
+# one worker burning CPU used to wedge the whole -n auto run). A SIGALRM
+# watchdog converts a runaway test into a normal TimeoutError failure naming
+# the nodeid. The budget sits well above the slowest legitimate test (the
+# eval-corpus run, ~8s under -n auto load) but far below "stuck forever".
+_WATCHDOG_SECONDS = 20.0
+
+
+def _watchdog_timeout(item):
+    """Opt-out marker: `@pytest.mark.watchdog(seconds)` raises the budget."""
+    for m in item.iter_markers(name="watchdog"):
+        return float(m.args[0]) if m.args else _WATCHDOG_SECONDS
+    return _WATCHDOG_SECONDS
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "watchdog(seconds): per-test hang budget")
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """Arm the SIGALRM watchdog around the CALL phase only (POSIX only; on
+    other platforms the hook degrades to the plain call). Setup/teardown are
+    NOT covered: several fixtures legitimately wait on shrunken-but-real
+    subprocess budgets and would trip the same alarm."""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+    budget = _watchdog_timeout(item)
+    old = signal.signal(signal.SIGALRM, _watchdog_fire)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def _watchdog_fire(signum, frame):  # noqa: ARG001 - signal handler signature
+    raise TimeoutError(
+        "test exceeded the suite's per-test hang budget — a test that "
+        "drives an input loop must terminate (scripted readers raise "
+        "EOFError when dry); see CONTRIBUTING.md 'Adding tests' "
+        "(mark @pytest.mark.watchdog(seconds) to raise the budget)")
 
 
 @pytest.hookimpl(wrapper=True)
