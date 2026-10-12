@@ -681,6 +681,7 @@ class SessionsView(_fullscreen.View):
         self.query = ""
         self.mode = "list"       # "list" | "preview"
         self.sel = 0
+        self.confirm_id: str | None = None  # session awaiting delete confirm
         self.sessions: list[dict[str, Any]] = []
         self.preview: list[str] = []
         self.notice = ""
@@ -722,7 +723,9 @@ class SessionsView(_fullscreen.View):
         if self.mode == "preview" and self.sessions:
             title = f"session · {self.sessions[self.sel]['id']}"
             body = [ln[:width] for ln in self.preview]
-            footer = "R resume · esc back to the list"
+            footer = ("R resume · d delete · esc back to the list"
+                      if self.confirm_id is None
+                      else f"delete {self.confirm_id[:12]}? y confirm · n cancel")
         else:
             title = (f"sessions · {len(self.sessions)} row(s){where} · "
                      f"page 1")
@@ -740,7 +743,9 @@ class SessionsView(_fullscreen.View):
                 desc = s.get("description") or s.get("preview")
                 if desc:
                     body.append(f"{role('MUTED')}      {desc[:width - 8]}{RESET}")
-            footer = "enter preview · / search · R resume · q/esc back"
+            footer = ("enter preview · / search · R resume · d delete · q/esc back"
+                      if self.confirm_id is None
+                      else f"delete {self.confirm_id[:12]}? y confirm · n cancel")
             if not self.sessions:
                 body = [f"{role('WARNING')}no sessions{where}{RESET}"]
         lines.extend(panel(title, body, footer=footer))
@@ -774,9 +779,43 @@ class SessionsView(_fullscreen.View):
             return "repaint"
         if key in ("R", "tab"):
             return self._resume()
+        if key == "d" and self.mode == "list" and self.confirm_id is None:
+            return self._arm_delete()
+        if key in ("y", "n") and self.confirm_id:
+            return self._delete(shell)
         if key in ("esc", "q", "ctrl-c", "ctrl-d"):
             return "quit"
         return "repaint"
+
+    def _arm_delete(self) -> str:
+        if not self.sessions:
+            self.notice = "nothing to delete"
+            return "repaint"
+        sid = self.sessions[self.sel]["id"]
+        if sid == self.current_id:
+            self.notice = "can't delete the session you're currently in"
+            return "repaint"
+        self.confirm_id = sid
+        return "repaint"
+
+    def _delete(self, shell) -> str:
+        sid, self.confirm_id = self.confirm_id, None
+        if not sid:
+            return "repaint"
+        ans = shell.ask(f"delete session {sid[:12]}? y/n ›")
+        if ans is None or ans.strip().lower() not in ("y", "yes"):
+            self.notice = "delete cancelled"
+            return "repaint"
+
+        def _act() -> None:
+            from ._render import commit_line
+            ok = _delete_session(sid)
+            commit_line(f"  {'✓ deleted' if ok else '✗ could not delete'} "
+                        f"session {sid}")
+            self.refresh()
+
+        self.pending_action = _act
+        return "run"
 
     def _resume(self) -> str:
         if not self.sessions:

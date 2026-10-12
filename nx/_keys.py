@@ -88,6 +88,7 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("/", "search"),
         ("enter", "preview"),
         ("R", "resume"),
+        ("d", "delete"),
         ("esc", "back"),
     ],
     "memory": [
