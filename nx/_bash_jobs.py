@@ -224,8 +224,13 @@ def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
     # start_new_session detaches into a new session so terminal Ctrl+C /
     # SIGINT can't reach the background job — no external setsid binary
     # needed (macOS does not ship one). Redirect to the log file ourselves.
+    # Prefer bash: on Debian/Ubuntu /bin/sh is dash, which rejects common
+    # bash-isms (&>, |&, process substitution) with "Syntax error:
+    # redirection unexpected".  Fall back to sh on shells-free systems.
+    import shutil as _shutil
+    shell = _shutil.which("bash") or "sh"
     inner = _wrap_exit_trailer(command)
-    wrapped = (f"sh -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
+    wrapped = (f"{shell} -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 < /dev/null &\n"
                f"echo $!")
     r = subprocess.run(wrapped, shell=True, capture_output=True, text=True,
                        start_new_session=True, cwd=_cwd or None)
