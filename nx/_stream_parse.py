@@ -145,13 +145,19 @@ def _live_tool_progress(tcs: dict[int, dict[str, Any]]) -> str:
     show_tool_status then does what its comment claims. The in-place (no
     Live) branch keeps the precise per-call view; watching the numbers tick
     is the point there."""
-    names = []
+    counts: dict[str, int] = {}
     total = 0
     for i in sorted(tcs):
         c = tcs[i]
-        names.append(c["name"] or "tool")
+        n = c["name"] or "tool"
+        counts[n] = counts.get(n, 0) + 1
         total += len(c["args"])
-    names = ", ".join(names) if names else "tool call ..."
+    if not counts:
+        return "tool call ..."
+    # A parallel fan-out of same-named calls (10× spawn_agent) collapses to
+    # one `name ×N` entry instead of N comma-joined copies.
+    names = ", ".join(n if k == 1 else f"{n} ×{k}"
+                      for n, k in counts.items())
     if total:
         return f"{names} · {_status_abbr(total)} args"
     return names
@@ -159,6 +165,12 @@ def _live_tool_progress(tcs: dict[int, dict[str, Any]]) -> str:
 
 def _tool_call_progress(tcs: dict[int, dict[str, Any]], precise: bool = True,
                         quantized: bool = False) -> str:
+    """Single call: the classic precise per-call view. Multiple calls (a
+    parallel fan-out): one compact aggregate — the per-call comma list used to
+    re-render in full on every bucket crossing of ANY call, committing an
+    ever-growing line per crossing (the 0.144 staircase regression)."""
+    if len(tcs) > 1:
+        return _live_tool_progress(tcs)
     parts = []
     for i in sorted(tcs):
         c = tcs[i]
