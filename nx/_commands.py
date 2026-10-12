@@ -136,7 +136,8 @@ _SPECS = [
     ("/toolcalls", "tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show",
      "[text|native|auto] [reset [tool]]", [],
      ["reset", "text", "native", "auto"], 1, "model"),
-    ("/undo", "revert the last write_file/edit_file/multi_edit", "[--list]",
+    ("/undo", "revert the last write_file/edit_file/multi_edit; "
+     "--list: full screen", "[--list]",
      [], None, 1, "workflow"),
     ("/reset", "clear conversation, start a fresh session", None,
      [("/clear", "alias for /reset", False),

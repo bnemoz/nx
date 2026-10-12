@@ -639,7 +639,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/build [issue]` | spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch |
 | `/plan [goal\|done\|off\|discard]` | start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard |
 | `/verify [cmd\|off\|run]` | set / clear / force-run the post-edit verify command (NX_VERIFY_CMD) |
-| `/undo [--list]` | revert the last write_file/edit_file/multi_edit |
+| `/undo [--list]` | revert the last write_file/edit_file/multi_edit; --list: full screen |
 <!-- END GENERATED COMMANDS -->
 
 ### Keyboard shortcuts

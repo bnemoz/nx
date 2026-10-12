@@ -30,7 +30,7 @@ import json
 import os
 import sys
 import time
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 if sys.version_info >= (3, 11):
     from typing import NotRequired
@@ -43,6 +43,7 @@ else:  # 3.9/3.10 have no typing.NotRequired; typing_extensions if present,
                 return item
 
 from ._env import _env_int
+from ._fullscreen import View
 from ._private import atomic_write_private
 from . import _state as st
 
@@ -417,3 +418,177 @@ def undo_last() -> tuple[Optional[Checkpoint], str]:
         msg += " (FAILED: " + "; ".join(errors) + ")"
     persist_undo_stack()
     return entry, msg
+
+
+# --- the /undo fullscreen view (0.152.0) ---------------------------------------
+# The same recipe as /diff's ReviewView, /context's ContextView and /memory's
+# MemoryView: the view lives in the module that owns the data, renders
+# exclusively through `_render.py`, and its ONLY mutation is the EXISTING
+# `undo_last()` handed back to the fullscreen shell as a deferred
+# `pending_action` (run AFTER the shell leaves the alternate screen, so the
+# confirm prompt never paints into it). No new revert logic: `u` calls the
+# exact same function bare `/undo` runs.
+
+def _undo_paths_summary(files: list[FileSnapshot]) -> str:
+    """The path column `/undo --list` prints: one path, or an N-file summary."""
+    if len(files) == 1:
+        return files[0]["path"]
+    return f"{len(files)} files: " + ", ".join(f["path"] for f in files)
+
+
+def _undo_when(ts: float | None) -> str:
+    """Relative time, the SAME formatter `/undo --list` prints."""
+    from ._sessions_cmd import _fmt_when
+    return _fmt_when(ts)
+
+
+class UndoView(View):
+    """The `/undo --list` view: a browsable checkpoint history (most recent
+    first, the exact rows the inline list prints), `enter` opens one
+    checkpoint's per-file detail, `u` reverts the NEWEST checkpoint.
+
+    Deliberately read-only apart from that one action: consuming the stack is
+    strictly LIFO (`undo_last()` pops the top), so the view offers NO
+    pick-N revert — browsing an older checkpoint is inspection, mutation is
+    always "undo newest", same as pressing `/undo` at the prompt.
+    """
+
+    surface = "undo"
+    title = "undo"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sel = 0
+        self.mode = "list"        # "list" | "checkpoint"
+        self.entries: list[Checkpoint] = []
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Re-read the stack — most recent first, the exact rows
+        `/undo --list` prints. Called on open AND after a deferred undo (the
+        stack shrank; the next repaint must show it)."""
+        self.entries = list_checkpoints()
+        self.sel = min(self.sel, max(0, len(self.entries) - 1))
+        self.mode = "list"
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._ansi import clip_display
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        self.sel = min(self.sel, max(0, len(self.entries) - 1))
+        lines = [f"{role('ACCENT')}undo{RESET}{role('MUTED')} — "
+                 f"{hint_line('undo')}{RESET}"]
+        budget = max(1, height - len(lines) - 2)   # header line + box borders
+        body: list[str] = []
+        n = len(self.entries)
+        if self.mode == "checkpoint" and n:
+            cp = self.entries[min(self.sel, n - 1)]
+            body.append(f"{role('ACCENT')}{cp['tool']}{RESET}"
+                        f"{role('MUTED')}  checkpoint "
+                        f"{n - min(self.sel, n - 1)} of {n}  "
+                        f"({_undo_when(cp.get('ts'))}){RESET}")
+            for snap in cp["files"]:
+                verb = "restore" if snap["existed"] else "delete"
+                size = len(snap.get("content") or "")
+                body.append(f"{role('MUTED')}{verb:<8}{RESET} "
+                            + clip_display(snap["path"], width - 16)
+                            + (role('MUTED') + f"  {size} B" + RESET
+                               if snap["existed"] else ""))
+            lines.extend(panel(f"{cp['tool']} · {len(cp['files'])} file(s)",
+                               [ln[:width] for ln in body],
+                               footer=f"newest: {cp['tool']} "
+                                      f"({_undo_when(cp.get('ts'))})"))
+            if self.notice:
+                lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+            return lines[:height]
+        if not n:
+            body.append(f"{role('MUTED')}  nothing to undo — /undo --list "
+                        f"prints the same list inline{RESET}")
+        else:
+            shown = budget if n <= budget else max(1, budget - 1)
+            start = max(0, min(self.sel - shown + 1, n - shown))
+            stop = min(n, start + shown)
+            for i in range(start, stop):
+                cp = self.entries[i]
+                marker = "›" if i == self.sel else " "
+                text = clip_display(
+                    f"{i + 1:>2}  {cp['tool']:<11} "
+                    f"{_undo_paths_summary(cp['files'])}  "
+                    f"({_undo_when(cp.get('ts'))})",
+                    width - 3)
+                r = "ACCENT" if i == self.sel else "MUTED"
+                mcol = "ACCENT" if i == self.sel else "MUTED"
+                body.append(f"{role(mcol)}{marker}{RESET} "
+                            f"{role(r)}{text}{RESET}")
+            hidden = n - (stop - start)
+            if hidden > 0:
+                body.append(f"{role('MUTED')}  … {hidden} more checkpoint"
+                            f"{'s' if hidden != 1 else ''} (j/k scroll){RESET}")
+        lines.extend(panel(f"undo checkpoints · {n}",
+                           [ln[:width] for ln in body],
+                           footer=f"{self.sel + 1}/{n}"))
+        if self.notice:
+            lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+        return lines[:height]
+
+    def on_key(self, key: str, shell: Any) -> str:
+        self.notice = ""
+        if key == "j/k":
+            # The registry advertises the pair as ONE hint label ("j/k move");
+            # the two real keys are handled below (the ReviewView convention).
+            return "repaint"
+        last = max(0, len(self.entries) - 1)
+        if self.mode == "checkpoint":
+            if key in ("enter", "tab", "esc", "left"):
+                self.mode = "list"
+                return "repaint"
+            if key == "u":
+                return self._undo(shell)
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(last, self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key == "pagedown":
+            self.sel = min(last, self.sel + 10)
+            return "repaint"
+        if key == "pageup":
+            self.sel = max(0, self.sel - 10)
+            return "repaint"
+        if key == "enter":
+            if self.entries:
+                self.mode = "checkpoint"
+            return "repaint"
+        if key == "u":
+            return self._undo(shell)
+        if key == "r":
+            self.refresh()
+            return "repaint"
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+    def _undo(self, shell: Any) -> str:
+        """Queue the EXISTING `undo_last()` (what bare `/undo` runs) as the
+        deferred action — confirm via the shell prompt first, the same shape
+        as MemoryView's delete. Cancelled ask -> notice, nothing queued."""
+        if not self.entries:
+            self.notice = "nothing to undo"
+            return "repaint"
+        newest = self.entries[0]   # list order is most-recent-first
+        if shell.ask(f"undo newest checkpoint ({newest['tool']}, "
+                     f"{_undo_paths_summary(newest['files'])})? y/n ›") is None:
+            self.notice = "undo cancelled"
+            return "repaint"
+        view = self
+
+        def _act() -> None:
+            from ._render import commit_line
+            entry, msg = undo_last()
+            commit_line(f"  ↳ {msg}")
+            view.refresh()
+
+        self.pending_action = _act
+        return "run"

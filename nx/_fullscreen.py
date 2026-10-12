@@ -562,6 +562,12 @@ def memory_view():
     return MemoryView()
 
 
+@register_view("undo")
+def undo_view():
+    from ._undo import UndoView
+    return UndoView()
+
+
 @register_view("sessions")
 def sessions(state):
     from ._sessions_cmd import SessionsView

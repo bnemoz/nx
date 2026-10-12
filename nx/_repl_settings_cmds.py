@@ -813,19 +813,36 @@ def _cmd_recover(user: str, state: _ReplState) -> None:
 def _cmd_undo(user: str, state: _ReplState) -> None:
     import nx as _m
     if user in ("/undo --list", "/undo -l", "/undo list"):
-        checkpoints = _m.list_checkpoints()
-        if not checkpoints:
-            print(f"{DIM}  nothing to undo{RESET}")
+        # The fullscreen UndoView when a tty is available, with the pre-view
+        # inline table (`_undo_inline_list`) as the fallback — the same
+        # gate-then-open_view shape /context and /memory use, so off a tty or
+        # with NX_FULLSCREEN=0 the output is byte-identical. Bare /undo and
+        # every other arg form keep their exact mutating/inline behavior.
+        from . import _fullscreen
+        from ._undo import UndoView
+        if _fullscreen.wants_fullscreen():
+            _fullscreen.open_view(
+                UndoView(), fallback=lambda: _undo_inline_list(_m))
             return
-        print(f"{DIM}  pending undo checkpoints (most recent first):{RESET}")
-        for i, c in enumerate(checkpoints, 1):
-            files = c["files"]
-            paths = files[0]["path"] if len(files) == 1 else f"{len(files)} files: " + ", ".join(f["path"] for f in files)
-            print(f"  {DIM}{i:>2}{RESET}  {c['tool']:<11} {paths}  {DIM}({_fmt_when(c.get('ts'))}){RESET}")
+        _undo_inline_list(_m)
         return
     entry, msg = _m.undo_last()
     color = C.ERROR if msg.startswith("ERROR") else DIM
     print(f"{color}  ↳ {msg}{RESET}")
+
+
+def _undo_inline_list(_m) -> None:
+    """`/undo --list`'s inline table — the pre-view output, byte for byte
+    (the fullscreen fallback, so the off-tty path cannot rot)."""
+    checkpoints = _m.list_checkpoints()
+    if not checkpoints:
+        print(f"{DIM}  nothing to undo{RESET}")
+        return
+    print(f"{DIM}  pending undo checkpoints (most recent first):{RESET}")
+    for i, c in enumerate(checkpoints, 1):
+        files = c["files"]
+        paths = files[0]["path"] if len(files) == 1 else f"{len(files)} files: " + ", ".join(f["path"] for f in files)
+        print(f"  {DIM}{i:>2}{RESET}  {c['tool']:<11} {paths}  {DIM}({_fmt_when(c.get('ts'))}){RESET}")
 
 
 def _cmd_compress(user: str, state: _ReplState) -> None:

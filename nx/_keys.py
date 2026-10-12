@@ -99,6 +99,15 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("?", "keys"),
         ("esc", "back"),
     ],
+    "undo": [
+        ("j/k", "move"),
+        ("enter", "open checkpoint"),
+        ("tab", "back to list"),
+        ("u", "undo newest"),
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
     "todos": [
         ("j/k", "move"),
         ("?", "keys"),

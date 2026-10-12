@@ -1099,3 +1099,182 @@ def test_memory_subcommands_keep_their_inline_behaviour(monkeypatch, capsys):
     assert "usage" in capsys.readouterr().out.lower()
     mc._cmd_memory([], "/memory optimize")
     assert capsys.readouterr().out is not None
+
+
+# ---------------------------------------------------------------------------
+# /undo --list — the UndoView (Phase 3 of the view work: the MemoryView recipe
+# again, with the ONE mutation being the EXISTING undo_last() deferred through
+# pending_action — no pick-N revert, the stack is strictly LIFO)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _undo_stack():
+    """Two pending checkpoints on the real stack (the view reads the same
+    list_checkpoints() the inline /undo --list prints): an older write_file
+    and a NEWER multi_edit over two files. The conftest state-restore fixture
+    rewinds `nx._state` after each test, so this leaks nowhere."""
+    import time as _time
+    from nx import _state as st
+    st._UNDO_STACK[:] = [
+        {"tool": "write_file", "ts": _time.time() - 120,
+         "files": [{"path": "old.py", "existed": True,
+                    "content": "old content"}]},
+        {"tool": "multi_edit", "ts": _time.time() - 5,
+         "files": [{"path": "new.py", "existed": False, "content": None},
+                   {"path": "other.py", "existed": True,
+                    "content": "x" * 12}]},
+    ]
+    return st
+
+
+def test_undo_view_is_registered_and_its_keys_are_advertised(_undo_stack):
+    from nx import _fullscreen, _keys, _undo
+    assert "undo" in _fullscreen.view_names()
+    assert isinstance(_fullscreen.make_view("undo"), _undo.UndoView)
+    view = _undo.UndoView()
+    real = {"j/k": "j"}
+
+    class _S:
+        ask = staticmethod(lambda label, initial="": "y")
+
+    for key, _meaning in _keys.keys_for("undo"):
+        assert view.on_key(real.get(key, key), _S()) in (
+            "repaint", "quit", "run"), key
+
+
+def test_undo_view_renders_rows_hint_and_quit_keys(_undo_stack):
+    from nx import _keys, _render, _undo
+    view = _undo.UndoView()
+    body = "\n".join(view.render(120, 20))
+    assert _render.BOX_TL in body and _render.BOX_BL in body
+    assert _render.role("ACCENT") in body
+    assert _keys.hint_line("undo") in body   # one registry: hints can't drift
+    # most recent FIRST — the /undo --list ordering — with its path summary
+    assert body.index("multi_edit") < body.index("write_file")
+    assert "2 files: new.py, other.py" in body and "old.py" in body
+    assert "undo checkpoints · 2" in body
+    for key in ("q", "ctrl-c", "ctrl-d"):
+        assert view.on_key(key, None) == "quit", key
+
+
+def test_undo_view_enter_opens_the_checkpoint_and_tab_returns(_undo_stack):
+    from nx import _undo
+    view = _undo.UndoView()
+    assert view.on_key("enter", None) == "repaint"
+    assert view.mode == "checkpoint"
+    body = "\n".join(view.render(120, 20))
+    # the NEWEST checkpoint opened: per-file rows with the restore/delete verb
+    assert "delete" in body and "restore" in body
+    assert "new.py" in body and "other.py" in body
+    assert "12 B" in body                    # snapshot size, cheap to show
+    assert view.on_key("tab", None) == "repaint"
+    assert view.mode == "list"
+    assert view.on_key("esc", None) == "quit"   # esc at the list quits
+
+
+def test_undo_view_u_defers_through_the_real_undo_last(_undo_stack, monkeypatch):
+    from nx import _undo
+    calls = []
+
+    def _fake_undo_last():
+        calls.append(1)
+        return {"tool": "multi_edit", "files": []}, "reverted multi_edit on 2 file(s)"
+
+    monkeypatch.setattr(_undo, "undo_last", _fake_undo_last)
+    view = _undo.UndoView()
+    shell = type("S", (), {"ask": staticmethod(
+        lambda label, initial="": "y")})()
+    # DEFERRED: the stack is untouched while the view is still on screen
+    assert view.on_key("u", shell) == "run"
+    assert callable(view.pending_action)
+    assert calls == [] and len(_undo_stack._UNDO_STACK) == 2
+    view.pending_action()
+    assert calls == [1]                  # the existing undo_last ran, once
+    assert len(_undo_stack._UNDO_STACK) == 2   # fake undo pops nothing; view re-reads
+
+
+def test_undo_view_undo_mentioned_the_newest_checkpoint_in_the_ask(_undo_stack):
+    """The confirm prompt says WHICH checkpoint is about to be reverted — the
+    newest, always (the view offers no pick-N revert)."""
+    from nx import _undo
+    asked = []
+    view = _undo.UndoView()
+    shell = type("S", (), {"ask": staticmethod(
+        lambda label, initial="": asked.append(label))})()
+    view.on_key("u", shell)
+    assert len(asked) == 1
+    assert "multi_edit" in asked[0] and "new.py" in asked[0]
+    assert view.pending_action is None      # ask returned None: cancelled
+    assert "undo cancelled" in view.notice
+    assert len(_undo_stack._UNDO_STACK) == 2
+
+
+def test_undo_view_empty_stack_is_a_notice_not_a_crash(monkeypatch):
+    from nx import _state as st
+    from nx import _undo
+    st._UNDO_STACK[:] = []
+    view = _undo.UndoView()
+    body = "\n".join(view.render(120, 20))
+    assert "nothing to undo" in body
+    assert view.on_key("enter", None) == "repaint"   # no selection: stays put
+    assert view.mode == "list"
+    shell = type("S", (), {"ask": staticmethod(lambda label, initial="": "y")})()
+    assert view.on_key("u", shell) == "repaint"      # nothing queued
+    assert view.pending_action is None
+    assert "nothing to undo" in view.notice
+
+
+def test_undo_handler_opens_the_view_for_every_list_form(monkeypatch):
+    """`/undo --list` (and its `-l`/`list` aliases) take the view, with the
+    inline table wired as the fallback (so the off-tty path cannot rot)."""
+    import nx
+    from nx import _repl_settings_cmds as sc
+    opened = []
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: opened.append(
+                            (view, fallback)) or True)
+    for line in ("/undo --list", "/undo -l", "/undo list"):
+        sc._cmd_undo(line, None)
+        view, fallback = opened[-1]
+        assert view.surface == "undo"
+        assert callable(fallback)
+
+
+def test_undo_off_tty_prints_the_pre_view_list_byte_for_byte(
+        monkeypatch, capsys):
+    """NX_FULLSCREEN=0 (and any off-tty run) keeps the pre-view /undo --list
+    output byte for byte."""
+    import time as _time
+    import nx
+    from nx import _repl_settings_cmds as sc
+    from nx import _state as st
+    st._UNDO_STACK[:] = [{"tool": "write_file", "ts": _time.time() - 30,
+                          "files": [{"path": "a.py", "existed": True,
+                                     "content": "x"}]}]
+    monkeypatch.setenv("NX_FULLSCREEN", "0")
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "off a tty /undo --list must not open a view"))
+    sc._cmd_undo("/undo --list", None)
+    inline = capsys.readouterr().out
+    assert "pending undo checkpoints" in inline and "a.py" in inline
+    sc._undo_inline_list(nx)
+    assert capsys.readouterr().out == inline
+
+
+def test_undo_other_arg_forms_never_open_the_view(monkeypatch, capsys):
+    """Bare /undo still performs the undo INLINE (unchanged mutating
+    behavior); no other arg form takes the view even with a tty."""
+    import nx
+    from nx import _repl_settings_cmds as sc
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "this /undo arg form must not open the view"))
+    monkeypatch.setattr(nx, "undo_last", lambda: (None, "nothing to undo"))
+    sc._cmd_undo("/undo", None)
+    assert "nothing to undo" in capsys.readouterr().out
+    sc._cmd_undo("/undo --wat", None)   # unknown arg: falls through to undo
+    assert "nothing to undo" in capsys.readouterr().out
