@@ -26,14 +26,14 @@ Use `uv` for local development:
 
 ```bash
 uv pip install -e .                 # install the CLI and runtime dependencies
-uv run pytest tests/ -n auto        # run pytest-style tests in parallel (~14s; workers capped at 32)
+uv run pytest tests/ -n 8           # run pytest-style tests in parallel (eight workers maximum)
 uv run python3 tests/test_sources.py # run a standalone assertion-style test
 uv run ruff check .                 # lint gate — must be clean before committing
 uv run ty check nx                  # type check; no new diagnostics in touched files
 nx --help                           # inspect the installed CLI
 ```
 
-`-n auto` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~40s) works too and is the fallback if xdist is unavailable.
+`-n 8` is the default way to run the suite; plain `uv run pytest tests/` (serial, ~40s) works too and is the fallback if xdist is unavailable. Run only one full suite on a host at a time. xdist isolates workers within one pytest invocation; it does not isolate concurrent suites, which contend for the same CPU, thermal headroom, repository, and external process state. Do not background a full suite and start another one before it exits; wait for its result or kill its process group first.
 
 Target a single pytest test during development with `uv run pytest tests/test_risk_context.py -k test_name`. The suite is designed to run offline; do not depend on a live model endpoint.
 
@@ -44,7 +44,7 @@ The suite runs 12/12 clean on an idle box. A failure you cannot reproduce standa
 1. **Check the run's wall time.** A clean run takes ~13.6s. If the failing run took 23s+, another pytest/nx session was running concurrently on this machine (verify with `ps aux | grep pytest` and `ls -t ~/.nx/bg-logs/` — including sessions in *other* projects). Re-run once before investigating anything.
 2. **Check the known-flake ledger** in `docs/test-architecture.md` §5.0. It lists each recurring flake, its root cause, and its fix — including the residue classes (`_PENDING_*` notice slots, `_TOOL_RESULT_CACHE`, the wake poller, `_BG_NOTICE_SEEN`/`_BG_SCAN_DONE`) that `nx_state_reset` in `tests/_nxtest.py` now drains. If a test fails because some new hidden home wasn't drained, the fix belongs in that fixture — centrally, once — not in the failing test.
 3. **Genuinely environmental flakes live in `_FLAKY_RERUN_NODEIDS`** (`tests/conftest.py`): those nodeids get one silent in-process retry; if the retry also fails *and* the test passes standalone, extend the tuple with a one-line comment — do not debug it.
-4. **Reproduce serially before bisecting**: `uv run pytest tests/test_suspect.py tests/test_poisoned.py -q` (both orders). Cross-file failures that reproduce serially are residue (fix the fixture or the leaking test); failures that only appear under `-n auto` after that are contention — see step 1.
+4. **Reproduce serially before bisecting**: `uv run pytest tests/test_suspect.py tests/test_poisoned.py -q` (both orders). Cross-file failures that reproduce serially are residue (fix the fixture or the leaking test); failures that only appear under `-n 8` after that are contention — see step 1.
 
 Do not delete a slow or flaky test to make a run green, and do not add sleeps to a timing-sensitive test — poll on the condition (`_wait_for`) or sync on the event instead. The suite's wall time is dominated by its slowest single file (per-file `--dist loadfile` packing), so before assuming the suite "got slower," check for a straggler file with `--junitxml` + per-class durations before touching distribution settings.
 
@@ -68,7 +68,7 @@ Ruff configuration includes two intentional `per-file-ignores` blocks in `pyproj
 
 ## Testing Guidelines
 
-Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it. The suite is xdist-safe by construction: `tests/conftest.py` rewinds `NX_*` env vars and all `nx.*` module state around every test, so a new test file must not rely on state left behind by other files — set up what it needs (module scope or a fixture) instead of depending on execution order.
+Name pytest tests `test_*.py` and test functions `test_*`. Follow existing test setup: insert the repository root on `sys.path`, clear relevant `NX_*` variables, and set `NX_ENV_FILE` to `/dev/null` or a temporary file so local credentials cannot affect results. Add a focused regression test for parsing, approval, terminal, or concurrency changes. Run the relevant test file(s) for the touched area. If the change is behavioral (dispatch, parsing, approval, compression, terminal rendering, or module state), also run the full pytest suite before submitting — a docs-only or fully isolated addition (see CONTRIBUTING.md) doesn't need it. The suite is xdist-safe within one invocation: `tests/conftest.py` rewinds `NX_*` env vars and all `nx.*` module state around every test, so a new test file must not rely on state left behind by other files. That fixture does not isolate independent pytest invocations or their child processes; do not overlap full suites. Set up each test's required state (module scope or a fixture) instead of depending on execution order.
 
 Every change to `nx/` or `tests/` also passes `uv run ruff check .` (hard gate) and adds no new `uv run ty check nx` diagnostics in the touched files. See CONTRIBUTING.md's "Lint and type check" section.
 
