@@ -20,12 +20,20 @@ Two pieces:
    compress() must keep verbatim (pinned turns move into the kept tail even
    when they're old). State is a list of indexes on st (session lifetime,
    persisted by the session save like todos — see _repl_state).
+
+4. `ContextView` — the full-screen /context view (the Phase-D pattern: the view
+   lives in the module that owns the data). It renders the report through
+   `_render.py`/`_keys.py`, and is the one view allowed a mutation — pinning —
+   which it hands back to the fullscreen shell as a deferred `pending_action`
+   calling the EXISTING `_ctx_pin`/`_ctx_unpin` helpers above (no new pin
+   logic).
 """
 from __future__ import annotations
 
 from typing import Any
 
 from . import _state as st
+from ._fullscreen import View
 
 CHARS_PER_TOKEN = 4
 
@@ -211,3 +219,212 @@ def _ctx_unpin(spec: str | None, messages: list[dict[str, Any]]) -> tuple[list[i
 
 def _pinned_indexes() -> set[int]:
     return set(getattr(st, "_CTX_PINNED", []) or [])
+
+
+# ---------------------------------------------------------------------------
+# /context — alternate-screen view (Phase 1 of the 3-phase view work: same
+# Phase-D pattern as /tabs, /diff, /sessions, /todo — the view lives in the
+# module that owns the data). One deliberate deviation from those views: a
+# view is otherwise read-only, but /context's whole point is pinning, so `p`
+# hands the mutation back to the shell as a DEFERRED pending_action that calls
+# the EXISTING `_ctx_pin`/`_ctx_unpin` helpers (no new pin logic here): the
+# shell leaves the alternate screen first, then the action runs, so no state
+# changes underneath a live frame. The inline one-shot print stays as the
+# command's fallback, byte-identical to the pre-view `/context` output.
+# ---------------------------------------------------------------------------
+
+# message role -> semantic render role (never a raw palette hue: the Phase B
+# grep guard enforces it). Unknown roles degrade to MUTED.
+_MSG_ROLES = {
+    "user": "ACCENT",
+    "assistant": "SUCCESS",
+    "system": "MUTED",
+    "tool": "TODO",
+}
+
+
+def _context_row(row: tuple[Any, ...], selected: bool, pinned: bool,
+                 hit: float | None, width: int) -> str:
+    """One message row: selection marker, pin marker, the same columns the
+    inline report prints (index, role, est tokens, cache hit, preview)."""
+    from ._ansi import clip_display
+    from ._render import RESET, role
+    i, role_name, t, preview = row[0], row[1], row[2], row[3]
+    marker = "›" if selected else " "
+    pin = "📌" if pinned else " "
+    hit_s = "—" if hit is None else f"{hit * 100:.0f}%"
+    text = clip_display(f"{pin}{i + 1:>4}  {role_name:<9} {t:>6}  "
+                        f"{hit_s:>4}  {preview}", width - 5)
+    return (f"{role('ACCENT')}{marker}{RESET} "
+            f"{role(_MSG_ROLES.get(role_name, 'MUTED'))}{text}{RESET}")
+
+
+class ContextView(View):
+    """The `/context` view: one row per message, selected with j/k, `p` (or
+    enter/space) toggles the pin that protects the turn from /compress.
+
+    The report is re-read whenever the message count changed (a background turn
+    appending to the session shows up without reopening the view) and on `r`;
+    between those the cached report is reused, because `_messages_token_report`
+    may call the server's /tokenize endpoint for its exact total and a repaint
+    every 0.25s must not cost a round trip. Pin markers are read live off
+    `st._CTX_PINNED` on every frame, so the marker never lags the state.
+    """
+
+    surface = "context"
+    title = "context"
+
+    def __init__(self, state: Any = None) -> None:
+        super().__init__()
+        self.state = state
+        self.sel = 0
+        self.report: dict[str, Any] = {}
+        self.n_messages = -1
+        self.refresh()
+
+    def _messages(self) -> list[dict[str, Any]]:
+        return list(getattr(self.state, "messages", None) or [])
+
+    def refresh(self) -> None:
+        """Re-read the report from the session's live message list."""
+        messages = self._messages()
+        self.report = _messages_token_report(messages)
+        self.n_messages = len(messages)
+        self.sel = min(self.sel, max(0, len(self.report.get("rows") or []) - 1))
+
+    def _heading(self) -> str:
+        """Panel title: totals, the exact count when the server gave one, and
+        the window share — all of it already in the report / a live attribute
+        read, nothing recomputed."""
+        from ._metrics import _abbr
+        rep = self.report
+        total = rep.get("total_est", 0)
+        head = f"context · {len(rep.get('rows') or [])} message(s) · ~{total} est"
+        exact = rep.get("total_exact")
+        if isinstance(exact, int) and exact > 0:
+            head += f" · {exact} exact"
+        mx = st.ACTIVE._context_window if st.ACTIVE else None
+        if isinstance(mx, int) and mx > 0:
+            head += f" · ≈{100 * total // mx}% of {_abbr(mx)} window"
+        return head
+
+    def _footer(self) -> str:
+        """Selection position, pin count and the per-role subtotals (by_role
+        excludes the per-turn tools= overhead, which gets its own line above)."""
+        from ._metrics import _abbr
+        by_role = self.report.get("by_role") or {}
+        role_s = "  ".join(f"{r}:{_abbr(t)}"
+                           for r, t in sorted(by_role.items(), key=lambda kv: -kv[1]))
+        n = len(self.report.get("rows") or [])
+        pos = f"{self.sel + 1}/{n}" if n else "0/0"
+        pins = len(_pinned_indexes())
+        pin_s = f"{pins} pinned · " if pins else ""
+        return f"{pos} · {pin_s}{role_s}"
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        if len(self._messages()) != self.n_messages:
+            self.refresh()          # a turn landed since the last frame
+        rep = self.report
+        rows = list(rep.get("rows") or [])
+        cache = rep.get("cache") or []
+        pinned = _pinned_indexes()
+        n = len(rows)
+        self.sel = min(self.sel, max(0, n - 1))
+        lines = [f"{role('ACCENT')}context{RESET}{role('MUTED')} — "
+                 f"{hint_line('context')}{RESET}"]
+        # The tools= schemas are in total_est but have no message row: name them
+        # above the box (the same sentence the inline report prints below it).
+        lines.extend(f"{role('MUTED')}{ln[:width]}{RESET}"
+                     for ln in _overhead_lines(rep.get("total_est", 0),
+                                               rep.get("overhead_est", 0)))
+        budget = max(1, height - len(lines) - 2)   # header line(s) + box borders
+        body: list[str] = []
+        if not rows:
+            body.append(f"{role('MUTED')}  (no messages yet — /context prints "
+                        f"the same report inline){RESET}")
+        else:
+            # Windowed on the selection (the TodoView rule): a long history
+            # scrolls instead of clipping the row the cursor sits on; the
+            # overflow note costs one body line only when something is hidden.
+            shown = budget if n <= budget else max(1, budget - 1)
+            start = max(0, min(self.sel - shown + 1, n - shown))
+            stop = min(n, start + shown)
+            for i in range(start, stop):
+                hit = cache[i] if i < len(cache) else None
+                body.append(_context_row(rows[i], i == self.sel,
+                                         rows[i][0] in pinned, hit, width))
+            hidden = n - (stop - start)
+            if hidden > 0:
+                body.append(f"{role('MUTED')}  … {hidden} more row"
+                            f"{'s' if hidden != 1 else ''} (j/k scroll){RESET}")
+        lines.extend(panel(self._heading(),
+                           [ln[:width] for ln in body],
+                           footer=self._footer()))
+        if self.notice:
+            lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+        return lines[:height]
+
+    def _toggle_pin(self) -> str:
+        """Queue the pin/unpin of the selected row as the deferred action; the
+        shell runs it AFTER leaving the alternate screen (the view's only
+        sanctioned mutation path). The mutation itself is the existing
+        `_ctx_pin`/`_ctx_unpin` pair — this view adds no pin logic."""
+        rows = list(self.report.get("rows") or [])
+        if not rows:
+            self.notice = "no message rows to pin"
+            return "repaint"
+        idx = rows[min(self.sel, len(rows) - 1)][0]
+        spec = str(idx + 1)                 # pin specs are 1-based
+        was_pinned = idx in _pinned_indexes()
+
+        def _act() -> None:
+            from ._render import commit_line
+            messages = self._messages()
+            if was_pinned:
+                removed, remaining = _ctx_unpin(spec, messages)
+                commit_line(f"  unpinned {len(removed)} turn(s) "
+                            f"({len(remaining)} pinned remain)")
+            else:
+                added, pinned = _ctx_pin(spec, messages)
+                commit_line(f"  pinned {len(added)} turn(s) — compress will "
+                            f"keep them verbatim ({len(pinned)} pinned)")
+
+        self.pending_action = _act
+        return "run"
+
+    def on_key(self, key: str, shell: Any) -> str:
+        self.notice = ""
+        rows = list(self.report.get("rows") or [])
+        last = max(0, len(rows) - 1)
+        if key == "j/k":
+            # The registry advertises the pair as ONE hint label ("j/k move");
+            # the two real keys are handled below (the ReviewView convention).
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(last, self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key == "pagedown":
+            self.sel = min(last, self.sel + 10)
+            return "repaint"
+        if key == "pageup":
+            self.sel = max(0, self.sel - 10)
+            return "repaint"
+        if key in ("enter", "p", "space"):
+            return self._toggle_pin()
+        if key == "r":
+            self.refresh()
+            return "repaint"
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+
+def context_view(state: Any = None) -> "ContextView":
+    """The /context view object the fullscreen shell runs (`_fullscreen.context`
+    is the thin alias the command path uses)."""
+    return ContextView(state)

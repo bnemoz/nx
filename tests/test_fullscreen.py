@@ -13,7 +13,7 @@ What is testable without a real terminal is tested here:
   owns the screen, and a view pauses/reopens the dashboard around itself;
 * the inline fallback being byte-identical to the pre-Phase-D command output
   (/tabs -> `tabs_print_fallback`, /sessions -> `_cmd_sessions`, /diff -> the
-  plain file list);
+  plain file list, /context -> `_ctx_inline_report`);
 * one key registry: the views' advertised hints and their key handling cannot
   drift (every key in `_keys.keys_for(surface)` is a key the view handles).
 """
@@ -405,9 +405,9 @@ def test_sessions_view_keys_are_advertised_by_the_registry(monkeypatch):
 
 
 def test_every_view_surface_has_a_registry_entry():
-    from nx import _keys, _review, _sessions_cmd, _surfaces
+    from nx import _ctxreport, _keys, _review, _sessions_cmd, _surfaces
     for view in (_surfaces.tabs_view, _review.ReviewView,
-                 _sessions_cmd.SessionsView):
+                 _sessions_cmd.SessionsView, _ctxreport.ContextView):
         assert _keys.keys_for(getattr(view, "surface", "fullscreen"))
 
 
@@ -548,6 +548,173 @@ def test_no_new_command_was_added_to_review(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /context — the ContextView (Phase 1 of the view work: same recipe as
+# /diff's ReviewView, with ONE addition — the deferred pin action)
+# ---------------------------------------------------------------------------
+
+
+class _CtxState:
+    """The one bit of `_ReplState` the view reads: the live message list."""
+
+    def __init__(self, n: int = 3) -> None:
+        self.messages = [{"role": "system", "content": "sys prompt"}]
+        for i in range(n):
+            self.messages.append({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"msg {i} " + "x" * 80})
+
+
+def test_context_view_is_registered_and_its_keys_are_advertised(monkeypatch):
+    from nx import _ctxreport, _fullscreen, _keys
+    assert "context" in _fullscreen.view_names()
+    assert isinstance(_fullscreen.make_view("context", _CtxState()),
+                      _ctxreport.ContextView)
+    view = _ctxreport.context_view(_CtxState())
+    # "j/k" and "enter/p" are hint LABELS for two real keys each (the
+    # ReviewView convention): every advertised key must be handled.
+    real = {"j/k": "j", "enter/p": "p"}
+    for key, _meaning in _keys.keys_for("context"):
+        assert view.on_key(real.get(key, key), None) in (
+            "repaint", "quit", "run"), key
+
+
+def test_context_view_renders_rows_pin_marker_and_quit_keys(monkeypatch):
+    from nx import _ctxreport, _keys, _render
+    from nx import _state as st
+    monkeypatch.setattr(st, "_CTX_PINNED", [1], raising=False)
+    view = _ctxreport.context_view(_CtxState())
+    body = "\n".join(view.render(120, 20))
+    assert _render.BOX_TL in body and _render.BOX_BL in body
+    assert _render.role("ACCENT") in body
+    assert _keys.hint_line("context") in body   # one registry: hints can't drift
+    assert "msg 0" in body and "msg 2" in body
+    assert "📌" in body                          # row 2 is pinned
+    assert "1 pinned" in body
+    assert "context · 4 message(s)" in body
+    for key in ("q", "esc", "ctrl-c", "ctrl-d"):
+        assert view.on_key(key, None) == "quit", key
+
+
+def test_context_view_scrolls_and_refreshes_from_the_live_session():
+    from nx import _ctxreport
+    state = _CtxState(30)
+    view = _ctxreport.context_view(state)
+    view.render(120, 10)
+    assert "msg 0" in "\n".join(view.render(120, 10))
+    assert [view.on_key("j", None), view.on_key("down", None)] == [
+        "repaint", "repaint"]
+    assert view.sel == 2
+    assert view.on_key("k", None) == "repaint" and view.sel == 1
+    assert view.on_key("pagedown", None) == "repaint" and view.sel > 1
+    # a turn landing in the session shows up on the next frame (a frame tall
+    # enough to hold the whole history: the selection does not move with it)
+    state.messages.append({"role": "user", "content": "a brand new turn"})
+    assert "a brand new turn" in "\n".join(view.render(120, 60))
+    assert view.n_messages == len(state.messages)
+
+
+def test_context_view_pin_key_queues_the_existing_pin_helper(monkeypatch):
+    from nx import _ctxreport, _fullscreen
+    from nx import _state as st
+    monkeypatch.setattr(st, "_CTX_PINNED", [], raising=False)
+    seen = {}
+    real_pin, real_unpin = _ctxreport._ctx_pin, _ctxreport._ctx_unpin
+
+    def _pin(spec, messages):
+        seen["pin"] = spec
+        return real_pin(spec, messages)
+
+    def _unpin(spec, messages):
+        seen["unpin"] = spec
+        return real_unpin(spec, messages)
+
+    monkeypatch.setattr(_ctxreport, "_ctx_pin", _pin)
+    monkeypatch.setattr(_ctxreport, "_ctx_unpin", _unpin)
+    view = _fullscreen.make_view("context", _CtxState())
+    # `p` (and enter/space) is DEFERRED: the shell runs pending_action only
+    # after leaving the alternate screen, so nothing mutates under a frame.
+    assert view.on_key("p", None) == "run"
+    assert callable(view.pending_action)
+    assert st._CTX_PINNED == []
+    view.pending_action()
+    assert seen["pin"] == "1"            # specs are 1-based, row 0 -> "1"
+    assert st._CTX_PINNED == [0]
+    assert view.on_key("enter", None) == "run"
+    view.pending_action()
+    assert seen["unpin"] == "1"
+    assert st._CTX_PINNED == []
+
+
+def test_context_view_pin_on_an_empty_session_is_a_notice_not_a_crash():
+    from nx import _ctxreport
+
+    class _Empty:
+        messages: list = []
+
+    view = _ctxreport.context_view(_Empty())
+    assert "no messages yet" in "\n".join(view.render(100, 12))
+    assert view.on_key("p", None) == "repaint"
+    assert view.pending_action is None
+    assert "no message rows" in view.notice
+
+
+def test_context_handler_opens_the_view_when_a_tty_is_available(
+        monkeypatch, capsys):
+    """Bare /context takes the fullscreen view, with the inline report wired
+    as the fallback (so the off-tty path cannot rot)."""
+    import nx
+    from nx import _repl_settings_cmds as rs
+    opened = []
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: opened.append(
+                            (view, fallback)) or True)
+    state = _CtxState()
+    rs._cmd_ctx("/context", state)
+    view, fallback = opened[0]
+    assert view.surface == "context" and view.state is state
+    assert callable(fallback)            # the inline path stays wired
+    fallback()
+    assert "context by message" in capsys.readouterr().out
+
+
+def test_context_off_tty_prints_the_pre_view_body_byte_for_byte(
+        monkeypatch, capsys):
+    """NX_FULLSCREEN=0 (and any off-tty run) keeps the pre-view /context
+    output: `_ctx_inline_report` IS the body the command printed before the
+    view existed."""
+    import nx
+    from nx import _repl_settings_cmds as rs
+    monkeypatch.setenv("NX_FULLSCREEN", "0")
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "off a tty /context must not open a view"))
+    state = _CtxState()
+    rs._cmd_ctx("/context", state)
+    inline = capsys.readouterr().out
+    assert "by role:" in inline
+    rs._ctx_inline_report(state)
+    assert capsys.readouterr().out == inline
+
+
+def test_context_subcommands_keep_their_inline_behaviour(monkeypatch, capsys):
+    import nx
+    from nx import _repl_settings_cmds as rs
+    monkeypatch.setattr(nx._state, "_CTX_PINNED", [], raising=False)
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "/context pin must not open the view"))
+    state = _CtxState()
+    rs._cmd_ctx("/context pin 1", state)
+    assert "pinned 1 turn(s)" in capsys.readouterr().out
+    rs._cmd_ctx("/context unpin 1", state)
+    assert "unpinned 1 turn(s)" in capsys.readouterr().out
+    rs._cmd_ctx("/context clear", state)
+    assert "unpinned" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # view stack (0.148.9): push/pop and esc-pops
 # ---------------------------------------------------------------------------
 
@@ -653,10 +820,10 @@ def test_esc_on_the_bottom_view_still_quits_normally():
 # ---------------------------------------------------------------------------
 
 
-def test_the_five_builtin_views_are_registered():
+def test_the_builtin_views_are_registered():
     from nx import _fullscreen
     assert set(_fullscreen.view_names()) >= {
-        "tabs", "review", "sessions", "todos", "bgjobs"}
+        "tabs", "review", "sessions", "todos", "bgjobs", "context"}
 
 
 def test_make_view_builds_registered_views_lazily():

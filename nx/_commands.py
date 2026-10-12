@@ -74,7 +74,8 @@ _SPECS = [
     ("/yolo", "toggle auto-approve for writes and bash", None, [], None, 0, "session"),
     ("/resources", "show this nx process's CPU% and RSS memory", None,
      [("/resmon", "alias for /resources", True)], None, 1, "display"),
-    ("/context", "context breakdown by message; pin/unpin turns against /compress",
+    ("/context", "per-message context breakdown, full screen; "
+     "p pins the selected turn against /compress",
      "[all|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
      ["pin", "unpin", "clear"], 1, "context"),
     ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1, "context"),

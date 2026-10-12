@@ -550,6 +550,12 @@ def review(state=None):
     return ReviewView(state)
 
 
+@register_view("context")
+def context(state=None):
+    from ._ctxreport import ContextView
+    return ContextView(state)
+
+
 @register_view("sessions")
 def sessions(state):
     from ._sessions_cmd import SessionsView

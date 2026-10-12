@@ -353,10 +353,22 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
     compress() keeps them verbatim; /context clear — drop all pins."""
     from ._ctxreport import (_messages_token_report, _ctx_pin, _ctx_unpin,
                              _overhead_lines)
-    from ._metrics import _abbr
     parts = user.split()
     sub = parts[1].lower() if len(parts) >= 2 else ""
     messages = state.messages
+    if not sub:
+        # Bare /context: the full-screen view when a tty is available (Phase 1
+        # of the view work). `_ctx_inline_report` is the SAME body the command
+        # printed before the view — that is the fallback, so off a tty or with
+        # NX_FULLSCREEN=0 the output is byte-identical. Every subcommand below
+        # (pin/unpin/clear/all) keeps its one-shot inline behaviour, and an
+        # unrecognised argument still falls through to the inline report.
+        from . import _fullscreen
+        from ._ctxreport import context_view
+        if _fullscreen.wants_fullscreen():
+            _fullscreen.open_view(
+                context_view(state), fallback=lambda: _ctx_inline_report(state))
+            return
     if sub == "clear":
         removed, remaining = _ctx_unpin(None, messages)
         print(f"{DIM}  unpinned {len(removed)} turn(s){RESET}")
@@ -393,6 +405,19 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
             print(f"{DIM}{line}{RESET}")
         return
     # default: the report
+    _ctx_inline_report(state)
+
+
+def _ctx_inline_report(state: _ReplState) -> None:
+    """`/context`'s inline report body — the pre-view output, byte for byte.
+
+    Both the no-arg command's fallback (off a tty / `NX_FULLSCREEN=0`) and an
+    unrecognised argument land here, so adding the view changed nothing about
+    what `/context` prints when it does not take the alternate screen.
+    """
+    from ._ctxreport import _messages_token_report, _overhead_lines
+    from ._metrics import _abbr
+    messages = state.messages
     report = _messages_token_report(messages)
     rows = report["rows"]
     cache = report.get("cache") or []

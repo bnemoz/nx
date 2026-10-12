@@ -613,7 +613,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/delete [target]` | delete a saved session |
 | `/reset` | clear conversation, start a fresh session |
 | `/quit` | exit |
-| `/context [all\|pin\|unpin\|clear]` | context breakdown by message; pin/unpin turns against /compress |
+| `/context [all\|pin\|unpin\|clear]` | per-message context breakdown, full screen; p pins the selected turn against /compress |
 | `/cost` | session usage + per-source cost scoreboard |
 | `/status` | snapshot: source, model, caps, budgets, fence, approval |
 | `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory |
