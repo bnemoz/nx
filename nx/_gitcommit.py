@@ -154,7 +154,7 @@ def _git_commit_with_index(repo: str, file_list: list[str], message: str,
         return ("[git_commit] nothing staged — every path in `files` was already "
                 "committed, unchanged, or ignored; nothing was committed")
     from ._bash_jobs import _contains_secret
-    hit = _contains_secret(staged)
+    hit = _contains_secret(staged, env_dumps=False)
     if hit:
         return (f"REFUSED: the staged diff contains a secret-shaped string "
                 f"({hit}…) — remove the secret and commit again. Nothing was "

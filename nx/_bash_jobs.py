@@ -767,15 +767,22 @@ _SECRET_ENV_DUMPS = (
 )
 
 
-def _contains_secret(command: str) -> str | None:
-    """Return the name of the first secret pattern the command matches, or None."""
+def _contains_secret(command: str, env_dumps: bool = True) -> str | None:
+    """Return the name of the first secret pattern the command matches, or None.
+
+    env_dumps=False restricts the scan to content patterns (tokens, PEM
+    blocks, ...) — used by the commit guard, which scans DIFF TEXT, not a
+    shell command: a diff line reading "env" or "| set " is data, not an
+    environment dump (0.152.1).
+    """
     for rx in _SECRET_PATTERNS:
         m = rx.search(command)
         if m:
             return m.group(0)[:8] + "…"
-    for rx in _SECRET_ENV_DUMPS:
-        if rx.search(command):
-            return "environment/credential dump"
+    if env_dumps:
+        for rx in _SECRET_ENV_DUMPS:
+            if rx.search(command):
+                return "environment/credential dump"
     return None
 
 

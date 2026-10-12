@@ -282,6 +282,17 @@ def test_sync_keeps_live_wip_staged(repo):
     assert (rp / "a.py").read_text(encoding="utf-8") == "x = 9\n"
 
 
+def test_commit_guard_ignores_env_dump_words_in_diff(repo, monkeypatch):
+    # 0.152.1: the commit guard scans DIFF TEXT, not a shell command — a
+    # diff line containing "| set " or "env" is data, not an env dump.
+    # (Regression: 0.152.0's fullscreen test table tripped the guard.)
+    nx, rp = repo
+    monkeypatch.setattr(nx._bash_jobs, "_confirm", lambda a, preview=None: True)
+    (rp / "t.py").write_text('KEYMAP = "| set  toggle pane"\n', encoding="utf-8")
+    result = nx._gitcommit.git_commit(files="t.py", message="fix: keymap table")
+    assert "[git_commit]" in result
+
+
 def test_non_repo_path_is_refused(repo, tmp_path):
     nx, _ = repo
     other = tmp_path / "elsewhere"
