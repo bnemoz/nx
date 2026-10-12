@@ -21,6 +21,18 @@ notes file, ``NX_DUCKDB_NOTES`` (default ``.nx-duckdb-notes.sql`` under the
 project root), is auto-loaded as a ``-init`` prologue before every query so
 macro/view/type definitions from earlier sessions are present — recall
 without a config file. The model appends to it with write_file/edit_file.
+
+Identity resolution (the idea worth stealing from the "context engine"
+pattern): name/logon filters are the top cause of silently-empty org-data
+results — "Peter" never matches ``author = 'puery'``. The model should
+resolve human names to canonical ids BEFORE filtering, and record what it
+learned in the notes file so later sessions skip the step:
+
+    -- id-map: peter -> puery; anisha -> anisha.r
+
+A comment line is enough (the model reads the whole prologue each turn);
+views built on top of a mapping table also work. Resolve-then-filter, and
+say so when a resolved name had no match instead of returning zero rows.
 """
 from __future__ import annotations
 
