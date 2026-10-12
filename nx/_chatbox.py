@@ -787,8 +787,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             close_dashboard()
         except Exception:
             pass
-        sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line)
-                         + "\x1b[2K\x1b[J\n")
+        sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line) + "\n")
         sys.stdout.write("\x1b[?25h\x1b[?2004l")
         sys.stdout.flush()
 
