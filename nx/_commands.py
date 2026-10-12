@@ -104,7 +104,7 @@ _SPECS = [
      [], None, 1, "session"),
     ("/fork", "branch the conversation into a new session (original kept)",
      "[title]", [], None, 1, "session"),
-    ("/memory", "manage persistent memory",
+    ("/memory", "manage persistent memory (bare /memory: full screen)",
      "[save|remember|delete|list|archived|optimize|reflect]", [],
      ["save", "remember", "delete", "list", "archived", "optimize",
       "reflect"], 1, "context"),

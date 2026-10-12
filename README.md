@@ -616,7 +616,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/context [all\|pin\|unpin\|clear]` | per-message context breakdown, full screen; p pins the selected turn against /compress |
 | `/cost` | session usage + per-source cost scoreboard |
 | `/status` | snapshot: source, model, caps, budgets, fence, approval |
-| `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory |
+| `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory (bare /memory: full screen) |
 | `/retro` | distill this session's friction (usage.jsonl) into gotcha memories |
 | `/todo` | show the model's current todo_write list, full screen; Ctrl+G |
 | `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |

@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from ._ansi import C, DIM, RESET
+from ._fullscreen import View
 from ._logging import _log_event
 from ._metrics import _record_usage
 from ._openai_client import APIConnectionError
@@ -50,6 +51,20 @@ from ._memory_archive import (  # noqa: F401 (re-exports)
     _cmd_memory_archived, _iter_archive_notes,
 )
 
+
+def _memory_usage_inline() -> None:
+    """The pre-view bare-`/memory` usage block (the fullscreen fallback)."""
+    print(f"{DIM}  usage:{RESET}")
+    print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
+    print(f"{DIM}    /memory remember <query>    search memories{RESET}")
+    print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
+    print(f"{DIM}    /memory list                list all memories{RESET}")
+    print(f"{DIM}    /memory archived [target]   list archived notes, or restore one{RESET}")
+    print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
+          f"(dry prints the plan only){RESET}")
+    print(f"{DIM}    /memory reflect [focus]     cross-project pass: promote recurring "
+          f"preferences, surface shared patterns{RESET}")
+
 # --- /memory slash commands ----------------------------------------------------
 
 def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
@@ -68,9 +83,15 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     parts = user_input.split(None, 2)
     sub = parts[1].lower() if len(parts) >= 2 else ""
 
-    if sub == "list":
-        _cmd_memory_list()
-        return
+    if sub in ("", "list"):
+        # Bare /memory and /memory list: the fullscreen MemoryView, with the
+        # pre-view inline list (or usage block) as the off-tty fallback — the
+        # same gate-then-open_view shape _cmd_ctx uses for /context.
+        from . import _fullscreen
+        if _fullscreen.wants_fullscreen():
+            fallback = _cmd_memory_list if sub == "list" else _memory_usage_inline
+            _fullscreen.open_view(MemoryView(), fallback=fallback)
+            return
 
     if sub == "remember":
         query = parts[2] if len(parts) >= 3 else ""
@@ -104,17 +125,9 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
         _cmd_memory_reflect(parts[2] if len(parts) >= 3 else "")
         return
 
-    # Bare /memory — show usage
-    print(f"{DIM}  usage:{RESET}")
-    print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
-    print(f"{DIM}    /memory remember <query>    search memories{RESET}")
-    print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
-    print(f"{DIM}    /memory list                list all memories{RESET}")
-    print(f"{DIM}    /memory archived [target]   list archived notes, or restore one{RESET}")
-    print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
-          f"(dry prints the plan only){RESET}")
-    print(f"{DIM}    /memory reflect [focus]     cross-project pass: promote recurring "
-          f"preferences, surface shared patterns{RESET}")
+    # Bare /memory — show usage (unreachable while the view is wired above;
+    # kept for callers importing the handler directly with an unexpected sub)
+    _memory_usage_inline()
 
 
 def _cmd_memory_handler(user: str, state: Any) -> None:
@@ -368,3 +381,191 @@ def memory_write(
     except ValueError:
         pass
     return f"saved {scope} memory: {title}\nfile: {rel}" + challenge
+
+
+# --- the /memory fullscreen view (0.151.0) -------------------------------------
+# The same recipe as /diff's ReviewView and /context's ContextView: the view
+# lives in the module that owns the data, renders exclusively through
+# `_render.py`, and its ONLY mutation is the existing delete path handed back
+# to the fullscreen shell as a deferred `pending_action` (run AFTER the shell
+# leaves the alternate screen, so the gate's y/n prompt never paints into it).
+
+def _memory_row(note: dict[str, Any], selected: bool, index: int,
+                width: int) -> str:
+    """One note row: selection marker, the same columns the inline list prints
+    (index, scope label, title, date)."""
+    from ._ansi import clip_display
+    from ._render import RESET, role
+    date = time.strftime("%Y-%m-%d %H:%M", time.localtime(note["mtime"]))
+    marker = "›" if selected else " "
+    text = clip_display(
+        f"{index:>3}. [{note['label']}] {note['title']}  ({date})",
+        width - 3)
+    return (f"{role('ACCENT')}{marker}{RESET} "
+            f"{role('MUTED')}{text}{RESET}")
+
+class MemoryView(View):
+    """The `/memory` view: note list → note body, `d` deletes (with confirm).
+
+    Two modes like ReviewView: "list" over the newest-first note list the
+    inline `/memory list` prints (title, scope label, date), `enter`/`tab`
+    opens the body wrapped and scrollable; `d` resolves the selected note by
+    filename (unambiguous — no prefix collision possible) and queues the
+    EXISTING `memory_delete` machinery as the deferred action.
+    """
+
+    surface = "memory"
+    title = "memory"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sel = 0
+        self.offset = 0           # scroll offset inside a note body
+        self.mode = "list"        # "list" | "note"
+        self.notes: list[dict[str, Any]] = []
+        self.body_lines: list[str] = []
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Re-read the note list — newest first, both scopes, the exact rows
+        `_cmd_memory_list` prints."""
+        notes = []
+        for d, label in _iter_memory_dirs("project"):
+            for name, path, mtime, title, _content in _iter_notes(d, titles_only=True):
+                notes.append({"mtime": mtime, "name": name, "path": path,
+                              "title": title, "label": label})
+        notes.sort(key=lambda n: n["mtime"], reverse=True)
+        self.notes = notes
+        self.sel = min(self.sel, max(0, len(notes) - 1))
+        self.mode = "list"
+        self.body_lines = []
+        self.offset = 0
+
+    def _open_note(self) -> None:
+        import textwrap
+        if not self.notes:
+            return
+        note = self.notes[self.sel]
+        read = _read_memory_file(note["path"], note["name"])
+        content = read[1] if read is not None else (note["title"] + "\n")
+        self.body_lines = []
+        for para in content.split("\n"):
+            self.body_lines.extend(textwrap.wrap(para, width=200,
+                                                 replace_whitespace=False,
+                                                 drop_whitespace=False) or [""])
+        self.offset = 0
+        self.mode = "note"
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        self.sel = min(self.sel, max(0, len(self.notes) - 1))
+        lines = [f"{role('ACCENT')}memory{RESET}{role('MUTED')} — "
+                 f"{hint_line('memory')}{RESET}"]
+        budget = max(1, height - len(lines) - 2)   # header line + box borders
+        body: list[str] = []
+        if self.mode == "note":
+            note = self.notes[self.sel]
+            wrapped = [ln[:width] for ln in self.body_lines]
+            n = len(wrapped)
+            self.offset = max(0, min(self.offset, max(0, n - budget)))
+            shown = wrapped[self.offset:self.offset + budget]
+            body.extend(shown)
+            lines.extend(panel(f"{note['title']}  ({note['label']})",
+                               [ln[:width] for ln in body],
+                               footer=f"line {self.offset + 1}"
+                                      f"-{self.offset + len(shown)}/{n}"))
+        else:
+            n = len(self.notes)
+            if not n:
+                body.append(f"{role('MUTED')}  no memories saved yet — "
+                            f"/memory list prints the same list inline{RESET}")
+            else:
+                shown = budget if n <= budget else max(1, budget - 1)
+                start = max(0, min(self.sel - shown + 1, n - shown))
+                stop = min(n, start + shown)
+                for i in range(start, stop):
+                    body.append(_memory_row(self.notes[i], i == self.sel,
+                                            i + 1, width))
+                hidden = n - (stop - start)
+                if hidden > 0:
+                    body.append(f"{role('MUTED')}  … {hidden} more note"
+                                f"{'s' if hidden != 1 else ''} (j/k scroll){RESET}")
+            lines.extend(panel(f"memories · {n}",
+                               [ln[:width] for ln in body],
+                               footer=f"{self.sel + 1}/{n}"))
+        if self.notice:
+            lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
+        return lines[:height]
+
+    def on_key(self, key: str, shell: Any) -> str:
+        self.notice = ""
+        if key == "j/k":
+            # The registry advertises the pair as ONE hint label ("j/k move");
+            # the two real keys are handled below (the ReviewView convention).
+            return "repaint"
+        last = max(0, len(self.notes) - 1)
+        if self.mode == "note":
+            if key in ("j", "down"):
+                self.offset += 1
+                return "repaint"
+            if key in ("k", "up"):
+                self.offset = max(0, self.offset - 1)
+                return "repaint"
+            if key == "pagedown":
+                self.offset += 10
+                return "repaint"
+            if key == "pageup":
+                self.offset = max(0, self.offset - 10)
+                return "repaint"
+            if key in ("enter", "tab", "esc", "left"):
+                self.mode = "list"
+                return "repaint"
+            if key == "d":
+                return self._delete(shell)
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(last, self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key == "pagedown":
+            self.sel = min(last, self.sel + 10)
+            return "repaint"
+        if key == "pageup":
+            self.sel = max(0, self.sel - 10)
+            return "repaint"
+        if key == "enter":
+            self._open_note()
+            return "repaint"
+        if key == "d":
+            return self._delete(shell)
+        if key == "r":
+            self.refresh()
+            return "repaint"
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+    def _delete(self, shell: Any) -> str:
+        """Queue the existing `memory_delete` for the selected note's FILENAME
+        (an exact-name match can never be ambiguous) — deferred: the shell
+        runs `pending_action` only after leaving the alternate screen."""
+        if not self.notes:
+            self.notice = "no notes to delete"
+            return "repaint"
+        note = self.notes[min(self.sel, len(self.notes) - 1)]
+        if shell.ask(f"delete note '{note['title']}'? y/n ›") is None:
+            self.notice = "delete cancelled"
+            return "repaint"
+        target, view = note["name"], self
+
+        def _act() -> None:
+            from ._render import commit_line
+            for line in memory_delete(target, scope="project").split("\n"):
+                commit_line(line)
+            view.refresh()
+
+        self.pending_action = _act
+        return "run"

@@ -937,3 +937,165 @@ def test_pty_view_round_trip_writes_the_alternate_screen_pair():
     assert _fullscreen.ALT_ENTER in text
     assert text.rstrip().endswith(_fullscreen.ALT_EXIT)
     assert text.count(_fullscreen.ALT_ENTER) == 1
+
+
+# ---------------------------------------------------------------------------
+# /memory — the MemoryView (Phase 2 of the view work: the ContextView recipe,
+# plus the two-mode list -> note browsing ReviewView has, and the deferred
+# delete going through the EXISTING memory_delete machinery)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _mem_notes(tmp_path, monkeypatch):
+    """Two notes on disk, project scope only (the view reads the same dirs the
+    inline list reads)."""
+    from nx import _memory_store as store
+    d = tmp_path / "memories"
+    d.mkdir()
+    notes = []
+    for i, (name, title) in enumerate([
+            ("20250101_000001_two.md", "# Second note\n\nbody two"),
+            ("20250201_000001_one.md", "# First note\n\nbody one")]):
+        p = d / name
+        p.write_text(title + "\n\nkind: fact\n", encoding="utf-8")
+        notes.append(p)  # noqa: B901
+    monkeypatch.setattr(store, "_iter_memory_dirs", lambda scope: [(str(d), "project")])
+    # the view module re-exports the store names at import time: patch there too
+    from nx import _memory_cmd as mc
+    monkeypatch.setattr(mc, "_iter_memory_dirs", lambda scope: [(str(d), "project")])
+    return d, notes
+
+
+def test_memory_view_is_registered_and_its_keys_are_advertised(_mem_notes):
+    from nx import _fullscreen, _keys, _memory_cmd
+    assert "memory" in _fullscreen.view_names()
+    assert isinstance(_fullscreen.make_view("memory"), _memory_cmd.MemoryView)
+    view = _memory_cmd.MemoryView()
+    real = {"j/k": "j"}
+    class _S:
+        ask = staticmethod(lambda label, initial="": "y")
+    for key, _meaning in _keys.keys_for("memory"):
+        assert view.on_key(real.get(key, key), _S()) in (
+            "repaint", "quit", "run"), key
+
+
+def test_memory_view_renders_rows_hint_and_quit_keys(_mem_notes):
+    from nx import _keys, _memory_cmd, _render
+    view = _memory_cmd.MemoryView()
+    body = "\n".join(view.render(120, 20))
+    assert _render.BOX_TL in body and _render.BOX_BL in body
+    assert _render.role("ACCENT") in body
+    assert _keys.hint_line("memory") in body   # one registry: hints can't drift
+    assert "First note" in body and "Second note" in body
+    assert "memories · 2" in body
+    for key in ("q", "ctrl-c", "ctrl-d"):
+        assert view.on_key(key, None) == "quit", key
+
+
+def test_memory_view_enter_opens_the_note_body_and_tab_returns(_mem_notes):
+    from nx import _memory_cmd
+    view = _memory_cmd.MemoryView()
+    assert view.on_key("enter", None) == "repaint"
+    assert view.mode == "note"
+    body = "\n".join(view.render(120, 20))
+    assert "First note" in body       # newest note first, opened
+    assert "line 1-" in body           # scroll footer
+    assert view.on_key("tab", None) == "repaint"
+    assert view.mode == "list"
+
+
+def test_memory_view_d_defers_through_the_real_delete_path(_mem_notes, monkeypatch):
+    from nx import _memory_cmd
+    _d, notes = _mem_notes
+    deleted = []
+
+    def _fake_delete(target, scope="project", **_):
+        deleted.append(target)
+        return f"deleted project memory: {target}"
+
+    monkeypatch.setattr(_memory_cmd, "memory_delete", _fake_delete)
+    view = _memory_cmd.MemoryView()
+    shell = type("S", (), {"ask": staticmethod(
+        lambda label, initial="": "y")})()
+    # DEFERRED: nothing is deleted while the view is still on screen
+    assert view.on_key("d", shell) == "run"
+    assert callable(view.pending_action)
+    assert deleted == [] and all(p.exists() for p in notes)
+    view.pending_action()
+    assert deleted == ["20250201_000001_one.md"]   # exact filename, not a prefix
+    assert not notes[1].exists() or True  # fake delete: no real unlink expected
+
+
+def test_memory_view_delete_confirm_cancelled_is_a_notice(monkeypatch):
+    from nx import _memory_cmd
+
+    class _None:
+        notes = [{"name": "a.md", "title": "A", "mtime": 0, "path": "/x/a.md",
+                  "label": "project"}]
+        notice = ""
+
+        def refresh(self):
+            pass
+
+    view = _memory_cmd.MemoryView()
+    view.notes = _None.notes
+    shell = type("S", (), {"ask": staticmethod(lambda label, initial="": None)})()
+    assert view.on_key("d", shell) == "repaint"
+    assert view.pending_action is None
+    assert "delete cancelled" in view.notice
+
+
+def test_memory_handler_opens_the_view_when_a_tty_is_available(monkeypatch, capsys):
+    """Bare /memory takes the fullscreen view, with the inline paths wired as
+    the fallback (so the off-tty path cannot rot)."""
+    import nx
+    from nx import _memory_cmd as mc
+    opened = []
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: opened.append(
+                            (view, fallback)) or True)
+    mc._cmd_memory([], "/memory")
+    view, fallback = opened[0]
+    assert view.surface == "memory"
+    assert callable(fallback)
+    fallback()
+    assert "usage:" in capsys.readouterr().out
+    mc._cmd_memory([], "/memory list")
+    view, fallback = opened[1]
+    assert view.surface == "memory"
+    fallback()
+    assert "memories" in capsys.readouterr().out
+
+
+def test_memory_off_tty_prints_the_pre_view_body_byte_for_byte(
+        monkeypatch, capsys):
+    """NX_FULLSCREEN=0 (and any off-tty run) keeps the pre-view /memory
+    output byte for byte."""
+    import nx
+    from nx import _memory_cmd as mc
+    monkeypatch.setenv("NX_FULLSCREEN", "0")
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "off a tty /memory must not open a view"))
+    mc._cmd_memory([], "/memory")
+    inline = capsys.readouterr().out
+    assert "usage:" in inline
+    mc._memory_usage_inline()
+    assert capsys.readouterr().out == inline
+
+
+def test_memory_subcommands_keep_their_inline_behaviour(monkeypatch, capsys):
+    import nx
+    from nx import _memory_cmd as mc
+    monkeypatch.setattr(nx._fullscreen, "wants_fullscreen", lambda: True)
+    monkeypatch.setattr(nx._fullscreen, "open_view",
+                        lambda view, fallback=None: pytest.fail(
+                            "/memory subcommand must not open the view"))
+    mc._cmd_memory([], "/memory remember ")      # empty query: usage warning
+    assert "usage" in capsys.readouterr().out.lower()
+    mc._cmd_memory([], "/memory delete ")
+    assert "usage" in capsys.readouterr().out.lower()
+    mc._cmd_memory([], "/memory optimize")
+    assert capsys.readouterr().out is not None

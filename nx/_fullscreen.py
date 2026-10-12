@@ -556,6 +556,12 @@ def context(state=None):
     return ContextView(state)
 
 
+@register_view("memory")
+def memory_view():
+    from ._memory_cmd import MemoryView
+    return MemoryView()
+
+
 @register_view("sessions")
 def sessions(state):
     from ._sessions_cmd import SessionsView

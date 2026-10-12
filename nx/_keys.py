@@ -90,6 +90,15 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("R", "resume"),
         ("esc", "back"),
     ],
+    "memory": [
+        ("j/k", "move"),
+        ("enter", "open note"),
+        ("tab", "back to list"),
+        ("d", "delete note"),
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
     "todos": [
         ("j/k", "move"),
         ("?", "keys"),
