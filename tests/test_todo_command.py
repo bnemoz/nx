@@ -46,9 +46,8 @@ def fake_print(*a, **kw):
 def run_with(cmd):
     """Run the REPL with a small seeded conversation then `cmd`, return output."""
     captured.truncate(0); captured.seek(0)
-    # Isolate the persistent-todo file (0.94.0): a fresh session loads
-    # .nx/todo.md under PROJECT_ROOT over st._TODOS at startup, which would
-    # clobber the seeded list with the repo's real todo file.
+    # Isolate the persistent-todo file: todo_write still write-throughs
+    # .nx/todo.md under PROJECT_ROOT (a write-through export since 0.148.8).
     st.PROJECT_ROOT = tempfile.mkdtemp(prefix="nx-test-todo-")
     # Pin argv: another test module leaking a bare "--resume" in sys.argv
     # (process-global, conftest doesn't rewind it) would make main() resume

@@ -44,7 +44,6 @@ from ._sessions_cmd import (
 from ._memory_cmd import (
     _cmd_memory_handler,
 )
-from ._todo import load_persisted_todos
 from . import _panel
 from ._wip import _cmd_wip
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
@@ -367,12 +366,6 @@ def _repl() -> None:
         # recorder for this id. The optional HTTP push (NX_METRICS_URL) is off
         # by default — see _Metrics.
         st._METRICS = _fresh_metrics(session_id)
-        # Persistent todo file (0.94.0): a fresh session picks up the task
-        # plan a previous session wrote through todo_write (see _todo.py).
-        # The /todo command views it; the next todo_write overwrites both.
-        _persisted = load_persisted_todos()
-        if _persisted:
-            st._TODOS = _persisted
     # Cross-session repo advisory lock (0.103.0): another REPL in this repo
     # gets a warning + explicit opt-in to share, instead of both sessions
     # silently interleaving edits. An isolated session (own worktree) can't

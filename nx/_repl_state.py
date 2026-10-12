@@ -203,14 +203,10 @@ def _reload_metrics_totals(session_id: str) -> None:
     saved = _load_session(session_id) or {}
     if isinstance(saved.get("todos"), list) and saved["todos"]:
         st._TODOS = saved["todos"]
-    elif not st._TODOS:
-        # No session-recorded todos: fall back to the persistent todo file
-        # (0.94.0), so resuming a session that predates a plan (or a
-        # different session in the same project) still sees it.
-        from ._todo import load_persisted_todos
-        persisted = load_persisted_todos()
-        if persisted:
-            st._TODOS = persisted
+    # (0.150.x) The persistent todo file is no longer a resume fallback:
+    # todos are session state — a session without recorded todos starts
+    # with an empty list. The file (.nx/todo.md / NX_TODO_FILE) remains a
+    # write-through export only.
     plan_meta = saved.get("plan")
     if isinstance(plan_meta, dict):
         st._PLAN_ACTIVE = bool(plan_meta.get("active"))
