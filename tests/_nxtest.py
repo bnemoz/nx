@@ -199,7 +199,6 @@ _GLOBALS_FILES = [
     "test_tool_hooks.py",
     "test_tool_output_toggle.py",
     "test_tool_overflow.py",
-    "test_tool_schema_invariants.py",
     "test_tps_footer.py",
     "test_turn_spinner_wipe.py",
     "test_undo_compress_v2.py",
