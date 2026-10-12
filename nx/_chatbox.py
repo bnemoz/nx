@@ -778,7 +778,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         line_widths = []
         cursor_line = 0
 
-    def finish() -> None:
+    def finish(*, anchor_above: bool = False) -> None:
         # Termination (guardrail): erase the live region before the editor
         # tears its own frame down, so the region doesn't orphan in
         # scrollback above the next prompt.
@@ -787,7 +787,16 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             close_dashboard()
         except Exception:
             pass
-        sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line) + "\n")
+        if anchor_above:
+            # Fullscreen-handoff path (Ctrl+T/O/G/X): erase_stale_frame() left
+            # the cursor on the old frame's TOP row, so the scrollback
+            # arithmetic below would land a row short. Anchor one row ABOVE
+            # the frame instead — the next editor's mandatory leading "\n"
+            # then re-anchors the fresh frame exactly where the old one was
+            # (the alternate screen restores this cursor byte-exact).
+            sys.stdout.write("\r\x1b[1A")
+        else:
+            sys.stdout.write("\r" + move_down((rendered_rows - 1) - cursor_line) + "\n")
         sys.stdout.write("\x1b[?25h\x1b[?2004l")
         sys.stdout.flush()
 
@@ -1051,7 +1060,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # "history" here would reappear and stack under the fresh
                     # prompt (nothing is printed between /tabs and the repaint).
                     erase_stale_frame()
-                    finish()
+                    finish(anchor_above=True)
                     return "/tabs"
                 elif c == "\x0f":
                     # Ctrl+O -> /bg (this session's background run_bash jobs,
@@ -1067,7 +1076,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # screen byte-exact, so a leftover prompt frame would
                     # reappear under the fresh one.
                     erase_stale_frame()
-                    finish()
+                    finish(anchor_above=True)
                     return "/bg"
                 elif c == "\x07":
                     # Ctrl+G -> /todo (GTD-style plan view, fullscreen). The
@@ -1081,7 +1090,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # restores the normal screen byte-exact, so a leftover
                     # prompt frame would reappear under the fresh one.
                     erase_stale_frame()
-                    finish()
+                    finish(anchor_above=True)
                     return "/todo"
                 elif c == "\x18":
                     # Ctrl+X -> /diff (full-screen working-tree review). \x04
@@ -1093,7 +1102,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # so the alternate screen's byte-exact restore does not
                     # reappear under the fresh prompt.
                     erase_stale_frame()
-                    finish()
+                    finish(anchor_above=True)
                     return "/diff"
                 elif c == "\x13":
                     # Ctrl+S -> /compress. raw_mode clears IXON, so the

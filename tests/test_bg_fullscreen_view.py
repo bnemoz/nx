@@ -139,5 +139,5 @@ def test_ctrl_b_and_ctrl_x_return_the_right_commands():
     assert src.index('elif c == "\\x04":') < src.index('elif c == "\\x18":')
     # and the erase-then-return discipline Ctrl+T/Ctrl+G established
     block = src[src.index('elif c == "\\x0f":'):src.index('elif c == "\\x07":')]
-    assert "erase_stale_frame()" in block and "finish()" in block
+    assert "erase_stale_frame()" in block and "finish(anchor_above=True)" in block
     assert _fullscreen.bgjobs().surface == "bgjobs"
