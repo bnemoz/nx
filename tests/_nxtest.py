@@ -107,7 +107,6 @@ _GLOBALS_FILES = [
     "test_local_risk_hint.py",
     "test_memindex.py",
     "test_memory_drift.py",
-    "test_memory_optimize.py",
     "test_memory_reflect.py",
     "test_memory_tools.py",
     "test_mention_large_files.py",

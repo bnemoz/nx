@@ -16,6 +16,8 @@ import sys
 import tempfile
 import threading
 
+import pytest
+
 _PLAN = [""]   # mutable cell: the fake client reads the current run's plan
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-memopt-")
@@ -32,6 +34,11 @@ from nx._openai_client import APIConnectionError as _APIConn  # noqa: E402
 # Captured stdout lines, for asserting on the printed explanations.
 import io  # noqa: E402
 from contextlib import redirect_stdout  # noqa: E402
+
+# Baseline project root, captured at import before any test moves it: the
+# autouse fixture below resets st.PROJECT_ROOT to this before every test
+# (Tier A: conftest's module-dict rewind does not run for this file).
+_BASE_ROOT = m.st.PROJECT_ROOT
 
 
 class _Captured(list):
@@ -57,32 +64,23 @@ def _fake_confirm(action, preview=None):
     return True
 
 
-_saved = {}
-
-
-def _setup_function():
+@pytest.fixture(autouse=True)
+def _isolate(monkeypatch):
+    """Tier A isolation: every nx global this file mutates is monkeypatched
+    (undo restores it after each test), and the one shared container it
+    writes into in place (_TOOL_RESULT_CACHE) is snapshotted and refilled.
+    Env vars need no handling: conftest's NX_* rewind is universal."""
     _confirm_calls.clear()
-    _saved["confirm"] = m._confirm
-    _saved["home"] = m.st.SESSION_HOME
-    _saved["root"] = m.st.PROJECT_ROOT
-    m._confirm = _fake_confirm
-    m.st.SESSION_HOME = _tmp
-
-
-def _teardown_function():
-    if _saved.get("confirm") is not None:
-        m._confirm = _saved["confirm"]
-    if _saved.get("home") is not None:
-        m.st.SESSION_HOME = _saved["home"]
-    if "root" in _saved:
-        m.st.PROJECT_ROOT = _saved["root"]
-    for k in ("NX_MEMORY_OPTIMIZE_BATCH", "NX_MEMORY_OPTIMIZE_MAX_NOTES",
-              "NX_MEMORY_OPTIMIZE_MAX_TOKENS", "NX_MEMORY_OPTIMIZE_MERGE_WORKERS"):
-        os.environ.pop(k, None)
-
-
-setup_function = lambda _function: _setup_function()
-teardown_function = lambda _function: _teardown_function()
+    monkeypatch.setattr(m, "_confirm", _fake_confirm, raising=False)
+    monkeypatch.setattr(m.st, "SESSION_HOME", _tmp, raising=False)
+    monkeypatch.setattr(m.st, "PROJECT_ROOT", _BASE_ROOT, raising=False)
+    for _attr in ("client", "MODEL", "ACTIVE", "_METRICS"):
+        monkeypatch.setattr(m.st, _attr, getattr(m.st, _attr), raising=False)
+    cache = m.st._TOOL_RESULT_CACHE
+    saved_cache = dict(cache)
+    yield
+    cache.clear()
+    cache.update(saved_cache)
 
 
 # --- helpers -----------------------------------------------------------------
@@ -90,7 +88,7 @@ teardown_function = lambda _function: _teardown_function()
 def _note(title, body, scope="project", root=None):
     """Write one memory through the shared writer with a controlled root."""
     old = m.st.PROJECT_ROOT
-    m.st.PROJECT_ROOT = root if root is not None else _saved["root"]
+    m.st.PROJECT_ROOT = root if root is not None else _BASE_ROOT
     try:
         return _memory_cmd._write_memory_file(title, body, scope)[0]
     finally:
@@ -872,7 +870,7 @@ def test_optimize_first_pass_failure_with_empty_plan_returns_quietly():
     assert _confirm_calls == []
 
 
-def test_confirm_optimize_escape_returns_false():
+def test_confirm_optimize_escape_returns_false(monkeypatch):
     """Esc at the approval prompt must cancel the run, not propagate into the
     REPL."""
     root = tempfile.mkdtemp(prefix="nx-opt-esc-")
@@ -888,14 +886,9 @@ def test_confirm_optimize_escape_returns_false():
     def _esc(action, preview=None):
         raise _Esc()
 
-    saved = m._EscToChat
-    m._EscToChat = _Esc
-    m._confirm = _esc
-    try:
-        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")  # no raise
-    finally:
-        m._EscToChat = saved
-        m._confirm = _fake_confirm
+    monkeypatch.setattr(m, "_EscToChat", _Esc, raising=False)
+    monkeypatch.setattr(m, "_confirm", _esc, raising=False)
+    opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")  # no raise
     assert sorted(_md_files(pdir)) == names
     assert not os.path.exists(os.path.join(pdir, "archive"))
 
