@@ -185,11 +185,14 @@ THEMES: dict[str, dict[str, str]] = {
         "brown": "9a6b4f", "slate": "8c8fa1",
     },
     "dracula": {
-        "cyan": "8be9fd", "green": "50fa7b", "yellow": "f1fa8c",
-        "red": "ff5555", "magenta": "bd93f9", "gray": "6272a4",
-        "blue": "7aa6da", "orange": "ffb86c",
-        "purple": "aa87f0", "teal": "5af0c8", "pink": "ff79c6",
-        "brown": "c9a56e", "slate": "8b93b8",
+        # softened from upstream: every slot re-derived in OKLCH at uniform
+        # pastel lightness (0.74-0.82) and low chroma (0.09-0.12); hues keep
+        # dracula's cool violet/pink lean. Contrast 4.7:1+ on dark backgrounds.
+        "cyan": "72cede", "green": "90d192", "yellow": "d8c477",
+        "red": "eb9097", "magenta": "c8a2e4", "gray": "868991",
+        "blue": "89a9f1", "orange": "e7ad74",
+        "purple": "b5a4ea", "teal": "7cccc1", "pink": "eda4cc",
+        "brown": "bd9670", "slate": "829cb3",
     },
     "nord": {
         "cyan": "88c0d0", "green": "a3be8c", "yellow": "ebcb8b",
@@ -198,19 +201,23 @@ THEMES: dict[str, dict[str, str]] = {
         "purple": "9d7fc9", "teal": "8fbcbb", "pink": "d8a1c0",
         "brown": "a97c5e", "slate": "7b88a1",
     },
-    "gruvbox": {   # Gruvbox dark
-        "cyan": "8ec07c", "green": "b8bb26", "yellow": "fabd2f",
-        "red": "fb4934", "magenta": "d3869b", "gray": "928374",
-        "blue": "83a598", "orange": "fe8019",
-        "purple": "b16286", "teal": "689d6a", "pink": "e78a4e",
-        "brown": "af3a03", "slate": "928377",
+    "gruvbox": {   # Gruvbox dark — softened
+        # warm-hue retune in OKLCH: lower chroma (0.07-0.11), raised luma, warm
+        # gray/slate; the old af3a03 brown was invisible on dark backgrounds.
+        "cyan": "72cede", "green": "afc177", "yellow": "d7bb70",
+        "red": "e1897b", "magenta": "d295bd", "gray": "857f76",
+        "blue": "71afc3", "orange": "e09865",
+        "purple": "b5a4ea", "teal": "87c0a6", "pink": "eba6c6",
+        "brown": "aa7b54", "slate": "9c917e",
     },
-    "vaporwave": {   # neon pastel — fluorescent but soft
-        "cyan": "5ffbf1", "green": "8aff80", "yellow": "fdfd96",
-        "red": "ff6ec7", "magenta": "d183ff", "gray": "9a86b3",
-        "blue": "7aa2f7", "orange": "ff9e64",
-        "purple": "a44dff", "teal": "3dfcd2", "pink": "ff9ecb",
-        "brown": "d9a05b", "slate": "8ea0c9",
+    "vaporwave": {   # dusk pastel — the neon softened to an evening-fog palette
+        # same OKLCH architecture as mist with violet/teal-leaning hues
+        # (magenta 315, teal 175, pink 340); no slot above chroma 0.12.
+        "cyan": "83d5d4", "green": "90d192", "yellow": "d8c477",
+        "red": "f4928a", "magenta": "d4a0ec", "gray": "868991",
+        "blue": "8bb1f7", "orange": "e7ad74",
+        "purple": "ba9cef", "teal": "7bd1ba", "pink": "eda8d5",
+        "brown": "bd9670", "slate": "829cb3",
     },
     "ayu-light": {   # ayu light (ayu-theme) — light
         # authored: yellow #eca944, orange #f2ae49, teal #4cbf99 sit above the
@@ -238,25 +245,40 @@ THEMES: dict[str, dict[str, str]] = {
         "purple": "babbf1", "teal": "99d1db", "pink": "f4b8e4",
         "brown": "d699b6", "slate": "949cbb",
     },
-    "opencode": {   # OpenCode default theme (opencode.ai) — dark, warm orange
+    "opencode": {   # OpenCode default theme (opencode.ai) — dark, warm
         # primary #fab283 as orange; accent #9d7cd8 as magenta; secondary
         # #5c9cf5 as blue; warning #f5a742 as yellow; error #e06c75,
-        # success #7fd88f, info #56b6c2; text #eeeeee, muted #808080.
-        "cyan": "56b6c2", "green": "7fd88f", "yellow": "f5a742",
-        "red": "e06c75", "magenta": "9d7cd8", "gray": "808080",
-        "blue": "5c9cf5", "orange": "fab283",
-        "purple": "ffc09f", "teal": "94e2d5", "pink": "f5c2e7",
-        "brown": "e0af79", "slate": "8a93a6",
+        # success #7fd88f, info #56b6c2. 0.149.0: softened in OKLCH — warm
+        # slate-gray reasoning text (the old #808080 pure gray had no family
+        # tie), the #ffc09f purple slot re-hued into the warm band, every
+        # slot 4.5:1+ on dark backgrounds.
+        "cyan": "72cede", "green": "90d192", "yellow": "e5bf6d",
+        "red": "f4928a", "magenta": "b7a0e4", "gray": "8c857f",
+        "blue": "85b4f0", "orange": "f2ad73",
+        "purple": "e0b79c", "teal": "7cccc1", "pink": "eba6c6",
+        "brown": "ca9971", "slate": "a88f82",
     },
     "amethyst": {   # monochrome purple — every hue is a violet/orchid/pink
         # shade, so roles stay distinguishable by lightness and by position in
         # the violet→pink band rather than by hue. "gray" stays a true neutral
         # gray: reasoning text is the one thing that shouldn't go purple.
-        "cyan": "b581f8", "green": "dfccff", "yellow": "b433ff",
-        "red": "f65aa3", "magenta": "ec8fff", "gray": "9e9eaa",
-        "blue": "6655fc", "orange": "fa47cd",
-        "purple": "8a5cf6", "teal": "c4a8ff", "pink": "ff8ad8",
-        "brown": "b092d9", "slate": "9273d1",
+        # 0.149.0: saturation softened toward 0.62 (HLS) with the lightness
+        # pyramid widened — same separability bar, calmer read.
+        "cyan": "b58fe5", "green": "e1d6f5", "yellow": "a856d7",
+        "red": "df76a7", "magenta": "d998e7", "gray": "9e9eaa",
+        "blue": "6154d4", "orange": "d755b7",
+        "purple": "845fd9", "teal": "cab9ee", "pink": "e48cc6",
+        "brown": "9d78d0", "slate": "623dae",
+    },
+    "mist": {   # calm pastel dark ("evening fog") — the house style
+        # generated in OKLCH: uniform lightness bands (0.60-0.82), low chroma
+        # (0.012-0.12), slate-tinted neutrals. Every slot >= 4.69:1 on dark
+        # backgrounds; closest hue pair still 39/255 apart in RGB space.
+        "cyan": "72cede", "green": "90d192", "yellow": "d8c477",
+        "red": "f4928a", "magenta": "df9ed9", "gray": "868991",
+        "blue": "85b4f0", "orange": "e7ad74",
+        "purple": "b5a4ea", "teal": "7cccc1", "pink": "eba6c6",
+        "brown": "bd9670", "slate": "829cb3",
     },
 }
 DEFAULT_THEME = "opencode"
