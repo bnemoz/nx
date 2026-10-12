@@ -764,6 +764,15 @@ class StreamParser:
         elif self.mode == "say":
             self.stop_say_live()
             self.mode = None
+            # The Live just froze the pre-tool-call prose on screen. Reset the
+            # clean mirror so prose resuming after the tool call reopens a
+            # Live that renders ONLY the new segment — leaving the mirror
+            # intact made the reopened Live re-paint the whole accumulated
+            # answer (the duplicated re-echo bug). self.content, which feeds
+            # the transcript, is deliberately NOT reset.
+            self._clean.clear()
+            self._clean_len = 0
+            self._last_render_len = -1
         self.had_tool_call = True
         s = self.tcs.setdefault(tc.index, {"id": "", "name": "", "args": ""})
         if tc.id:
