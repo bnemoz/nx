@@ -2,7 +2,9 @@
 
 run_bash always launches detached (own session) and polls briefly before
 backgrounding; wait_background resumes polling a job started earlier. Logs
-live under st.SESSION_HOME/bg-logs, auto-trimmed by _delete_old_bg_logs.
+live under st.SESSION_HOME/bg-logs/<project-slug>/ (per-project since
+0.145.2; the flat parent is the legacy machine-global store), auto-trimmed
+by _delete_old_bg_logs.
 
 `_confirm` is monkeypatched by tests via `m._confirm = fake` (the top-level
 `nx` module attribute), so it's called through a lazy `import nx as _m;
@@ -160,6 +162,25 @@ def _heredoc_terminator_suffix_trap(command: str) -> str | None:
     return None
 
 
+def _bg_dir() -> str:
+    """The bg-logs dir for THIS project: bg-logs/<project-slug>/ (0.145.2).
+    The flat parent bg-logs/ is the legacy machine-global store: readers that
+    accept foreign entries scan it too (owner_pid filtering stays the gate),
+    and _delete_old_bg_logs drains it."""
+    import nx as _m
+    return os.path.join(st.SESSION_HOME, "bg-logs", _m.project_store_slug())
+
+
+def _bg_pid_map_path(pid: int | str) -> str:
+    """Path of the pid→map file: per-project dir first, legacy flat parent
+    as fallback (a job launched before the 0.145.2 split keeps working)."""
+    name = f"bg-pid-{pid}.map"
+    p = os.path.join(_bg_dir(), name)
+    if os.path.exists(p):
+        return p
+    return os.path.join(st.SESSION_HOME, "bg-logs", name)
+
+
 def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
     """Launch `command` detached in its own session and return (pid, log_path).
 
@@ -189,7 +210,7 @@ def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
     distinguishes the launched process from a later process that reuses its PID.
     """
     _delete_old_bg_logs()
-    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
+    bg_dir = _bg_dir()
     private_dir(bg_dir)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     suffix = f"{stamp}-{secrets.token_hex(3)}"
@@ -334,15 +355,25 @@ def list_bg_jobs(mine_only: bool = True) -> list[dict[str, Any]]:
     session's job. Callers that genuinely want the machine-wide view (``/bg
     all``) pass ``mine_only=False``.
     """
-    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
+    bg_dir = _bg_dir()
+    legacy_dir = os.path.dirname(bg_dir)
     jobs = []
     mine = os.getpid()
-    try:
-        names = [n for n in os.listdir(bg_dir) if n.startswith("bg-pid-") and n.endswith(".map")]
-    except OSError:
-        return jobs
-    for name in names:
-        p = os.path.join(bg_dir, name)
+    # per-project dir first; the legacy flat parent is scanned too (foreign
+    # maps are still gated by owner_pid below, so this adds nothing foreign
+    # to a mine_only view — it only keeps this session's pre-split jobs
+    # visible until the legacy store drains)
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for d in (bg_dir, legacy_dir):
+        try:
+            for n in os.listdir(d):
+                if n.startswith("bg-pid-") and n.endswith(".map") and n not in seen:
+                    seen.add(n)
+                    found.append((n, os.path.join(d, n)))
+        except OSError:
+            continue
+    for name, p in found:
         try:
             with open(p) as f:
                 data = json.load(f)
@@ -378,22 +409,30 @@ def _delete_old_bg_logs(max_logs: int = 50, max_age_days: int = 7) -> None:
     """Trim background logs so they don't pile up forever.
 
     Also removes stale ``bg-pid-*.map`` files whose target log no longer exists.
+
+    Trims the per-project dir and drains the legacy flat parent (0.145.2).
     """
-    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
     try:
         log_entries = []
         map_entries = []
-        for name in os.listdir(bg_dir):
-            if not name.startswith("bg-"):
-                continue
-            p = os.path.join(bg_dir, name)
+        for bg_dir in (_bg_dir(), os.path.join(st.SESSION_HOME, "bg-logs")):
             try:
-                if name.endswith(".map"):
-                    map_entries.append((os.path.getmtime(p), p, name))
-                else:
-                    log_entries.append((os.path.getmtime(p), p, name))
+                names = os.listdir(bg_dir)
             except OSError:
                 continue
+            for name in names:
+                if not name.startswith("bg-"):
+                    continue
+                p = os.path.join(bg_dir, name)
+                try:
+                    if os.path.isdir(p):
+                        continue  # a sibling project's slug dir, never a log
+                    if name.endswith(".map"):
+                        map_entries.append((os.path.getmtime(p), p, name))
+                    else:
+                        log_entries.append((os.path.getmtime(p), p, name))
+                except OSError:
+                    continue
         now = time.time()
         # remove logs by age
         for mtime, p, _ in log_entries:
@@ -462,7 +501,7 @@ def _mark_job_killed(pid: int | str) -> None:
     if not pid.isdigit():
         return
     try:
-        p = os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")
+        p = _bg_pid_map_path(pid)
         with open(p) as f:
             data = json.load(f)
         data["killed"] = True
@@ -1054,8 +1093,8 @@ def _mark_log_consumed(log_path: str | None) -> None:
     worth announcing."""
     if not log_path:
         return
-    bg_dir = os.path.join(st.SESSION_HOME, "bg-logs")
-    if os.path.dirname(os.path.abspath(log_path)) != bg_dir:
+    bg_dir = os.path.dirname(os.path.abspath(log_path))
+    if bg_dir not in (_bg_dir(), os.path.join(st.SESSION_HOME, "bg-logs")):
         return
     try:
         for name in os.listdir(bg_dir):
@@ -1063,7 +1102,7 @@ def _mark_log_consumed(log_path: str | None) -> None:
                 continue
             pid = name[len("bg-pid-"):-len(".map")]
             try:
-                with open(os.path.join(bg_dir, name)) as f:
+                with open(_bg_pid_map_path(pid)) as f:
                     data = json.load(f)
             except (OSError, json.JSONDecodeError):
                 continue
@@ -1205,7 +1244,7 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
     # cancellable wait, and cancelling KILLS the job (the user asked for it).
     _wcmd = ""
     try:
-        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
+        with open(_bg_pid_map_path(pid)) as f:
             _wcmd = json.load(f).get("command", "")
     except (OSError, IOError, json.JSONDecodeError):
         pass
@@ -1260,7 +1299,7 @@ def _find_bg_start_time_for_pid(pid: int | str) -> str | None:
     if not pid.isdigit():
         return None
     try:
-        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
+        with open(_bg_pid_map_path(pid)) as f:
             return json.load(f).get("pid_start_time")
     except (OSError, IOError, json.JSONDecodeError):
         return None
@@ -1280,7 +1319,7 @@ def _find_bg_log_for_pid(pid: int | str) -> str | None:
     if not pid.isdigit():
         return None
     try:
-        with open(os.path.join(st.SESSION_HOME, "bg-logs", f"bg-pid-{pid}.map")) as f:
+        with open(_bg_pid_map_path(pid)) as f:
             return json.load(f).get("log_path")
     except (OSError, IOError, json.JSONDecodeError):
         return None

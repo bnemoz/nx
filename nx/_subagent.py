@@ -315,8 +315,13 @@ def _extract_exit_state(answer: str) -> tuple[str, str, str]:
 
 
 def _agents_report_dir() -> str:
-    """Directory holding sub-agent reports (st.SESSION_HOME/agents)."""
-    return os.path.join(st.SESSION_HOME, "agents")
+    """Directory holding sub-agent reports for THIS project
+    (st.SESSION_HOME/agents/<project-slug>). Per-project since 0.145.2:
+    the flat store leaked one project's reports into another project's
+    `ls -t ~/.nx/agents`. Reports in the legacy flat parent stay readable
+    by exact path (nothing filters them); the purge drains that dir."""
+    import nx as _m
+    return os.path.join(st.SESSION_HOME, "agents", _m.project_store_slug())
 
 
 def _write_agent_report(job_id: str, instruction: str, status: str,
@@ -356,19 +361,26 @@ def _write_agent_report(job_id: str, instruction: str, status: str,
 
 def _purge_old_agent_reports(max_age_days: int = _ASYNC_REPORT_TTL_DAYS) -> None:
     """Remove agent reports older than max_age_days (best-effort, mirrors
-    _purge_old_overflow)."""
-    d = _agents_report_dir()
-    try:
-        now = time.time()
-        for name in os.listdir(d):
-            p = os.path.join(d, name)
-            try:
-                if (now - os.path.getmtime(p)) > max_age_days * 86400:
-                    os.remove(p)
-            except OSError:
-                continue
-    except OSError:
-        pass
+    _purge_old_overflow).
+
+    Purges the per-project slug dir AND files sitting directly in the legacy
+    flat parent (0.145.2), so the pre-slug store drains over time without a
+    migration pass."""
+    now = time.time()
+    for d in (_agents_report_dir(), os.path.join(st.SESSION_HOME, "agents")):
+        try:
+            for name in os.listdir(d):
+                p = os.path.join(d, name)
+                try:
+                    # never remove the slug subdirs themselves from the parent
+                    if os.path.isdir(p):
+                        continue
+                    if (now - os.path.getmtime(p)) > max_age_days * 86400:
+                        os.remove(p)
+                except OSError:
+                    continue
+        except OSError:
+            continue
 
 
 # Job id → agent record. Only agents from this process are tracked/announced
@@ -1484,10 +1496,18 @@ def critique(focus: Any, paths: Any = None, severity: Any = None,
     else:
         named = [p.strip() for p in str(paths or "").replace(",", " ").split()
                  if p.strip()]
+    root_hint = str(getattr(st, "PROJECT_ROOT", None) or os.getcwd())
+    confine_line = ("\nReads MUST stay inside the project root " + root_hint +
+                    " — never read ~/.nx/agents, other per-project stores "
+                    "under ~/.nx, or any other project's directories: they "
+                    "belong to unrelated repos and their contents will "
+                    "mislead your review.\n")
     if named:
         scope_line = ("\nRead scope (inspect these paths and their immediate "
                       "call sites; a finding elsewhere is out of scope): "
-                      + ", ".join(named) + "\n")
+                      + ", ".join(named) + "\n") + confine_line
+    else:
+        scope_line = confine_line
     instruction = (
         "[CRITIQUE MODE]\nReview the work named below and report findings only. "
         "You cannot modify anything. Severity floor: " + raw_sev +

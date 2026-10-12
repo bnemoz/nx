@@ -72,7 +72,10 @@ def create_session_worktree(session_id: str) -> tuple[str | None, str | None]:
         return None, "no git repo at the project root"
     base = st.PROJECT_ROOT or os.getcwd()
     home = st.SESSION_HOME or os.path.expanduser("~/.nx")
-    root = os.path.join(home, "worktrees")
+    # Per-project slug dir (0.145.2): concurrent projects must not share
+    # one flat worktrees/ store.
+    import nx as _m
+    root = os.path.join(home, "worktrees", _m.project_store_slug())
     os.makedirs(root, exist_ok=True)
     wt = os.path.realpath(os.path.join(root, f"nx-wt-session-{session_id}"))
     branch = f"nx/session-{session_id}"
@@ -179,7 +182,8 @@ def create_worktree(job_id: str) -> tuple[str | None, str | None]:
     # fence — the agent's writes must be allowed without extra fence roots),
     # named by job id so /bg and reports can point at it unambiguously.
     home = st.SESSION_HOME or os.path.expanduser("~/.nx")
-    root = os.path.join(home, "worktrees")
+    import nx as _m
+    root = os.path.join(home, "worktrees", _m.project_store_slug())
     os.makedirs(root, exist_ok=True)
     wt = os.path.realpath(os.path.join(root, f"nx-wt-{job_id}"))
     if os.path.exists(wt):
@@ -255,19 +259,30 @@ def sweep_stale_worktrees() -> None:
         hours = _env_int("NX_SUBAGENT_WORKTREE_TTL_HOURS", 24)
         if hours <= 0:
             return
-        root = os.path.join(st.SESSION_HOME or os.path.expanduser("~/.nx"),
-                            "worktrees")
+        home = st.SESSION_HOME or os.path.expanduser("~/.nx")
+        import nx as _m
+        root = os.path.join(home, "worktrees", _m.project_store_slug())
         cutoff = time.time() - hours * 3600
-        with os.scandir(root) as it:
-            entries = [e for e in it if e.name.startswith("nx-wt-agent-")]
-        for e in entries:
-            try:  # per-entry: one unreadable dir must not stop the sweep
-                if not e.is_dir(follow_symlinks=False):
-                    continue
-                if e.stat(follow_symlinks=False).st_mtime < cutoff:
-                    remove_worktree(e.path)
+        # sweep this project's slug dir, then (transitionally, 0.145.2)
+        # only entries sitting DIRECTLY in the legacy flat parent — never
+        # recursing into other projects' slug dirs, which scandir's flat
+        # listing can't reach anyway (they're dirs, filtered by name).
+        roots = [root, os.path.join(home, "worktrees")]
+        for d in roots:
+            try:
+                with os.scandir(d) as it:
+                    entries = [e for e in it
+                               if e.name.startswith("nx-wt-agent-")]
             except OSError:
                 continue
+            for e in entries:
+                try:  # per-entry: one unreadable dir must not stop the sweep
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                    if e.stat(follow_symlinks=False).st_mtime < cutoff:
+                        remove_worktree(e.path)
+                except OSError:
+                    continue
         base = st.PROJECT_ROOT
         if base:
             try:

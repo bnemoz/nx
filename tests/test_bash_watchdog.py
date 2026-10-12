@@ -120,7 +120,8 @@ def test_completion_notice_after_job_finishes(nx_fresh):
         pass
     # find its log via the map file and append the exit trailer
     log = None
-    bg_dir = os.path.join(os.environ["NX_HOME"], "bg-logs")
+    from nx import _bash_jobs as _bj
+    bg_dir = _bj._bg_dir()  # per-project slug subdir (0.145.2)
     for name in os.listdir(bg_dir):
         if name.startswith("bg-pid-") and name.endswith(".map"):
             data = json.load(open(os.path.join(bg_dir, name)))

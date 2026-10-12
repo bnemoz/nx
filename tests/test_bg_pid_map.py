@@ -64,7 +64,9 @@ def nx_fresh(tmp_path, monkeypatch):
 
 
 def _bg_dir(nx):
-    d = os.path.join(nx._state.SESSION_HOME, "bg-logs")
+    # per-project slug subdir (0.145.2); the same dir _run_bash writes into
+    from nx import _bash_jobs as bj
+    d = bj._bg_dir()
     os.makedirs(d, exist_ok=True)
     return d
 

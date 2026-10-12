@@ -135,6 +135,28 @@ SESSION_HOME = os.path.expanduser(
 # in tests that reassigns this from a fresh NX_HOME.
 st.SESSION_HOME = SESSION_HOME
 
+
+def project_store_slug() -> str:
+    """Short stable slug for the current project, used to partition the
+    machine-global SESSION_HOME stores (agents/, bg-logs/, worktrees/) so
+    concurrent projects stop surfacing each other's artifacts.
+
+    Sanitized basename of st.PROJECT_ROOT (fallback: cwd) + the first 8 hex
+    chars of sha256(realpath), so same-named projects never collide.
+    Empty/unknown root -> "default"."""
+    import hashlib
+    root = getattr(st, "PROJECT_ROOT", None) or os.getcwd()
+    root = str(root).strip()
+    if not root:
+        return "default"
+    real = os.path.realpath(root)
+    base = os.path.basename(real.rstrip(os.sep)) or "root"
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in base)
+    safe = safe.strip("-_.") or "root"
+    digest = hashlib.sha256(real.encode("utf-8", "surrogateescape")).hexdigest()
+    return f"{safe[:24]}-{digest[:8]}"
+
+
 from ._sessions_io import (
     _flatten_message_text, _new_session_id, _safe_title, _is_empty_assistant_message,
     _prune_empty_assistant_messages, _short_id, _summarize_session_data,
