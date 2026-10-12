@@ -400,7 +400,7 @@ def _fused_body(body):
         args = {"path": path, "then_run": then_run, **call_kw}
         return _fusion_run_fused(args, lambda: body(path, **call_kw))
     # expose the body's real parameter names (and then_run) to introspection
-    _inner.__wrapped_signature_params__ = real_params | {"then_run"}
+    setattr(_inner, "__wrapped_signature_params__", real_params | {"then_run"})
     _inner.__name__ = getattr(body, "__name__", "fused")
     _inner.__doc__ = getattr(body, "__doc__", None)
     return _inner
@@ -678,12 +678,17 @@ def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
         backend = "git" if has_git else "patch"
+        # One dry-run per backend, assigned on every path (the checker reads
+        # `check` after the branch; the old shape reassigned `backend` inside
+        # the git arm, which a flow-insensitive join cannot correlate).
         if backend == "git":
             check = subprocess.run(["git", "apply", "--check", tmp_path],
                                     cwd=path, capture_output=True, text=True)
             if check.returncode != 0 and has_patch:
                 backend = "patch"
-        if backend == "patch":
+                check = subprocess.run(["patch", "--dry-run", "-p1", "-i", tmp_path],
+                                        cwd=path, capture_output=True, text=True)
+        else:
             check = subprocess.run(["patch", "--dry-run", "-p1", "-i", tmp_path],
                                     cwd=path, capture_output=True, text=True)
         if check.returncode != 0:

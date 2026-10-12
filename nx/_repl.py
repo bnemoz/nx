@@ -243,7 +243,7 @@ _REPL_COMMANDS: dict[str, CommandHandler] = handler_map()
 # rows here so /help, the completion menu, the arg dropdowns and dispatch
 # all derive from the one table (UIUX_SPEC A1). Reading the name from the
 # defining module still works: the rows are the same registry data.
-_rsc._HELP_COMMANDS = help_rows()
+_rsc._HELP_COMMANDS = help_rows()  # pyrefly: ignore[bad-assignment]  # rebind to registry rows (grouped | flat)
 
 
 def _release_claims_on_exit() -> None:
@@ -463,7 +463,7 @@ def _repl() -> None:
             # pending" (0.109.5).
             if not _m._autowake.wake_due():
                 continue
-            st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1
+            st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
             user = _m._autowake.wake_instruction()
             print(f"{DIM}  ▸ background job finished — auto-continuing{RESET}")
         if not user and not wake:

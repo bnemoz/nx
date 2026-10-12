@@ -840,6 +840,10 @@ def run_bash(command: str, timeout: int | None = None,
     command = prefer_ripgrep(command)
     secret = _contains_secret(command) if _env_int("NX_BASH_PROMPT_SECRETS", 0) else None
     staged = None
+    # Bound here (not only inside the secret-less branch below): line ~915
+    # reads it behind a `not secret` short-circuit, which the checker cannot
+    # see. `None` is exactly the value that path would have had anyway.
+    clobber: list[str] | None = None
     if secret is not None:
         from ._subagent import _subagent_quiet
         if _subagent_quiet():

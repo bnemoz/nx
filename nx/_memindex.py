@@ -108,7 +108,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _connect(memories_dir: str) -> Optional[sqlite3.Connection]:
+def _connect(memories_dir: str) -> sqlite3.Connection:
     path = _db_path(memories_dir)
     try:
         private_dir(memories_dir)
@@ -152,7 +152,8 @@ def _open(memories_dir: str) -> Optional[sqlite3.Connection]:
         except sqlite3.OperationalError as e:
             last_err = e
             try:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             except Exception:
                 pass
             msg = str(e)
@@ -164,7 +165,8 @@ def _open(memories_dir: str) -> Optional[sqlite3.Connection]:
             _set_aside_corrupt(path)
         except sqlite3.DatabaseError:
             try:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             except Exception:
                 pass
             _set_aside_corrupt(path)

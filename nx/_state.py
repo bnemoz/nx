@@ -197,7 +197,7 @@ _WAKE_STREAK = 0
 # True once this session has successfully spawned a write/implement/advisor
 # tier sub-agent (set in _subagent.spawn_agent) — gates the campaign wake
 # instruction.
-_SPAWNED_WRITE_TIER = False
+_SPAWNED_WRITE_TIER: bool = False
 
 # True for the whole duration of one _run_model_turn_loop() call in the
 # interactive parent. wake_due() refuses to fire mid-turn: a notice that

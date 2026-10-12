@@ -70,7 +70,8 @@ def _run_read_only_parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[int
         _ASYNC_QUIET_SLOTS.quiet = True
         rec = attach_recorder()
         try:
-            return i, run_tool(n, a)
+            result = run_tool(n, a)
+            return i, result if isinstance(result, str) else repr(result)
         except _EscToChat:
             raise  # read-only tools can't prompt, but propagate defensively
         except Exception as e:  # noqa: BLE001 — mirror run_tool's error surfacing

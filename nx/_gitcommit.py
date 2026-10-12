@@ -153,6 +153,7 @@ def _git_commit_with_index(repo: str, file_list: list[str], message: str,
     if not (staged or "").strip():
         return ("[git_commit] nothing staged — every path in `files` was already "
                 "committed, unchanged, or ignored; nothing was committed")
+    staged = staged or ""
     from ._bash_jobs import _contains_secret
     hit = _contains_secret(staged, env_dumps=False)
     if hit:
@@ -192,7 +193,7 @@ def _head_moved(repo: str, old: str, new: str, timeout: int) -> str:
     """
     out, err = _git(repo, ["log", "--oneline", f"{old}..{new}"], timeout)
     landed = ""
-    if not err and (out or "").strip():
+    if out is not None and (out or "").strip():
         lines = out.strip().splitlines()
         brief = "; ".join(lines[:5])
         if len(lines) > 5:

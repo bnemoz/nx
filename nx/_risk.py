@@ -347,6 +347,7 @@ def _assess_risk(action: str) -> tuple[str, str]:
     max_conn = max(0, st.RISK_CONNECTION_RETRIES) + 1
     max_parse = 3
     conn_attempts_used = 0
+    text = ""
     try:
         for parse_attempt in range(max_parse):
             resp = None

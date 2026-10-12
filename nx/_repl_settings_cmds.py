@@ -40,7 +40,7 @@ from ._todo import render_todos_display
 # The hand-synced list that used to live here is gone: /help renders
 # reg.help_rows() (rebound in _repl.py), so the registry is the single source
 # of truth. The name is kept as a registry view for tests that patch/import it.
-_HELP_COMMANDS: list[tuple[str, str]] = _registry_help_rows()
+_HELP_COMMANDS: list[tuple[str, str]] | list[tuple[str, list[tuple[str, str]]]] = _registry_help_rows()
 
 
 def _cmd_build(user: str, state: _ReplState) -> None:
@@ -340,8 +340,11 @@ def _cmd_resources(user: str, state: _ReplState) -> None:
     peak_s = f" · peak {peak:.1f} MB" if peak is not None else ""
     tree = stats["tree"]
     tree_s = ""
-    if tree:
-        tree_s = f" · tree {tree['tree_mb']:.1f} MB ({tree['count']} children)"
+    if isinstance(tree, dict):
+        tree_mb = tree.get("tree_mb")
+        count = tree.get("count")
+        if tree_mb is not None and count is not None:
+            tree_s = f" · tree {tree_mb:.1f} MB ({count} children)"
     print(
         f"{DIM}  pid {stats['pid']} · cpu {stats['cpu_percent']:.1f}%"
         f" · rss {rss_s}{peak_s}{tree_s}{RESET}"

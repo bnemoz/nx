@@ -739,6 +739,7 @@ def _store_session_txn(
             if fast:
                 # Fast append: new events only. The sessions row is
                 # metadata + indexed columns; there is no blob to rewrite.
+                assert chain_len is not None  # fast=True implies a valid chain_len (guarded above); narrows for the checker
                 for i, m in enumerate(messages[chain_len:], start=chain_len):
                     conn.execute(
                         "INSERT INTO session_events(session_id, seq, msg)"

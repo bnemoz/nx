@@ -42,7 +42,7 @@ if IS_WINDOWS:
     _WAIT_OBJECT_0 = 0
     _WAIT_TIMEOUT = 0x102
 
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyrefly: ignore[missing-attribute]  # win32-only branch
     _GetStdHandle = _kernel32.GetStdHandle
     _GetStdHandle.argtypes = [wintypes.DWORD]
     _GetStdHandle.restype = wintypes.HANDLE
@@ -162,7 +162,7 @@ def wait_ready(fd: int, timeout: float) -> bool:
             return r == _WAIT_OBJECT_0
         # Non-console fd (pipe/file): PeekNamedPipe poll.
         try:
-            wh = msvcrt.get_osfhandle(fd)
+            wh = msvcrt.get_osfhandle(fd)  # pyrefly: ignore[missing-attribute]  # win32-only branch
         except OSError:
             return False
         avail = wintypes.DWORD(0)
@@ -341,7 +341,7 @@ if IS_WINDOWS:
     def kbhit() -> bool:
         """True if a key is available on the Windows console right now
         (non-blocking). Returns False for non-console stdin."""
-        return bool(msvcrt.kbhit())
+        return bool(msvcrt.kbhit())  # pyrefly: ignore[missing-attribute]  # win32-only branch
 else:
     def kbhit() -> bool:
         # POSIX non-blocking readiness on stdin's fd.

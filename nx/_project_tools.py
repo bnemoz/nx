@@ -78,6 +78,7 @@ def _registry() -> tuple[dict[str, ProjectTool], str | None]:
         if not all(isinstance(v, str) and _NAME.fullmatch(v)
                    for v in (module, handler)):
             return {}, f"{name}: module and handler must be Python identifiers"
+        assert isinstance(module, str) and isinstance(handler, str)
         if not isinstance(description, str) or not description.strip():
             return {}, f"{name}: description must be a non-empty string"
         if not isinstance(parameters, dict) or parameters.get("type") != "object":

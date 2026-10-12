@@ -45,7 +45,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from typing import Callable
+from typing import Any, Callable
 
 API_BASE = "https://api.telegram.org"
 # Telegram hard limit on one message's text.
@@ -125,6 +125,10 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
         raise RuntimeError("NX_TELEGRAM_BOT_TOKEN is not set")
     url = f"{API_BASE}/bot{token}/{method}"
     data = json.dumps(payload or {}).encode()
+    # The loop body either returns or re-raises, so `r` is always bound by the
+    # time the fall-through `return r` below is reached; the empty default just
+    # makes that visible to the checker.
+    r: dict = {}
     for attempt in range(2):
         # NOTE: the token is part of the URL (Bot API contract) — never log
         # req.full_url or exception reprs that embed it.
@@ -340,7 +344,7 @@ def _send(api: Callable, chat_id: int, text: str) -> dict:
     """Send (chunked). Fail-soft: the returned dict records ok/error instead
     of raising, but failures are never silently indistinguishable from
     success. Chunks are throttled to stay under the per-chat flood limit."""
-    out = {"message_id": None, "ok": True}
+    out: dict[str, Any] = {"message_id": None, "ok": True}
     for i, chunk in enumerate(_chunk(text) or ["(empty)"]):
         if i:
             time.sleep(0.6)
@@ -430,7 +434,7 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
     started = time.monotonic()
     # live sub-agent feedback (0.95.0): spawn_agent's per-step note_progress
     # lands here so the phone sees `🤖 agent turn 3/100` while it waits.
-    progress_note = [None]
+    progress_note: list[str | None] = [None]
 
     def _sink(text: str) -> None:
         if text:
@@ -598,6 +602,10 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
     chat_id = chat.get("id")
     if chat_id not in allowed:
         return  # not even an error: an open reply is the vulnerability
+    if not isinstance(chat_id, int):
+        # The allowlist holds ints only (see _allowed_chats), so a non-int id
+        # can never have reached here — the guard exists for the checker.
+        return
     if chat.get("type") not in ("private", None) and not _groups_allowed():
         return
     if allowed_users is None:

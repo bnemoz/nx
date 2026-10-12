@@ -339,12 +339,14 @@ def _cli_tokens(args: list[str]) -> bool:
     else:
         probe = None
     if probe is not None and active is not None:
-        def count(text):
-            return active.tokenize_count(text)
+        def count(text: str) -> int:
+            n = active.tokenize_count(text)
+            assert n is not None  # probe above proved this source tokenizes; narrows for the checker
+            return n
         method = f"server /tokenize ({active.name})"
     else:
         try:
-            import tiktoken  # ty: ignore[unresolved-import]
+            import tiktoken  # ty: ignore[unresolved-import]  # pyrefly: ignore[missing-import]  # optional dep, guarded by this try/except ImportError
             enc = tiktoken.get_encoding("cl100k_base")
 
             def count(text):

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import platform
 import time
+from typing import Any
 
 try:
     import resource
@@ -119,7 +120,7 @@ def sys_is_linux() -> bool:
     return platform.system() == "Linux"
 
 
-def process_stats(interval: float = 0.2) -> dict[str, int | float | None]:
+def process_stats(interval: float = 0.2) -> dict[str, Any]:
     """Sample this process's CPU% (over `interval` seconds, blocking) and RSS."""
     return {
         "pid": os.getpid(),

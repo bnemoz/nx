@@ -144,7 +144,7 @@ def _normalize_usage(
     stream - a full-prompt str()+len() scan per turn per agent, wasted on any
     server that reports usage.
     """
-    def _resolve(v):
+    def _resolve(v: int | Callable[[], int]) -> int:
         return v() if callable(v) else v
     # llama.cpp: no `usage`, but a `timings` object on the final chunk with
     # prompt_n / predicted_n / cache_n. There's no reasoning split here —

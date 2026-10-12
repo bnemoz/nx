@@ -492,8 +492,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     buffered = recorder is not None
     # todo_write's args ARE the list, which the result body re-renders below —
     # the raw-JSON args line would only duplicate it, so it is suppressed.
+    # tool_accent is a pure name->color lookup, so it is computed for every
+    # call (the box bodies below use it even when the header box is skipped);
+    # the checker can then see it bound on every path to those reads.
+    accent = tool_accent(name)
     if not quiet and not buffered:
-        accent = tool_accent(name)
         # Header + args line are one visual unit of the tool box: one lock.
         # The box itself comes from _render (UIUX_SPEC B1/B2): the rounded
         # glyph set and the row/rail shape live there, so the sequential box,
@@ -661,6 +664,11 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         if len(preview_lines) > TOOL_PREVIEW_LINES:
             hidden = len(preview_lines) - TOOL_PREVIEW_LINES
             preview_lines = preview_lines[:TOOL_PREVIEW_LINES] + [f"... [{hidden} more lines]"]
+    # The str form of the result (`""` for a content-parts result). Every tail
+    # string test below is guarded by a tool-name check that a parts-returning
+    # tool (read_image) can never satisfy, so the old list-typed reads could only
+    # ever be false there — this is the same answer, typed as the str it is.
+    tail_text: str = result if isinstance(result, str) else ""
     # User/org post-hook (NX_POST_TOOL_HOOK): observer only — failures are
     # logged, never raised, and the result is unaffected. Parts results are
     # serialized for the hook's JSON stdin — via _parts_preview, so the hook
@@ -737,11 +745,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # tracks (commits write under .git/ only) — store_cacheable_result
         # stamps them so a hit can detect a commit/checkout that happened
         # behind the cache's back.
-        store_cacheable_result(st._TOOL_RESULT_CACHE, cache_key, name, args, result)
+        # The key is recomputed here (deterministic from name+args) rather than
+        # reusing the lookup's local, so the store site cannot depend on a
+        # name-only correlation the checker cannot make.
+        store_cacheable_result(st._TOOL_RESULT_CACHE, _tool_cache_key(name, args),
+                               name, args, tail_text)
         # store_cacheable_result re-bounds the cache (PF-16/I-8) — both the
         # entry cap and the byte cap, oldest first.
     elif name in ("write_file", "edit_file", "multi_edit", "delete_file",
-                  "sed_edit", "apply_patch") and not result.startswith("ERROR"):
+                  "sed_edit", "apply_patch") and not tail_text.startswith("ERROR"):
         if isinstance(args.get("diff"), str) and args.get("diff").strip():
             from ._edit_tools import _patch_affected_files
             base = args.get("path") or "."
@@ -767,7 +779,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # removed) in ways no stamp or mtime sees, so git_* entries always go.
         drop_changed_entries(st._TOOL_RESULT_CACHE)
         drop_vcs_entries(st._TOOL_RESULT_CACHE)
-    elif name in ("memory_write", "memory_delete") and not result.startswith("ERROR") and result != "DENIED by user":
+    elif name in ("memory_write", "memory_delete") and not tail_text.startswith("ERROR") and result != "DENIED by user":
         # A new (or removed) memory invalidates any cached memory_search
         # index/snippets — regardless of the scope the write/delete targeted.
         for k in [k for k in st._TOOL_RESULT_CACHE if k[0] == "memory_search"]:
@@ -777,9 +789,9 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # run_bash, so key on the marker text rather than the tool name — otherwise the
     # model is never told wait_background exists and the wake poller stays unarmed for
     # work whose completion only a later turn can observe (0.68.2).
-    if ((result.startswith("[background]") if name == "run_bash"
+    if ((tail_text.startswith("[background]") if name == "run_bash"
          else name in ("write_file", "edit_file", "multi_edit")
-         and "\n[background] PID" in result)
+         and "\n[background] PID" in tail_text)
             and not st._SESSION_HAS_BACKGROUNDED):
         st._SESSION_HAS_BACKGROUNDED = True
         st._PENDING_BACKGROUND_NOTICE = BACKGROUND_GUIDANCE
@@ -793,7 +805,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # the next scan, announcing "exited (code N)" is exactly what the model
     # needs to hear, since it was told the job was backgrounded.)
     if (name == "edit_file" and not (isinstance(args.get("diff"), str) and args.get("diff").strip())
-            and not isinstance(args.get("edits"), list) and not result.startswith("ERROR")):
+            and not isinstance(args.get("edits"), list) and not tail_text.startswith("ERROR")):
         st._CONSECUTIVE_EDITS += 1
         if st._CONSECUTIVE_EDITS >= _MULTI_EDIT_NUDGE_THRESHOLD and not st._MULTI_EDIT_NUDGED:
             st._MULTI_EDIT_NUDGED = True

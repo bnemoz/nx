@@ -52,7 +52,9 @@ def tap_event(kind: str, text: str) -> None:
         return
     job_id = getattr(_subagent_ctx(), "job_id", None)
     sink = _es.sink_for(job_id)
-    if sink is None:
+    if sink is None or job_id is None:
+        # sink_for() short-circuits a None id to None, so this arm is
+        # unreachable in practice; it narrows `job_id` for sink.write's `str`.
         return
     for line in text.splitlines():
         if line.strip():

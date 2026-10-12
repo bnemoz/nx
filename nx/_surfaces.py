@@ -488,7 +488,7 @@ def _vt_supported() -> bool:
         try:
             import ctypes
             mode = ctypes.wintypes.DWORD()
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyrefly: ignore[missing-attribute]  # win32-only branch
             h = k32.GetStdHandle(-11)
             if not k32.GetConsoleMode(h, ctypes.byref(mode)):
                 return False

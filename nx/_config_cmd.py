@@ -136,7 +136,7 @@ def _cmd_doctor(_args: list[str]) -> int:
     notes: list[str] = []
 
     def bad(text: str) -> None:
-        issues.append(text)
+        issues.append((text, ""))  # pyrefly: ignore[bad-argument-type]  # tuple placeholder; only text is printed
 
     def warn(text: str) -> None:
         notes.append(text)

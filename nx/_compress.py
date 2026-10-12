@@ -441,7 +441,7 @@ def _compress_call_target() -> tuple[Any, str, dict[str, Any]]:
             st._COMPRESS_SOURCE_WARNED = True
             print(f"{C.WARNING}  ↳ NX_COMPRESS_SOURCE={name!r} unusable — folding "
                   f"on {getattr(st.ACTIVE, 'name', 'the active source')}{RESET}")
-    return (st.client, st.MODEL,
+    return (st.client, st.MODEL,  # pyrefly: ignore[bad-return]  # Any-typed client
             st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {})
 
 
@@ -795,10 +795,10 @@ def _region_fingerprint(msgs: list[dict[str, Any]]) -> tuple:
     stale snapshot is discarded rather than mis-spliced (hash() of str is
     per-process randomized but stable within one process, which is all a
     dispatch→apply comparison needs)."""
-    out = []
+    out: list[tuple[Any, int, int, int, Any]] = []
     for m in msgs:
         if not isinstance(m, dict):
-            out.append(("raw", hash(repr(m))))
+            out.append(("raw", hash(repr(m))))  # pyrefly: ignore[bad-argument-type]  # non-dict marker entry
             continue
         c = m.get("content")
         if isinstance(c, list):
@@ -888,7 +888,7 @@ def _collect_async_fold(messages: list[dict[str, Any]], wait: float = 0.0) -> bo
     if not _subagent_quiet():
         print(f"{DIM}  ↻ auto-compressed {summarized_n} turns → 1 summary "
               f"({summary_chars} chars), kept last {kept_n} verbatim "
-              f"(context was at {pct}% of {_abbr(mx)}){RESET}")
+              f"(context was at {pct}% of {_abbr(mx if mx is not None else 0)}){RESET}")
     return True
 
 

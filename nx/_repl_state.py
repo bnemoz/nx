@@ -155,6 +155,8 @@ def _save_current_locked(
 ) -> None:
     """Body of `_save_current`, run with SIGINT blocked."""
     m = _build_save_meta(state, state.messages, meta)
+    if state.session_id is None:
+        return
     try:
         _write_session(state.session_id, state.messages, m, update_index=update_index)
     except OSError as e:

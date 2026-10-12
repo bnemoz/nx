@@ -174,7 +174,7 @@ def snapshot_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     dict per message plus a pointer copy — orders of magnitude below the
     SQLite read-merge-write it replaces.
     """
-    out = []
+    out: list[dict[str, Any]] = []
     for m in messages:
         if not isinstance(m, dict):
             out.append(m)

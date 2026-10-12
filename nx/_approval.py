@@ -161,7 +161,9 @@ def _paused_spinner():
             paused = True
         yield
     finally:
-        if paused:
+        # `paused` is only ever True when sp was not None; the re-check is for
+        # the checker, not the runtime (the narrowing is lost across yield).
+        if paused and sp is not None:
             sp.start()
 
 

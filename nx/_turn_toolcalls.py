@@ -116,7 +116,7 @@ def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[s
             print(f"{C.WARNING}  ✂ FORCED FINAL — model emitted {names} instead of "
                   f"final_answer; executing and continuing the turn{RESET}")
         delegated = _handle_text_tool_calls(messages, text, malformed_call_count,
-                                            exclude={"final_answer"})
+                                            exclude=frozenset({"final_answer"}))
         return delegated if delegated is not None else TURN_DONE
     if not quiet:
         print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")

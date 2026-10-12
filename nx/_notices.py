@@ -39,6 +39,7 @@ def _frame_slots() -> dict:
     module reload / conftest eviction that adds a routed name must not
     KeyError a frame installed before it."""
     fr = _CURRENT.get()
+    assert fr is not None  # callers only reach this inside an installed frame; narrows for the checker
     slots = fr.slots
     if len(slots) != len(SLOTS):
         d = st._NOTICE_DEFAULTS

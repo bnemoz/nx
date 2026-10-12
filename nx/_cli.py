@@ -205,12 +205,14 @@ def _run_one_shot() -> bool:
         instruction = _PROMPT_TEXT
     elif _PROMPT_FILE == "-":
         instruction = sys.stdin.read()
-    else:
+    elif _PROMPT_FILE is not None:
         try:
             instruction = Path(_PROMPT_FILE).read_text(encoding="utf-8")
         except OSError as e:
             sys.stderr.write(f"nx: cannot read --prompt-file {e.filename!r}: {e}\n")
             sys.exit(2)
+    else:
+        return False
     instruction = instruction.strip()
     if not instruction:
         sys.stderr.write("nx: --prompt-file is empty — nothing to do\n")

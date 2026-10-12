@@ -77,7 +77,7 @@ def _match_slash_commands(prefix: str) -> list[tuple[str, str]]:
     q = prefix[1:].lower()
     if not q:
         return list(SLASH_COMMANDS)
-    scored = []
+    scored: list[tuple[float, str, str]] = []
     for cmd, desc in SLASH_COMMANDS:
         name = cmd[1:].lower()
         if name.startswith(q):
@@ -95,7 +95,7 @@ def _fuzzy_filter(opts: list[str], prefix: str) -> list[str]:
     q = prefix.lower()
     if not q:
         return list(opts)
-    scored = []
+    scored: list[tuple[float, str]] = []
     for o in opts:
         name = o.lower()
         if name.startswith(q):
@@ -954,7 +954,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 if wake is not None and st._WAKE_DUE:
                     st._WAKE_PREFILL = "\n".join(buf)
                     finish()
-                    return wake
+                    return cast(str, wake)
                 # Poll instead of blocking so a terminal resize repaints the
                 # frame within ~0.2s: each idle tick compares the current
                 # column count against the last painted frame (cheap and

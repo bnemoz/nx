@@ -34,7 +34,7 @@ exactly the roadmap's "thin facade" carve-out.
 from __future__ import annotations
 
 import contextvars
-from typing import Any
+from typing import Any, cast
 
 from . import _state as st
 
@@ -306,8 +306,8 @@ def _install_descriptors() -> None:
     # Inherit the store/seed when an earlier generation installed them (None
     # checks, not `or {}` — an emptied dict must keep its identity, or the
     # generations would silently fork into separate stores).
-    store: dict[str, Any] = getattr(base, "_RECOVERY_STORE", None)
-    seed: dict[str, Any] = getattr(base, "_RECOVERY_SEED", None)
+    store = cast("dict[str, Any] | None", getattr(base, "_RECOVERY_STORE", None))
+    seed = cast("dict[str, Any] | None", getattr(base, "_RECOVERY_SEED", None))
     if store is None:
         store = {}
     if seed is None:
@@ -327,7 +327,7 @@ def _install_descriptors() -> None:
             (lambda _f: lambda self: get(_f))(f),
             (lambda _f: lambda self, v: set_(_f, v))(f),
         )
-    st.__class__ = type(base.__name__ + "Routed", (base,), ns)
+    st.__class__ = type(base.__name__ + "Routed", (base,), ns)  # pyrefly: ignore[missing-attribute]  # deliberate dynamic class swap
     for f in FIELDS:
         if f in st.__dict__:
             _val = st.__dict__.pop(f)

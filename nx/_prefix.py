@@ -26,7 +26,7 @@ Byte-stability rules for anything added here:
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import threading
 
@@ -59,7 +59,7 @@ pinned: Optional[list[str]] = None
 def _get_pinned() -> Optional[list[str]]:
     v = getattr(_PREFIX_TLS, "pinned", _PREFIX_TLS)
     if v is not _PREFIX_TLS:
-        return v
+        return cast("Optional[list[str]]", v)
     return pinned
 
 
@@ -161,7 +161,10 @@ def _same_session_head(messages: list[dict[str, Any]]) -> bool:
     if not messages or not isinstance(messages[0], dict) \
             or messages[0].get("role") != "system":
         return False
-    return _encode([messages[0]])[0] == _get_pinned()[0]
+    pinned = _get_pinned()
+    if pinned is None:
+        return False
+    return _encode([messages[0]])[0] == pinned[0]
 
 
 def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
@@ -178,6 +181,8 @@ def check_prefix(messages: list[dict[str, Any]], *, warn: bool = True) -> bool:
     if not _same_session_head(messages):
         return True  # not the session head (sub-agent turn, fixture): uncheckable
     cur = _get_pinned()
+    if cur is None:
+        return True
     head = _encode(messages[:len(cur)])
     if head == cur:
         return True

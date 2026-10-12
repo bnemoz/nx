@@ -150,12 +150,12 @@ def _recovery_sampling_opts() -> dict[str, Any]:
     unknown keys. Set any RECOVERY_* value negative to omit it.  When
     NX_BACKEND=vllm the llama.cpp-only knobs are set to None instead of
     their defaults, so the checks below miss them automatically."""
-    opts = {}
+    opts: dict[str, Any] = {}
     if st.RECOVERY_TEMPERATURE is not None and st.RECOVERY_TEMPERATURE >= 0:
         opts["temperature"] = st.RECOVERY_TEMPERATURE
     if st.RECOVERY_TOP_P is not None and st.RECOVERY_TOP_P >= 0:
         opts["top_p"] = st.RECOVERY_TOP_P
-    extra = {}
+    extra: dict[str, Any] = {}
     # RECOVERY_* constants live on _compress (recomputed by its reload when
     # NX_BACKEND flips); read them at call time so a mid-session backend
     # change and the tests' module reload both take effect.

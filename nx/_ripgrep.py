@@ -44,6 +44,8 @@ _REDIRECTION = re.compile(r"^\d*[<>]")
 
 def _rewrite_combined_flag(tok: str) -> str:
     m = _COMBINED_FLAGS.match(tok)
+    if m is None:
+        return tok
     body = "".join(ch for ch in m.group("body") if ch not in _DROP_CHARS)
     return f"-{body}"
 

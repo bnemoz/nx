@@ -121,7 +121,8 @@ class _AsyncLogWriter:
                         except OSError:
                             pass
                         f = self._open()
-                    f.write(line)
+                    if f is not None:  # fail-soft: a failed reopen drops the line
+                        f.write(line)
                 except OSError:
                     pass
                 finally:

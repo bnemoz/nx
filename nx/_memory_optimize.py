@@ -374,7 +374,7 @@ def _answer_text(choice: Any) -> str:
         return ""
 
 
-def _optimize_call(prompt: str, purpose: str, mt_kwargs: dict[str, int],
+def _optimize_call(prompt: str, purpose: str, mt_kwargs: "dict[str, Any]",
                    base_kwargs: dict[str, Any]) -> tuple[Any, Any]:
     """One HTTP round-trip → (first choice, response). `max_tokens` rides in
     as a kwarg dict so a caller can raise it between attempts. A server that
@@ -384,6 +384,7 @@ def _optimize_call(prompt: str, purpose: str, mt_kwargs: dict[str, int],
     _log_event("req", {"model": st.MODEL, "messages": [{"role": "user", "content": prompt}],
                        "stream": False, "_purpose": purpose,
                        "max_tokens": mt_kwargs.get("max_tokens")})
+    assert st.client is not None and st.MODEL is not None  # caller (_optimize_chat) guards; narrows for the checker
     try:
         resp = st.client.chat.completions.create(
             model=st.MODEL,
@@ -490,7 +491,7 @@ def _plan_shaped(ln: str) -> bool:
     return up.startswith(("RETIRE", "MERGE", "OK")) or "=>" in ln
 
 
-def _parse_plan(text: str, known: dict[str, _OptNote]) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+def _parse_plan(text: str, known: dict[str, _OptNote]) -> tuple[list[str], list[tuple[list[str], str]], list[str]]:
     """Plan text → (retire names, [(names, title)], rejected plan lines).
 
     Line-oriented and forgiving: unrelated prose, bullets and fences pass
@@ -538,7 +539,7 @@ def _parse_plan(text: str, known: dict[str, _OptNote]) -> tuple[list[str], list[
     return retire, merges, skipped
 
 
-def _merge_plan(total: _Plan, chunk: tuple[list[str], list[tuple[str, str]]],
+def _merge_plan(total: _Plan, chunk: tuple[list[str], list[tuple[list[str], str]]],
                 budget: int) -> _Plan:
     """Fold one pass's plan into the run's totals, keeping every name in
     exactly one action (a merge wins over a retire of the same note) and

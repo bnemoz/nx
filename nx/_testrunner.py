@@ -348,8 +348,8 @@ def run_tests(targets: str = "", **_: Any) -> str:
     if not target_dir:
         try:
             from ._undo import list_checkpoints
-            edited = [f.path for cp in list_checkpoints()
-                      for f in (cp.files or ())]
+            edited = [f["path"] for cp in list_checkpoints()
+                      for f in (cp.get("files") or ())]
         except Exception:  # noqa: BLE001
             edited = []
         mapped = _mapped_targets(edited) if edited else []

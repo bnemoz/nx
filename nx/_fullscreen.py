@@ -40,7 +40,7 @@ import os
 import signal
 import sys
 from collections.abc import Iterator
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # --- the contract with the terminal ------------------------------------------
 # Enter/exit are the ONLY cursor-and-scrollback-relevant bytes this module
@@ -487,13 +487,15 @@ _VIEW_FACTORIES: dict[str, Callable[..., View]] = {}
 
 
 def register_view(name: Optional[str] = None,
-                  factory: Optional[Callable[..., View]] = None) -> Callable[..., View]:
+                  factory: Optional[Callable[..., View]] = None) -> Callable[..., Any]:
     """Register a zero-or-more-arg view factory under `name` (e.g. "tabs").
 
     Usable as a decorator on a factory function, or called directly. Returns
     the factory unchanged.
     """
     if factory is None:                       # bare decorator form
+        # A decorator, not a finished factory: it returns register_view's own
+        # result (the factory), so the shape is Callable -> factory.
         return lambda f: register_view(name, f)
     _VIEW_FACTORIES[name] = factory           # type: ignore[index]
     return factory

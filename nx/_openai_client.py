@@ -411,9 +411,14 @@ class _Models:
         self._client = client
 
     def list(self, timeout: float | httpx.Timeout | None = None) -> _Obj:
-        req = self._client._client.build_request(
-            "GET", "/models",
-            **({} if timeout is None else {"timeout": timeout}))
+        # Explicit branch instead of `**({"timeout": ...})` unpack: httpx's
+        # overloads can't type a conditional-dict `**kwargs`, but the named
+        # kwarg types fine (behavior identical either way).
+        if timeout is None:
+            req = self._client._client.build_request("GET", "/models")
+        else:
+            req = self._client._client.build_request("GET", "/models",
+                                                     timeout=timeout)
         resp = self._client._send(req, stream=False)
         return _Obj(resp.json())
 

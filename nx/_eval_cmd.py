@@ -169,6 +169,11 @@ def _render_turn(turn: dict[str, Any]) -> list[tuple[str, float]]:
 class _EvalStubServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Assigned by _stub_server() right after construction and read by the
+    # handlers through self.server; declared here so every instance carries
+    # them for the type checker (and for an instance built directly in a test).
+    _turns: dict[str, int]
+    _lock: threading.Lock
 
     def handle_error(self, request, client_address) -> None:
         # The client legitimately hangs up mid-stream (a collapse/timeout cut,
@@ -194,7 +199,7 @@ class _EvalStubHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *args: Any) -> None:  # silence per-request stderr
+    def log_message(self, format: str, *args: Any) -> None:  # silence per-request stderr
         pass
 
     # --- request resolution ---------------------------------------------

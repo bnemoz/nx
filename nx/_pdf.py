@@ -71,13 +71,13 @@ def extract_pdf(path: str, token: str | None = None) -> str:
         return _tail(head, path, cli_text)
     # 2) No toolchain on PATH → in-process pymupdf4llm fallback (lazy).
     try:
-        import pymupdf4llm  # lazy: heavy, demoted from hard dep in 0.100.0
+        import pymupdf4llm  # lazy: heavy, demoted from hard dep in 0.100.0  # pyrefly: ignore[missing-import]  # optional dep, guarded by this try/except ImportError
     except ImportError:
         return head + f"(a PDF you asked about — not inlined: {_INSTALL_HINT})"
     # pymupdf4llm depends on PyMuPDF, so `pymupdf` is importable alongside it;
     # we open the doc ourselves to learn the page count and cap the extraction.
     try:
-        import pymupdf
+        import pymupdf  # pyrefly: ignore[missing-import]  # optional dep (pymupdf4llm's own dep); ImportError caught below
         doc = pymupdf.open(path)
     except Exception as e:  # noqa: BLE001 — any failure becomes a note
         return head + f"ERROR: could not open PDF: {type(e).__name__}: {e}"

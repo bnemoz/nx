@@ -876,6 +876,7 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
     with _ASYNC_LOCK:
         _prune_queued()
         queued = sem is not None and sem._value == 0  # type: ignore[attr-defined]
+        queue_depth = 0  # only meaningful when queued; initialized so the read below is always bound
         _ASYNC_AGENTS[job_id] = {
             "instruction": instruction,
             "status": "queued" if queued else "running",

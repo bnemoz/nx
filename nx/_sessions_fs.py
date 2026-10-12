@@ -136,7 +136,9 @@ def _exclusive_file_lock(path: str):
     lock = open_private(path + ".lock", os.O_CREAT | os.O_RDWR | os.O_APPEND,
                         text_mode="a+")
     try:
-        with _platform.exclusive_file_lock(lock):
+        # _platform.exclusive_file_lock accepts a file object (its docstring:
+        # Windows needs it; the declared `fd: int` is the narrower legacy sig).
+        with _platform.exclusive_file_lock(lock):  # pyrefly: ignore[bad-argument-type]
             yield
     finally:
         lock.close()
@@ -1196,9 +1198,11 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
             {"role": "user", "content": prompt},
         ]
         try:
+            client = st.client
+            assert client is not None and st.MODEL is not None  # checked by _maybe_refresh_description before spawning this thread; AssertionError here is caught by the `except Exception` below, same as the AttributeError it replaces
             _log_event("req", {"model": st.MODEL, "messages": payload,
                                "stream": False, "_purpose": "session_desc"})
-            resp = st.client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=st.MODEL, messages=payload, stream=False, timeout=20,
                 **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
             try:

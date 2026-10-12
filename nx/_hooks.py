@@ -93,7 +93,7 @@ def post_tool_hook(tool: str, args: dict[str, Any], result: str, cached: bool = 
     cmd = _hook_cmd("NX_POST_TOOL_HOOK")
     if not cmd:
         return
-    payload = {"tool": tool, "args": args, "result": result}
+    payload: dict[str, Any] = {"tool": tool, "args": args, "result": result}
     if cached:
         payload["cached"] = True
     ok, msg = _run_hook(cmd, payload, _hook_timeout())

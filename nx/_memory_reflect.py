@@ -164,6 +164,7 @@ def _reflect_chat(prompt: str, purpose: str) -> str | None:
         base_kwargs = st.ACTIVE.extra_request_kwargs()
     _log_event("req", {"model": st.MODEL, "messages": [{"role": "user", "content": prompt}],
                        "stream": False, "_purpose": purpose})
+    assert st.client is not None and st.MODEL is not None  # caller guards st.client/st.MODEL is None; narrows for the checker
     try:
         resp = st.client.chat.completions.create(
             model=st.MODEL,

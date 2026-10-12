@@ -246,7 +246,11 @@ def end_user_turn_footer() -> None:
     if acc.steps == 0:
         return
     if acc.steps == 1:
+        if acc.last is None:
+            return
         _render_footer(*acc.last)
+        return
+    if acc.last is None:
         return
     usage, timings, chars, t_first, elapsed, text, tcs, parser = acc.last
     if acc.gen_n:
