@@ -143,16 +143,17 @@ def _exclusive_file_lock(path: str):
 
 
 def _load_index() -> dict[str, Any]:
-    """The listing index: {session_id: summary dict}, derived from the
-    session store (0.101.0: the transcripts ARE the rows, so each summary
-    is computed from its `data` blob — one query, no per-file parse). An
+    """The listing index: {session_id: summary dict}, read column-only from
+    the store's indexed listing columns (0.129: preview/n_msg ride on the
+    sessions row, so an index build never touches an event log). An
     unavailable store degrades to an empty dict."""
     from . import _sessiondb
     try:
-        return {
-            sid: _summarize_session_data(sid, data)
-            for sid, data in _sessiondb.iter_rows() if data is not None
-        }
+        out: dict[str, Any] = {}
+        for s in _sessiondb.list_summaries():
+            s.pop("heal", None)
+            out[s["id"]] = s
+        return out
     except Exception:
         return {}
 
@@ -935,34 +936,49 @@ def _session_summary_from_file(fname: str, idx: dict[str, Any] | None = None) ->
 def _list_sessions(limit: int | None = 20, offset: int = 0, query: str | None = None) -> list[dict[str, Any]]:
     """Return sessions newest-first as dicts: id, title, description, preview, n.
 
-    `preview` is the first ~60 chars of the first user message; `description`
-    is an optional model-generated one-liner refreshed every N turns (richer
-    than the static first-message title). `n` is the turn count (non-system
-    messages)."""
-    import nx as _m
+    0.129: the listing is COLUMN-ONLY — preview and n come from the
+    sessions row's indexed listing columns, so an open does O(page) work,
+    never an event-log read or transcript parse. Pre-0.129 rows (NULL
+    columns) self-heal once: just the returned page is inflated via
+    load_session and its columns backfilled. `description` is an optional
+    model-generated one-liner refreshed every N turns (richer than the
+    static first-message title)."""
     from . import _session_save
     # A listing must show the newest transcript, not the last landed one.
     _session_save.flush_pending()
     limit = max(0, int(limit)) if limit is not None else None
     offset = max(0, int(offset or 0))
-    files = _session_files_newest()
-    idx = _load_index()
-    out = []
-    for fname in files:
-        # Looked up via nx (not the module-local binding) since a couple of
-        # tests monkeypatch m._session_summary_from_file to spy on call count.
-        summary = _m._session_summary_from_file(fname, idx)
-        if not summary or not _session_matches_query(summary, query):
-            continue
-        out.append(summary)
-        if query:
-            continue
-        if limit is not None and len(out) >= offset + limit:
-            break
+    from . import _sessiondb
     if query:
-        out.sort(key=lambda s: s["updated_at"], reverse=True)
+        # Scan ALL matching sessions, then re-sort: a match may be older
+        # than page 1 (tests pin this). Still no event-log reads.
+        rows = _sessiondb.list_summaries()
+    else:
+        rows = _sessiondb.list_summaries(
+            limit=None if limit is None else offset + limit)
+    if query:
+        rows = [s for s in rows if _session_matches_query(s, query)]
+        rows.sort(key=lambda s: s["updated_at"], reverse=True)
     end = None if limit is None else offset + limit
-    return out[offset:end]
+    page = rows[offset:end]
+    # Bounded self-heal: only rows we are about to return (page-size, not
+    # store-size). Computes the real summary from the event log once and
+    # backfills the columns, so the next listing is column-only again.
+    for row in page:
+        if not row.pop("heal", False):
+            continue
+        data = _sessiondb.load_session(row["id"])
+        if not data:
+            continue
+        fixed = _summarize_session_data(row["id"], data)
+        fixed.pop("heal", None)
+        row.update(fixed)
+        try:
+            _sessiondb.heal_listing_row(row["id"], fixed["preview"],
+                                        fixed["n"])
+        except Exception:
+            pass  # best-effort backfill; the NULL fallback still serves
+    return page
 
 
 def _prune_sessions_store() -> dict[str, int]:

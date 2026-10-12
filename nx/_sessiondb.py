@@ -177,6 +177,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # 0.108.6: per-session image sha set, maintained on every write so the
     # sidecar-GC live-set scan never has to parse transcript blobs.
     _ensure_shas_column(conn)
+    # 0.129.x: listing columns (preview text + message count) maintained on
+    # every write so a listing never has to read the event log at all.
+    _ensure_listing_columns(conn)
     # Append-only event log (0.104.x): the authoritative transcript lives in
     # per-message rows; the sessions.data blob becomes a lagging cache (only
     # rebuilt on merge/compaction/fork/migration). session_chain is the
@@ -337,8 +340,8 @@ def migrate_files(force: bool = False) -> int:
                     conn.execute(
                         "INSERT OR REPLACE INTO sessions"
                         " (session_id, data, updated_at, revision, title,"
-                        "  cwd, model, source, image_shas)"
-                        " VALUES (?,?,?,?,?,?,?,?,?)",
+                        "  cwd, model, source, image_shas, preview, n_msg)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         _data_to_row(sid, data))
                 except sqlite3.Error:
                     continue
@@ -387,13 +390,16 @@ def _import_legacy_shards(conn: sqlite3.Connection, d: str,
                 "updated_at": float(summary.get("updated_at") or 0.0),
                 "revision": 0,
                 "messages": [],  # transcript lost pre-store — listing stub only
+                # keep the shard's own preview/n so the stub lists as-is
+                "preview": summary.get("preview"),
+                "n_msg": int(summary.get("n") or 0),
             }
             try:
                 conn.execute(
                     "INSERT OR REPLACE INTO sessions"
                     " (session_id, data, updated_at, revision, title,"
-                    "  cwd, model, source, image_shas)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    "  cwd, model, source, image_shas, preview, n_msg)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     _data_to_row(sid, data))
             except sqlite3.Error:
                 continue
@@ -425,6 +431,64 @@ def _ensure_shas_column(conn: sqlite3.Connection) -> None:
         pass  # the NULL fallback still serves the scan
 
 
+def _ensure_listing_columns(conn: sqlite3.Connection) -> None:
+    """Add the sessions.preview / sessions.n_msg listing columns to a
+    pre-0.129 store (rows read as NULL and fall back to a bounded heal in
+    the listing path, same as before the columns existed)."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        if "preview" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN preview TEXT")
+        if "n_msg" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN n_msg INTEGER")
+    except sqlite3.Error:
+        pass  # the NULL fallback still serves the listing
+
+
+def _preview_of(messages: list[dict[str, Any]]) -> Optional[str]:
+    """The indexed preview: the first user message's content, truncated the
+    same way _summarize_session_data truncates it (None when there is no
+    user message — the listing falls back to the title)."""
+    try:
+        from ._sessions_io import _safe_title
+        for msg in messages or []:
+            if isinstance(msg, dict) and msg.get("role") == "user" \
+                    and msg.get("content"):
+                return _safe_title(msg["content"]) or None
+    except Exception:
+        return None
+    return None
+
+
+def _n_msg_of(messages: list[dict[str, Any]]) -> int:
+    """The indexed turn count: non-system messages (matches `n` in the
+    listing summary)."""
+    try:
+        return sum(1 for m in messages or []
+                   if isinstance(m, dict) and m.get("role") != "system")
+    except Exception:
+        return 0
+
+
+def heal_listing_row(session_id: str, preview: str, n_msg: int) -> bool:
+    """Best-effort backfill of a pre-0.129 row's listing columns (computed
+    once, by the listing's bounded self-heal, not on every open)."""
+    conn = _open()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE sessions SET preview = ?, n_msg = ?"
+                " WHERE session_id = ?", (preview or None, int(n_msg),
+                                          session_id))
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _shas_of(data: dict[str, Any]) -> Optional[str]:
     """The sorted image shas referenced by `data`'s messages, as a JSON list
     string — the indexed form of the sidecar-GC live-set."""
@@ -442,6 +506,10 @@ TEXT_REF_MARKER = '"type": "text_ref"'
 
 
 def _data_to_row(session_id: str, data: dict[str, Any]) -> tuple:
+    msgs = data.get("messages") or []
+    # an explicit preview/n_msg (legacy-shard stubs) wins over a recompute
+    preview = data["preview"] if "preview" in data else _preview_of(msgs)
+    n_msg = data["n_msg"] if data.get("n_msg") is not None else _n_msg_of(msgs)
     return (
         session_id,
         json.dumps(data, ensure_ascii=False),
@@ -452,6 +520,8 @@ def _data_to_row(session_id: str, data: dict[str, Any]) -> tuple:
         data.get("model"),
         data.get("source"),
         _shas_of(data),
+        preview,
+        n_msg,
     )
 
 
@@ -706,8 +776,9 @@ def _store_session_txn(
                 # Small meta (todos/plan/wip/metrics) rides in the shell.
                 conn.execute(
                     "INSERT INTO sessions (session_id, data, updated_at,"
-                    " revision, title, cwd, model, source, image_shas)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)"
+                    " revision, title, cwd, model, source, image_shas,"
+                    " preview, n_msg)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
                     " ON CONFLICT(session_id) DO UPDATE SET"
                     " data=excluded.data,"
                     " updated_at=excluded.updated_at,"
@@ -716,7 +787,9 @@ def _store_session_txn(
                     " cwd=COALESCE(excluded.cwd, sessions.cwd),"
                     " model=COALESCE(excluded.model, sessions.model),"
                     " source=COALESCE(excluded.source, sessions.source),"
-                    " image_shas=excluded.image_shas",
+                    " image_shas=excluded.image_shas,"
+                    " preview=excluded.preview,"
+                    " n_msg=excluded.n_msg",
                     (session_id, shell_blob,
                      float((meta or {}).get("updated_at") or now),
                      live_revision + 1,
@@ -724,7 +797,9 @@ def _store_session_txn(
                      (meta or {}).get("cwd") or existing.get("cwd"),
                      (meta or {}).get("model") or existing.get("model"),
                      (meta or {}).get("source") or existing.get("source"),
-                     _shas_of({"messages": merged})))
+                     _shas_of({"messages": merged}),
+                     _preview_of(merged),
+                     _n_msg_of(merged)))
                 # The FTS mirror of a rebuilt transcript is stale at every
                 # seq — drop it; the next indexed save (or the next search's
                 # lazy backfill) rebuilds it.
@@ -742,12 +817,16 @@ def _store_session_txn(
                 " (session_id, chain_len, updated_at) VALUES (?,?,?)",
                 (session_id, len(merged), now))
             if fast:
-                # Only the columns the caller actually supplied may change —
-                # the blob cache's values are stale, so defaulting to them
-                # here could regress a title another writer just set.
-                sets = ["updated_at = ?", "revision = COALESCE(revision, 0) + 1"]
+                # 0.129.x: the indexed listing columns must track an append:
+                # n_msg grows by the newly appended non-system messages;
+                # preview is stable (first user message never changes) and
+                # is set only if a pre-0.129 row never computed one.
+                added = _n_msg_of(messages[chain_len:])
+                sets = ["updated_at = ?",
+                        "revision = COALESCE(revision, 0) + 1",
+                        "n_msg = COALESCE(n_msg, 0) + ?"]
                 vals: list[Any] = [
-                    float((meta or {}).get("updated_at") or now)]
+                    float((meta or {}).get("updated_at") or now), added]
                 for col in ("title", "cwd", "model", "source"):
                     v = (meta or {}).get(col)
                     if v is not None:
@@ -757,6 +836,15 @@ def _store_session_txn(
                 conn.execute(
                     f"UPDATE sessions SET {', '.join(sets)}"
                     " WHERE session_id = ?", vals)
+                pv = _preview_of(messages)
+                if pv is not None:
+                    try:
+                        conn.execute(
+                            "UPDATE sessions SET preview = ?"
+                            " WHERE session_id = ? AND preview IS NULL",
+                            (pv, session_id))
+                    except sqlite3.Error:
+                        pass
                 # Fast path: the shell's small meta must still refresh —
                 # metrics totals and the plan/wip block change every turn.
                 if shell_blob != "{}":
@@ -1044,6 +1132,60 @@ def list_ids_newest(limit: Optional[int] = None) -> list[tuple[str, float]]:
             sql += f" LIMIT {int(limit)}"
         rows = conn.execute(sql).fetchall()
         return [(r[0], float(r[1] or 0.0)) for r in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def list_summaries(limit: Optional[int] = None, offset: int = 0,
+                   ids: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Column-only listing summaries, newest-first — the whole point of the
+    listing columns: NO event-log read, NO transcript parse, O(page) work.
+
+    Returns dicts in the exact `_summarize_session_data` shape. Rows whose
+    preview/n_msg are NULL (pre-0.129 stores) come back with `heal` set to
+    True — the caller may compute and backfill those bounded rows."""
+    from ._sessions_io import _short_id
+    _ensure_migrated()
+    conn = _open()
+    if conn is None:
+        return []
+    try:
+        sql = ("SELECT s.session_id, s.updated_at, s.title, s.preview,"
+               " s.n_msg, s.model, s.source, s.cwd, s.image_shas,"
+               " m.description FROM sessions s"
+               " LEFT JOIN fts_meta m ON m.sid = s.session_id")
+        params: list[Any] = []
+        if ids is not None:
+            if not ids:
+                return []
+            sql += (" WHERE s.session_id IN ("
+                    + ",".join("?" * len(ids)) + ")")
+            params.extend(ids)
+        sql += " ORDER BY s.updated_at DESC"
+        if offset:
+            sql += f" OFFSET {int(offset)}"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        out: list[dict[str, Any]] = []
+        for (sid, updated_at, title, preview, n_msg, model, source, cwd,
+             shas, description) in conn.execute(sql, params):
+            out.append({
+                "id": sid,
+                "short": _short_id(sid),
+                "title": title or preview or "(empty)",
+                "description": description,
+                "preview": preview or "",
+                "updated_at": float(updated_at or 0.0),
+                "n": int(n_msg or 0),
+                "model": model,
+                "source": source,
+                "cwd": cwd,
+                "sha256s": sorted(json.loads(shas)) if shas else [],
+                "heal": preview is None or n_msg is None,
+            })
+        return out
     except sqlite3.Error:
         return []
     finally:

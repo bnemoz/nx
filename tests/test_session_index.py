@@ -85,6 +85,63 @@ def test_list_sessions_uses_index_even_if_file_is_corrupted():
     assert match[0]["preview"] == "important preview text"
 
 
+def test_listing_is_column_only_and_self_heals_null_rows():
+    """0.129 regression: a listing never reads event logs (iter_rows /
+    _read_events are not called), and pre-0.129 rows with NULL listing
+    columns self-heal once — backfilled to the real values in the same
+    listing call."""
+    _clear_test_sessions_dir()
+    sids = []
+    for i in range(5):
+        sid = f"20250101-1400{i:02d}-col{i:02d}"
+        m._write_session(sid, [_msg("user", f"coltest {i}")],
+                         {"updated_at": 300 + i})
+        sids.append(sid)
+
+    from nx import _sessiondb
+    calls = []
+    orig_read = _sessiondb._read_events
+
+    def spy_read(conn, session_id):
+        calls.append(session_id)
+        return orig_read(conn, session_id)
+
+    _sessiondb._read_events = spy_read
+    try:
+        sessions = m._list_sessions()
+    finally:
+        _sessiondb._read_events = orig_read
+
+    assert len(sessions) == 5
+    assert not calls, f"listing read {len(calls)} event logs: {calls}"
+    assert sessions[0]["preview"] == "coltest 4"  # newest first
+    assert sessions[0]["n"] == 1
+
+    # Pre-0.129 row: manually NULL the listing columns, then list.
+    victim = sids[2]
+    conn = _sessiondb._open()
+    try:
+        conn.execute("UPDATE sessions SET preview = NULL, n_msg = NULL"
+                     " WHERE session_id = ?", (victim,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    _sessiondb._read_events = spy_read
+    try:
+        healed = m._list_sessions()
+    finally:
+        _sessiondb._read_events = orig_read
+
+    row = [s for s in healed if s["id"] == victim][0]
+    assert row["preview"] == "coltest 2"
+    assert row["n"] == 1
+    assert len(calls) == 1 and calls[0] == victim  # bounded: just that row
+    # And the backfill persisted — a re-list is column-only again.
+    after = [s for s in m._list_sessions() if s["id"] == victim][0]
+    assert after["preview"] == "coltest 2" and after["n"] == 1
+
+
 def test_missing_index_entry_falls_back_to_full_parse():
     """0.101.0: the listing IS the transcript table, so dropping a summary
     entry cannot lose the session — _write_index only drops ids the caller

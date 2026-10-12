@@ -16,6 +16,7 @@ os.environ["NX_HOME"] = _tmp  # belt-and-suspenders
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m
+import nx
 
 
 def _use_test_sessions_dir():
@@ -158,6 +159,9 @@ def test_list_sessions_without_query_stops_at_limit():
                          [_msg("user", f"limited {i:02d}")],
                          {"updated_at": 200 + i})
 
+    # 0.129: the listing is column-only. Pin the new contract: a page of 5
+    # never triggers a full-store event-log read — iter_rows is not called
+    # at all, and no per-file transcript parse runs for listed rows.
     seen = []
     original = m._session_summary_from_file
 
@@ -165,15 +169,26 @@ def test_list_sessions_without_query_stops_at_limit():
         seen.append(fname)
         return original(fname, idx)
 
+    iter_calls = []
+    original_iter = nx._sessiondb.iter_rows
+
+    def spy_iter():
+        iter_calls.append(1)
+        return original_iter()
+
     m._session_summary_from_file = wrapped
+    nx._sessiondb.iter_rows = spy_iter
     try:
         sessions = m._list_sessions(limit=5)
     finally:
         m._session_summary_from_file = original
+        nx._sessiondb.iter_rows = original_iter
 
     assert len(sessions) == 5
-    assert len(seen) == 5, f"parsed {len(seen)} files instead of stopping at limit"
-    print("PASS — recent listing stops after the requested page")
+    assert len(seen) == 0, (
+        f"listing parsed {len(seen)} transcripts instead of reading columns")
+    assert not iter_calls, "listing rebuilt the full event-log index"
+    print("PASS — recent listing stops after the requested page, column-only")
 
 
 def test_delete_session():
