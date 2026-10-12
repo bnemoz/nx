@@ -779,11 +779,21 @@ class SessionsView(_fullscreen.View):
             return "repaint"
         if key in ("R", "tab"):
             return self._resume()
-        if key == "d" and self.mode == "list" and self.confirm_id is None:
+        # "d" is advertised in both the list and the preview footer; the
+        # armed row is always `self.sessions[self.sel]` in either mode.
+        if key == "d" and self.confirm_id is None:
             return self._arm_delete()
         if key in ("y", "n") and self.confirm_id:
             return self._delete(shell)
-        if key in ("esc", "q", "ctrl-c", "ctrl-d"):
+        if key == "esc":
+            if self.confirm_id:            # cancel the confirm, not the view
+                self.confirm_id = None
+                return "repaint"
+            if self.mode == "preview":     # back out to the list first
+                self.mode = "list"
+                return "repaint"
+            return "quit"
+        if key in ("q", "ctrl-c", "ctrl-d"):
             return "quit"
         return "repaint"
 

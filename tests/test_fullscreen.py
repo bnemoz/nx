@@ -540,6 +540,97 @@ def test_sessions_view_search_uses_fts_hits(monkeypatch):
     assert [s["id"] for s in view.sessions] == ["hit"]
 
 
+def test_sessions_view_delete_defers_through_the_real_delete_path(monkeypatch, capsys):
+    from nx import _sessions_cmd
+
+    class State:
+        session_id = "cur"
+
+    monkeypatch.setattr(_sessions_cmd, "_list_sessions", lambda **k: [
+        {"id": "cur", "title": "here", "n": 1, "updated_at": 0},
+        {"id": "gone", "title": "there", "n": 2, "updated_at": 0}])
+    deleted = []
+    monkeypatch.setattr(_sessions_cmd, "_delete_session",
+                        lambda sid: deleted.append(sid) or True)
+
+    class Shell:
+        def ask(self, label, initial=""):
+            return "y"
+
+    view = _sessions_cmd.SessionsView(State())
+    view.on_key("j", None)
+    assert view.on_key("d", Shell()) == "repaint"  # arm the confirm
+    assert view.confirm_id == "gone"
+    assert view.on_key("y", Shell()) == "run"     # confirm -> deferred
+    assert deleted == []                          # nothing deleted on-screen
+    view.pending_action()
+    assert deleted == ["gone"]
+    assert "✓ deleted" in capsys.readouterr().out
+
+
+def test_sessions_view_esc_cancels_the_delete_confirm_then_the_preview(monkeypatch):
+    from nx import _sessions_cmd
+
+    class State:
+        session_id = "cur"
+
+    monkeypatch.setattr(_sessions_cmd, "_list_sessions", lambda **k: [
+        {"id": "cur", "title": "here", "n": 1, "updated_at": 0},
+        {"id": "other", "title": "there", "n": 2, "updated_at": 0}])
+    monkeypatch.setattr(_sessions_cmd, "_load_session", lambda sid: {
+        "title": "there", "updated_at": 0, "messages": []})
+    view = _sessions_cmd.SessionsView(State())
+    view.on_key("j", None)
+    view.confirm_id = "other"
+    assert view.on_key("esc", None) == "repaint"   # cancel confirm, stay
+    assert view.confirm_id is None
+    assert view.on_key("enter", None) == "repaint"  # into preview
+    assert view.on_key("esc", None) == "repaint"    # back to the list, stay
+    assert view.mode == "list"
+    assert view.on_key("esc", None) == "quit"
+
+
+def test_sessions_view_delete_works_from_the_preview(monkeypatch):
+    """The preview footer advertises 'd delete' — it must actually arm."""
+    from nx import _sessions_cmd
+
+    class State:
+        session_id = "cur"
+
+    monkeypatch.setattr(_sessions_cmd, "_list_sessions", lambda **k: [
+        {"id": "cur", "title": "here", "n": 1, "updated_at": 0},
+        {"id": "other", "title": "there", "n": 2, "updated_at": 0}])
+    monkeypatch.setattr(_sessions_cmd, "_load_session", lambda sid: {
+        "title": "there", "updated_at": 0, "messages": []})
+    view = _sessions_cmd.SessionsView(State())
+    view.on_key("j", None)
+    view.on_key("enter", None)                     # preview
+    assert "d delete" in "\n".join(view.render(80, 24))
+    assert view.on_key("d", None) == "repaint"
+    assert view.confirm_id == "other"
+
+
+def test_drain_pending_input_discards_queued_bytes():
+    """The delete runs after raw mode is gone; bytes typed during it must be
+    discarded, not echoed into the prompt as ^[[A garbage."""
+    from nx import _fullscreen
+    import os as _os
+    import select as _select
+
+    r, w = _os.pipe()
+    try:
+        _os.write(w, b"\x1b[B\x1b[A")   # arrows typed while the action ran
+        _fullscreen._drain_pending_input(r)
+        assert not _select.select([r], [], [], 0)[0]   # drained
+        _os.write(w, b"x")
+        assert _select.select([r], [], [], 0)[0]       # still live afterwards
+        _fullscreen._drain_pending_input(r)
+        _os.close(w)
+        _fullscreen._drain_pending_input(r)            # EOF: must not hang
+    finally:
+        _os.close(r)
+
+
 def test_no_new_command_was_added_to_review(monkeypatch):
     """/review keeps running the critique sub-agent — /diff is the diff view."""
     from nx import _commands

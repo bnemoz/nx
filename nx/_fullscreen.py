@@ -589,6 +589,23 @@ def bgjobs():
     return BackgroundJobsView()
 
 
+def _drain_pending_input(fd: int) -> None:
+    """Discard any bytes already queued on `fd`.
+
+    The key loop leaves raw mode before the deferred action runs, and an
+    action can take real time (a session delete GCs image sidecars). Bytes
+    typed during that window would otherwise be echoed by the kernel in
+    cooked mode and leak into the prompt as literal `^[[A` garbage.
+    """
+    from ._tty import wait_ready
+    try:
+        while wait_ready(fd, 0):
+            if not os.read(fd, 4096):
+                break                      # EOF: readable forever, never drains
+    except OSError:
+        pass
+
+
 def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> bool:
     """Run `view` in the alternate screen when `wants_fullscreen()`, else call
     `fallback` (the command's pre-Phase-D inline output) and return False.
@@ -607,6 +624,10 @@ def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> b
             fallback()
         return False
     if action is not None:
+        try:
+            _drain_pending_input(sys.stdin.fileno())
+        except (OSError, ValueError):    # no usable stdin (tests, pipes)
+            pass
         action()
     return True
 
