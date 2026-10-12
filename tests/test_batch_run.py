@@ -15,7 +15,6 @@ Contract under test:
 
 The suite is offline: _run_model_turn_loop is faked, never a real endpoint.
 """
-import importlib
 import io
 import json
 import os
@@ -33,16 +32,28 @@ import pytest
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
+    """Tier A: import nx once, no reload.
+
+    The old importlib.reload(nx) rebuilt import-time state from this
+    fixture's env. Both jobs it did are covered without a reload:
+    - the per-test session store is read LIVE from NX_SESSIONS_DIR/NX_HOME
+      on every access (nx/_sessions_fs._sessions_dir / _sessiondb), so the
+      env vars set here already redirect every read/write;
+    - the model source (st.ACTIVE/client/MODEL) is rebuilt with the proven
+      re-wire: _discover_sources() + switch_source() bind st.ACTIVE/
+      st.client/st.MODEL from a discovered source. resolve_model() reads the
+      configured model (probes are skipped under NX_SKIP_STARTUP_PROBES), so
+      no network round-trip happens.
+    env rewind is universal (conftest), so the fixture needs no teardown."""
     os.environ["NX_HOME"] = str(tmp_path / "nxhome")
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
-    importlib.reload(nx)
 
 
 class _FakeMetrics:
@@ -75,9 +86,12 @@ def fake_loop(nx_fresh, monkeypatch):
 
     from nx import _sources as _sources_mod
     src = _sources_mod.Source("fake", "http://127.0.0.1:9/v1", "k", "fake-model")
-    nx.st.SOURCES["fake"] = src
-    nx.st.SOURCE_ORDER.append("fake")
-    nx.st.ACTIVE = src
+    # Register through monkeypatch on REPLACED copies of the shared
+    # registry containers (never mutate the baseline dicts in place — Tier A
+    # files get no module-dict rewind), so every swap auto-restores.
+    monkeypatch.setattr(nx.st, "SOURCES", {**nx.st.SOURCES, "fake": src})
+    monkeypatch.setattr(nx.st, "SOURCE_ORDER", list(nx.st.SOURCE_ORDER) + ["fake"])
+    monkeypatch.setattr(nx.st, "ACTIVE", src)
 
     def fake_run_model_turn_loop(messages, force_final=False, recovery_sampling=False,
                                  on_step=None, max_turns_override=None):
@@ -339,7 +353,7 @@ def test_parallel_runs_concurrently_with_per_task_state(fake_loop, tmp_path, mon
         started.wait()  # all 4 tasks must be inside the loop simultaneously
         return real_loop(messages, **kw)
 
-    nx._run_model_turn_loop = slow_loop
+    monkeypatch.setattr(nx, "_run_model_turn_loop", slow_loop)
     f = _write_tasks(tmp_path, [json.dumps({"instruction": f"t{i}", "id": f"p{i}"})
                                 for i in range(n)])
     buf, err = _capture_stdout(monkeypatch)
@@ -383,7 +397,10 @@ def test_verify_and_bg_scan_gated_off_for_batch(fake_loop, tmp_path, monkeypatch
     monkeypatch.setattr(nx._dispatch, "_scan_background_completions",
                         lambda: scan_ran.append(1) or "")
     # A non-batch thread still runs the scan (interactive behavior unchanged)…
-    nx.st._BG_SCAN_DONE = False
+    # monkeypatch registers the import-time value so the flag the scan sets
+    # True auto-restores at teardown (no module-dict rewind in Tier A);
+    # the mid-test reset below is covered by that same undo registration.
+    monkeypatch.setattr(nx.st, "_BG_SCAN_DONE", False)
     run_tool("read_file", {"path": "README.md"})
     assert scan_ran == [1]
     # …but a batch-active thread skips it.
@@ -416,7 +433,7 @@ def test_mixed_run_exit_code_is_worst(fake_loop, tmp_path, monkeypatch):
             raise RuntimeError("kaboom")
         return {"status": holder["status"], "turns": 2}
 
-    nx._run_model_turn_loop = loop
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop)
     buf, _ = _capture_stdout(monkeypatch)
     code = _run(nx, ["-f", f, "--continue-on-error"])
     assert code == nx._batch.EXIT_ERROR
@@ -445,7 +462,7 @@ def test_result_exit_code_mapping(nx_fresh):
 # a swap-and-restore of the global races every sibling worker and silently
 # misattributes (or loses) each task's token totals on the JSONL result lines.
 
-def test_record_usage_lands_in_thread_metrics_not_global(fake_loop):
+def test_record_usage_lands_in_thread_metrics_not_global(fake_loop, monkeypatch):
     """A batch worker's usage goes to ITS metrics even though another thread
     (or the REPL parent) has installed a different recorder on st._METRICS."""
     nx, calls, holder = fake_loop
@@ -453,7 +470,11 @@ def test_record_usage_lands_in_thread_metrics_not_global(fake_loop):
 
     from nx._metrics import _record_usage
     global_metrics = nx._metrics._Metrics("repl-session")
-    nx.st._METRICS = global_metrics
+    # monkeypatch, not a bare write + `= None` teardown: the manual teardown
+    # would leak None past this file (whatever st._METRICS held at rewind
+    # time is what the next Tier A file sees; there is no module-dict
+    # rewind to put it back).
+    monkeypatch.setattr(nx.st, "_METRICS", global_metrics)
     nx.st._METRICS_TLS.metrics = nx._metrics._Metrics("task-session")
     usage = SimpleNamespace(prompt_tokens=5, completion_tokens=3,
                             prompt_tokens_details=None,
@@ -461,8 +482,7 @@ def test_record_usage_lands_in_thread_metrics_not_global(fake_loop):
     try:
         _record_usage(usage)
     finally:
-        nx.st._METRICS_TLS.metrics = None
-        nx.st._METRICS = None
+        nx.st._METRICS_TLS.metrics = None  # thread-local, cleared by hand
     assert global_metrics.api_calls == 0
     assert global_metrics.input_tokens == 0
     assert global_metrics.output_tokens == 0
@@ -491,7 +511,7 @@ def test_parallel_task_token_totals_are_per_task(fake_loop, tmp_path, monkeypatc
                                       output_tokens_details=None))
         return {"status": "done", "turns": 1}
 
-    nx._run_model_turn_loop = loop_with_usage
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop_with_usage)
     f = _write_tasks(tmp_path, [json.dumps({"instruction": f"t{i}", "id": f"p{i}"})
                                 for i in range(n)])
     buf, err = _capture_stdout(monkeypatch)
@@ -531,7 +551,7 @@ def test_parallel_task_sessions_carry_own_totals(fake_loop, tmp_path, monkeypatc
                                       output_tokens_details=None))
         return {"status": "done", "turns": 1}
 
-    nx._run_model_turn_loop = loop_with_usage
+    monkeypatch.setattr(nx, "_run_model_turn_loop", loop_with_usage)
     f = _write_tasks(tmp_path, [json.dumps({"instruction": f"t{i}", "id": f"p{i}"})
                                 for i in range(n)])
     buf, err = _capture_stdout(monkeypatch)
@@ -751,16 +771,14 @@ def test_task_timeout_env_default(nx_fresh, tmp_path, monkeypatch):
 
     monkeypatch.setattr(nx, "_run_model_turn_loop", loop)
     assert nx._batch._TASK_TIMEOUT_DEFAULT == 0  # env default: off
-    nx._batch._TASK_TIMEOUT_DEFAULT = 0.15
-    try:
-        f = _write_tasks(tmp, ['{"instruction": "slog", "id": "slow"}'])
-        buf, err = _capture_stdout(monkeypatch)
-        code = _run(nx, ["-f", f])
-        line = json.loads(buf.getvalue().strip())
-        assert code == nx._batch.EXIT_ERROR
-        assert line["timed_out"] is True
-    finally:
-        nx._batch._TASK_TIMEOUT_DEFAULT = 0
+    # monkeypatch, not set/restore-by-hand: auto-restores the import-time 0
+    monkeypatch.setattr(nx._batch, "_TASK_TIMEOUT_DEFAULT", 0.15)
+    f = _write_tasks(tmp, ['{"instruction": "slog", "id": "slow"}'])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f])
+    line = json.loads(buf.getvalue().strip())
+    assert code == nx._batch.EXIT_ERROR
+    assert line["timed_out"] is True
 
 
 def test_no_timeout_by_default_is_unbounded(nx_fresh, tmp_path, monkeypatch):

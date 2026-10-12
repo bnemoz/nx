@@ -6,36 +6,82 @@ for the rest of the session — re-pay tokens and wall-clock. The cache now stor
 os.stat().st_mtime_ns with each entry and re-stats on hit: a hit whose mtime is
 unchanged survives bash; only changed files are dropped. That also fixes a
 staleness bug for files edited outside nx (user's editor) mid-session.
+
+Tier A (docs/test-architecture.md §4): this file imports nx ONCE (module scope,
+below) and never reloads it or rewinds module state. The old Tier-B fixture did
+`importlib.reload(nx)` to rebuild nx's import-time state from its env — but the
+one object these tests measure is the SHARED cache the dispatcher writes and the
+mtime sweep reads (plus the DISPATCH table and os.stat), so replacing nx's module
+dict was pure liability: it forked st._TOOL_RESULT_CACHE away from the dict
+run_tool/the sweep resolve through nx._state at call time, and everything else it
+rebuilt was either a module-scope NX_* env write (conftest rewinds NX_* env
+universally), a knob monkeypatch can pin per test, or unused by this file. See
+nx_fresh below for the one piece of import-time wiring that does have to be
+re-established (the active model source).
 """
-import importlib
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
+# Module-scope env scrubs are Tier-A safe: conftest rewinds every NX_* var to
+# its baseline before and after each test, and records this module's own
+# import-time deltas (pytest_collectreport -> _INTENTS) to re-apply first.
 for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR"):
     os.environ.pop(k, None)
 
 import pytest  # noqa: E402 — repo-root sys.path insert must come first
 
+import nx  # noqa: E402 — imported once for the whole module (no reload below)
+
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
-    os.environ["NX_HOME"] = str(tmp_path / "nxhome")
-    os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
-    os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
+    # Per-test isolation homes. monkeypatch (not bare os.environ writes) so the
+    # assignments are auto-restored and visible to monkeypatch.undo(); the
+    # module-scope scrubs above already ran under conftest's scrubbed collection
+    # env, so there is no ambient NX_* left to clear here.
+    home = tmp_path / "nxhome"
+    monkeypatch.setenv("NX_HOME", str(home))
+    monkeypatch.setenv("NX_ENV_FILE", str(tmp_path / "env"))
+    monkeypatch.setenv("NX_SESSIONS_DIR", str(home / "sessions"))
+    # nx/__init__ derives SESSION_HOME from NX_HOME at import time and mirrors it
+    # onto nx._state (which the memory/overflow/session sinks read). Tier A never
+    # re-executes that block, so re-state the mirror per test — otherwise the
+    # memory_search test below would scan the developer's real ~/.nx (and the FTS
+    # accelerator could write its index there) instead of the empty temp home.
+    # monkeypatch restores both attrs at teardown.
+    monkeypatch.setattr(nx, "SESSION_HOME", str(home), raising=False)
+    monkeypatch.setattr(nx._state, "SESSION_HOME", str(home), raising=False)
     monkeypatch.chdir(tmp_path)
-    import nx
-    importlib.reload(nx)
-    nx.YOLO = True
+    # Tier A: no importlib.reload(nx). The reload also rebuilt the model source
+    # wiring — conftest imports nx once under a scrubbed env, so st.client /
+    # st.MODEL stay None (no active source). Rebuild just that: re-discover
+    # sources from the env above and switch to the first one (binds st.client +
+    # st.MODEL). resolve_model() reads NX_MODEL, so no network round-trip
+    # happens. Nothing here calls the model, but the runtime-note/one-shot paths
+    # run_tool can reach expect an active source.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # nx.YOLO / the session-background flags are real nx globals the code under
+    # test reads or can flip (the prefetch gate reads st.YOLO; run_bash sets
+    # _SESSION_HAS_BACKGROUNDED/_PENDING_BACKGROUND_NOTICE on its first
+    # backgrounding). The old Tier-B teardown restored them by hand; monkeypatch
+    # does both halves — pin the baseline here and auto-restore at teardown.
+    monkeypatch.setattr(nx, "YOLO", True, raising=False)
+    monkeypatch.setattr(nx, "_SESSION_HAS_BACKGROUNDED", False, raising=False)
+    monkeypatch.setattr(nx, "_PENDING_BACKGROUND_NOTICE", None, raising=False)
     yield nx, tmp_path
-    nx.YOLO = False
+    # The read-result cache is a process-global dict no Tier-A reset covers
+    # (nx_state_reset handles sub-agent TLS / async registry / notices / recovery;
+    # conftest's module-dict rewind is gated to `globals`-marked files). Clear it
+    # in place: monkeypatch cannot do this one, because restoring the ATTRIBUTE
+    # would put the same (now-populated) dict object back, so this test's entries
+    # would leak into the next one. Clearing keeps the shared identity that
+    # _dispatch reads through nx._state.
     nx._state._TOOL_RESULT_CACHE.clear()
-    nx._state._SESSION_HAS_BACKGROUNDED = False
-    nx._state._PENDING_BACKGROUND_NOTICE = None
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
 
 
 # Offset used to force an mtime onto a different tick than the cached one. 10s

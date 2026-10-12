@@ -1,7 +1,6 @@
 """F6: bash watchdog (NX_BASH_MAX_SECONDS), background-completion notices,
 and the secret-prompt guard (NX_BASH_PROMPT_SECRETS).
 """
-import importlib
 import json
 import os
 import re
@@ -20,6 +19,9 @@ import pytest
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
+    # Tier A: nx is imported ONCE (conftest did it); no importlib.reload. Env
+    # rewind is universal via conftest, so per-test os.environ writes here need
+    # no manual restore.
     os.environ["NX_HOME"] = str(tmp_path / "nxhome")
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
@@ -28,20 +30,34 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
-    nx.YOLO = True  # default to yolo so tests exercise the tool directly
+    # The old `importlib.reload(nx)` rebuilt nx's import-time state from this
+    # fixture's env — most importantly the model source (conftest imports nx
+    # under a scrubbed env, so st.client/st.MODEL stay None). Instead, rebind
+    # just that wiring: re-discover sources from the env we just set and switch
+    # to the first one. resolve_model() reads NX_MODEL ("test-model"), so no
+    # network round-trip happens; the dead 127.0.0.1:9 endpoint is never hit.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # The reload also re-ran __init__.py's SESSION_HOME assignment from NX_HOME
+    # (and mirrored it to st). Without it the bg-logs paths in _bash_jobs still
+    # point at the conftest import-time home, not this test's tmp home — the
+    # backgrounded jobs would write their maps under the wrong bg-logs dir.
+    home = os.path.join(str(tmp_path), "nxhome")
+    monkeypatch.setattr(nx, "SESSION_HOME", home, raising=False)
+    monkeypatch.setattr(nx._state, "SESSION_HOME", home, raising=False)
+    # YOLO on for the duration of the test (auto-restored), so the tool bodies
+    # run directly without approval prompts.
+    monkeypatch.setattr(nx, "YOLO", True)
+    # These tests background real jobs and flip session-level flags; pin each
+    # flag's entry value so a test's writes are undone at teardown and later
+    # test files (test_initial_context) see a fresh session.
+    import nx._state as st
+    for _flag in ("_SESSION_HAS_BACKGROUNDED", "_PENDING_BACKGROUND_NOTICE",
+                  "_BG_SCAN_DONE", "_PENDING_BG_COMPLETION_NOTICE",
+                  "_BG_NOTICE_SEEN"):
+        monkeypatch.setattr(st, _flag, getattr(st, _flag, False), raising=False)
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
-              "NX_BASH_MAX_SECONDS", "NX_BASH_PROMPT_SECRETS"):
-        os.environ.pop(k, None)
-    nx.YOLO = False
-    # these tests background real jobs — reset the session-level flags they
-    # flip, so later test files (test_initial_context) see a fresh session
-    nx._state._SESSION_HAS_BACKGROUNDED = False
-    nx._state._PENDING_BACKGROUND_NOTICE = None
-    nx._state._BG_SCAN_DONE = False
-    nx._state._PENDING_BG_COMPLETION_NOTICE = None
-    nx._state._BG_NOTICE_SEEN = None
 
 
 # --- secret guard ------------------------------------------------------------

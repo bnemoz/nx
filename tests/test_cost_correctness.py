@@ -7,8 +7,17 @@ masqueraded as measured numbers, a reasoning split that read only one of the
 two field shapes servers actually send, a scoreboard that lost its per-source
 attribution on resume, and a price key that couldn't distinguish two models
 hosted behind one source.
+
+Tier A: nx is imported ONCE and never reloaded. The old fixture's
+importlib.reload(nx) existed to rebuild the model-source wiring and the
+pricing/env knobs from this fixture's env; env is read live (pricing keys in
+nx._cost are read with os.environ.get at call time, and the conftest rewinds
+NX_* env universally), and the source wiring is rebuilt without a reload via
+_discover_sources()/switch_source() — resolve_model() reads NX_MODEL
+("test-model"), so no network round-trip happens. Bare nx/_state mutations are
+monkeypatch.setattr'd (their teardown used to ride the module-dict rewind);
+nx_state_reset covers the rest of the hidden state.
 """
-import importlib
 import os
 import sys
 import types
@@ -17,6 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
 
 import pytest
+
+import nx  # noqa: E402
 
 
 @pytest.fixture()
@@ -30,11 +41,14 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
-    import nx
-    importlib.reload(nx)
+    # Tier A: no importlib.reload(nx). Rebuild only the model-source wiring
+    # the reload used to redo: re-discover sources and switch to the first
+    # one (binds st.client + st.MODEL from the env set above). 127.0.0.1:9
+    # is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
     yield nx, tmp_path
-    for k in [k for k in os.environ if k.startswith("NX_")]:
-        os.environ.pop(k, None)
 
 
 def _usage_ns(prompt=100, cached=None, completion=50, reasoning=None,
@@ -92,10 +106,10 @@ def test_measured_not_flagged(nx_fresh):
     assert _normalize_usage(_usage_ns(), None)["estimated"] == 0
 
 
-def test_metrics_track_estimated_calls(nx_fresh):
+def test_metrics_track_estimated_calls(nx_fresh, monkeypatch):
     from nx._metrics import _Metrics
     nx, _tmp = nx_fresh
-    nx._state.ACTIVE = type("S", (), {"name": "s"})()
+    monkeypatch.setattr(nx._state, "ACTIVE", type("S", (), {"name": "s"})())
     m = _Metrics(session_id="t", source="s")
     m.add({"input_tokens": 200, "output_tokens": 100, "cache_read_tokens": 0,
            "reasoning_tokens": 0, "estimated": 1})
@@ -129,7 +143,21 @@ def test_by_source_saved_and_restored(nx_fresh):
     assert meta["by_source"] == m.by_source  # saved into session JSON
 
 
-def test_resume_reloads_by_source(nx_fresh):
+def _patch_reload_state(monkeypatch, st, saved):
+    """Tier-A stand-in for the module-dict rewind around
+    _reload_metrics_totals: patch _load_session where that function actually
+    looks it up (its own module dict) and pin every nx._state name the call
+    writes — _METRICS (which we replace) plus the todos/plan/wip snapshot it
+    re-reads from the saved dict."""
+    from nx._metrics import _Metrics
+    monkeypatch.setattr(nx._repl_state, "_load_session", lambda sid: saved)
+    for name in ("_METRICS", "_TODOS", "_PLAN_ACTIVE", "_PLAN_GOAL",
+                 "_PLAN_SLUG", "_PLAN_STARTED", "_WIP"):
+        monkeypatch.setattr(st, name, getattr(st, name), raising=False)
+    monkeypatch.setattr(st, "_METRICS", _Metrics(session_id="sid", source="local"))
+
+
+def test_resume_reloads_by_source(nx_fresh, monkeypatch):
     nx, tmp = nx_fresh
     from nx._metrics import _Metrics
     from nx import _repl_state
@@ -140,25 +168,20 @@ def test_resume_reloads_by_source(nx_fresh):
     saved = {"input_tokens": 111, "output_tokens": 9, "cache_read_tokens": 0,
              "reasoning_tokens": 0, "api_calls": 1, "started_at": 1.0,
              "by_source": m.by_source}
-    nx._load_session = lambda sid: saved
-    nx._repl_state._load_session = lambda sid: saved
     st = nx._state
-    st._METRICS = _Metrics(session_id="sid", source="local")
+    _patch_reload_state(monkeypatch, st, saved)
     _repl_state._reload_metrics_totals("sid")
     assert st._METRICS.by_source["local"]["input_tokens"] == 111
 
 
-def test_resume_without_by_source_keeps_fresh_buckets(nx_fresh):
+def test_resume_without_by_source_keeps_fresh_buckets(nx_fresh, monkeypatch):
     """Older session files have no by_source — must not fabricate one."""
     nx, _tmp = nx_fresh
-    from nx._metrics import _Metrics
     from nx import _repl_state
     saved = {"input_tokens": 5, "output_tokens": 1, "cache_read_tokens": 0,
              "reasoning_tokens": 0, "api_calls": 1}
-    nx._load_session = lambda sid: saved
-    nx._repl_state._load_session = lambda sid: saved
     st = nx._state
-    st._METRICS = _Metrics(session_id="sid", source="local")
+    _patch_reload_state(monkeypatch, st, saved)
     _repl_state._reload_metrics_totals("sid")
     assert st._METRICS.by_source == {}
 
@@ -229,12 +252,12 @@ def test_risk_call_recorded(nx_fresh, monkeypatch):
         def model_dump(self):
             return {}
 
-    risk_mod._log_event = lambda *a, **k: None
+    monkeypatch.setattr(risk_mod, "_log_event", lambda *a, **k: None)
     # _assess_risk reads st.client / st.MODEL (the _state module), so the
     # fake client must land there, not on nx._risk
-    nx._state.client = types.SimpleNamespace(chat=types.SimpleNamespace(
-        completions=types.SimpleNamespace(create=lambda **kw: Resp())))
-    nx._state.MODEL = "test-model"
+    monkeypatch.setattr(nx._state, "client", types.SimpleNamespace(chat=types.SimpleNamespace(
+        completions=types.SimpleNamespace(create=lambda **kw: Resp()))))
+    monkeypatch.setattr(nx._state, "MODEL", "test-model")
     # _record_api_call is imported inside _assess_risk at call time, so the
     # patch must land on the module it is imported FROM
     import nx._metrics as metrics_mod

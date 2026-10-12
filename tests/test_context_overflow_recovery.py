@@ -28,8 +28,16 @@ Contract under test:
 - Sub-agent quiet posture: no banner lines (assertions run against stdout).
 
 Offline: the OpenAI client is faked; compress() is stubbed.
+
+Tier A: nx is imported ONCE and never reloaded. The old `importlib.reload(nx)`
+in the fixture existed only to rebuild the model-source wiring (st.SOURCES /
+ACTIVE / client / MODEL) from the fixture's env; instead the fixture re-runs
+just that wiring — _discover_sources() + switch_source() — which reads NX_MODEL
+through resolve_model(), so no network round-trip happens (the dead
+127.0.0.1:9 endpoint is never contacted). Everything else the reload used to
+undo is now monkeypatch (the st latches/knobs this file writes), and the NX_*
+env rewind is universal via conftest.
 """
-import importlib
 import io
 import os
 import sys
@@ -62,15 +70,40 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_HOME"] = str(tmp_path / "nxhome")
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
+    os.environ["NX_BASE_URL"] = "http://127.0.0.1:9/v1"
+    os.environ["NX_MODEL"] = "fake-model"
+    os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
+    st = nx.st
+    # Tier A replaces the reload's per-test clean module dict: pin every
+    # st name this file (or the wiring below) writes, so monkeypatch.undo()
+    # restores what the module-dict rewind used to. The SOURCES/SOURCE_ORDER
+    # copies keep _discover_sources()/_install_source()'s in-place container
+    # writes off the baseline objects.
+    monkeypatch.setattr(st, "SOURCES", dict(st.SOURCES))
+    monkeypatch.setattr(st, "SOURCE_ORDER", list(st.SOURCE_ORDER))
+    monkeypatch.setattr(st, "ACTIVE", st.ACTIVE)
+    monkeypatch.setattr(st, "client", st.client)
+    monkeypatch.setattr(st, "MODEL", st.MODEL)
+    # The reload used to hand each test freshly-cleared latches and the
+    # shipped AUTOCOMPRESS_PERCENT (85): pin the same starting state.
+    monkeypatch.setattr(st, "_LAST_API_ERROR", None)
+    monkeypatch.setattr(st, "_LAST_CONTEXT_OVERRUN", None)
+    monkeypatch.setattr(st, "AUTOCOMPRESS_PERCENT", 85)
+    # The reload existed to rebuild the model-source wiring from this
+    # fixture's env (conftest imports nx under a scrubbed env, so st.client
+    # /st.MODEL can be None). Rebuild just that: re-discover sources from
+    # the env set above and switch to the first one (binds st.client +
+    # st.MODEL). resolve_model() reads the source's configured model
+    # ("fake-model" via NX_MODEL), so no network round-trip happens; the
+    # dead 127.0.0.1:9 endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(st.SOURCE_ORDER[0]), "fixture source wiring failed"
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
-    nx.st._LAST_API_ERROR = None
-    nx.st._LAST_CONTEXT_OVERRUN = None
-    importlib.reload(nx)
+    # env rewind is universal (conftest) and every st write is monkeypatched
+    # above, so the old manual latch-clear + teardown reload are both gone.
 
 
 def _install_source(nx):
@@ -265,7 +298,7 @@ def test_in_loop_guard_compresses_when_above_threshold(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
     _install_source(nx)
     _quiet(monkeypatch)
-    nx.st.AUTOCOMPRESS_PERCENT = 85
+    # (AUTOCOMPRESS_PERCENT=85 is pinned by the fixture — the reload's old default)
 
     class _Src:
         _context_window = 10000
@@ -316,7 +349,7 @@ def test_in_loop_guard_does_not_fire_repeatedly_on_stale_reading(nx_fresh, monke
     nx, _ = nx_fresh
     _install_source(nx)
     _quiet(monkeypatch)
-    nx.st.AUTOCOMPRESS_PERCENT = 85
+    # (AUTOCOMPRESS_PERCENT=85 is pinned by the fixture — the reload's old default)
     nx.st._LAST_PROMPT_TOKENS = 99999  # over threshold, and stays there
 
     calls = {"n": 0}

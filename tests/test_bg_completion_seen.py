@@ -22,7 +22,6 @@ Pinned here:
   5. end-to-end: run_bash → wake_due() must be False after the job's output
      was delivered inline (no "Nothing to do" wake turn).
 """
-import importlib
 import os
 import sys
 import threading
@@ -43,14 +42,36 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_WAKE_PROMPT"] = "1"
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
-    nx.YOLO = True
-    nx.st._BG_NOTICE_SEEN = None
-    nx.st._BG_NOTICE_BASELINE = set()
+    # Tier A: conftest imported nx once under a scrubbed env, so the reload that
+    # used to rebuild nx's import-time state from this fixture's env is gone.
+    # Rebuild just the model wiring: re-discover sources from the env set above
+    # and switch to the first one (binds st.client + st.MODEL). resolve_model()
+    # reads NX_MODEL ("test-model"), so the dead 127.0.0.1:9 endpoint is never
+    # contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # bg-logs live under st.SESSION_HOME, which __init__.py pinned at import time
+    # from the developer's own NX_HOME; the env var set above is only read by an
+    # nx reload, so point the live state at this test's tmpdir by hand.
+    home = str(tmp_path / "nxhome")
+    monkeypatch.setattr(nx.st, "SESSION_HOME", home)
+    monkeypatch.setattr(nx, "SESSION_HOME", home, raising=False)
+    # nx reads YOLO through the state proxy (nx.YOLO -> st.YOLO); pin it per test.
+    monkeypatch.setattr(nx, "YOLO", True)
+    # Pin the hidden slots this file both reads and writes directly. Pinning
+    # through monkeypatch means a bare `m.st._X = ...` inside a test is undone at
+    # teardown (the recorded pre-test value is written back), which is what the
+    # module-dict rewind used to do — no manual save/restore needed.
+    monkeypatch.setattr(nx.st, "_BG_NOTICE_SEEN", None)
+    monkeypatch.setattr(nx.st, "_BG_NOTICE_BASELINE", set(), raising=False)
+    monkeypatch.setattr(nx.st, "_PENDING_BG_COMPLETION_NOTICE", None)
+    monkeypatch.setattr(nx.st, "_BG_SCAN_DONE", False)
+    monkeypatch.setattr(nx.st, "_WAKE_ARMED", False)
+    monkeypatch.setattr(nx.st, "_TURN_ACTIVE", False)
     yield nx
-    nx.YOLO = False
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
-        os.environ.pop(k, None)
+    # NX_* env rewind is universal (conftest); nx globals are restored by the
+    # monkeypatch pins above.
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +89,8 @@ def test_inline_run_bash_finish_marks_seen(nx_fresh, monkeypatch):
     assert m._dispatch._scan_background_completions() is None
     assert m.st._PENDING_BG_COMPLETION_NOTICE is None
     # No wake either: the sweep finds no unstaged work.
-    m.st._WAKE_ARMED = True
-    m.st._TURN_ACTIVE = False
+    monkeypatch.setattr(m.st, "_WAKE_ARMED", True)
+    monkeypatch.setattr(m.st, "_TURN_ACTIVE", False)
     from nx import _autowake
     assert _autowake._finished_unseen_bg_jobs() == []
     assert _autowake.wake_due() is False
@@ -115,8 +136,6 @@ def test_read_file_of_running_log_does_not_mark_seen(nx_fresh):
     assert m._dispatch._scan_background_completions() is not None, \
         "the exit after a mid-run read is still worth announcing"
     assert "9902" not in "".join(m.st._PENDING_BG_COMPLETION_NOTICE or "")
-    m.st._PENDING_BG_COMPLETION_NOTICE = None
-    m.st._BG_NOTICE_SEEN = None
 
 
 def test_read_file_of_unrelated_path_is_noop(nx_fresh):
@@ -134,13 +153,13 @@ def test_wake_sweep_skips_dead_job_without_log(nx_fresh, monkeypatch):
     output — so the sweep must not wake on it."""
     from nx import _autowake
     m = nx_fresh
-    m.st._WAKE_ARMED = True
+    monkeypatch.setattr(m.st, "_WAKE_ARMED", True)
     fake_jobs = [{"pid": "434343", "alive": False, "owner_pid": os.getpid(),
                   "command": "true", "tail": "", "log_path": "/tmp/gone.log"}]
     monkeypatch.setattr("nx._bash_jobs.list_bg_jobs", lambda: fake_jobs)
     monkeypatch.setattr("os.path.exists", lambda p: False)
     assert _autowake._finished_unseen_bg_jobs() == []
-    m.st._TURN_ACTIVE = False
+    monkeypatch.setattr(m.st, "_TURN_ACTIVE", False)
     assert _autowake.wake_due() is False
 
 
@@ -149,7 +168,7 @@ def test_wake_sweep_still_announces_live_log(nx_fresh, monkeypatch):
     never read it) must still wake — that's the feature, not the bug."""
     from nx import _autowake
     m = nx_fresh
-    m.st._WAKE_ARMED = True
+    monkeypatch.setattr(m.st, "_WAKE_ARMED", True)
     log = os.path.join(str(m.st.SESSION_HOME), "bg-logs", "bg-x.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     with open(log, "w") as f:
@@ -198,7 +217,7 @@ def test_scan_marks_seen_even_when_exit_status_raises(nx_fresh, monkeypatch):
         "the mark must survive the probe failing"
 
 
-def test_merge_does_not_duplicate_staged_exit_lines(nx_fresh):
+def test_merge_does_not_duplicate_staged_exit_lines(nx_fresh, monkeypatch):
     """0.37.4: the poller's sweep and the turn's sweep can both stage the same
     job's exit line in a race — the merge must not produce it twice."""
     m = nx_fresh
@@ -206,22 +225,17 @@ def test_merge_does_not_duplicate_staged_exit_lines(nx_fresh):
             "  pid 465768 exited (code 0) — tail: done\n"
             "Check their output with read_file(log) or wait_background before "
             "relying on them.]")
-    m.st._PENDING_BG_COMPLETION_NOTICE = note
-    m.st._BG_NOTICE_SEEN = {"465768"}  # the poller's sweep already marked it
+    monkeypatch.setattr(m.st, "_PENDING_BG_COMPLETION_NOTICE", note)
+    # the poller's sweep already marked it
+    monkeypatch.setattr(m.st, "_BG_NOTICE_SEEN", {"465768"})
     # A second sweep producing the same line (pre-lock race) merges to nothing.
     fake_jobs = [{"pid": "465768", "alive": False, "owner_pid": os.getpid(),
                   "command": "true", "tail": "done", "log_path": "/tmp/dup.log"}]
     import nx._bash_jobs as bj
-    saved = bj.list_bg_jobs
-    bj.list_bg_jobs = lambda: fake_jobs
-    try:
-        m._dispatch._run_bg_completion_scan()
-        merged = m.st._PENDING_BG_COMPLETION_NOTICE
-        assert merged.count("pid 465768 exited") == 1, merged
-    finally:
-        bj.list_bg_jobs = saved
-        m.st._PENDING_BG_COMPLETION_NOTICE = None
-        m.st._BG_NOTICE_SEEN = None
+    monkeypatch.setattr(bj, "list_bg_jobs", lambda: fake_jobs)
+    m._dispatch._run_bg_completion_scan()
+    merged = m.st._PENDING_BG_COMPLETION_NOTICE
+    assert merged.count("pid 465768 exited") == 1, merged
 
 
 def test_scan_lock_serializes_poller_and_turn(nx_fresh):
@@ -250,11 +264,10 @@ def test_no_phantom_wake_after_inline_bash_turn(nx_fresh, monkeypatch):
     0.37.4 the orphan map woke a 'Nothing to do' auto-continuation."""
     from nx import _autowake
     m = nx_fresh
-    _silence = None
     m.run_bash("echo e2e-5656")  # inline finish, log deleted, map left behind
-    m.st._WAKE_ARMED = True
-    m.st._TURN_ACTIVE = False
-    m.st._PENDING_BG_COMPLETION_NOTICE = None
+    monkeypatch.setattr(m.st, "_WAKE_ARMED", True)
+    monkeypatch.setattr(m.st, "_TURN_ACTIVE", False)
+    monkeypatch.setattr(m.st, "_PENDING_BG_COMPLETION_NOTICE", None)
     assert _autowake.wake_due() is False
     # And a second poll (the real poller re-checks every 2s) stays quiet.
     assert _autowake.wake_due() is False

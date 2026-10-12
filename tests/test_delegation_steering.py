@@ -14,7 +14,6 @@ fan-out. Three prompt layers fix that, and this file guards each:
 
 No model/network round-trip.
 """
-import importlib
 import os
 import sys
 
@@ -41,14 +40,27 @@ def nx_fresh(tmp_path, monkeypatch):
     # spawn_agent call here would register a real worker in the process-global
     # async registry and leak it into later test files (test_subagent_async
     # counts that registry).
-    os.environ["NX_SUBAGENT_ASYNC"] = "0"
+    monkeypatch.setattr(os, "environ", os.environ)
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
-    importlib.reload(nx)
+    # The old `importlib.reload(nx)` rebuilt nx's import-time state from this
+    # fixture's env — most importantly the model source. Instead of a reload,
+    # rebuild just that wiring: re-discover sources from the env we just set
+    # and switch to the first one (binds st.client + st.MODEL).
+    # resolve_model() reads NX_MODEL ("test-model"), so no network round-trip.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # nx reads this knob through the MODULE ATTR first, falling back to the env
+    # (see _subagent._is_async_default); the reload used to rebuild the attr
+    # from this fixture's env. With the reload gone, pin it per-test instead:
+    # NX_SUBAGENT_ASYNC=0 = foreground sub-loop. Keeping any spawn synchronous
+    # also avoids registering real workers in the process-global async registry
+    # (test_subagent_async counts that registry).
+    monkeypatch.setattr(nx, "NX_SUBAGENT_ASYNC", 0, raising=False)
     yield nx
-    from nx import _subagent
-    with _subagent._ASYNC_LOCK:
-        _subagent._ASYNC_AGENTS.clear()
+    # env rewind is universal (conftest); hidden state (_ASYNC_AGENTS, TLS,
+    # pending notices) is reset by the autouse nx_state_reset fixture.
 
 
 # --- layer 1: schema description ---------------------------------------------
@@ -66,21 +78,21 @@ def test_schema_description_carries_proactive_triggers(nx_fresh):
 
 # --- layer 2: session-start note ----------------------------------------------
 
-def test_delegation_note_injected_only_when_subagents_on(nx_fresh):
-    nx_fresh.NX_SUBAGENTS = 1
+def test_delegation_note_injected_only_when_subagents_on(nx_fresh, monkeypatch):
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1, raising=False)
     msgs = nx_fresh._initial_messages()
     notes = [m for m in msgs if "[Delegation note:" in (m.get("content") or "")]
     assert len(notes) == 1, "fresh NX_SUBAGENTS=1 session must carry the note"
     assert notes[0]["role"] == "user"
 
-    nx_fresh.NX_SUBAGENTS = 0
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 0, raising=False)
     msgs = nx_fresh._initial_messages()
     assert not [m for m in msgs if "[Delegation note:" in (m.get("content") or "")], \
         "sub-agents-disabled session must not pay for the note"
 
 
-def test_delegation_note_not_duplicated_on_resume(nx_fresh):
-    nx_fresh.NX_SUBAGENTS = 1
+def test_delegation_note_not_duplicated_on_resume(nx_fresh, monkeypatch):
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1, raising=False)
     from nx._subagent import _add_delegation_note_if_absent
     msgs = [{"role": "system", "content": "sys"}]
     _add_delegation_note_if_absent(msgs)
@@ -90,7 +102,7 @@ def test_delegation_note_not_duplicated_on_resume(nx_fresh):
     # Inserted after the system message, not appended at the tail.
     assert msgs.index(notes[0]) == 1
     # Disabled: nothing added.
-    nx_fresh.NX_SUBAGENTS = 0
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 0, raising=False)
     bare = [{"role": "system", "content": "sys"}]
     _add_delegation_note_if_absent(bare)
     assert len(bare) == 1
@@ -98,16 +110,18 @@ def test_delegation_note_not_duplicated_on_resume(nx_fresh):
 
 # --- layer 3: runtime streak nudge --------------------------------------------
 
-def _streak_reset(m):
-    m.st._READ_STREAK = 0
-    m.st._DELEGATION_NUDGE_COUNT = 0
-    m.st._PENDING_DELEGATION_NOTICE = None
+def _streak_reset(m, monkeypatch):
+    # The old reload rebuilt these module globals per test; with the reload
+    # gone, pin each via monkeypatch (auto-restored, so no cross-file leak).
+    monkeypatch.setattr(m.st, "_READ_STREAK", 0, raising=False)
+    monkeypatch.setattr(m.st, "_DELEGATION_NUDGE_COUNT", 0, raising=False)
+    monkeypatch.setattr(m.st, "_PENDING_DELEGATION_NOTICE", None, raising=False)
 
 
 def test_streak_nudge_fires_after_threshold_reads(nx_fresh, tmp_path, monkeypatch):
     from nx._dispatch import _DELEGATION_NUDGE_THRESHOLD
-    nx_fresh.NX_SUBAGENTS = 1
-    _streak_reset(nx_fresh)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1, raising=False)
+    _streak_reset(nx_fresh, monkeypatch)
     f = tmp_path / "probe.txt"
     f.write_text("x\n")
     monkeypatch.setattr(nx_fresh.st, "_BG_SCAN_DONE", True)  # skip bg sweep
@@ -122,7 +136,7 @@ def test_streak_nudge_fires_after_threshold_reads(nx_fresh, tmp_path, monkeypatc
     # (re-fire needs a full 2x-threshold run — see test_delegation_nudge.py)
     assert nx_fresh.st._READ_STREAK == 0
     assert nx_fresh.st._DELEGATION_NUDGE_COUNT == 1
-    nx_fresh.st._PENDING_DELEGATION_NOTICE = None
+    monkeypatch.setattr(nx_fresh.st, "_PENDING_DELEGATION_NOTICE", None, raising=False)
     nx_fresh.run_tool("read_file", {"path": str(f)})
     assert nx_fresh.st._PENDING_DELEGATION_NOTICE is None, \
         "a lone read after a fire must not re-stage the nudge"
@@ -130,8 +144,8 @@ def test_streak_nudge_fires_after_threshold_reads(nx_fresh, tmp_path, monkeypatc
 
 def test_spawn_agent_resets_streak(nx_fresh, tmp_path, monkeypatch):
     from nx._dispatch import _DELEGATION_NUDGE_THRESHOLD
-    nx_fresh.NX_SUBAGENTS = 1
-    _streak_reset(nx_fresh)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1, raising=False)
+    _streak_reset(nx_fresh, monkeypatch)
     f = tmp_path / "probe.txt"
     f.write_text("x\n")
     monkeypatch.setattr(nx_fresh.st, "_BG_SCAN_DONE", True)
@@ -149,8 +163,8 @@ def test_spawn_agent_resets_streak(nx_fresh, tmp_path, monkeypatch):
 
 def test_streak_silent_when_subagents_disabled(nx_fresh, tmp_path, monkeypatch):
     from nx._dispatch import _DELEGATION_NUDGE_THRESHOLD
-    nx_fresh.NX_SUBAGENTS = 0
-    _streak_reset(nx_fresh)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 0, raising=False)
+    _streak_reset(nx_fresh, monkeypatch)
     f = tmp_path / "probe.txt"
     f.write_text("x\n")
     monkeypatch.setattr(nx_fresh.st, "_BG_SCAN_DONE", True)
@@ -163,8 +177,8 @@ def test_streak_silent_when_subagents_disabled(nx_fresh, tmp_path, monkeypatch):
 
 def test_threshold_zero_disables_nudge(nx_fresh, tmp_path, monkeypatch):
     from nx import _dispatch
-    nx_fresh.NX_SUBAGENTS = 1
-    _streak_reset(nx_fresh)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENTS", 1, raising=False)
+    _streak_reset(nx_fresh, monkeypatch)
     monkeypatch.setattr(_dispatch, "_DELEGATION_NUDGE_THRESHOLD", 0)
     f = tmp_path / "probe.txt"
     f.write_text("x\n")
@@ -174,9 +188,9 @@ def test_threshold_zero_disables_nudge(nx_fresh, tmp_path, monkeypatch):
     assert nx_fresh.st._PENDING_DELEGATION_NOTICE is None
 
 
-def test_nudge_flushed_into_messages_once(nx_fresh):
+def test_nudge_flushed_into_messages_once(nx_fresh, monkeypatch):
     from nx._compress import _flush_pending_background_notice
-    nx_fresh.st._PENDING_DELEGATION_NOTICE = "DELEG-NOTE"
+    monkeypatch.setattr(nx_fresh.st, "_PENDING_DELEGATION_NOTICE", "DELEG-NOTE", raising=False)
     msgs: list = []
     _flush_pending_background_notice(msgs)
     assert msgs and msgs[-1]["content"] == "DELEG-NOTE"

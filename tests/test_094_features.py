@@ -1,6 +1,12 @@
 """Regression tests for the 0.94.0 feature batch: /wip, /fork, the
 persistent todo file (NX_TODO_FILE), test-impact targeting, and the
-tier-2 lint_check tool."""
+tier-2 lint_check tool.
+
+Tier A: nx is imported ONCE and never reloaded. State writes go through
+monkeypatch (auto-restored); the lint gate's NX_LINT knob is read via the
+nx module attribute at call time, so it is pinned with monkeypatch instead
+of the old reload of nx._lint.
+"""
 import os
 import sys
 
@@ -16,17 +22,14 @@ from nx._sessions_io import _new_session_id
 
 
 @pytest.fixture()
-def state(tmp_path):
-    st._TODOS = []
-    st._WIP = None
-    s = _ReplState(
+def state(tmp_path, monkeypatch):
+    monkeypatch.setattr(st, "_TODOS", [])
+    monkeypatch.setattr(st, "_WIP", None)
+    monkeypatch.setattr(st, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    return _ReplState(
         [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
         _new_session_id(), True, [])
-    os.chdir(tmp_path)
-    st.PROJECT_ROOT = str(tmp_path)
-    yield s
-    st._TODOS = []
-    st._WIP = None
 
 
 # --- /wip --------------------------------------------------------------------
@@ -117,7 +120,7 @@ def test_todo_write_persists_and_loads(tmp_path, monkeypatch):
 def test_todo_file_default_location(tmp_path, monkeypatch):
     from nx._todo import _todo_file
     monkeypatch.delenv("NX_TODO_FILE", raising=False)
-    st.PROJECT_ROOT = str(tmp_path)
+    monkeypatch.setattr(st, "PROJECT_ROOT", str(tmp_path))
     assert _todo_file() == os.path.join(str(tmp_path), ".nx", "todo.md")
     monkeypatch.setenv("NX_TODO_FILE", "")
     assert _todo_file() is None
@@ -146,26 +149,23 @@ def test_record_and_map_failures(tmp_path, monkeypatch):
 
 # --- lint_check --------------------------------------------------------------
 
-def test_lint_tool_schema_and_gate():
+def test_lint_tool_schema_and_gate(monkeypatch):
     names = {t["function"]["name"] for t in m.TOOLS}
     assert "lint_check" in names
     from nx._tool_gates import _TOOL_GATES, _GATE_REFUSALS, _gate_closed
     assert "lint_check" in _TOOL_GATES and "lint_check" in _GATE_REFUSALS
-    monkey_gate = dict(os.environ)
-    os.environ.pop("NX_LINT", None)
-    import importlib
-    importlib.reload(m._lint) if hasattr(m, "_lint") else None
-    m.NX_LINT = 0
+    # The gate reads the nx-module attribute NX_LINT at call time — no reload
+    # needed; pin it with monkeypatch (auto-restored at teardown).
+    monkeypatch.delenv("NX_LINT", raising=False)
+    monkeypatch.setattr(m, "NX_LINT", 0, raising=False)
     assert _gate_closed("lint_check") is True
-    m.NX_LINT = 1
+    monkeypatch.setattr(m, "NX_LINT", 1, raising=False)
     assert _gate_closed("lint_check") is False
-    os.environ.clear()
-    os.environ.update(monkey_gate)
 
 
 def test_lint_check_body(monkeypatch, tmp_path):
     from nx._lint import lint_check
-    st.PROJECT_ROOT = str(tmp_path)
+    monkeypatch.setattr(st, "PROJECT_ROOT", str(tmp_path))
     # Missing paths are refused.
     assert "not found" in lint_check("nope.py")
     # No paths + no session edits -> explicit error, never a whole-tree run.
@@ -181,7 +181,7 @@ def test_lint_check_body(monkeypatch, tmp_path):
 
 def test_lint_check_uses_session_edited_files(monkeypatch, tmp_path):
     from nx._lint import lint_check
-    st.PROJECT_ROOT = str(tmp_path)
+    monkeypatch.setattr(st, "PROJECT_ROOT", str(tmp_path))
     target = tmp_path / "edited.py"
     target.write_text("x = 1\n")
 

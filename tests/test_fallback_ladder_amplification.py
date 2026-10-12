@@ -23,8 +23,15 @@ Contract under test:
   advancing to the next rung.
 
 Offline: the OpenAI client is faked; never a real endpoint.
+
+Tier A: nx is imported ONCE and never reloaded. The old nx_fresh fixture's
+importlib.reload(nx) only re-read the NX_HOME/NX_SESSIONS_DIR env and rewound
+the handful of nx globals these tests touch (the fake source entry plus the
+latched _LAST_API_ERROR/_LAST_CONTEXT_OVERRUN signals). With the reload gone,
+conftest's universal env rewind covers the env, and every mutated nx global
+goes through monkeypatch (per-test, auto-restored) instead of the module-dict
+rewind.
 """
-import importlib
 import io
 import os
 import sys
@@ -78,20 +85,27 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
     monkeypatch.chdir(tmp_path)
     import nx
-    importlib.reload(nx)
+    # No reload: nx is imported once (Tier A). The reload used to rewind the
+    # globals these tests latch; pin the two latched signals through monkeypatch
+    # so each test starts from a clean slate and teardown restores them (this
+    # stands in for the module-dict rewind). NX_* env rewind is universal via
+    # conftest, so no manual pop on teardown.
+    monkeypatch.setattr(nx.st, "_LAST_API_ERROR", None)
+    monkeypatch.setattr(nx.st, "_LAST_CONTEXT_OVERRUN", None)
     yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
-    nx.st._LAST_API_ERROR = None
-    importlib.reload(nx)
 
 
-def _install_source(nx):
+def _install_source(nx, monkeypatch):
+    # The old reload re-ran nx's import-time source discovery; here the tests
+    # install their own fake source. Register the mutated globals through
+    # monkeypatch (the SOURCES dict, SOURCE_ORDER list, and ACTIVE binding are
+    # replaced wholesale and auto-restored) instead of the Tier-B module-dict
+    # rewind.
     from nx import _sources as _sources_mod
     src = _sources_mod.Source("fake", "http://127.0.0.1:9/v1", "k", "fake-model")
-    nx.st.SOURCES["fake"] = src
-    nx.st.SOURCE_ORDER.append("fake")
-    nx.st.ACTIVE = src
+    monkeypatch.setattr(nx.st, "SOURCES", {**nx.st.SOURCES, "fake": src})
+    monkeypatch.setattr(nx.st, "SOURCE_ORDER", [*nx.st.SOURCE_ORDER, "fake"])
+    monkeypatch.setattr(nx.st, "ACTIVE", src)
     return src
 
 
@@ -149,7 +163,7 @@ def test_field_rejection_classifier(nx_fresh):
                          ids=["503", "401", "shapeless"])
 def test_open_stream_no_ladder_on_status_or_shape_errors(nx_fresh, monkeypatch, exc):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
 
     def behavior(calls):
@@ -167,7 +181,7 @@ def test_open_stream_still_walks_ladder_on_tools_400(nx_fresh, monkeypatch):
     """The ladder's reason for existing: a server that 400s on the tools= /
     tool_choice fields gets the no-tools then no-tools-no-extra re-sends."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     stages: list = []
 
@@ -195,7 +209,7 @@ def test_ladder_rung_5xx_surfaces_dont_advance(nx_fresh, monkeypatch):
     """A rung failing with a 5xx stops the ladder right there — advancing to
     the next rung would just re-send into the same degradation."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
 
     def behavior(calls):
@@ -215,7 +229,7 @@ def test_ladder_rung_overrun_latches_context_signal(nx_fresh, monkeypatch):
     """A rung that hits the context-400 wording folds into the overrun
     recovery path (compress + retry), not the terminal-error path."""
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
 
     def behavior(calls):
@@ -236,7 +250,7 @@ def test_ladder_rung_overrun_latches_context_signal(nx_fresh, monkeypatch):
 
 def test_status_error_still_maps_to_api_error_turn(nx_fresh, monkeypatch):
     nx, _ = nx_fresh
-    _install_source(nx)
+    _install_source(nx, monkeypatch)
     _quiet(monkeypatch)
     client, calls = _client(monkeypatch, lambda calls: (_ for _ in ()).throw(_StatusErr()))
     monkeypatch.setattr(nx.st, "client", client)

@@ -30,7 +30,6 @@ import pytest
 # runs" guard. Paths are relative to tests/.
 _GLOBALS_FILES = [
     "perf/test_static_budgets.py",
-    "test_094_features.py",
     "test_abbr.py",
     "test_approval_c3.py",
     "test_approval_policy.py",
@@ -40,18 +39,10 @@ _GLOBALS_FILES = [
     "test_async_log_writer.py",
     "test_async_save.py",
     "test_atomic_write.py",
-    "test_autocompress.py",
     "test_autowake.py",
-    "test_bash_heredoc.py",
-    "test_bash_watchdog.py",
-    "test_batch_run.py",
-    "test_bg_completion_seen.py",
     "test_breaker_ergonomics.py",
     "test_breaker_integrity.py",
     "test_build.py",
-    "test_cache_stale.py",
-    "test_cache_vcs_stale.py",
-    "test_cache_visibility.py",
     "test_chatbox_completion_cache.py",
     "test_chatbox_file_completion.py",
     "test_chatbox_model_dropdown.py",
@@ -62,20 +53,14 @@ _GLOBALS_FILES = [
     "test_commands_registry.py",
     "test_compact_alias.py",
     "test_config_cmd.py",
-    "test_context_overflow_recovery.py",
-    "test_context_window.py",
-    "test_cost_correctness.py",
     "test_critique.py",
-    "test_delegation_steering.py",
     "test_docs_parity.py",
     "test_duckdb.py",
     "test_edit_file.py",
     "test_empty_turn_recovery.py",
     "test_esc_approval.py",
-    "test_esc_ladder.py",
     "test_eval_corpus.py",
     "test_eventsink.py",
-    "test_fallback_ladder_amplification.py",
     "test_file_claims.py",
     "test_forced_final_recovery.py",
     "test_fullscreen.py",
@@ -231,6 +216,16 @@ def nx_state_reset():
             reset()  # recovery store (class-owned, out of dict reach)
     if no is not None:
         no._CURRENT.set(None)
+        # Drain the module-level pending-note slots too. A worker that finished
+        # after the join timeout above stages its [Runtime note] into the
+        # module store (nx/_notices.set_ → setattr(st, ...)) — invisible to the
+        # ContextVar reset — and Tier A files (no module-dict rewind) would
+        # otherwise inherit it: wake_due() sees a phantom notice (bg-completion
+        # tests fail) and the notice flush appends it (yolo/background-gating
+        # plumbing tests fail).
+        for slot in ("_PENDING_SUBAGENT_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
+                     "_PENDING_BG_COMPLETION_NOTICE", "_PENDING_BACKGROUND_NOTICE"):
+            no.set_(slot, None)
     # A Live leaked by a dashboard test stays on the shared console's stack,
     # which reroutes every later cprint through rich — invisible to the
     # suite's builtins.print captures (the test_preview_visibility flake).

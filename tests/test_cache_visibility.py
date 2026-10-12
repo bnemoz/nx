@@ -4,7 +4,6 @@ Regression signal for append-only discipline: a busted prompt prefix (memory_wri
 cache-key invalidation, /undo-style message edits) collapses the cache-hit
 fraction to ~0, which these surfaces make visible instead of silent.
 """
-import importlib
 import os
 import sys
 
@@ -15,7 +14,7 @@ for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR")
 
 import pytest
 
-import nx  # reloaded by nx_fresh; fixture yields the same module object
+import nx  # Tier A: imported once here / by conftest; nx_fresh yields this object
 
 
 @pytest.fixture()
@@ -26,12 +25,28 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_BASE_URL"] = "http://127.0.0.1:9/v1"
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
-    import nx
-    importlib.reload(nx)
+    # The old `importlib.reload(nx)` here rebuilt nx's import-time wiring from
+    # this fixture's env — most importantly the model source (conftest imports
+    # nx once under a scrubbed env, so st.client/st.MODEL stay None with no
+    # active source). Nothing else in this file depends on import-time state,
+    # so rebuild just that wiring: re-discover sources from the env we just set
+    # and switch to the first one. resolve_model() reads NX_MODEL
+    # ("test-model"), so no network round-trip happens; the dead 127.0.0.1:9
+    # endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
     yield nx
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY"):
-        os.environ.pop(k, None)
-    nx._state._CTX_PINNED = []
+    # env rewind is universal (conftest); _CTX_PINNED is covered by nx_state_reset,
+    # and the nx globals a test writes go through monkeypatch (auto-restored).
+
+
+def _turn_cls():
+    """Session-scoped _ReplState for /ctx — one class object, built once at
+    import (no per-test state carried over), so swapping it in for the real one
+    needs no import-time nx state."""
+    from nx._repl_state import _ReplState
+    return _ReplState([], "t", False, [])
 
 
 class _PTD:
@@ -54,73 +69,74 @@ class _Usage:
 
 # --- footer -------------------------------------------------------------------
 
-def test_footer_omits_cached_when_no_cache_numbers(nx_fresh, capsys):
+def test_footer_omits_cached_when_no_cache_numbers(nx_fresh, capsys, monkeypatch):
     from nx._turn import _print_stats_footer
-    nx._state._LAST_CACHE_HIT = None
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", None)
     _print_stats_footer(_Usage(500, 0), None, 0, 0.1, 1.0, "hi", {})
     out = capsys.readouterr().out
     assert "cached" not in out
 
 
-def test_footer_shows_cached_percent(nx_fresh, capsys):
+def test_footer_shows_cached_percent(nx_fresh, capsys, monkeypatch):
     from nx._turn import _print_stats_footer
-    nx._state._LAST_CACHE_HIT = 0.78
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.78)
     _print_stats_footer(_Usage(500, 390), None, 0, 0.1, 1.0, "hi", {})
     out = capsys.readouterr().out
     # ANSI codes sit between the number and the word — check both parts
     assert "78%" in out and "cached" in out
 
 
-def test_capture_last_cache_hit_usage_path(nx_fresh):
+def test_capture_last_cache_hit_usage_path(nx_fresh, monkeypatch):
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = None
-    nx._state._LAST_PROMPT_TOKENS = 0
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", None)
+    monkeypatch.setattr(nx._state, "_LAST_PROMPT_TOKENS", 0)
     _capture_last_prompt_tokens(_Usage(1000, 800), None)
     assert nx._state._LAST_PROMPT_TOKENS == 1000
     assert nx._state._LAST_CACHE_HIT == pytest.approx(0.8)
 
 
-def test_capture_last_cache_hit_timings_path(nx_fresh):
+def test_capture_last_cache_hit_timings_path(nx_fresh, monkeypatch):
     """llama.cpp: no usage object, cache_n on the timings dict instead."""
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = None
-    nx._state._LAST_PROMPT_TOKENS = 0
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", None)
+    monkeypatch.setattr(nx._state, "_LAST_PROMPT_TOKENS", 0)
     _capture_last_prompt_tokens(None, {"prompt_n": 2000, "cache_n": 1500,
                                        "predicted_n": 40})
     assert nx._state._LAST_PROMPT_TOKENS == 2000
     assert nx._state._LAST_CACHE_HIT == pytest.approx(0.75)
 
 
-def test_capture_last_cache_hit_zero_when_uncached(nx_fresh):
+def test_capture_last_cache_hit_zero_when_uncached(nx_fresh, monkeypatch):
     """cache_n absent/0 → 0.0, not None — a busted prefix is a real signal."""
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = 0.9
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.9)
     _capture_last_prompt_tokens(_Usage(1000, 0), None)
     assert nx._state._LAST_CACHE_HIT == 0.0
 
 
-def test_capture_cache_hit_none_when_no_breakdown(nx_fresh):
+def test_capture_cache_hit_none_when_no_breakdown(nx_fresh, monkeypatch):
     """vLLM-style usage with NO prompt_tokens_details: the server said nothing
     about cache — that's unknown, not 0. Footer renders nothing (None), so an
     unreporting backend doesn't show a permanent red `0% cached`."""
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = 0.9
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.9)
     _capture_last_prompt_tokens(_Usage(1000, 0, with_details=False), None)
     assert nx._state._LAST_PROMPT_TOKENS == 1000
     assert nx._state._LAST_CACHE_HIT is None
 
 
-def test_capture_reported_zero_stays_zero(nx_fresh):
+def test_capture_reported_zero_stays_zero(nx_fresh, monkeypatch):
     """Breakdown present with cached_tokens=0 → 0.0: a real (red) signal."""
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = 0.9
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.9)
     _capture_last_prompt_tokens(_Usage(1000, 0), None)
     assert nx._state._LAST_CACHE_HIT == 0.0
 
 
-def test_capture_ptd_without_cached_tokens_is_unknown(nx_fresh):
+def test_capture_ptd_without_cached_tokens_is_unknown(nx_fresh, monkeypatch):
     """ptd present but cached_tokens missing → still unknown, not 0."""
     from nx._turn import _capture_last_prompt_tokens
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.9)
 
     class _BarePTD:
         pass
@@ -131,10 +147,10 @@ def test_capture_ptd_without_cached_tokens_is_unknown(nx_fresh):
     assert nx._state._LAST_CACHE_HIT is None
 
 
-def test_capture_ignores_zero_prompt(nx_fresh):
+def test_capture_ignores_zero_prompt(nx_fresh, monkeypatch):
     from nx._turn import _capture_last_prompt_tokens
-    nx._state._LAST_CACHE_HIT = 0.5
-    nx._state._LAST_PROMPT_TOKENS = 123
+    monkeypatch.setattr(nx._state, "_LAST_CACHE_HIT", 0.5)
+    monkeypatch.setattr(nx._state, "_LAST_PROMPT_TOKENS", 123)
     _capture_last_prompt_tokens(_Usage(0, 0), None)
     assert nx._state._LAST_CACHE_HIT == 0.5
     assert nx._state._LAST_PROMPT_TOKENS == 123
@@ -161,9 +177,9 @@ def _msgs(n=6):
     return msgs
 
 
-def test_cache_hits_padded_and_truncated(nx_fresh):
+def test_cache_hits_padded_and_truncated(nx_fresh, monkeypatch):
     from nx._ctxreport import _cache_hits_by_turn
-    nx._state._METRICS = nx._metrics._Metrics("s", model="m")
+    monkeypatch.setattr(nx._state, "_METRICS", nx._metrics._Metrics("s", model="m"))
     for cached, prompt in ((0, 100), (900, 1000)):
         nx._state._METRICS.add({"input_tokens": prompt - cached,
                                 "output_tokens": 1,
@@ -185,17 +201,18 @@ def test_cache_hits_padded_and_truncated(nx_fresh):
     assert hits[-1] == pytest.approx(1.0)
 
 
-def test_cache_hits_empty_without_metrics(nx_fresh):
+def test_cache_hits_empty_without_metrics(nx_fresh, monkeypatch):
     from nx._ctxreport import _cache_hits_by_turn
-    nx._state._METRICS = None
+    monkeypatch.setattr(nx._state, "_METRICS", None)
     assert _cache_hits_by_turn(5) == []
 
 
-def test_report_includes_cache_and_cmd_renders(nx_fresh, capsys):
+def test_report_includes_cache_and_cmd_renders(nx_fresh, capsys, monkeypatch):
     from nx._ctxreport import _messages_token_report
     from nx._repl_settings_cmds import _cmd_ctx
     from nx._repl_state import _ReplState
-    nx._state._METRICS = nx._metrics._Metrics("s", model="m")
+    monkeypatch.setattr(nx._repl_state, "_ReplState", _turn_cls())
+    monkeypatch.setattr(nx._state, "_METRICS", nx._metrics._Metrics("s", model="m"))
     nx._state._METRICS.add({"input_tokens": 20, "output_tokens": 5,
                             "cache_read_tokens": 80, "reasoning_tokens": 0})
     msgs = _msgs()
@@ -238,10 +255,10 @@ def test_metrics_add_keeps_sentinel_out_of_totals_but_in_ring(nx_fresh):
     assert m.turns[1]["prompt_tokens"] == 1400
 
 
-def test_ctx_cache_column_unknown_when_sentinel(nx_fresh):
+def test_ctx_cache_column_unknown_when_sentinel(nx_fresh, monkeypatch):
     """Ring entry with the -1 sentinel → None (rendered '—'), not 0.0."""
     from nx._ctxreport import _cache_hits_by_turn
-    nx._state._METRICS = nx._metrics._Metrics("s", model="m")
+    monkeypatch.setattr(nx._state, "_METRICS", nx._metrics._Metrics("s", model="m"))
     nx._state._METRICS.add({"input_tokens": 1000, "output_tokens": 1,
                             "cache_read_tokens": -1, "reasoning_tokens": 0})
     nx._state._METRICS.add({"input_tokens": 1000, "output_tokens": 1,
@@ -251,9 +268,9 @@ def test_ctx_cache_column_unknown_when_sentinel(nx_fresh):
     assert hits[1] == 0.0
 
 
-def test_metrics_ring_buffer_capped(nx_fresh):
+def test_metrics_ring_buffer_capped(nx_fresh, monkeypatch):
     from nx._metrics import _TURN_RING_MAX
-    nx._state._METRICS = nx._metrics._Metrics("s", model="m")
+    monkeypatch.setattr(nx._state, "_METRICS", nx._metrics._Metrics("s", model="m"))
     for _ in range(_TURN_RING_MAX + 10):
         nx._state._METRICS.add({"input_tokens": 10, "output_tokens": 1,
                                 "cache_read_tokens": 0, "reasoning_tokens": 0})

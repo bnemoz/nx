@@ -12,12 +12,23 @@ Acceptance per the spec:
 
 The watcher ladder itself is driven over a real pipe with the same harness
 tests/test_perf_interrupt_disarm.py uses (no tty needed).
+
+Tier A: nx is imported ONCE and never reloaded. The only reload (nx._bash_jobs
+to re-read NX_CANCEL_KILL_GRACE) is gone — CANCEL_KILL_GRACE is a module attr
+read at call time inside cancel_kill_group's escalation, so
+monkeypatch.setattr(bj, "CANCEL_KILL_GRACE", ...) replaces the reload. The
+Tier-B module-dict rewind's job for everything else (the interrupt Events,
+_LAST_ESC_AT, _CANCEL_FN, st._INTERRUPT_THREAD/_TURN_ACTIVE) is done by the
+autouse _pin_interrupt_state fixture below; module-scope NX_* env writes are
+Tier-A safe (conftest's env rewind + SESSION_HOME re-derivation is universal).
 """
 import os
 import sys
 import tempfile
 import threading
 import time
+
+import pytest
 
 _tmp = tempfile.mkdtemp(prefix="nx-ladder-")
 os.environ["NX_ENV_FILE"] = "/dev/null"
@@ -31,10 +42,34 @@ from nx import _interrupt as iw  # noqa: E402
 from nx import _state as st  # noqa: E402
 
 
+# The interrupt Events are mutated IN PLACE (.set()/.clear()) by the ladder,
+# so patching the NAME cannot undo them — snapshot the flags and restore them
+# explicitly. Everything else this file touches is a plain module attr the
+# Tier-B dict rewind used to restore; monkeypatch covers it (the _LAST_ESC_AT
+# pin is a copy, so in-place [0] writes die with the test).
+@pytest.fixture(autouse=True)
+def _pin_interrupt_state(monkeypatch):
+    _events = (iw._INTERRUPT_ARMED, iw._INTERRUPT_EXIT, iw._USER_INTERRUPTED,
+               iw._INTERRUPT_RESTORED, iw._HARD_CANCEL)
+    _snap = [e.is_set() for e in _events]
+    monkeypatch.setattr(iw, "_CANCEL_FN", iw._CANCEL_FN)
+    monkeypatch.setattr(iw, "_LAST_ESC_AT", list(iw._LAST_ESC_AT))
+    monkeypatch.setattr(st, "_INTERRUPT_THREAD", st._INTERRUPT_THREAD)
+    monkeypatch.setattr(st, "_TURN_ACTIVE", st._TURN_ACTIVE)
+    monkeypatch.setattr(st, "_INTERRUPT_REDIRECT_TEXT",
+                        st._INTERRUPT_REDIRECT_TEXT)
+    monkeypatch.setattr(st, "_INTERRUPT_REDIRECT_SUBMITTED",
+                        st._INTERRUPT_REDIRECT_SUBMITTED)
+    monkeypatch.setattr(bj, "CANCEL_KILL_GRACE", bj.CANCEL_KILL_GRACE)
+    yield
+    for _e, _was_set in zip(_events, _snap):
+        (_e.set if _was_set else _e.clear)()
+
+
 def setup_function(_f):
-    os.environ["NX_SESSIONS_DIR"] = _tmp
-    os.environ["NX_HOME"] = _tmp
-    m.SESSION_HOME = _tmp
+    # env + the nx/st SESSION_HOME mirrors are re-applied per-test by
+    # conftest's universal restore from this module's import-time NX_*
+    # intents (Tier A: no manual m.SESSION_HOME write needed).
     iw._HARD_CANCEL.clear()
     iw.clear_tool_cancel()
     iw._LAST_ESC_AT[0] = 0.0
@@ -71,23 +106,19 @@ def test_cancel_kill_group_terminates_then_marks_killed():
     bj._delete_old_bg_logs(max_logs=0, max_age_days=0)
 
 
-def test_cancel_kill_group_survives_sigterm_ignorers():
+def test_cancel_kill_group_survives_sigterm_ignorers(monkeypatch):
     """A job trapping SIGTERM is SIGKILLed after the (shrunk) grace."""
-    os.environ["NX_CANCEL_KILL_GRACE"] = "0.3"
-    try:
-        import importlib
-        importlib.reload(bj)
-        assert bj.CANCEL_KILL_GRACE == 0.3
-        pid, _ = bj._run_bash("trap '' TERM; sleep 300; exit 0")
-        time.sleep(0.3)  # let the trap install
-        bj.cancel_kill_group(pid, "trap TERM; sleep 300")
-        deadline = time.time() + 5
-        while bj._pid_is_alive(int(pid)) and time.time() < deadline:
-            time.sleep(0.05)
-        assert not bj._pid_is_alive(int(pid)), "SIGKILL escalation did not land"
-    finally:
-        os.environ.pop("NX_CANCEL_KILL_GRACE", None)
-        importlib.reload(bj)
+    # Tier A: no importlib.reload(bj) to re-read NX_CANCEL_KILL_GRACE —
+    # cancel_kill_group's escalation reads the module attr at call time, so
+    # pinning the attr is exactly what the reload achieved, minus the fork.
+    monkeypatch.setattr(bj, "CANCEL_KILL_GRACE", 0.3)
+    pid, _ = bj._run_bash("trap '' TERM; sleep 300; exit 0")
+    time.sleep(0.3)  # let the trap install
+    bj.cancel_kill_group(pid, "trap TERM; sleep 300")
+    deadline = time.time() + 5
+    while bj._pid_is_alive(int(pid)) and time.time() < deadline:
+        time.sleep(0.05)
+    assert not bj._pid_is_alive(int(pid)), "SIGKILL escalation did not land"
 
 
 # ------------------------------------------------------------ poll integration
@@ -171,7 +202,7 @@ def test_double_esc_fires_the_ladder_and_hook(monkeypatch):
     monkeypatch.setattr(iw, "apply_interrupt_mode", lambda fd, old: None)
     monkeypatch.setattr(iw, "restore_input_mode", lambda fd, old: None)
     monkeypatch.setattr(iw, "_ladder_window", lambda: 0.8)
-    st._TURN_ACTIVE = False
+    monkeypatch.setattr(st, "_TURN_ACTIVE", False)
     hook_calls = []
     iw.register_tool_cancel(lambda: hook_calls.append(1))
     r, w = os.pipe()
@@ -242,8 +273,12 @@ def test_ladder_adds_no_watcher_threads(monkeypatch):
         while not iw._INTERRUPT_EXIT.is_set():
             iw._INTERRUPT_ARMED.wait(0.02)
 
-    m._interrupt_watcher = parking_body
-    m._INTERRUPT_THREAD = None
+    # _ensure_interrupt_watcher resolves the body through the TOP-LEVEL
+    # package (nx/_interrupt.py:498-505), so patching m._interrupt_watcher is
+    # the supported seam; the thread slot lives on st (nx._INTERRUPT_THREAD
+    # proxies through _StateProxyModule).
+    monkeypatch.setattr(m, "_interrupt_watcher", parking_body)
+    monkeypatch.setattr(st, "_INTERRUPT_THREAD", None)
     iw._INTERRUPT_EXIT.clear()
     try:
         for _ in range(10):

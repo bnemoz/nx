@@ -13,7 +13,6 @@ The wrapper-level tests are pure-string (fast, no subprocess). The end-to-end
 tests drive the real `_run_bash` launch path so the fix cannot silently regress
 into "helper is right, call site is wrong".
 """
-import importlib
 import os
 import sys
 import time
@@ -24,11 +23,15 @@ for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR",
           "NX_BASH_MAX_SECONDS"):
     os.environ.pop(k, None)
 
-import pytest
+import pytest  # noqa: E402
 
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
+    """Tier A: nx is imported ONCE (module scope, below); no reload. The env set
+    here is rewound universally by conftest. The old reload rebuilt exactly two
+    things — the model source wiring and the session-background flags — both
+    handled explicitly below without re-executing ~100 modules."""
     os.environ["NX_HOME"] = str(tmp_path / "nxhome")
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
@@ -36,19 +39,27 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_MODEL"] = "test-model"
     os.environ["NX_API_KEY"] = "sk-test"
     monkeypatch.chdir(tmp_path)
-    import nx
-    importlib.reload(nx)
-    yield nx, tmp_path
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
-              "NX_BASH_MAX_SECONDS"):
-        os.environ.pop(k, None)
-    # these tests launch real jobs — rewind the session flags they flip so later
-    # files don't see a session that "already backgrounded something"
-    nx._state._SESSION_HAS_BACKGROUNDED = False
-    nx._state._PENDING_BACKGROUND_NOTICE = None
-    nx._state._BG_SCAN_DONE = False
-    nx._state._PENDING_BG_COMPLETION_NOTICE = None
-    nx._state._BG_NOTICE_SEEN = None
+    # Rebuild just the model-source wiring the reload used to redo: re-discover
+    # sources from the env above and switch to the first one (binds st.client +
+    # st.MODEL). resolve_model() reads NX_MODEL ("test-model"), so no network
+    # round-trip happens; the dead 127.0.0.1:9 endpoint is never contacted.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(m._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # These tests launch real jobs — pin (not just reset) the session flags they
+    # flip, so monkeypatch rewinds them at teardown and later files don't see a
+    # session that "already backgrounded something".
+    st = m._state
+    monkeypatch.setattr(st, "_SESSION_HAS_BACKGROUNDED", False, raising=False)
+    monkeypatch.setattr(st, "_PENDING_BACKGROUND_NOTICE", None, raising=False)
+    monkeypatch.setattr(st, "_BG_SCAN_DONE", False, raising=False)
+    monkeypatch.setattr(st, "_PENDING_BG_COMPLETION_NOTICE", None, raising=False)
+    monkeypatch.setattr(st, "_BG_NOTICE_SEEN", None, raising=False)
+    yield m, tmp_path
+
+
+# Tier A: import nx once, at module scope, under the scrubbed env above.
+import nx as m  # noqa: E402,F811
 
 
 # --- wrapper shape (pure string) ---------------------------------------------

@@ -8,8 +8,14 @@ file. So a cached "clean working tree" was served for the rest of the session:
 after edits, after run_bash("git commit -am …"), after anything. Entries now
 carry a git_state_stamp (mtimes of .git/HEAD, index, ORIG_HEAD) checked on
 every hit, and are dropped outright by any edit tool or run_bash.
+
+Tier A: nx is imported ONCE and never reloaded. The old fixture's
+importlib.reload(nx) rebuilt module state this file never reads (no model
+source is ever configured — every test drives run_tool's cache/dispatch
+paths directly), and its manual teardown is replaced by monkeypatch +
+conftest's universal env rewind; the tool-result cache is the one hidden
+home the Tier A rewind does not cover, so the fixture clears it itself.
 """
-import importlib
 import os
 import subprocess
 import sys
@@ -21,23 +27,32 @@ for k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_HOME", "NX_SESSIONS_DIR")
 
 import pytest
 
+import nx  # noqa: E402
+from nx import _state as st  # noqa: E402
+
 
 @pytest.fixture()
 def nx_fresh(tmp_path, monkeypatch):
+    # Tier A: no reload. The old importlib.reload(nx) rebuilt import-time
+    # state from this fixture's env, but nothing in this file reads it: no
+    # test touches the model (no source is wired here, and the reload had no
+    # NX_BASE_URL/NX_MODEL to rebuild client wiring from either), and the
+    # knobs it rebuilt stay at their import defaults. NX_* env writes need no
+    # manual undo (conftest rewinds env universally); the module state the
+    # old teardown reset by hand is pinned through monkeypatch instead,
+    # auto-restored at teardown. The result cache is mutated in place by
+    # run_tool, so monkeypatch cannot undo its contents — clear it around
+    # the test explicitly (mirrors the old empty-after-reload start state).
     os.environ["NX_HOME"] = str(tmp_path / "nxhome")
     os.environ["NX_ENV_FILE"] = str(tmp_path / "env")
     os.environ["NX_SESSIONS_DIR"] = str(tmp_path / "nxhome" / "sessions")
     monkeypatch.chdir(tmp_path)
-    import nx
-    importlib.reload(nx)
-    nx.YOLO = True
+    monkeypatch.setattr(st, "YOLO", True)
+    monkeypatch.setattr(st, "_SESSION_HAS_BACKGROUNDED", False)
+    monkeypatch.setattr(st, "_PENDING_BACKGROUND_NOTICE", None)
+    st._TOOL_RESULT_CACHE.clear()
     yield nx, tmp_path
-    nx.YOLO = False
-    nx._state._TOOL_RESULT_CACHE.clear()
-    nx._state._SESSION_HAS_BACKGROUNDED = False
-    nx._state._PENDING_BACKGROUND_NOTICE = None
-    for k in ("NX_HOME", "NX_SESSIONS_DIR"):
-        os.environ.pop(k, None)
+    st._TOOL_RESULT_CACHE.clear()
 
 
 def _git(repo, *args):
