@@ -439,7 +439,7 @@ _KILL_BACKGROUND_TOOL = {"type": "function", "function": {"name": "kill_backgrou
     "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "The PID from the `[background]` result"}}, "required": ["pid"]}}}
 TOOLS.append(_KILL_BACKGROUND_TOOL)
 _WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for a command run_bash backgrounded and return its output when it exits. Waits up to ~30 min by default (then returns the log path); Esc cancels the WAIT, never the process. It cannot kill anything -- use it instead of reaching for pkill.",
-    "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "The PID from the `[background]` result"}, "timeout": {"type": "integer", "description": "Give up after this many seconds (default 0 = wait up to 1800s, then report the log path; capped at 1800)"}}, "required": ["pid"]}}}
+    "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "The PID from the `[background]` result"}, "timeout": {"type": "integer", "description": "Give up after this many seconds (default 0 = wait up to 1800s, then report the log path; explicit values are capped at 120 — poll briefly and check back, don't blind-block)"}}, "required": ["pid"]}}}
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
 TOOLS.append(SUBAGENT_TOOL)
 # critique (0.132.0, feature #3): the scoped minimal reviewer — a read-only

@@ -1148,6 +1148,11 @@ def kill_background(pid: int | str, **_: Any) -> str:
 
 # Fail-fast ceiling (0.130.0) for wait_background's indefinite default.
 WAIT_CEILING = _env_int("NX_WAIT_BACKGROUND_CEILING", 1800)
+# Cap on an *explicit* wait_background timeout= (0.144.x): mirrors
+# MAX_EXPLICIT_TIMEOUT for run_bash. Models that pass timeout=600 to a wait
+# turn a poll into a ten-minute blind block; the whole point of a wait is to
+# come back quickly with either output or a log path to read_file.
+WAIT_TIMEOUT_CAP = _env_int("NX_WAIT_TIMEOUT_CAP", 120)
 
 
 def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 0, **_: Any) -> str:
@@ -1160,7 +1165,9 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
 
     Pass ``timeout=N`` only if you specifically want to bail after N seconds
     (rarely useful — you called this because you want to *wait*, not guess a
-    ceiling).
+    ceiling). An explicit N is capped (NX_WAIT_TIMEOUT_CAP, default 120s) so
+    a wait can never become a long blind block; polling briefly and coming
+    back later is always cheaper.
 
     Parameters
     ----------
@@ -1188,6 +1195,10 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
         return (f"[error] No background log found for PID {pid}. "
                 "The log may have been cleaned up already.")
     timeout_s = timeout if timeout > 0 else WAIT_CEILING
+    # Explicit timeout= gets the fail-fast cap, exactly like run_bash's
+    # timeout= (the indefinite default is still bounded by WAIT_CEILING).
+    if timeout > 0 and WAIT_TIMEOUT_CAP > 0:
+        timeout_s = min(timeout_s, WAIT_TIMEOUT_CAP)
     if WAIT_CEILING > 0:
         timeout_s = min(timeout_s, WAIT_CEILING)
     # C1: same cancel-hook contract as run_bash — waiting on a bg job is a
@@ -1218,7 +1229,7 @@ def wait_background(pid: int | str, log_path: str | None = None, timeout: int = 
         return (f"[interrupted] PID {pid} still running. "
                 f"Check later with read_file('{os.path.abspath(log_path)}')")
     if status == "timeout":
-        return (f"[timeout after {timeout}s] PID {pid} still running. "
+        return (f"[timeout after {timeout_s:g}s] PID {pid} still running. "
                 f"Check output so far with read_file('{os.path.abspath(log_path)}')")
     # The full output is about to land in the transcript — same as an inline
     # run_bash finish, so the completion scan must never announce this pid.
