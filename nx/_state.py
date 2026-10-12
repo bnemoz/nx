@@ -487,3 +487,26 @@ _PLAN_ACTIVE: bool = False
 _PLAN_GOAL: str | None = None
 _PLAN_SLUG: str | None = None
 _PLAN_STARTED: float | None = None
+
+# --- env-resolved request/overflow/compression knobs --------------------------
+# Assigned once at startup by nx/__init__.py (the NX_* env resolution block);
+# declared here so static checkers (ty, pyrefly) see every `st.X` read site.
+# Defaults mirror __init__.py's `_env_*` fallbacks — __init__.py's assignment
+# is the authoritative initialization, never a second resolution path.
+TEMPERATURE: float = -1.0
+TOP_P: float = -1.0
+TOKENS_MARGIN: int = 2048
+MIN_COMPLETION_TOKENS: int = 256
+TOKENIZE_PREFLIGHT: int = 1
+OVERFLOW_FOLD_TIERS: int = 3
+OVERFLOW_FOLD_KEEP_FLOOR: int = 1
+OVERFLOW_EVICT_MIN_CHARS: int = 4000
+OVERFLOW_EVICT_MAX: int = 8
+COMPRESS_KEEP_TOKENS: int = 0
+COMPRESS_SPILL_MIN_CHARS: int = 8000
+COMPRESS_SPILL_MAX: int = 6
+COMPRESS_SOURCE: str = ""
+COMPRESS_MODEL: str = ""
+COMPRESS_SUMMARY_TOKENS: int = 8192
+_COMPRESS_SOURCE_WARNED: bool = False
+_SUBAGENT_SOURCE_WARNED: bool = False
