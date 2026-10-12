@@ -101,6 +101,36 @@ def _cmd_tabs(user: str, state: _ReplState) -> None:
     _fullscreen.open_view(tabs_view(), fallback=_m.tabs_print_fallback)
 
 
+@command("/bg")
+def _cmd_bg_view(user: str, state: _ReplState) -> None:
+    """This session's background run_bash jobs, full screen (`/bg`, Ctrl+B).
+
+    The jobs half of the old /tabs dashboard (0.148.6): one row per running or
+    recently finished job with a status glyph, pid, status word, age, command
+    and the log tail `list_bg_jobs()` already reads. Read-only — the kill form
+    keeps its own path. Bare `/bg` (and the `/jobs` alias) opens the view when a
+    tty is available; `_cmd_bg_inline_fallback` is the pre-view print.
+
+    `/bg kill <pid>`, `/bg all` and every other argument go STRAIGHT to
+    `_cmd_bg` (the pre-existing handler, nx/_repl_settings_cmds.py): they are
+    one-shot actions, not a view, and the machine-wide list has no pid filter
+    the view could apply.
+    """
+    args = user.split()[1:]
+    if args:
+        _cmd_bg(user, state)
+        return
+    from . import _fullscreen
+    from ._bg_completions import bg_jobs_view
+    _fullscreen.open_view(bg_jobs_view(), fallback=_cmd_bg_inline_fallback)
+
+
+def _cmd_bg_inline_fallback() -> None:
+    """`/bg`'s inline output (off tty / NX_FULLSCREEN=0): the pre-view command
+    body, byte-identical (`_cmd_bg` with no arguments)."""
+    _cmd_bg("/bg", None)
+
+
 @command("/diff")
 def _cmd_diff(user: str, state: _ReplState) -> None:
     """Full-screen review of the WORKING TREE diff vs HEAD: the changed file
@@ -113,6 +143,7 @@ def _cmd_diff(user: str, state: _ReplState) -> None:
     one file's diff for `/diff <path>`.
 
     Distinct from /review, which runs the read-only critique sub-agent.
+    Ctrl+X enters this view from the prompt (`/review` keeps Ctrl+R).
     """
     args = user[len("/diff"):].strip()
     from . import _fullscreen
@@ -177,7 +208,8 @@ bind_handlers({
     "/context": _cmd_ctx,
     "/cost": _cmd_cost,
     "/status": _cmd_status,
-    "/bg": _cmd_bg,
+    "/bg": _cmd_bg_view,        # bare /bg opens the view; args -> _cmd_bg
+    "/jobs": _cmd_bg_view,      # alias: this session's background jobs
     "/yolo": _cmd_yolo,
     "/approval": _cmd_approval,
     "/reset": _cmd_reset,

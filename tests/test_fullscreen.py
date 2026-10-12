@@ -268,7 +268,7 @@ def test_view_pauses_and_reopens_the_dashboard(monkeypatch):
     monkeypatch.setattr(_surfaces, "close_dashboard", _close)
     monkeypatch.setattr(_surfaces, "open_dashboard", _open)
     monkeypatch.setattr(_surfaces, "_surfaces_snapshot",
-                        lambda: [{"kind": "agent", "alive": True}])
+                        lambda include_bg=True: [{"kind": "agent", "alive": True}])
     with _fullscreen.alternate_screen(out=FakeOut()):
         assert calls == ["close"]
     assert calls == ["close", "open"]
@@ -371,7 +371,7 @@ def test_review_inline_with_a_path_adds_that_diff(capsys, monkeypatch):
 def test_tabs_view_keys_are_advertised_by_the_registry(monkeypatch):
     from nx import _keys, _surfaces
     monkeypatch.setattr(_surfaces, "_surfaces_snapshot",
-                        lambda: [{"kind": "main", "id": "main", "alive": False,
+                        lambda include_bg=True: [{"kind": "main", "id": "main", "alive": False,
                                   "status": "idle", "instruction": "",
                                   "tail": ""}])
     view = _surfaces.tabs_view()
@@ -414,7 +414,7 @@ def test_every_view_surface_has_a_registry_entry():
 def test_tabs_view_renders_through_the_render_layer(monkeypatch):
     from nx import _render, _surfaces
     monkeypatch.setattr(_surfaces, "_surfaces_snapshot",
-                        lambda: [{"kind": "main", "id": "main", "alive": False,
+                        lambda include_bg=True: [{"kind": "main", "id": "main", "alive": False,
                                   "status": "idle",
                                   "instruction": "hello", "tail": ""}])
     body = "\n".join(_surfaces.tabs_view().render(80, 24))

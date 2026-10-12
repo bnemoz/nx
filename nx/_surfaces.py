@@ -163,11 +163,32 @@ def steer_status_line() -> str:
 _DONE_KEEP = 4  # newest finished bg jobs shown below the live ones
 
 
-def _surfaces_snapshot() -> list[dict]:
+def _process_status(job: dict) -> str:
+    """The ONE status word for a background job, shared by the live /tabs
+    frame, the /tabs fullscreen view and the /bg background-jobs view.
+
+    C1: a hard-cancelled job (the Esc ladder / Ctrl+C path) shows as `killed`,
+    never a bare `finished`, so the ladder's outcome stays visible. Lifted out
+    of `_surfaces_snapshot` (0.148.6) so `_bg_completions.BackgroundJobsView`
+    can report the same word instead of re-deriving it."""
+    if job.get("alive", False):
+        return "running"
+    if job.get("killed"):
+        return "killed"
+    return str(job.get("status") or "finished")
+
+
+def _surfaces_snapshot(*, include_bg: bool = True) -> list[dict]:
     """Unified rows for every running surface: main turn + bg jobs + agents.
 
     Shape mirrors list_bg_jobs()/list_async_agents() plus the synthetic main
-    row; kind distinguishes them ("main"|"bg"|"agent")."""
+    row; kind distinguishes them ("main"|"bg"|"agent").
+
+    `include_bg=False` drops the bg-job rows: since 0.148.6 those belong to the
+    dedicated `/bg` view (`_bg_completions.BackgroundJobsView`) and the /tabs
+    surface shows live-status rows only (main turn + async agents), so the two
+    dashboards no longer duplicate each other. The live-region frame and
+    `maybe_close_if_idle` keep the full snapshot."""
     import nx as _m
     rows: list[dict] = [{
         "kind": "main", "id": "main",
@@ -176,21 +197,18 @@ def _surfaces_snapshot() -> list[dict]:
         "tail": steer_status_line(),
         "obj": None,
     }]
-    try:
-        # mine_only default: the shared bg-logs dir holds every session's
-        # jobs on the machine; /tabs is a per-session dashboard.
-        for job in _m.list_bg_jobs():
-            alive = job.get("alive", False)
-            # C1: a hard-cancelled job shows as `killed`, not a bare
-            # `finished` — the ladder's outcome stays visible in /tabs.
-            _status = ("running" if alive
-                       else ("killed" if job.get("killed") else "finished"))
-            rows.append({"instruction": job.get("command") or job.get("instruction") or "",
-                         "status": _status,
-                         "tail": job.get("tail") or "", **job,
-                         "kind": "bg", "id": f"bg-{job['pid']}", "alive": alive})
-    except Exception:
-        pass
+    if include_bg:
+        try:
+            # mine_only default: the shared bg-logs dir holds every session's
+            # jobs on the machine; /tabs is a per-session dashboard.
+            for job in _m.list_bg_jobs():
+                alive = job.get("alive", False)
+                rows.append({"instruction": job.get("command") or job.get("instruction") or "",
+                             "status": _process_status(job),
+                             "tail": job.get("tail") or "", **job,
+                             "kind": "bg", "id": f"bg-{job['pid']}", "alive": alive})
+        except Exception:
+            pass
     try:
         for ag in _m.list_async_agents():
             # EVENTSURFACE_SPEC §2 agent-row tails: a RUNNING agent has no
@@ -212,8 +230,9 @@ def _surfaces_snapshot() -> list[dict]:
                          "alive": ag.get("alive", False)})
     except Exception:
         pass
-    # finished bg jobs accumulate across the session; keep the newest few so
-    # the dashboard stays a live view (full history remains under /bg).
+    # finished surfaces accumulate across the session; keep the newest few so
+    # the dashboard stays a live view (a job's full history, finished rows
+    # included, is the /bg view's own windowed list).
     done = [r for r in rows if not r.get("alive") and r["kind"] != "main"]
     rows = [r for r in rows if r.get("alive") or r["kind"] == "main"] + done[:_DONE_KEEP]
     return rows
@@ -780,9 +799,14 @@ def tabs_print_fallback() -> None:
 # the steering queue and the inline fallback are unchanged.
 
 class TabsView(_fullscreen.View):
-    """The Phase D /tabs view: one row per live surface (main turn, bg jobs,
-    async agents), j/k focus, Enter steers the focused row through the SAME
-    `_surfaces` steering queue the mid-turn watcher fills.
+    """The Phase D /tabs view: one row per LIVE surface (the main turn and the
+    async sub-agents), j/k focus, Enter steers the focused agent row through
+    the SAME `_surfaces` steering queue the mid-turn watcher fills.
+
+    Background jobs are NOT here (0.148.6): they are process history rather
+    than a live surface, and they have their own view — `/bg`
+    (`_bg_completions.BackgroundJobsView`, Ctrl+B). The live region below the
+    prompt still paints them; only this alternate-screen dashboard split.
 
     Renders through `_render.py` (`panel`, `role`, `hint_line`) — read-only:
     steering a row is the queue the pre-existing dashboard already used, and
@@ -796,10 +820,15 @@ class TabsView(_fullscreen.View):
         super().__init__()
         self.sel = 0
         self.rows: list[dict] = []
+        self.job_rows: list[dict] = []   # not painted here; /bg owns these rows
         self.notice = ""
 
     def refresh(self) -> None:
-        self.rows = _surfaces_snapshot()
+        """Live-status rows only: main turn + async agents. `job_rows` keeps
+        the bg rows for the notice's "see /bg" hint; the live-region frame
+        reads the unfiltered snapshot and still shows them."""
+        self.rows = _surfaces_snapshot(include_bg=False)
+        self.job_rows = [r for r in _surfaces_snapshot() if r["kind"] == "bg"]
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
 
     def _row_lines(self, f: dict, selected: bool, width: int) -> list[str]:
@@ -855,8 +884,11 @@ class TabsView(_fullscreen.View):
                 body.extend(r[:per])
             body.append(f"{role('MUTED')}  … some tails hidden "
                         f"(terminal too short){RESET}")
-        lines.extend(panel(f"tabs · live surfaces · {len(self.rows)} row(s)",
-                           body, footer="q/esc back to chat"))
+        extra = (f" · {len(self.job_rows)} bg job(s) in /bg"
+                 if self.notice and self.job_rows else "")
+        lines.extend(panel(
+            f"tabs · live surfaces · {len(self.rows)} row(s){extra}",
+            body, footer="q/esc back to chat"))
         if self.notice:
             lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
         return lines[:height]
@@ -879,7 +911,7 @@ class TabsView(_fullscreen.View):
 
     def on_key(self, key: str, shell) -> str:
         self.notice = ""
-        if key == "j/k":
+        if key == "j/k":   # the hint line's "j/k move" entry
             return "repaint"
         if key in ("j", "down"):
             self.sel = min(max(0, len(self.rows) - 1), self.sel + 1)

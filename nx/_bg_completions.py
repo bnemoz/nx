@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+
 
 from . import _state as st
 from . import _notices
+from . import _fullscreen
 
 # The scan runs from both the model turn (run_tool's first-tool hook) and the
 # wake poller thread; the seen-set is read-modify-rewritten, so both sides
@@ -159,3 +162,183 @@ def _stage_orphan_agent_intents_safe() -> None:
             "[Runtime note: sub-agent(s) from a crashed nx session were killed "
             "mid-run and never finished:\n" + "\n".join(lines) + "\n"
             "Re-spawn deliberately if the work still matters.]")
+
+
+# ---------------------------------------------------------------------------
+# /bg — alternate-screen view (UIUX_SPEC Phase D pattern, 0.148.6)
+# ---------------------------------------------------------------------------
+# The bg-job HALF of the /tabs dashboard, split out so /tabs is a live-status
+# surface again and history has its own view. Entered by the `/bg` command
+# (existing: same command, same inline print as the fallback) and by Ctrl+B at
+# the prompt.
+#
+# OWNERSHIP NOTE: the view lives in `_bg_completions` — the in-repo module
+# whose job it is to walk the bg-job registry — because `_bash_jobs` (where
+# `list_bg_jobs` is defined) is the module a cycle forbids reaching for a
+# `_fullscreen` import: `_fullscreen` lazy-imports `_surfaces.TabsView`, and
+# `_surfaces` imports `_fullscreen` at module level, so a VIEW in `_surfaces`
+# would close that cycle at import time. The data accessors are imported
+# lazily here for the same reason.
+
+_BG_DONE_KEEP = 4  # newest finished jobs shown (mirrors _surfaces._DONE_KEEP)
+
+# status -> _render role / glyph: the SAME mapping /tabs' `_glyph` and /bg's
+# inline output already apply (running=SUCCESS, killed/error=ERROR,
+# done/finished=ACCENT).
+_BG_STATUS_ROLE = {"running": "SUCCESS", "killed": "ERROR", "error": "ERROR",
+                   "partial": "WARNING", "finished": "ACCENT", "done": "ACCENT"}
+_BG_GLYPH = {"running": "●", "killed": "✗", "error": "✗", "partial": "◐",
+             "finished": "✔", "done": "✔"}
+
+
+def _bg_status(job: dict) -> str:
+    """The one status word for a job row.
+
+    Delegates to `_surfaces._process_status` — the pre-Phase-D /tabs
+    classifier (alive -> running; killed -> killed; else the recorded exit
+    status or finished) — so /bg and /tabs can never disagree about what a job
+    is doing. Falls back to the local rules when that helper is unavailable (a
+    stripped build), which is exactly what the old inline /bg print did."""
+    try:
+        from ._surfaces import _process_status
+        return str(_process_status(job))
+    except Exception:  # noqa: BLE001 — a row must always render a status
+        if job.get("alive"):
+            return "running"
+        if job.get("killed"):
+            return "killed"
+        return str(job.get("status") or "finished")
+
+
+def _bg_age(job: dict) -> str:
+    """Elapsed time since `job["started"]` (unix seconds), e.g. "2m14s";
+    empty when the map carries no start time."""
+    started = job.get("started")
+    if not isinstance(started, (int, float)):
+        return ""
+    total = max(0, int(time.time() - started))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m}m"
+    if m:
+        return f"{m}m{s}s"
+    return f"{s}s"
+
+
+class BackgroundJobsView(_fullscreen.View):
+    """The /bg view: this session's background run_bash jobs, full screen.
+
+    Read-only: a status glyph, pid, status word, age and command per row, with
+    the log tail `list_bg_jobs()` already returns; killing stays `/bg kill
+    <pid>` (announced in the panel footer). j/k scroll the selection, `?` is the
+    shell's key overlay, Esc/q back to chat. An empty registry gets an explicit
+    empty state instead of a blank frame.
+    """
+
+    surface = "bgjobs"
+    title = "bg"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sel = 0
+        self.jobs: list[dict] = []
+        self.rows: list[dict] = []   # live jobs first, then the newest finished
+
+    def refresh(self) -> None:
+        """Re-read the registry (the poll-time repaint calls this, so a job that
+        finishes while the view is open lands without reopening it)."""
+        try:
+            from ._bash_jobs import list_bg_jobs
+            jobs = list_bg_jobs()
+        except Exception:  # noqa: BLE001 — a broken registry renders empty
+            jobs = []
+        for job in jobs:
+            job["status"] = _bg_status(job)
+        done = [j for j in jobs if not j.get("alive")]
+        self.rows = ([j for j in jobs if j.get("alive")]
+                     + done[:_BG_DONE_KEEP])
+        self.jobs = jobs
+        self.sel = min(self.sel, max(0, len(self.rows) - 1))
+
+    def _heading(self) -> str:
+        n = len(self.rows)
+        running = sum(1 for j in self.rows if j.get("alive"))
+        if not self.jobs:
+            return "bg jobs · none"
+        return (f"bg jobs · {n} shown · {running} running · "
+                f"{len(self.jobs) - running} finished")
+
+    def _row_lines(self, job: dict, selected: bool, width: int) -> list[str]:
+        from ._ansi import clip_display
+        from ._render import RESET, role
+        status = job.get("status") or "finished"
+        marker = "›" if selected else " "
+        glyph = (f"{role(_BG_STATUS_ROLE.get(status, 'MUTED'))}"
+                 f"{_BG_GLYPH.get(status, '○')}{RESET}")
+        age = _bg_age(job)
+        head = (f"{role('ACCENT')}{marker}{RESET} {glyph} "
+                f"{str(job.get('pid', '?')):>7} "
+                f"{role('MUTED')}{status:<9}{age:<8}{RESET}")
+        out = [clip_display(head, width - 4)]
+        cmd = " ".join(str(job.get("command") or "").split())
+        if cmd:
+            out.append(f"{role('MUTED')}    {clip_display(cmd, width - 10)}"
+                       f"{RESET}")
+        tail = job.get("tail") or ""
+        if tail:
+            out.append(f"{role('MUTED')}    │ {clip_display(tail, width - 12)}"
+                       f"{RESET}")
+        return out
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        self.refresh()
+        lines = [f"{role('ACCENT')}bg{RESET}{role('MUTED')} — "
+                 f"{hint_line('bgjobs')}{RESET}"]
+        body: list[str] = []
+        if not self.rows:
+            body.append(f"{role('MUTED')}  (no background jobs — run_bash with "
+                        f"a trailing `&`, or /bg all for every session's){RESET}")
+        else:
+            budget = max(1, height - (1 + 2))  # title line + panel top/bottom
+            row_lines = [self._row_lines(j, i == self.sel, width)
+                         for i, j in enumerate(self.rows)]
+            if sum(len(r) for r in row_lines) <= budget:
+                for r in row_lines:
+                    body.extend(r)
+            else:
+                # Progressive trim (TabsView's rule): every row keeps at least
+                # its head line, deep tails give way first, and the trim says so.
+                for i, r in enumerate(row_lines):
+                    per = max(1, (budget - len(body)) // (len(row_lines) - i))
+                    body.extend(r[:per])
+                body.append(f"{role('MUTED')}  … some tails hidden "
+                            f"(terminal too short){RESET}")
+        lines.extend(panel(
+            self._heading(), body,
+            footer="q/esc back to chat · /bg kill <pid> stops a job"))
+        return lines[:height]
+
+    def on_key(self, key: str, shell) -> str:
+        self.notice = ""
+        if key == "j/k":
+            return "repaint"
+        if key in ("j", "down"):
+            self.sel = min(max(0, len(self.rows) - 1), self.sel + 1)
+            return "repaint"
+        if key in ("k", "up"):
+            self.sel = max(0, self.sel - 1)
+            return "repaint"
+        if key in ("r", "enter"):
+            return "repaint"   # r: the repaint itself re-reads the registry
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+
+def bg_jobs_view() -> "BackgroundJobsView":
+    """The /bg view object the fullscreen shell runs (`_fullscreen.bgjobs()` is
+    the thin alias the command path uses)."""
+    return BackgroundJobsView()

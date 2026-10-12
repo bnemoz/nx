@@ -80,12 +80,14 @@ _SPECS = [
     ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1, "context"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval",
      None, [], None, 1, "context"),
-    ("/bg", "list this session's background run_bash jobs and sub-agents, "
-     "or /bg kill <pid>; /bg all lists every session's", "[kill <pid>|all]",
-     [], ["kill", "all"], 1, "workflow"),
-    ("/tabs", "live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T",
+    ("/bg", "this session's background jobs, full screen; Ctrl-B — "
+     "/bg kill <pid> stops one, /bg all lists every session's",
+     "[kill <pid>|all]", [("/jobs", "alias for /bg", True)],
+     ["kill", "all"], 1, "workflow"),
+    ("/tabs", "live dashboard of running surfaces (main turn, sub-agents); Ctrl-T",
      None, [], None, 2, "display"),
-    ("/diff", "full-screen working-tree diff review; a commits via the reviewed git flow",
+    ("/diff", "working-tree diff review, full screen; Ctrl-X — "
+     "a commits via the reviewed git flow",
      "[path]", [], None, 1, "workflow"),
     ("/panel", "toggle the right status rail on the live region", None, [],
      None, 0, "display"),
@@ -193,8 +195,22 @@ def command(name: str, help: Optional[str] = None, args: Optional[str] = None,
 
 def bind_handlers(handlers: "dict[str, Callable]") -> None:
     """Bind the handlers defined elsewhere (the bulk case: every handler
-    imported into `_repl.py`) through the same `command` decorator."""
+    imported into `_repl.py`) through the same `command` decorator.
+
+    A key that is not a registered COMMAND is an alias-only spelling bound
+    straight to an existing command's handler (0.148.6, `/jobs`), never a new
+    spec: the alias meaning comes FROM that spec's own `aliases` entry, so
+    binding it here would otherwise create a spec-shaped imposter with an empty
+    help row in the menus. `_repl` binds both spellings; a truly unknown name
+    still gets the minimal spec the decorator has always created."""
     for cmd, fn in handlers.items():
+        if cmd not in COMMANDS and any(
+                cmd == alias[0] for spec in COMMANDS.values()
+                for alias in spec.aliases):
+            COMMANDS[next(spec.name for spec in COMMANDS.values()
+                          if any(cmd == a[0] for a in spec.aliases)
+                          )].handler = fn
+            continue
         command(cmd)(fn)
 
 

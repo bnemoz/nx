@@ -619,12 +619,12 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/toolcalls [text\|native\|auto] [reset [tool]]` | tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show |
 | `/theme [name]` | list color themes, or switch to one |
 | `/resources` | show this nx process's CPU% and RSS memory |
-| `/tabs` | live dashboard of running surfaces (main turn, bg jobs, agents); Ctrl-T |
+| `/tabs` | live dashboard of running surfaces (main turn, sub-agents); Ctrl-T |
 | `/panel` | toggle the right status rail on the live region |
 | `/reasoning on\|off\|last` | on|off|last — toggle or show reasoning trace |
 | `/tooloutput on\|off\|last` | on|off|last — toggle or show tool-call result |
-| `/bg [kill <pid>\|all]` | list this session's background run_bash jobs and sub-agents, or /bg kill <pid>; /bg all lists every session's |
-| `/diff [path]` | full-screen working-tree diff review; a commits via the reviewed git flow |
+| `/bg [kill <pid>\|all]` | this session's background jobs, full screen; Ctrl-B — /bg kill <pid> stops one, /bg all lists every session's |
+| `/diff [path]` | working-tree diff review, full screen; Ctrl-X — a commits via the reviewed git flow |
 | `/review [focus]` | scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R) |
 | `/build [issue]` | spec-driven pipeline: spec → parallel implementers → critique → fixes, on a feature branch |
 | `/plan [goal\|done\|off\|discard]` | start/view/exit plan mode: /plan <goal>, /plan, /plan done|off|discard |
@@ -644,7 +644,13 @@ In the REPL input box:
   reviewer; readline history-search convention does not apply here — history
   recall here is Up/Down, so the byte is free), **Ctrl+G** opens `/todo` in
   the full-screen plan view (`\x07` is free: no editor branch consumes it and
-  the OSC theme probe drains its own reply window before the prompt runs)
+  the OSC theme probe drains its own reply window before the prompt runs),
+  **Ctrl+B** opens `/bg`, this session's background jobs (`\x02` is free: the
+  editor loop consumes no C0 byte but the ^C/^D/^G/^L/^Q/^R/^S/^T/^U gestures
+  below, and nothing else in `nx/` reads it), and **Ctrl+X** opens `/diff`,
+  the working-tree review (`\x04` / Ctrl+D is TAKEN — it raises EOF at an
+  empty prompt, i.e. quit — so the next genuinely free byte, `\x18`, is used
+  instead in the same single-byte shorthand style)
   (so you don't have to type the full command).
 - **Enter** submits; **Shift+Enter** (or **Ctrl+J**) inserts a newline.
 - **Up/Down** navigate history; **Left/Right** move within a line;

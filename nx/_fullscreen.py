@@ -480,6 +480,14 @@ def todos():
     return TodoView()
 
 
+def bgjobs():
+    """The /bg view (background run_bash jobs). Lives in `_bg_completions`:
+    the view module must not be `_surfaces`, which imports `_fullscreen` at
+    module level — `_fullscreen` importing it back would close the cycle."""
+    from ._bg_completions import BackgroundJobsView
+    return BackgroundJobsView()
+
+
 def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> bool:
     """Run `view` in the alternate screen when `wants_fullscreen()`, else call
     `fallback` (the command's pre-Phase-D inline output) and return False.
@@ -507,4 +515,5 @@ __all__ = [
     "View", "Shell", "read_key", "read_line",
     "alternate_screen", "run_view", "open_view",
     "wants_fullscreen", "owns_screen", "tabs", "review", "sessions", "todos",
+    "bgjobs",
 ]

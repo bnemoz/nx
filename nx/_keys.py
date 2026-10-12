@@ -8,6 +8,8 @@ Surfaces:
   * "chatbox"   — the prompt editor (keys handled in `_chatbox._raw_read_key`)
   * "approval"  — the Y/n/a approval prompt (`_approval._ask_approval`)
   * "tabs"      — the full-screen /tabs dashboard (`_surfaces.TabsView`)
+  * "bgjobs"    — the full-screen /bg background-jobs view
+                  (`_bg_completions.BackgroundJobsView`)
   * "diff"      — the full-screen /diff working-tree review (`_review.ReviewView`)
   * "sessions"  — the full-screen /sessions browser (`_sessions_cmd.SessionsView`)
   * "todos"     — the full-screen /todo plan view (`_todo.TodoView`)
@@ -54,6 +56,12 @@ KEYS: dict[str, list[tuple[str, str]]] = {
     "tabs": [
         ("j/k", "move"),
         ("enter", "steer row"),
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    "bgjobs": [
+        ("j/k", "move"),
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),
