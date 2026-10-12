@@ -1053,16 +1053,19 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     erase_stale_frame()
                     finish()
                     return "/tabs"
-                elif c == "\x02":
-                    # Ctrl+B -> /bg (this session's background run_bash jobs,
+                elif c == "\x0f":
+                    # Ctrl+O -> /bg (this session's background run_bash jobs,
                     # full screen). The byte is genuinely free: the branches
                     # below consume ^C/^D/^L/^Q/^R/^S/^T/^U/\x07 and printable
-                    # chars only, and `grep -r '\x02'` finds no other reader
+                    # chars only, and `grep -r '\x0f'` finds no other reader
                     # anywhere in nx/ (the mid-turn interrupt watcher discards
                     # non-Esc bytes; its ^C path is identical to the old one).
-                    # Erase the frame like Ctrl+T/Ctrl+G: the alternate screen
-                    # restores the normal screen byte-exact, so a leftover
-                    # prompt frame would reappear under the fresh one.
+                    # The old Ctrl+B (\x02) was retired: it is the default
+                    # prefix of tmux/herdr-style multiplexers, which swallow it
+                    # before the editor ever sees it. Erase the frame like
+                    # Ctrl+T/Ctrl+G: the alternate screen restores the normal
+                    # screen byte-exact, so a leftover prompt frame would
+                    # reappear under the fresh one.
                     erase_stale_frame()
                     finish()
                     return "/bg"
@@ -1085,7 +1088,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                     # (Ctrl+D) is TAKEN — the branch above raises EOFError on an
                     # empty buffer, i.e. quit — so the next genuinely free byte
                     # is used instead: `grep -r '\x18'` finds no reader in nx/,
-                    # and the editor loop consumes only ^B/^C/^D/^L/^Q/^R/^S/^T/
+                    # and the editor loop consumes only ^C/^D/^L/^O/^Q/^R/^S/^T/
                     # ^U/^G plus printables. Like Ctrl+T/Ctrl+G, erase the frame
                     # so the alternate screen's byte-exact restore does not
                     # reappear under the fresh prompt.

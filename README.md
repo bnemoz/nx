@@ -645,9 +645,11 @@ In the REPL input box:
   recall here is Up/Down, so the byte is free), **Ctrl+G** opens `/todo` in
   the full-screen plan view (`\x07` is free: no editor branch consumes it and
   the OSC theme probe drains its own reply window before the prompt runs),
-  **Ctrl+B** opens `/bg`, this session's background jobs (`\x02` is free: the
-  editor loop consumes no C0 byte but the ^C/^D/^G/^L/^Q/^R/^S/^T/^U gestures
-  below, and nothing else in `nx/` reads it), and **Ctrl+X** opens `/diff`,
+  **Ctrl+O** opens `/bg`, this session's background jobs (`\x0f` is free: the
+  editor loop consumes no C0 byte but the ^C/^D/^G/^L/^O/^Q/^R/^S/^T/^U gestures
+  below, and nothing else in `nx/` reads it; the old Ctrl+B was retired — it is
+  the default prefix of tmux/herdr-style multiplexers, which swallow the byte
+  before nx sees it), and **Ctrl+X** opens `/diff`,
   the working-tree review (`\x04` / Ctrl+D is TAKEN — it raises EOF at an
   empty prompt, i.e. quit — so the next genuinely free byte, `\x18`, is used
   instead in the same single-byte shorthand style)

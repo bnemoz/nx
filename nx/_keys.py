@@ -35,6 +35,7 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("^L", "clear"),
         ("^Q", "exit"),
         ("^S", "compress"),
+        ("^O", "jobs"),
         ("?", "keys"),
         ("shift+tab", "{mode}"),
     ],

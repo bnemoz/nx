@@ -103,7 +103,7 @@ def _cmd_tabs(user: str, state: _ReplState) -> None:
 
 @command("/bg")
 def _cmd_bg_view(user: str, state: _ReplState) -> None:
-    """This session's background run_bash jobs, full screen (`/bg`, Ctrl+B).
+    """This session's background run_bash jobs, full screen (`/bg`, Ctrl+O).
 
     The jobs half of the old /tabs dashboard (0.148.6): one row per running or
     recently finished job with a status glyph, pid, status word, age, command

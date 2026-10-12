@@ -2,7 +2,7 @@
 
 Background jobs used to ride in the /tabs rows; they now have their own
 Phase-D view (`_bg_completions.BackgroundJobsView`, entered by bare `/bg` or
-Ctrl+B) while /tabs keeps only the live-status rows. Modelled on
+Ctrl+O) while /tabs keeps only the live-status rows. Modelled on
 tests/test_todo_fullscreen_view.py: the view (rows from `list_bg_jobs()`, the
 shared `_surfaces._process_status` word, an explicit empty state, j/k
 scrolling), the /tabs split, and the dispatch path of both new keybindings —
@@ -132,12 +132,12 @@ def test_ctrl_b_and_ctrl_x_return_the_right_commands():
     import inspect
     from nx import _chatbox
     src = inspect.getsource(_chatbox._chatbox_raw)
-    assert 'elif c == "\\x02":' in src and 'return "/bg"' in src
+    assert 'elif c == "\\x0f":' in src and 'return "/bg"' in src
     assert 'elif c == "\\x18":' in src and 'return "/diff"' in src
     # ^D (EOF on an empty buffer) is TAKEN and its branch comes FIRST: \x04
     # stays the quit gesture, which is why /diff got \x18 instead
     assert src.index('elif c == "\\x04":') < src.index('elif c == "\\x18":')
     # and the erase-then-return discipline Ctrl+T/Ctrl+G established
-    block = src[src.index('elif c == "\\x02":'):src.index('elif c == "\\x07":')]
+    block = src[src.index('elif c == "\\x0f":'):src.index('elif c == "\\x07":')]
     assert "erase_stale_frame()" in block and "finish()" in block
     assert _fullscreen.bgjobs().surface == "bgjobs"

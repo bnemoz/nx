@@ -169,7 +169,7 @@ def _stage_orphan_agent_intents_safe() -> None:
 # ---------------------------------------------------------------------------
 # The bg-job HALF of the /tabs dashboard, split out so /tabs is a live-status
 # surface again and history has its own view. Entered by the `/bg` command
-# (existing: same command, same inline print as the fallback) and by Ctrl+B at
+# (existing: same command, same inline print as the fallback) and by Ctrl+O at
 # the prompt.
 #
 # OWNERSHIP NOTE: the view lives in `_bg_completions` — the in-repo module

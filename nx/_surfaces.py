@@ -805,7 +805,7 @@ class TabsView(_fullscreen.View):
 
     Background jobs are NOT here (0.148.6): they are process history rather
     than a live surface, and they have their own view — `/bg`
-    (`_bg_completions.BackgroundJobsView`, Ctrl+B). The live region below the
+    (`_bg_completions.BackgroundJobsView`, Ctrl+O). The live region below the
     prompt still paints them; only this alternate-screen dashboard split.
 
     Renders through `_render.py` (`panel`, `role`, `hint_line`) — read-only:
