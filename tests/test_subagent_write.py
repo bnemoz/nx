@@ -5,7 +5,6 @@ Y/n prompt with a diff preview) gates every sub-agent write, the tool box
 header is tagged (sub-agent), and no write-tier agent ever runs concurrently
 with another."""
 
-import importlib
 import os
 import sys
 
@@ -25,17 +24,20 @@ import pytest
 
 # 0.96.0: foreground spawn results are head+report-path by default; these
 # tests assert on the full inline answer, so opt into the legacy inline mode.
+# Module-scope env writes are Tier-A safe (conftest rewinds NX_* env
+# universally); the module-attr half of this knob is pinned per-test below.
 os.environ["NX_SUBAGENT_SYNC_INLINE"] = "1"
 
 
 @pytest.fixture(autouse=True)
 def _sync_inline(monkeypatch):
     # Load-bearing (not a no-op): nx/_subagent._sync_inline prefers the module
-    # attr _m.NX_SUBAGENT_SYNC_INLINE over the env. nx_fresh's reload()
-    # re-executes nx/__init__ in the SAME module dict without defining this
-    # name, so setting it here (autouse runs before nx_fresh) survives the
-    # reload and pins inline mode. raising=False because the attr is not
-    # defined at import time.
+    # attr _m.NX_SUBAGENT_SYNC_INLINE over the env, and production never
+    # defines that attr (importing nx does not create it), so the module-scope
+    # os.environ line alone would not pin inline mode. Under the old Tier-B
+    # reload this also survived the reload because reload() re-executes
+    # nx/__init__ in the SAME module dict without defining the name.
+    # raising=False because the attr does not exist at import time.
     import nx as _nx
     monkeypatch.setattr(_nx, "NX_SUBAGENT_SYNC_INLINE", 1, raising=False)
     yield
@@ -53,20 +55,42 @@ def nx_fresh(tmp_path, monkeypatch):
     os.environ["NX_API_KEY"] = "sk-test"
     os.environ["NX_SUBAGENT_ASYNC"] = "0"  # these tests exercise the foreground sub-loop; the 0.18.8 default is background (covered in test_subagent_async.py)
     # These tests dispatch REAL write_file/edit_file/delete_file calls to tmp_path,
-    # outside the freshly-reloaded nx's project root (this repo). The shipped
-    # fence (2.1) would refuse them before the body runs — and the behavior
-    # under test is the approval/tag/wrapper layer, not the fence (pinned in
-    # tests/test_write_fence.py). Re-enable the fence per-test where needed:
-    # tests/test_write_fence.py's dispatch tests monkeypatch st.PROJECT_ROOT
-    # already, and the default-on posture is asserted there.
+    # outside nx's project root (this repo). The shipped fence (2.1) would refuse
+    # them before the body runs — and the behavior under test is the approval/
+    # tag/wrapper layer, not the fence (pinned in tests/test_write_fence.py).
+    # Re-enable the fence per-test where needed: tests/test_write_fence.py's
+    # dispatch tests monkeypatch st.PROJECT_ROOT already, and the default-on
+    # posture is asserted there.
     os.environ["NX_WRITE_FENCE"] = "0"
     monkeypatch.setattr(sys, "argv", ["nx"])
     import nx
-    importlib.reload(nx)
+    # Tier A: no importlib.reload(nx) here. The reload used to rebuild nx's
+    # import-time state from this fixture's env — most importantly the model
+    # source: conftest imports nx once under a scrubbed env, so st.client/
+    # st.MODEL stay None (no active source) and every spawn would answer
+    # "ERROR: no active model source". Instead of a reload, rebuild just that
+    # wiring: re-discover sources from the env we just set and switch to the
+    # first one (binds st.client + st.MODEL). resolve_model() reads NX_MODEL
+    # ("test-model"), so no network round-trip happens; the dead 127.0.0.1:9
+    # endpoint is never contacted. See tests/test_subagent.py's nx_fresh.
+    from nx._sources import _discover_sources, switch_source
+    _discover_sources()
+    assert switch_source(nx._state.SOURCE_ORDER[0]), "fixture source wiring failed"
+    # nx reads these knobs through the MODULE ATTR first, falling back to the
+    # env (see _subagent._async_default / _sync_inline /
+    # _subagent_tiers._write_tier_enabled), and that attr holds the import-time
+    # default. The reload used to rebuild the attrs from this fixture's env;
+    # with the reload gone, state the behavior-changing knobs the env alone can
+    # no longer reach as per-test monkeypatches (auto-restored). Environment
+    # writes above are still needed: the values are read at spawn time by code
+    # that consults the env (NX_WRITE_FENCE, NX_HOME/SESSIONS_DIR) and by the
+    # attr fallback path. NX_SUBAGENT_ASYNC=0 = foreground sub-loop;
+    # NX_SUBAGENT_WRITE=0 = the write tier is off unless a test opts in.
+    monkeypatch.setattr(nx, "NX_SUBAGENT_ASYNC", 0, raising=False)
+    monkeypatch.setattr(nx, "NX_SUBAGENT_WRITE", 0, raising=False)
     yield nx
-    for k in ("NX_HOME", "NX_SESSIONS_DIR", "NX_BASE_URL", "NX_MODEL", "NX_API_KEY",
-              "NX_SUBAGENTS", "NX_SUBAGENT_WRITE", "NX_SUBAGENT_ASYNC", "NX_WRITE_FENCE"):
-        os.environ.pop(k, None)
+    # env rewind is universal (conftest), so no manual pop here; nx globals a
+    # test mutates go through monkeypatch (per-test, auto-restored).
 
 
 def test_write_tier_off_by_default(nx_fresh):
@@ -103,7 +127,7 @@ def test_write_tier_on_offers_and_wraps(nx_fresh, monkeypatch, tmp_path):
     from nx import _dispatch
     from nx._subagent import (_subagent_tools, _write_tier_dispatch,
                               _write_tier_enabled, spawn_agent, _SUBAGENT_TLS)
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     assert _write_tier_enabled() is True
     names = {t["function"]["name"] for t in _subagent_tools()}
     assert {"write_file", "edit_file", "multi_edit", "sed_edit"} <= names
@@ -148,7 +172,7 @@ def test_write_tier_edit_denied_by_parent_confirm(nx_fresh, monkeypatch, tmp_pat
     """The sub-agent's edit is denied when the parent's _confirm() says no —
     the gate is the parent's, not a YOLO override."""
     from nx._subagent import spawn_agent
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
 
     def fake_confirm(action, preview=None):
         assert preview is not None  # diff preview reached the gate
@@ -176,7 +200,7 @@ def test_write_tier_tool_box_tagged_sub_agent(nx_fresh, monkeypatch, tmp_path, c
     tool box header; the same call outside a sub-agent is not."""
     from nx import _dispatch
     from nx._subagent import _SubagentContext, _write_tier_dispatch, _SUBAGENT_TLS
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     monkeypatch.setattr(nx_fresh, "_confirm", lambda action, preview=None: True)
     target = tmp_path / "tagged.txt"
     args = {"path": str(target), "content": "x"}
@@ -203,7 +227,7 @@ def test_write_tier_boxes_readonly_calls_untagged(nx_fresh, monkeypatch, tmp_pat
     import io
     from nx import _dispatch
     from nx._subagent import _SubagentContext, _write_tier_dispatch, _SUBAGENT_TLS
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     _SUBAGENT_TLS.ctx = _SubagentContext(_write_tier_dispatch(), write=True)
     try:
         buf = io.StringIO()
@@ -224,12 +248,12 @@ def test_write_tier_never_parallel_fanout(nx_fresh, monkeypatch, tmp_path):
     """Two write-capable spawn_agent calls stay sequential: their bodies hit
     the real _confirm(), and two prompts must never interleave."""
     from nx._turn import _should_parallelize
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     calls = [("spawn_agent", {"instruction": "A"}), ("spawn_agent", {"instruction": "B"})]
     assert _should_parallelize(calls) is False
     assert _should_parallelize(calls + [("read_file", {"path": "a"})]) is False
     # read-only spawns still fan out when the tier is on but unused
-    nx_fresh.NX_SUBAGENT_WRITE = 0
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 0)
     assert _should_parallelize(calls) is True
 
 
@@ -239,7 +263,7 @@ def test_write_tier_no_bash_widening(nx_fresh, monkeypatch, tmp_path):
     write agent's job); delete/wait_background/memory_write stay unavailable."""
     from nx import _dispatch
     from nx._subagent import _SubagentContext, _write_tier_dispatch, _SUBAGENT_TLS
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     table = _write_tier_dispatch()
     from nx._subagent import _subagent_bash
     assert table["run_bash"] is _subagent_bash  # same gate, tier-aware inside
@@ -271,7 +295,7 @@ def test_write_tier_nested_spawn_refused(nx_fresh, monkeypatch):
     """A write-tier agent cannot spawn another agent — only the parent holds
     the approval gate."""
     from nx._subagent import spawn_agent
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
 
     def fake_turn(messages, *a, **kw):
         from nx import _dispatch
@@ -290,7 +314,7 @@ def test_write_tier_yolo_inherited_not_forced(nx_fresh, monkeypatch, tmp_path):
     unattended; a prompting parent's sub-agent writes prompt)."""
     from nx import _state as st
     from nx._subagent import spawn_agent
-    nx_fresh.NX_SUBAGENT_WRITE = 1
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     seen = {}
 
     def fake_turn(messages, *a, **kw):
@@ -299,13 +323,14 @@ def test_write_tier_yolo_inherited_not_forced(nx_fresh, monkeypatch, tmp_path):
         return nx_fresh.TURN_DONE
 
     monkeypatch.setattr(nx_fresh, "model_turn", fake_turn)
-    st.YOLO, st.APPROVE_LEVEL = False, "medium"
-    try:
-        spawn_agent("q", tier="write")
-        assert seen["yolo"] is False
-        assert st.YOLO is False and st.APPROVE_LEVEL == "medium"  # restored
-    finally:
-        st.YOLO, st.APPROVE_LEVEL = False, "high"
+    # The parent posture is set through monkeypatch (auto-restored at teardown)
+    # instead of the old manual save/restore, which relied on the Tier-B
+    # module-dict rewind to undo a leak on failure.
+    monkeypatch.setattr(st, "YOLO", False)
+    monkeypatch.setattr(st, "APPROVE_LEVEL", "medium")
+    spawn_agent("q", tier="write")
+    assert seen["yolo"] is False
+    assert st.YOLO is False and st.APPROVE_LEVEL == "medium"  # unchanged
 
 
 def test_write_tier_wrappers_refuse_outside_context(nx_fresh):

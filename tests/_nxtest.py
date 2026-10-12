@@ -184,7 +184,6 @@ _GLOBALS_FILES = [
     "test_subagent_model.py",
     "test_subagent_tiers_096.py",
     "test_subagent_turn_budget.py",
-    "test_subagent_write.py",
     "test_surfaces.py",
     "test_tabs_live.py",
     "test_telegram.py",
