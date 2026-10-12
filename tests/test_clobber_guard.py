@@ -117,6 +117,21 @@ def test_lock_and_dotfiles_are_never_exempt():
     assert clobber_targets("cmd > " + k) == [k]
 
 
+def test_nx_state_dir_scratch_is_exempt():
+    # 0.145.x: files under the repo's .nx/ state dir are nx's own scratch
+    # (tmp patches, plans) — the model rewrites them every session, so
+    # prompting trains Y-mashing. Traversal into a real target still prompts.
+    d = os.path.join(_tmp, ".nx", "tmp")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "a7.patch")
+    with open(p, "w") as f:
+        f.write("patch\n")
+    assert clobber_targets("git diff HEAD -- x > " + p) == []
+    assert _redirect_targets("git diff HEAD -- x > " + p) == [p]
+    real = _seed(".nx/real.env")
+    assert clobber_targets("cat > " + real) == [real]
+
+
 def test_dedup():
     p = _seed()
     assert clobber_targets("cat > " + p + " && cat > " + p) == [p]

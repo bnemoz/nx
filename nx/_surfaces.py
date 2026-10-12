@@ -812,7 +812,7 @@ class TabsView(_fullscreen.View):
                 f"{f['kind']:<5} {f['id']:<18} "
                 f"{role('MUTED')}{status:<8}{RESET}")
         if tier:
-            head += f"{role('MUTED')} {tier:<9}{RESET}"
+            head += f"{role('MUTED')} tier: {tier:<5}{RESET}"
         out = [clip_display(head, width - 4)]
         instr = " ".join(str(f.get("instruction", "")).split())
         if instr:

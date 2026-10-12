@@ -66,6 +66,11 @@ _REDIR_RE = re.compile(
 # FD-duplication forms (2>&1) and append (>>) are not truncations.
 _DUP_RE = re.compile(r"^\d*>>&?$")
 
+# nx's own repo-state scratch dir: `.nx/` (staged-claims, tmp patches,
+# plans, worktree metadata). The model itself created whatever it redirects
+# there and rewrites it freely — a prompt there trains Y-mashing.
+_NX_STATE_DIR_RE = re.compile(r"(^|/)\.nx/")
+
 # Extensions that are logs or build/ephemeral artifacts. The model
 # legitimately truncates these every session (rerunning a benchmark
 # rewrites its run log), so prompting trains the user to mash Y.
@@ -116,6 +121,8 @@ def clobber_targets(command: str) -> list[str]:
         if (_env_int("NX_CLOBBER_LOG_EXTENSIONS", 1)
                 and os.path.splitext(target)[1].lower() in _LOG_EXTENSIONS
                 and not _NEVER_EXEMPT_RE.search(target)):
+            continue
+        if _NX_STATE_DIR_RE.search(target) and not _NEVER_EXEMPT_RE.search(target):
             continue
         hits.append(target)
     if hits:
