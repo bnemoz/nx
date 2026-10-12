@@ -37,6 +37,19 @@ nx --help                           # inspect the installed CLI
 
 Target a single pytest test during development with `uv run pytest tests/test_risk_context.py -k test_name`. The suite is designed to run offline; do not depend on a live model endpoint.
 
+### When a full-suite run fails (read before debugging)
+
+The suite runs 12/12 clean on an idle box. A failure you cannot reproduce standalone is almost never a regression — work this checklist in order before spending more than five minutes:
+
+1. **Check the run's wall time.** A clean run takes ~13.6s. If the failing run took 23s+, another pytest/nx session was running concurrently on this machine (verify with `ps aux | grep pytest` and `ls -t ~/.nx/bg-logs/` — including sessions in *other* projects). Re-run once before investigating anything.
+2. **Check the known-flake ledger** in `docs/test-architecture.md` §5.0. It lists each recurring flake, its root cause, and its fix — including the residue classes (`_PENDING_*` notice slots, `_TOOL_RESULT_CACHE`, the wake poller, `_BG_NOTICE_SEEN`/`_BG_SCAN_DONE`) that `nx_state_reset` in `tests/_nxtest.py` now drains. If a test fails because some new hidden home wasn't drained, the fix belongs in that fixture — centrally, once — not in the failing test.
+3. **Genuinely environmental flakes live in `_FLAKY_RERUN_NODEIDS`** (`tests/conftest.py`): those nodeids get one silent in-process retry; if the retry also fails *and* the test passes standalone, extend the tuple with a one-line comment — do not debug it.
+4. **Reproduce serially before bisecting**: `uv run pytest tests/test_suspect.py tests/test_poisoned.py -q` (both orders). Cross-file failures that reproduce serially are residue (fix the fixture or the leaking test); failures that only appear under `-n auto` after that are contention — see step 1.
+
+Do not delete a slow or flaky test to make a run green, and do not add sleeps to a timing-sensitive test — poll on the condition (`_wait_for`) or sync on the event instead. The suite's wall time is dominated by its slowest single file (per-file `--dist loadfile` packing), so before assuming the suite "got slower," check for a straggler file with `--junitxml` + per-class durations before touching distribution settings.
+
+Writing tests that touch process-global state: every module global your test mutates must either be set through `monkeypatch` (auto-restored) or be a home `nx_state_reset` already drains. Tests with no `nx_fresh`-style fixture run against whatever `SESSION_HOME` the module holds — which can be the developer's real `~/.nx` — so any test that triggers a background-completion sweep must pin its own session home.
+
 Ruff and ty are pinned in the `dev` dependency group (installed with `uv sync --group dev`). Ruff is a hard gate; ty's existing ~130 diagnostics are tracked, not owed — see CONTRIBUTING.md's "Lint and type check" section for the policy.
 
 ## Coding Style & Naming Conventions
