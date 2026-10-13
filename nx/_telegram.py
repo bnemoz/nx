@@ -569,6 +569,7 @@ def run_gateway() -> int:
             # Network hiccup / timeout: back off briefly and keep polling.
             time.sleep(_poll_interval())
             continue
+        _maybe_wake_turn(_api, allowed)
         if not r.get("ok"):
             code = (r.get("parameters") or {}).get("error_code") \
                 or r.get("error_code")
@@ -587,6 +588,45 @@ def run_gateway() -> int:
                 # kill the gateway
                 print(f"nx telegram: update dropped: {type(e).__name__}: "
                       f"{str(e)[:200]}")
+
+
+def _maybe_wake_turn(api: Callable, allowed: set) -> None:
+    """Autowake (0.153.0): mirror the REPL's auto-continuation turn. The wake
+    poller (_autowake) raises st._WAKE_DUE when a background sub-agent / bg
+    job finishes while the gateway idles, but nothing in this module consumed
+    that flag — the completion note sat staged until the user typed something
+    (the first tool call of their turn flushed it). Between polls the loop is
+    idle and _TURN_LOCK is free, so synthesize the REPL's wake turn here:
+    sweep, flush the staged notice into the conversation, run a turn on the
+    wake instruction. A real Telegram message arriving concurrently wins the
+    lock and this no-ops."""
+    from . import _autowake
+    from . import _state as st
+    from ._dispatch import _run_bg_completion_scan
+    from ._runtime_notes import _flush_pending_background_notice
+    try:
+        if not st._WAKE_DUE or not _autowake.wake_due():
+            return
+        if not _TURN_LOCK.acquire(blocking=False):
+            return  # a real user turn is running; it drains the note itself
+        try:
+            st._WAKE_DUE = False
+            st._TURN_ACTIVE = True
+            try:
+                st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1
+                _run_bg_completion_scan()
+                _flush_pending_background_notice(_CONVERSATION)
+                wake = _autowake.wake_instruction()
+            finally:
+                st._TURN_ACTIVE = False
+            print("nx telegram: background work finished — auto-continuing")
+            _run_turn(api, next(iter(sorted(allowed))), wake, _CONVERSATION)
+            if _autowake._any_pending_notice():
+                st._WAKE_DUE = True
+        finally:
+            _TURN_LOCK.release()
+    except Exception:
+        pass  # a wake turn must never take the gateway down
 
 
 # One conversation for the process (the single-chat constraint, stated in the
