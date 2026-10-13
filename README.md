@@ -232,7 +232,7 @@ line per action.
 | `NX_IMAGES_QUOTA_MB` | size cap on the `_images/` payload dir (default `200` MB, `0` disables): once over quota, the oldest unreferenced payloads are evicted first, then — only if still over — the oldest referenced ones (their resume degrades to the missing-sidecar note). Enforced after every indexed save and by `nx sessions --prune` |
 | `NX_SESSION_TEXT_REFS` | keep big tool-output text out of the session store (default `1`): any single text payload over `NX_SESSION_TEXT_REF_MIN` lives content-addressed in `<sessions>/_textrefs/<sha256>.txt` and the event carries a 512-char preview reference that resume expands back into the live transcript (a missing sidecar degrades to the preview, never a 400). Garbage-collected to the payloads still referenced by any session, same as images. `0` stores all text inline |
 | `NX_SESSION_TEXT_REF_MIN` | the per-payload size threshold for `NX_SESSION_TEXT_REFS`, in bytes (default `65536`); `0` disables offloading |
-| `NX_THEME` | `opencode` (default) / `mist` / `mocha` / `latte` / `frappe` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `ayu-light` / `bluloco-light` / `amethyst` |
+| `NX_THEME` | `mist` (default) / `opencode` / `mocha` / `latte` / `frappe` / `dracula` / `nord` / `gruvbox` / `vaporwave` / `ayu-light` / `bluloco-light` / `amethyst` |
 | `NX_SPINNER` | the waiting/`running` animation (default `1`): a slow 12-cell sweep bar, at most two glyphs change per frame. `0` disables animation entirely and shows a static status line — recommended for photosensitive users. While a tool runs the line also carries live progress (`· 12s · 2/3 · compiling 3/40`) — see [Live tool progress](#live-tool-progress); under `0` that tail is suppressed, since a redraw-once line cannot show a moving clock |
 | `NX_REASONING_VISIBLE` | stream live reasoning/thinking text (default `0` — collapsed; `1` streams it — toggle live with `/reasoning`) |
 | `NX_THINKING` | `auto` (default) probes each source/model for a `chat_template_kwargs` thinking toggle that makes servers like glm-5.3-flash (vLLM) separate reasoning into `reasoning_content` instead of merging it into the answer; `off` keeps the server's stock behavior. The probe's response budget is `NX_THINKING_PROBE_MAX_TOKENS` (default 256) — generous on purpose: a reasoning model's thinking phase counts against `max_tokens`, and a tight budget cut the probe mid-think before any reasoning token landed, recording the wrong answer for the (source, model) pair |
@@ -515,7 +515,7 @@ it is not a separate fixed palette.
 `mist` is the house style: a calm, pastel dark theme generated in OKLCH —
 uniform lightness bands with low chroma, slate-tinted neutrals, every slot
 ≥4.5:1 against dark backgrounds (WCAG AA). `dracula`, `gruvbox`, `vaporwave`,
-and the default `opencode` follow the same architecture with their own hue
+and the house default `mist` follow the same architecture with their own hue
 leans (dracula cool violet/pink, gruvbox warm retro, vaporwave dusk, opencode
 warm amber) — same calm read, different accent families.
 

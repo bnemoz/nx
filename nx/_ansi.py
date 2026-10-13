@@ -281,7 +281,7 @@ THEMES: dict[str, dict[str, str]] = {
         "brown": "bd9670", "slate": "829cb3",
     },
 }
-DEFAULT_THEME = "opencode"
+DEFAULT_THEME = "mist"
 _PALETTE_KEYS: tuple[str, ...] = (
     "cyan", "green", "yellow", "red", "magenta", "gray", "blue", "orange",
     "purple", "teal", "pink", "brown", "slate",
