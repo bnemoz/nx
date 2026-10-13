@@ -41,6 +41,7 @@ the conversation in place for a fresh context without a process restart.
 """
 from __future__ import annotations
 
+import base64
 import html as _html
 import json
 import os
@@ -51,6 +52,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Callable
 
 API_BASE = "https://api.telegram.org"
@@ -79,6 +81,12 @@ _REDACT_FLAG = "NX_TELEGRAM_REDACT_ARGS"
 # needs PySocks installed; anything urllib cannot speak surfaces as a poll
 # error at startup, not a silent hang.
 _PROXY_FLAG = "NX_TELEGRAM_PROXY"
+# Send back the images the model read/generated this turn via sendPhoto
+# (screenshots, plots). 0/false/off disables — text-only gateway as before.
+_PHOTOS_FLAG = "NX_TELEGRAM_SEND_PHOTOS"
+# Never more than this many photos per turn (flood safety; each is a
+# multipart upload against the per-chat rate limit).
+_MAX_PHOTOS_PER_TURN = 2
 
 
 def _groups_allowed() -> bool:
@@ -91,6 +99,11 @@ def _redact_args() -> bool:
 
 def _proxy() -> str:
     return os.environ.get(_PROXY_FLAG, "").strip()
+
+
+def _send_photos_enabled() -> bool:
+    return os.environ.get(_PHOTOS_FLAG, "1").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _parse_ids(name: str) -> set[int]:
@@ -133,6 +146,16 @@ def _poll_interval() -> float:
 
 # --- Bot API surface (the only HTTP the gateway speaks) ----------------------
 
+def _opener_for() -> urllib.request.OpenerDirector | None:
+    """A proxy-routing opener when NX_TELEGRAM_PROXY is set, else None
+    (plain urlopen). Shared by the JSON and multipart senders."""
+    proxy = _proxy()
+    if not proxy:
+        return None
+    return urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http": proxy, "https": proxy}))
+
+
 def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dict:
     """One Bot-API call. getUpdates long-polls with `timeout` inside the
     payload; everything else is a plain POST. Returns the parsed JSON; the
@@ -145,11 +168,7 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
         raise RuntimeError("NX_TELEGRAM_BOT_TOKEN is not set")
     url = f"{API_BASE}/bot{token}/{method}"
     data = json.dumps(payload or {}).encode()
-    opener = None
-    proxy = _proxy()
-    if proxy:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler(
-            {"http": proxy, "https": proxy}))
+    opener = _opener_for()
 
     # The loop body either returns or re-raises, so `r` is always bound by the
     # time the fall-through `return r` below is reached; the empty default just
@@ -297,6 +316,106 @@ def _md_html(chunk: str, open_pre: bool = False) -> tuple[str, bool]:
             continue
         out.append(_inline_md(line))
     return "\n".join(out), in_pre
+
+
+# --- outbound media: the images a turn produced, sent back as photos ---------
+
+def _part_image_bytes(part: dict) -> tuple[bytes, str] | None:
+    """Image payload (bytes, mime) from one content part — a live image_url
+    data URL or an image_ref whose sidecar file still exists — else None."""
+    url = None
+    if not isinstance(part, dict):
+        return None
+    if part.get("type") == "image_url":
+        try:
+            url = part["image_url"]["url"]
+        except (KeyError, TypeError):
+            return None
+    elif part.get("type") == "image_ref":
+        from ._images import _ref_to_data_url_part
+        live = _ref_to_data_url_part(part)
+        if live:
+            url = live["image_url"]["url"]
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    head, _, b64 = url.partition(",")
+    mime = head[5:].split(";", 1)[0] or "image/png"
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return raw, mime
+
+
+def _turn_images(messages: list, turn_start: int) -> list[tuple[bytes, str]]:
+    """Distinct images that appeared in this turn's tool results (read_image,
+    rendered plots): at most _MAX_PHOTOS_PER_TURN, in order, deduped by data
+    URL. Only parts that carry a real payload count."""
+    out: list[tuple[bytes, str]] = []
+    seen: set[str] = set()
+    for m in messages[turn_start:]:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                key = (part.get("image_url") or {}).get("url") or ""
+            elif part.get("type") == "image_ref":
+                key = f"ref:{part.get('sha256')}"
+            else:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            got = _part_image_bytes(part)
+            if got:
+                out.append(got)
+            if len(out) >= _MAX_PHOTOS_PER_TURN:
+                return out
+    return out
+
+
+def _send_photo(api: Callable, chat_id: int, raw: bytes, mime: str,
+                caption: str = "") -> bool:
+    """One multipart sendPhoto upload (the only Bot-API call that is not
+    JSON). Fail-soft: returns False on any failure — a photo is a bonus, a
+    failed upload must not kill the turn or duplicate the answer."""
+    ext = ".jpg" if "jpeg" in mime or mime == "image/jpg" else (
+        ".gif" if "gif" in mime else ".png")
+    boundary = f"nxtg{uuid.uuid4().hex}"
+    parts: list[bytes] = []
+    for name, value in (("chat_id", str(chat_id)),
+                        ("caption", caption[:1024])):
+        if value:
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="{name}"\r\n\r\n{value}\r\n'.encode())
+    parts.append(
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; "
+         f'filename="image{ext}"\r\nContent-Type: {mime}\r\n\r\n')
+        .encode() + raw + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    token = _token()
+    req = urllib.request.Request(
+        f"{API_BASE}/bot{token}/sendPhoto", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "User-Agent": "nx-telegram-gateway"})
+    try:
+        opener = _opener_for()
+        if opener is not None:
+            cm = opener.open(req, timeout=60.0)
+        else:
+            cm = urllib.request.urlopen(req, timeout=60.0)  # noqa: S310
+        with cm as resp:
+            return bool(json.loads(resp.read().decode(
+                "utf-8", errors="replace")).get("ok"))
+    except Exception:
+        return False
 
 
 def _call_base(line: str) -> str:
@@ -665,6 +784,13 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
     if not answer:
         answer = "(no final answer — status: %s)" % (summary or {}).get("status", "?")
     _send(api, chat_id, answer)
+    # 0.153.4: the pictures the turn produced (a read_image the user asked
+    # about, a rendered plot) go back to the phone after the answer text —
+    # the guaranteed-delivery contract above still comes first. Opt out with
+    # NX_TELEGRAM_SEND_PHOTOS=0.
+    if _send_photos_enabled():
+        for raw, mime in _turn_images(messages, turn_start):
+            _send_photo(api, chat_id, raw, mime)
 
 
 # --- main loop ----------------------------------------------------------------

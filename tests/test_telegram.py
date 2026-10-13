@@ -8,6 +8,7 @@ auto-deny), the message-to-instruction translation (PDF attachments inline
 via extract_pdf, URLs pass through for the model to fetch), message
 chunking, and the on_step progress-edit seam.
 """
+import base64
 import json
 import os
 import sys
@@ -328,7 +329,108 @@ def test_run_turn_reports_loop_failure():
     assert "RuntimeError" in calls[-1][1]["text"]
 
 
-# --- main loop: allowlist enforcement -----------------------------------------------
+# --- outbound photos -------------------------------------------------------------
+
+def test_turn_images_extracts_and_dedupes_parts():
+    data_url = "data:image/png;base64," + base64.b64encode(b"PNGDATA").decode()
+    msgs = [{"role": "tool", "tool_call_id": "1", "content": [
+        {"type": "text", "text": "[image: /tmp/x.png, 7 bytes]"},
+        {"type": "image_url", "image_url": {"url": data_url}},
+        {"type": "image_url", "image_url": {"url": data_url}},   # dup
+        {"type": "text", "text": "not an image"},
+    ]}]
+    out = tg._turn_images(msgs, 0)
+    assert out == [(b"PNGDATA", "image/png")]
+
+
+def test_turn_images_cap_and_refusal():
+    url = lambda n: "data:image/png;base64," + base64.b64encode(
+        f"img{n}".encode()).decode()
+    msgs = [{"role": "tool", "content": [
+        {"type": "image_url", "image_url": {"url": url(1)}},
+        {"type": "image_url", "image_url": {"url": url(2)}},
+        {"type": "image_url", "image_url": {"url": url(3)}},
+    ]}]
+    assert len(tg._turn_images(msgs, 0)) == tg._MAX_PHOTOS_PER_TURN
+    # a part without a parseable payload never yields a photo
+    bad = [{"role": "tool", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}}]}]
+    assert tg._turn_images(bad, 0) == []
+
+
+def test_send_photo_multipart_request():
+    calls = []
+    class R:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b'{"ok": true, "result": {"message_id": 7}}'
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        return R()
+
+    with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        ok = tg._send_photo(unittest.mock.MagicMock(), 111, b"\x89PNG", "image/png",
+                            caption="your plot")
+    assert ok is True
+    req = calls[0]
+    assert req.full_url.endswith("/sendPhoto")
+    body = req.data
+    assert b'name="chat_id"' in body and b"111" in body
+    assert b'name="caption"' in body and b"your plot" in body
+    assert b'filename="image.png"' in body and b"\x89PNG" in body
+    assert req.headers.get("Content-type", "").startswith("multipart/form-data")
+
+
+def test_send_photo_failure_is_soft():
+    def boom(req, timeout=None):
+        raise OSError("network down")
+    with unittest.mock.patch("urllib.request.urlopen", boom):
+        assert tg._send_photo(unittest.mock.MagicMock(), 111, b"x", "image/png") is False
+
+
+def test_run_turn_sends_turn_photos_after_answer():
+    data_url = "data:image/png;base64," + base64.b64encode(b"PLOT").decode()
+    conv = []
+    calls = []
+    api = _fake_api(calls)
+
+    def fake_loop(messages, on_step=None, **kw):
+        messages.append({"role": "tool", "tool_call_id": "1", "content": [
+            {"type": "image_url", "image_url": {"url": data_url}}]})
+        messages.append({"role": "assistant", "content": "Here is the plot."})
+        return {"status": "done"}
+
+    with unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()), \
+         unittest.mock.patch("nx._turn._run_model_turn_loop",
+                             side_effect=fake_loop), \
+         unittest.mock.patch("nx._dispatch._initial_messages", return_value=[]), \
+         unittest.mock.patch("nx._turn._ensure_ctx_probe", lambda *a, **k: None), \
+         unittest.mock.patch.object(tg, "_send_photo",
+                                    side_effect=lambda api, cid, raw, mime,
+                                    caption="": calls.append(
+                                        ("sendPhoto", raw, mime))):
+        tg._run_turn(api, 111, "plot it", conv)
+    kinds = [c[0] for c in calls]
+    assert "sendPhoto" in kinds
+    # text answer first, photo after — the delivery contract holds
+    assert kinds.index("sendMessage") < kinds.index("sendPhoto")
+    photo = next(c for c in calls if c[0] == "sendPhoto")
+    assert photo[1] == b"PLOT" and photo[2] == "image/png"
+
+
+def test_send_photos_opt_out():
+    os.environ["NX_TELEGRAM_SEND_PHOTOS"] = "0"
+    try:
+        assert tg._send_photos_enabled() is False
+    finally:
+        os.environ["NX_TELEGRAM_SEND_PHOTOS"] = ""
+    assert tg._send_photos_enabled() is True
+
+
+
 
 def test_loop_drops_disallowed_chat():
     os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
