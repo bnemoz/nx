@@ -12,7 +12,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest.mock
+import urllib.error
 
 _tmp = tempfile.mkdtemp(prefix="nx-test-")
 os.environ["NX_SESSIONS_DIR"] = _tmp
@@ -583,13 +586,17 @@ def test_oversize_instruction_rejected_with_reply():
     assert turn.call_count == 0 and sent and "8192" in sent[0]
 
 
-def test_cooldown_drops_back_to_back_turns(monkeypatch):
+def test_cooldown_sends_busy_notice_instead_of_silent_drop(monkeypatch):
     os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
     os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
     monkeypatch.setattr(tg, "_TURN_COOLDOWN_SECS", 60.0)
     turns = []
+    sent = []
     with unittest.mock.patch.object(tg, "_run_turn",
-                                    side_effect=lambda *a: turns.append(a)):
+                                    side_effect=lambda *a: turns.append(a)), \
+         unittest.mock.patch.object(tg, "_send",
+                                    side_effect=lambda api, cid, text:
+                                        sent.append(text)):
         tg._LAST_TURN_AT.clear()
         msg = {"update_id": 1, "message": {
             "chat": {"id": 111, "type": "private"},
@@ -598,7 +605,113 @@ def test_cooldown_drops_back_to_back_turns(monkeypatch):
         tg._handle_update({"update_id": 2, "message": {
             "chat": {"id": 111, "type": "private"},
             "from": {"id": 111}, "text": "two"}}, {111})
-    assert len(turns) == 1  # second message inside the cooldown window dropped
+    assert len(turns) == 1           # second message inside the window: no turn
+    assert sent and "still working" in sent[0]   # but the sender is told why
+
+
+def test_message_sent_mid_turn_is_queued_not_dropped(monkeypatch):
+    os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
+    os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
+    monkeypatch.setattr(tg, "_TURN_COOLDOWN_SECS", 0.0)
+    turns = []
+    lock = threading.Lock()
+    lock.acquire()   # simulate a turn already running (lock held)
+
+    def fake_run_turn(api, chat_id, instruction, messages):
+        turns.append(instruction)
+
+    def queue_and_release():
+        # this update arrives while the "turn" holds the lock: _handle_update
+        # must wait on _TURN_LOCK and still run its turn afterwards
+        threading.Thread(target=tg._handle_update, args=(
+            {"update_id": 2, "message": {"chat": {"id": 111, "type": "private"},
+                                         "from": {"id": 111}, "text": "two"}},
+            {111}), daemon=True).start()
+        time.sleep(0.1)
+        lock.release()
+
+    with unittest.mock.patch.object(tg, "_run_turn",
+                                    side_effect=fake_run_turn), \
+         unittest.mock.patch.object(tg, "_TURN_LOCK", lock), \
+         unittest.mock.patch.object(tg, "_LAST_TURN_AT", {}):
+        threading.Thread(target=queue_and_release, daemon=True).start()
+        time.sleep(0.5)
+    assert turns == ["Instruction from the user: two"]
+
+
+def test_429_without_json_body_still_retries_once(monkeypatch):
+    monkeypatch.setattr(tg, "_token", lambda: "t")
+    slept = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    class FakeErr(urllib.error.HTTPError):
+        code = 429
+        def __init__(self):
+            pass   # no body: read() will explode
+        def read(self):
+            raise ValueError("no body")
+
+    calls = []
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise FakeErr()
+        class R:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b'{"ok": true, "result": []}'
+        return R()
+
+    with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        r = tg._api("getMe")
+    assert len(calls) == 2 and r["ok"] is True
+    assert slept and slept[0] == 3.0
+
+
+def test_429_json_without_retry_after_uses_default(monkeypatch):
+    monkeypatch.setattr(tg, "_token", lambda: "t")
+    slept = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    class FakeErr(urllib.error.HTTPError):
+        code = 429
+        def __init__(self):
+            pass
+        def read(self):
+            return b'{"ok": false, "error_code": 429, "description": "flood"}'
+
+    calls = []
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise FakeErr()
+        class R:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b'{"ok": true, "result": []}'
+        return R()
+
+    with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        r = tg._api("getMe")
+    assert len(calls) == 2 and r["ok"] is True
+    assert slept and slept[0] == 3.5   # default 3.0 + 0.5 grace
+
+
+def test_yolo_flag_reaches_gateway_via_sysargv():
+    # nx/__init__.py scans the whole sys.argv for --yolo at import time, so
+    # `nx telegram --yolo` arms YOLO before the gateway starts; this pins that
+    # contract (the audit flagged cli_telegram's unused argv).
+    import subprocess
+    code = ("import sys; sys.argv = ['nx', 'telegram', '--yolo']; "
+            "import nx; assert nx._state.YOLO is True")
+    subprocess.run([sys.executable, "-c", code], check=True,
+                   env={**os.environ, "NX_HOME": _tmp})
 
 
 def test_gateway_stops_on_rejected_token(capsys):

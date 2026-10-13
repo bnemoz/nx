@@ -75,15 +75,11 @@ def _groups_allowed() -> bool:
     return os.environ.get(_GROUP_FLAG, "").strip().lower() in ("1", "true", "yes")
 
 
-def _allowed_users(allowed: set[int]) -> set[int]:
-    """User allowlist; empty means 'anyone in the allowed chats' (backwards
-    compatible for private chats, where the chat IS the user)."""
-    return _allowed_chats_named("NX_TELEGRAM_ALLOWED_USERS") or allowed
-
-
-def _allowed_chats_named(name: str) -> set[int]:
+def _parse_ids(name: str) -> set[int]:
+    """One env allowlist parser for every NX_TELEGRAM_*_IDS-style variable:
+    comma/semicolon-separated ints, junk tokens ignored."""
     raw = os.environ.get(name, "")
-    out = set()
+    out: set[int] = set()
     for part in raw.replace(";", ",").split(","):
         part = part.strip()
         if part:
@@ -92,6 +88,12 @@ def _allowed_chats_named(name: str) -> set[int]:
             except ValueError:
                 pass
     return out
+
+
+def _allowed_users(allowed: set[int]) -> set[int]:
+    """User allowlist; empty means 'anyone in the allowed chats' (backwards
+    compatible for private chats, where the chat IS the user)."""
+    return _parse_ids("NX_TELEGRAM_ALLOWED_USERS") or allowed
 
 
 # --- env (read lazily so tests can set NX_* after import) --------------------
@@ -101,16 +103,7 @@ def _token() -> str:
 
 
 def _allowed_chats() -> set[int]:
-    raw = os.environ.get("NX_TELEGRAM_ALLOWED_CHATS", "")
-    out = set()
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if part:
-            try:
-                out.add(int(part))
-            except ValueError:
-                pass
-    return out
+    return _parse_ids("NX_TELEGRAM_ALLOWED_CHATS")
 
 
 def _poll_interval() -> float:
@@ -150,14 +143,20 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
             try:
                 r = json.loads(e.read().decode("utf-8", errors="replace"))
             except Exception:
+                r = None
+            if r is None:
+                # unparseable body (or none): a 429 still deserves its retry
                 if attempt == 0 and getattr(e, "code", None) == 429:
                     time.sleep(3.0)
                     continue
                 raise
         if not r.get("ok") and attempt == 0:
             wait = (r.get("parameters") or {}).get("retry_after")
-            if wait:
-                time.sleep(min(float(wait), 30.0) + 0.5)
+            code = r.get("error_code")
+            if wait or code == 429:
+                # retry_after when given, else a small default (a 429 whose
+                # parameters block is missing still floods if hammered)
+                time.sleep(min(float(wait or 3.0), 30.0) + 0.5)
                 continue
         return r
     return r
@@ -775,10 +774,14 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
         return
     # Minimal replay/rate guard: a chat that just ran a turn must wait a beat
     # before another (a crash-looping client or a flooded chat otherwise
-    # queues unbounded model-token spend). /new is exempt.
+    # queues unbounded model-token spend). /new is exempt. A message inside
+    # the window is NOT dropped silently: it gets a busy notice (the
+    # docstring always claimed queuing; 0.153.2 makes it true).
     now = time.monotonic()
     last = _LAST_TURN_AT.get(chat_id, 0.0)
     if now - last < _TURN_COOLDOWN_SECS:
+        _send(_api, chat_id, "⏳ still working on the previous message — "
+                             "resend it in a moment.")
         return
     try:
         instruction = _message_instruction(msg)
@@ -787,6 +790,10 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
         return
     if not instruction:
         return
+    # Queue behind a running turn instead of interleaving or dropping: the
+    # lock serializes turns; waiting here (bounded) keeps a message sent
+    # mid-turn from vanishing. The cooldown above already bounds how deep
+    # the queue can get from one chat.
     with _TURN_LOCK:
         _LAST_TURN_AT[chat_id] = now
         _run_turn(_api, chat_id, instruction, _CONVERSATION)
