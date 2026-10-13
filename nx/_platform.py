@@ -12,6 +12,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 
 IS_WINDOWS = sys.platform == "win32"
@@ -25,11 +26,15 @@ else:
 # ------------------------------------------------------------- file locking ---
 
 @contextlib.contextmanager
-def exclusive_file_lock(fd: int, *, blocking: bool = True) -> Iterator[bool]:
+def exclusive_file_lock(fd: int, *, blocking: bool = True,
+                        timeout: float | None = None) -> Iterator[bool]:
     """Hold an advisory interprocess exclusive lock on an open fd.
 
     Yields True when the lock was acquired, False when a non-blocking
-    attempt found it held. On Windows, msvcrt.locking() requires the
+    attempt found it held or `timeout` elapsed. `timeout` (seconds) bounds
+    the wait: instead of blocking forever, the lock is retried non-blocking
+    in a 50 ms poll loop and False is yielded once the budget is spent —
+    callers degrade (proceed unlocked / skip) rather than hang. On Windows, msvcrt.locking() requires the
     file object it locks to stay open for the lifetime of the lock — the
     caller therefore passes a file-like object, not a raw fd, when it can.
 
@@ -45,13 +50,26 @@ def exclusive_file_lock(fd: int, *, blocking: bool = True) -> Iterator[bool]:
         owned = fobj is not fd
         try:
             fobj.seek(0)  # type: ignore[union-attr]  # guarded by hasattr above
-            try:
-                msvcrt.locking(fobj.fileno(),  # pyrefly: ignore[missing-attribute]  # Windows-only branch
-                               # pyrefly: ignore [missing-attribute]
-                               (msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK), 1)
-            except OSError:
-                yield False
-                return
+            if timeout is not None:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        # pyrefly: ignore[missing-attribute]  # Windows-only branch
+                        msvcrt.locking(fobj.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            yield False
+                            return
+                        time.sleep(0.05)
+            else:
+                try:
+                    msvcrt.locking(fobj.fileno(),  # pyrefly: ignore[missing-attribute]  # Windows-only branch
+                                   # pyrefly: ignore [missing-attribute]
+                                   (msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK), 1)
+                except OSError:
+                    yield False
+                    return
             try:
                 yield True
             finally:
@@ -68,11 +86,23 @@ def exclusive_file_lock(fd: int, *, blocking: bool = True) -> Iterator[bool]:
 
     # --- POSIX ---
     flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
-    try:
-        fcntl.flock(fd, flags)
-    except OSError:
-        yield False
-        return
+    if timeout is not None:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, flags | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.05)
+    else:
+        try:
+            fcntl.flock(fd, flags)
+        except OSError:
+            yield False
+            return
     try:
         yield True
     finally:

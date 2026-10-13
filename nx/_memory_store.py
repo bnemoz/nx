@@ -466,14 +466,19 @@ _DRIFT_BEHIND: dict = {}
 _DRIFT_TOUCHED: dict = {}
 
 
-def _git_in(root: str, args: list):
+def _git_in(root: str, args: list, timeout: float = 2.0):
     """One git command in `root`: stdout on success, None on ANY failure (no
-    git binary, not a repo, unknown sha, timeout). Never raises."""
+    git binary, not a repo, unknown sha, timeout). Never raises.
+
+    Bounded at 2 s per call (was 5): drift stamping is informational, so a
+    slow git (lock starvation, gc, saturated disk) degrades to an unknown
+    stamp instead of stalling the synchronous memory_write path — worst case
+    is now a few hundred ms per memoized call, not multiple seconds."""
     if not root:
         return None
     try:
         r = subprocess.run(["git", "-C", root] + list(args),
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     if r.returncode != 0:
@@ -640,6 +645,11 @@ def _drift_freshness(stamp):
         return 0, 0
     behind = _drift_commits_behind(stamp.root, stamp.sha)
     if behind is None:
+        return 0, 0
+    # Skip the diff when the note is not behind: the two calls stack (each
+    # bounded at _git_in's timeout), and the challenge path runs synchronously
+    # inside memory_write — 0 commits behind already means "fresh".
+    if max(0, behind) == 0:
         return 0, 0
     touched = _drift_changed_paths(stamp.root, stamp.sha)
     changed = 0 if touched is None else sum(1 for p in stamp.paths if p in touched)

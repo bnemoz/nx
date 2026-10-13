@@ -90,7 +90,8 @@ def _load_input_history() -> list[str]:
 def _append_to_file(entry: str) -> None:
     """Best-effort append + cap on disk, under the same interprocess lock
     pattern _write_session uses so two concurrent nx REPLs can't lose each
-    other's entries."""
+    other's entries. The lock is bounded (5 s): on expiry the append is
+    skipped — a lost history line beats an indefinite input hang."""
     cap = _history_lines()
     if cap <= 0:
         return
@@ -102,7 +103,9 @@ def _append_to_file(entry: str) -> None:
         except OSError:
             return  # not our dir (e.g. an NX_INPUT_HISTORY_FILE in a shared
             # /tmp) — makedirs already applied 0700 if we created it
-    with _exclusive_file_lock(path):
+    with _exclusive_file_lock(path) as held:
+        if not held:
+            return  # contended past the timeout: skip rather than race RMW
         entries = _read_entries(path)
         entries.append(entry)
         del entries[:-cap]

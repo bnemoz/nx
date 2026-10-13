@@ -115,7 +115,7 @@ def _open_private(path: str, flags: int = os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
 
 
 @contextmanager
-def _exclusive_file_lock(path: str):
+def _exclusive_file_lock(path: str, timeout: float = 5.0):
     """Hold an advisory interprocess lock associated with ``path``.
 
     Session saves are a read-modify-write operation, not just an atomic
@@ -128,18 +128,19 @@ def _exclusive_file_lock(path: str):
     Windows msvcrt.locking() locks a range of the file object's handle and
     that object must stay open for the lock's lifetime (the helper normalizes
     the position to byte 0 itself; this lock file is never written, so the
-    single-byte range covers it). The call is blocking on both platforms, so
-    callers see exactly the old semantics: the with block runs with the lock
-    held, a contended lock waits instead of raising, and lock.close()
-    releases it.
+    single-byte range covers it). Bounded by `timeout` seconds (default 5):
+    a contended lock polls instead of blocking forever, and on expiry the
+    with block runs WITHOUT the lock (yield False) — a lost history entry
+    beats an indefinite REPL hang. lock.close() releases it.
     """
     lock = open_private(path + ".lock", os.O_CREAT | os.O_RDWR | os.O_APPEND,
                         text_mode="a+")
     try:
         # _platform.exclusive_file_lock accepts a file object (its docstring:
         # Windows needs it; the declared `fd: int` is the narrower legacy sig).
-        with _platform.exclusive_file_lock(lock):  # pyrefly: ignore[bad-argument-type]
-            yield
+        with _platform.exclusive_file_lock(  # pyrefly: ignore[bad-argument-type]
+                lock, blocking=False, timeout=timeout) as held:
+            yield held
     finally:
         lock.close()
 
