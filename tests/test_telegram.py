@@ -82,6 +82,64 @@ def test_chunk_respects_limit_and_paragraphs():
     assert "para two" in chunks[-1]
 
 
+# --- markdown -> HTML rendering ----------------------------------------------
+
+def test_md_html_inline_formatting():
+    html_, open_ = tg._md_html("**bold** and *it* and `code`")
+    assert open_ is False
+    assert "<b>bold</b>" in html_ and "<i>it</i>" in html_
+    assert "<code>code</code>" in html_
+    assert "**" not in html_
+
+
+def test_md_html_escapes_html_and_renders_fence():
+    html_, open_ = tg._md_html('a <b> & "c"\n```python\nx = 1\n```')
+    assert "&lt;b&gt;" in html_
+    assert '<pre><code class="language-python">' in html_
+    assert "x = 1" in html_ and "</code></pre>" in html_
+
+
+def test_md_html_link_and_bullet():
+    html_, _ = tg._md_html("- [docs](https://example.com/a_b)")
+    assert "\u2022 " in html_
+    assert '<a href="https://example.com/a_b">docs</a>' in html_
+
+
+def test_send_uses_parse_mode_and_falls_back_on_parse_error():
+    calls = []
+
+    def api(method, payload=None, timeout=35.0):
+        calls.append(payload)
+        if payload.get("parse_mode"):
+            return {"ok": False, "description": "can't parse entities"}
+        return {"ok": True, "result": {"message_id": 1}}
+
+    out = tg._send(api, 111, "**hi**")
+    assert out["ok"] is True
+    assert calls[0]["parse_mode"] == "HTML" and "<b>hi</b>" in calls[0]["text"]
+    assert calls[1].get("parse_mode") is None and calls[1]["text"] == "**hi**"
+
+
+def test_send_closes_reopened_fence_across_chunks():
+    calls = []
+    text = "intro\n\n```python\n" + "x" * 60 + "\n```\n\noutro"
+    # small limit forces a cut inside the fence
+    chunks = tg._chunk(text, limit=40)
+    assert len(chunks) >= 2
+
+    def api(method, payload=None, timeout=35.0):
+        calls.append(payload)
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with unittest.mock.patch.object(tg, "_chunk", return_value=chunks):
+        tg._send(api, 111, text)
+    pre_chunks = [c for c in calls if "<pre>" in c["text"]]
+    # the code block opens in chunk 1, is reopened in chunk 2 after the
+    # split; chunk 3 holds only the closer + trailing prose
+    assert len(pre_chunks) == 3 and all(c.get("parse_mode") == "HTML"
+                                        for c in calls)
+
+
 # --- message -> instruction ------------------------------------------------------
 
 def test_text_passes_through_verbatim():

@@ -25,7 +25,11 @@ Security (mirrors the batch-mode contract in nx/_batch.py):
   run `nx telegram` under --yolo only in a vault you accept writes to.
 
 Transport: raw Bot-API long polling over urllib (web_fetch already depends
-on nothing richer). Messages > 4096 chars are chunked; the phone gets ONE
+on nothing richer). Outbound text is rendered as Telegram HTML (0.156.0:
+the model's markdown becomes bold/code/links/fenced blocks instead of
+literal asterisks, with a per-chunk plain-text fallback whenever Telegram
+rejects the generated entities; a 4096-cut inside a code fence is closed
+and reopened across chunks). Messages > 4096 chars are chunked; the phone gets ONE
 status bubble per turn, edited in place at each model-turn boundary via
 editMessageText through the on_step seam of _run_model_turn_loop. Since
 0.95.0 the bubble is a first-and-last summary (the user's ask, the ×N-
@@ -37,8 +41,10 @@ the conversation in place for a fresh context without a process restart.
 """
 from __future__ import annotations
 
+import html as _html
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import threading
@@ -212,6 +218,57 @@ def _chunk(text: str, limit: int = TG_MAX_MESSAGE) -> list[str]:
     return chunks
 
 
+# --- markdown -> Telegram HTML (parse_mode fallback rendering) ----------------
+
+_FENCE_RE = re.compile(r"^\s*```(\w*)\s*$")
+
+
+def _inline_md(line: str) -> str:
+    """One markdown line -> Telegram HTML. Order matters: inline code first
+    (so its payload is protected from further subs), then links, bold,
+    italic, headings, bullets. The line is HTML-escaped before any sub, so
+    model output can never inject markup."""
+    s = _html.escape(line, quote=False)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+               lambda m: '<a href="%s">%s</a>'
+                         % (m.group(2).replace('"', "%22"), m.group(1)), s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"(?<!\*)\*([^*\s][^*]*)\*(?!\*)", r"<i>\1</i>", s)
+    s = re.sub(r"^#{1,6} (.*)$", r"<b>\1</b>", s)
+    s = re.sub(r"^[-*] ", "\u2022 ", s)
+    return s
+
+
+def _md_html(chunk: str, open_pre: bool = False) -> tuple[str, bool]:
+    """Convert one chunk of markdown to Telegram HTML. `open_pre` means the
+    previous chunk ended inside a fenced code block (a hard cut split it);
+    this chunk therefore starts inside <pre>. Returns (html, still_open) —
+    the caller closes a still-open fence and reopens it on the next chunk.
+    Fence payloads are escaped verbatim (no markdown inside code)."""
+    out: list[str] = []
+    in_pre = open_pre
+    if in_pre:
+        out.append("<pre><code>")   # reopened: the fence opened last chunk
+    for line in chunk.split("\n"):
+        m = _FENCE_RE.match(line)
+        if in_pre:
+            if m:
+                in_pre = False
+                out.append("</code></pre>")
+            else:
+                out.append(_html.escape(line, quote=False))
+            continue
+        if m:
+            in_pre = True
+            lang = m.group(1)
+            out.append('<pre><code class="language-%s">' % lang if lang
+                       else "<pre><code>")
+            continue
+        out.append(_inline_md(line))
+    return "\n".join(out), in_pre
+
+
 def _call_base(line: str) -> str:
     """A call line without any folded-on result suffix — the dedup key."""
     i = line.find("  ok")
@@ -341,15 +398,27 @@ def _edit_status(api: Callable, chat_id: int, message_id: int,
 
 
 def _send(api: Callable, chat_id: int, text: str) -> dict:
-    """Send (chunked). Fail-soft: the returned dict records ok/error instead
-    of raising, but failures are never silently indistinguishable from
-    success. Chunks are throttled to stay under the per-chat flood limit."""
+    """Send (chunked), rendering markdown as Telegram HTML (bold, italic,
+    inline code, fenced blocks, links) with parse_mode=HTML. Any chunk
+    Telegram refuses to parse falls back to its plain text — the model's
+    markdown is never allowed to break delivery. A code fence split by the
+    4096 chunker is closed and reopened so both halves still render as a
+    block. Fail-soft: the returned dict records ok/error instead of raising,
+    but failures are never silently indistinguishable from success. Chunks
+    are throttled to stay under the per-chat flood limit."""
     out: dict[str, Any] = {"message_id": None, "ok": True}
+    open_pre = False
     for i, chunk in enumerate(_chunk(text) or ["(empty)"]):
         if i:
             time.sleep(0.6)
+        rendered, open_pre = _md_html(chunk, open_pre)
+        if open_pre:
+            rendered += "</code></pre>"
+        payload = {"chat_id": chat_id, "text": rendered, "parse_mode": "HTML"}
         try:
-            r = api("sendMessage", {"chat_id": chat_id, "text": chunk})
+            r = api("sendMessage", payload)
+            if not r.get("ok") and "parse" in (r.get("description") or "").lower():
+                r = api("sendMessage", {"chat_id": chat_id, "text": chunk})
         except Exception as e:
             out["ok"], out["error"] = False, f"{type(e).__name__}: {e}"
             continue
