@@ -140,6 +140,57 @@ def test_send_closes_reopened_fence_across_chunks():
                                         for c in calls)
 
 
+# --- inbound photos -------------------------------------------------------------
+
+def test_photo_attached_as_image_parts_when_vision_on():
+    with unittest.mock.patch.object(tg, "_download_file",
+                                    return_value=b"\xff\xd8 fake jpeg"), \
+         unittest.mock.patch.object(nx, "NX_VISION", True):
+        instr = tg._message_instruction({"text": "what is this?", "photo": [
+            {"file_id": "S"}, {"file_id": "BIG", "width": 1280}]})
+    assert isinstance(instr, list)
+    assert instr[0] == {"type": "text",
+                        "text": "Instruction from the user: what is this?"}
+    kinds = [p["type"] for p in instr[1:]]
+    assert "image_url" in kinds and "text" in kinds
+    payload = next(p for p in instr if p.get("type") == "image_url")
+    assert payload["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_photo_without_vision_leaves_a_note():
+    with unittest.mock.patch.object(nx, "NX_VISION", False):
+        instr = tg._message_instruction({"text": "look", "photo": [
+            {"file_id": "BIG"}]})
+    assert isinstance(instr, str)
+    assert "NX_VISION is off" in instr
+
+
+def test_photo_only_message_still_produces_instruction():
+    with unittest.mock.patch.object(tg, "_download_file",
+                                    return_value=b"\xff\xd8 x"), \
+         unittest.mock.patch.object(nx, "NX_VISION", True):
+        instr = tg._message_instruction({"caption": "check this", "photo": [
+            {"file_id": "BIG"}]})
+    assert isinstance(instr, list)
+    assert instr[0]["type"] == "text" and "check this" in instr[0]["text"]
+
+
+def test_photo_parts_instruction_briefs_in_status():
+    parts = [{"type": "text", "text": "describe this screenshot"},
+             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xx"}}]
+    conv = []
+    with unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()), \
+         unittest.mock.patch("nx._turn._run_model_turn_loop",
+                             side_effect=lambda m, on_step=None, **k: (
+                                 m.append({"role": "assistant",
+                                           "content": "It is a login form."}),
+                                 {"status": "done"})), \
+         unittest.mock.patch("nx._dispatch._initial_messages", return_value=[]), \
+         unittest.mock.patch("nx._turn._ensure_ctx_probe", lambda *a, **k: None):
+        tg._run_turn(_fake_api(), 111, parts, conv)
+    assert conv[-1]["role"] == "assistant"
+
+
 # --- message -> instruction ------------------------------------------------------
 
 def test_text_passes_through_verbatim():

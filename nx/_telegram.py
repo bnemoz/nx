@@ -432,10 +432,13 @@ def _send(api: Callable, chat_id: int, text: str) -> dict:
 
 # --- per-message ingestion ----------------------------------------------------
 
-def _message_instruction(msg: dict) -> str | None:
+def _message_instruction(msg: dict) -> str | list | None:
     """Translate one Telegram update's message into (instruction, attachments):
-    a PDF document becomes an inline extracted-text attachment; text passes
-    through verbatim (URLs included — the model fetches them via web_fetch).
+    a PDF document becomes an inline extracted-text attachment; a photo (with
+    NX_VISION on) becomes content parts carrying the image itself — the model
+    sees the picture, same as read_image/@mentions (0.156.1). With NX_VISION
+    off the photo is skipped with a one-line note. Text passes through
+    verbatim (URLs included — the model fetches them via web_fetch).
     Returns None for messages with nothing actionable."""
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if len(text) > MAX_INSTRUCTION_CHARS:
@@ -445,6 +448,9 @@ def _message_instruction(msg: dict) -> str | None:
     doc = msg.get("document") or {}
     name = doc.get("file_name") or ""
     mime = doc.get("mime_type") or ""
+    photo = msg.get("photo") or []
+    if photo and not isinstance(photo, list):
+        photo = []
     atts: list[str] = []
     if doc and ("pdf" in mime or name.lower().endswith(".pdf")):
         raw = _download_file(doc["file_id"])
@@ -459,14 +465,46 @@ def _message_instruction(msg: dict) -> str | None:
                 os.unlink(tmp)
             except OSError:
                 pass
-    if not atts and not text:
+    image_parts: list[dict] = []
+    if photo:
+        from . import NX_VISION  # module global; live value, not import-time
+        if not NX_VISION:
+            atts.append("(a photo was sent — not attached: NX_VISION is off, so "
+                        "this nx session cannot receive pictures; set "
+                        "NX_VISION=1 on a native-tool-call backend, or describe "
+                        "the image in text)")
+        else:
+            # `photo` is an array of sizes ascending; the last is the largest.
+            # Telegram photos are always JPEG.
+            raw = _download_file(photo[-1]["file_id"])
+            fd, tmp = tempfile.mkstemp(suffix=".jpg", prefix="nx-tg-photo-")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                from ._images import read_image
+                out = read_image(tmp)
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            if isinstance(out, list):
+                image_parts.extend(out)
+            else:
+                atts.append(f"(photo download failed: {out})")
+    if not atts and not image_parts and not text:
         return None
     body = ""
     if atts:
         body += "\n\n".join(atts) + "\n\n"
     if text:
         body += f"Instruction from the user: {text}"
-    return body.strip()
+    body = body.strip()
+    if image_parts:
+        # Content parts: the instruction text first, then the picture(s) —
+        # the same shape read_image returns and the turn loop already sends.
+        return [{"type": "text", "text": body or "(photo)"}] + image_parts
+    return body or None
 
 
 # --- the turn (one instruction -> one Telegram reply) -------------------------
@@ -499,7 +537,12 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
     # answer when the turn was a pure one-shot reply).
     status_id = None
     turn_start = len(messages)   # activity re-renders the whole turn
-    ask = _brief(instruction, 100)
+    # the ask shown in the status bubble: the text of a parts instruction
+    ask_src = instruction
+    if isinstance(instruction, list):
+        ask_src = " ".join(p.get("text", "") for p in instruction
+                           if isinstance(p, dict) and p.get("type") == "text")
+    ask = _brief(ask_src, 100)
     started = time.monotonic()
     # live sub-agent feedback (0.95.0): spawn_agent's per-step note_progress
     # lands here so the phone sees `🤖 agent turn 3/100` while it waits.
