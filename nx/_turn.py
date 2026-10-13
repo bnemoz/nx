@@ -252,13 +252,14 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
         salvaged = _strip_unterminated_tool_call("".join(reasoning_parts)).strip()
         if quiet:
             pass  # the salvage prints below are terminal noise on an agent thread
-        elif salvaged:
-            # Message + salvaged reasoning are one visual unit: same lock.
-            # RLock re-entrancy covers the rich Console.print inside.
+        elif salvaged and st.REASONING_VISIBLE:
+            # Reasoning already streamed dim above (REASONING_VISIBLE): re-printing
+            # the identical text in normal color reads as a duplicated echo. A
+            # pointer to the dim block is the whole salvage here.
             with write_lock():
                 cprint(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
                       f"showing captured reasoning as a best-effort answer{RESET}")
-                _say_console.print(salvaged)
+                cprint(f"{DIM}  (the reasoning is the dim block above){RESET}")
         else:
             with write_lock():
                 cprint(f"{C.ERROR}  ✂ FORCED FINAL ANSWER FAILED — got {loop_detail}; "
@@ -352,7 +353,8 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                 "previous message. Do not continue private reasoning. Use "
                 "the final_answer tool if available, or return a complete "
                 "visible answer now based on what you reasoned. Keep it "
-                "concise.]"})
+                "concise. Do not repeat or restate your reasoning — it is "
+                "already visible above.]"})
         else:
             _nudge_current_user_turn(messages, FORCED_FINAL_NUDGE)
         return TURN_FORCE_FINAL
@@ -385,7 +387,9 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
             "  • run_bash: execute it to see what happens.\n"
             "  • edit_file / write_file: fix what the run reported and re-run.\n"
             "An imperfect file you iterate on beats a perfect plan that never "
-            "gets written. Emit the write_file or run_bash tool call now.]"})
+            "gets written. Emit the write_file or run_bash tool call now. "
+            "Do not repeat or restate your reasoning in your answer — it is "
+            "already visible above.]"})
     else:
         _nudge_current_user_turn(
             messages,
