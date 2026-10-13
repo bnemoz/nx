@@ -276,6 +276,18 @@ tests/test_test_speed_tunables.py).
   (20s, `@pytest.mark.watchdog(seconds)` to raise) turns such a runaway into a
   named TimeoutError instead; the contract is pinned by
   `tests/test_fullscreen.py::test_a_dry_reader_ends_the_run_instead_of_looping`.
+- Any test whose fakes put a hostname into an SSRF-checked field (a fake
+  searx/DDG result URL, a redirect target) must also stub
+  `socket.getaddrinfo` (see the `gaierror(-2, "offline")` patches in
+  tests/test_webfetch.py): `nx/_webfetch._host_is_private` resolves
+  result-URL hostnames for real, and a name your stub resolver answers
+  slowly — or the network's default 10s timeout — costs ~10s per lookup.
+  0.148.11's two new searx tests missed the patch and silently took the
+  suite from ~16s to ~64s (plus watchdog failures); the older searx tests
+  already had it. Related product sharp edge (still open): a slow DNS
+  lookup inside `_host_is_private` is a real latency hit in the
+  tool-call path too — worth a negative-cache or short resolution timeout.
+  (0.153.7)
 
 ## Choosing what tests to run
 

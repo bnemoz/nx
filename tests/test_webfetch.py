@@ -170,7 +170,9 @@ def test_searx_auto_routing_it_and_fresh():
         return '{"results": [{"title": "R", "url": "https://r.example/", "content": ""}]}'
 
     try:
-        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             w.web_fetch(query="pypi package flask")
             w.web_fetch(query="latest release of numpy")
             w.web_fetch(query="plain query", engines="google", categories="science")
@@ -219,7 +221,9 @@ def test_searx_pageno_and_max_results():
         return body
 
     try:
-        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             w.web_fetch(query="page one")
             out = w.web_fetch(query="page two", pageno=2)
     finally:

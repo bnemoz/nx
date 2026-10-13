@@ -14,9 +14,86 @@ module scope, or mutates nx globals in place — each such file is named in
 `@pytest.mark.globals` on the module works too). Phase 2 migration is then
 one line per file: fix the file, drop its name from the list.
 """
+import io
+import os
 import sys
 
 import pytest
+
+
+def rebuilt_shared_console(env: dict[str, str]):
+    """A fresh shared rich console built under `env` (a context-managed patch of
+    the process env for the duration), replacing the module singleton — so tests
+    force terminal/color/interactive state via rich's documented env hooks
+    (TTY_INTERACTIVE, TTY_COMPATIBLE, COLORTERM, FORCE_COLOR) instead of
+    patching console privates (_force_terminal / _color_system / is_interactive).
+
+    Typical use::
+
+        with _nxtest.rebuilt_shared_console({"TTY_INTERACTIVE": "1",
+                                             "COLORTERM": "truecolor"}) as con:
+            con.file = buf           # capture output
+            ... open the region, assert on buf ...
+
+    Restores the previous console singleton on exit (a Live leaked onto the
+    rebuilt console is the existing nx_state_reset responsibility)."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        import nx._rich as rich
+        old_console = rich._SHARED_CONSOLE
+        old_env = {k: os.environ.get(k) for k in env}
+        try:
+            for k, v in env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            con = rich.themed_console()
+            rich._SHARED_CONSOLE = con
+            # the say-footer binds the singleton at import time; rebind it too
+            footer = sys.modules.get("nx._turn_footer")
+            if footer is not None:
+                old_say = footer._say_console
+                footer._say_console = con
+            else:
+                old_say = None
+            yield con
+        finally:
+            rich._SHARED_CONSOLE = old_console
+            if footer is not None and old_say is not None:
+                footer._say_console = old_say
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    return _ctx()
+
+
+def captured_console_output(env: dict[str, str]):
+    """`rebuilt_shared_console` with output captured to a StringIO — the common
+    shape (force a terminal, paint a Live, assert on the bytes).
+
+        with _nxtest.captured_console_output(
+                {"TTY_INTERACTIVE": "1", "COLORTERM": "truecolor"}) as (con, buf):
+            ..."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        with rebuilt_shared_console(env) as con:
+            buf = io.StringIO()
+            old_file = con.file
+            con.file = buf
+            try:
+                yield con, buf
+            finally:
+                con.file = old_file
+
+    return _ctx()
 
 
 # Files that still depend on conftest's full module-dict rewind (Tier B).

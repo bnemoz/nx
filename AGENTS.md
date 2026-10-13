@@ -48,6 +48,8 @@ The suite runs 12/12 clean on an idle box. A failure you cannot reproduce standa
 
 Do not delete a slow or flaky test to make a run green, and do not add sleeps to a timing-sensitive test — poll on the condition (`_wait_for`) or sync on the event instead. The suite's wall time is dominated by its slowest single file (per-file `--dist loadfile` packing), so before assuming the suite "got slower," check for a straggler file with `--junitxml` + per-class durations before touching distribution settings.
 
+Test fakes must not be able to reach the network. In particular: any test whose fakes put a hostname into an SSRF-checked field (a fake searx/DDG result URL, a redirect target) must also stub `socket.getaddrinfo` (`gaierror(-2, "offline")`, as tests/test_webfetch.py does) — `_webfetch._host_is_private` resolves result-URL hostnames for real, and one slow-resolving DNS name costs ~10s per lookup (0.148.11's searx tests missed this and took the suite from ~16s to ~64s). A product-level fix (negative cache / short resolution timeout in `_host_is_private`) is still open.
+
 Writing tests that touch process-global state: every module global your test mutates must either be set through `monkeypatch` (auto-restored) or be a home `nx_state_reset` already drains. Tests with no `nx_fresh`-style fixture run against whatever `SESSION_HOME` the module holds — which can be the developer's real `~/.nx` — so any test that triggers a background-completion sweep must pin its own session home.
 
 Ruff and ty are pinned in the `dev` dependency group (installed with `uv sync --group dev`). Ruff is a hard gate; ty's existing ~130 diagnostics are tracked, not owed — see CONTRIBUTING.md's "Lint and type check" section for the policy.

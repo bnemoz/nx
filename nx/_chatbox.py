@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import heapq
 import os
-import shutil
 import signal
 import sys
 import threading
@@ -35,7 +34,7 @@ from ._ansi import (DIM, RESET, C, raw_mode, strip_ansi_for_display,
                     # do `from ._chatbox import THEMES`)
 from ._commands import arg_options_map, menu_list
 from ._keys import hint_line, print_overlay
-from ._layout import DROPDOWN_MAX_ROWS, TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS
+from ._layout import (DROPDOWN_MAX_ROWS, term_width)
 from ._render import BOX_BL, BOX_BR, BOX_H, BOX_TL, BOX_TR, BOX_V
 from ._tty import read_byte, wait_ready
 
@@ -620,8 +619,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
     def render() -> None:
         nonlocal rendered_lines, rendered_rows, line_widths, cursor_line, \
             sel_idx, win_top, last_width
-        width = shutil.get_terminal_size(
-            (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns
+        width = term_width()
         if last_width is not None and width != last_width:
             # The terminal was resized (maximized/windowed): the previously
             # painted frame re-wrapped to the new width, so the cursor is no
@@ -746,8 +744,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
         the terminal wraps every line FURTHER, so the frame can occupy more
         rows than when it was painted. Clear down past that recomputed
         bottom, then clear upward through the whole recomputed height."""
-        cols = shutil.get_terminal_size(
-            (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns
+        cols = term_width()
         total_rows = _frame_rows(line_widths, cols) \
             if len(line_widths) == rendered_lines else rendered_lines
         sys.stdout.write("\r")
@@ -973,8 +970,7 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                             repaint_live_tick()
                     except Exception:
                         pass
-                    if last_width is not None and shutil.get_terminal_size(
-                            (80, 24)).columns != last_width:
+                    if last_width is not None and term_width() != last_width:
                         render()
                     continue
                 c = _raw_read_key(fd)

@@ -454,6 +454,21 @@ lands with a corpus run) is the next band.
   guard.** The repo's philosophy is diagnosis-not-rewrite for model commands
   (`test_broken_command_still_fails_loudly`); the heredoc pre-flight is the
   model to follow.
+- **Adopting `rich.progress` (or any second rich Live) for bg-completion
+  sweeps or `nx run` batch.** Investigated 0.153.x and rejected on mechanism:
+  `Progress` runs on an internal `Live`, and `Live.start()` pushes onto the
+  shared console's `_live_stack`, which `_rich.live_active()`
+  (`nx/_rich.py:215`) reads globally — while the bar is up, every LifeSpinner
+  frame flips from raw `CLEAR_LINE` self-repaint to committed `cprint` lines
+  (`nx/_render.py:118`), the spinner's stop-erase becomes a no-op
+  (`nx/_ansi.py:789`), and `_stream_parse`'s CLEAR_LINE writes change byte
+  shape (suite-pinned). The two candidate sites don't want a bar anyway: the
+  bg sweep is deliberately invisible (staged into `_notices`, surfaced at the
+  next turn boundary, `nx/_bg_completions.py:132`), and batch's progress
+  channel *is* stdout JSONL (`nx/_batch.py:34-35`). If a bar ever earns its
+  keep, the safe shape is a stderr-only, non-shared `Console(file=sys.stderr,
+  force_terminal=...)` with `transient=True, redirect_stdout=False,
+  redirect_stderr=False` — never `shared_console()`. LifeSpinner stays.
 
 ## Suggested ordering (semver per AGENTS.md)
 

@@ -254,26 +254,18 @@ def test_rich_console_styles_markdown_with_theme_palette():
     for a markdown element rich would otherwise paint its own color."""
     from rich.markdown import Markdown
     from nx import _turn
+    import tests._nxtest as _nxtest
     console = _turn._say_console
     orig = _ansi.C.name
     try:
         _ansi.set_theme("mocha")
-        rich_stdout = console._file
-        import io
-        buf = io.StringIO()
-        console.file = buf
-        console._force_terminal = True
-        console._color_system = "truecolor"
-        console.print(Markdown("# Hi"))
-        out = buf.getvalue()
+        with _nxtest.captured_console_output(
+                {"TTY_COMPATIBLE": "1", "COLORTERM": "truecolor"}) as (con, buf):
+            con.print(Markdown("# Hi"))
+            out = buf.getvalue()
         expected = "\x1b[1;38;2;137;180;250m"  # ACCENT hue, bold (h1)
         assert expected in out, "say-panel markdown not rendered in theme hue"
     finally:
-        # SPEC_LIVEENGINE.md: _say_console is now the process-wide SHARED
-        # console, so this test must restore its LAZY stdout binding (None),
-        # not the resolved stream — pinning the object here would make every
-        # later console write bypass a test's redirect_stdout.
-        console.file = rich_stdout
         _ansi.set_theme(orig)
 
 
@@ -459,9 +451,8 @@ def test_light_bg_probe_swaps_variant_via_apply():
 def test_rendered_code_block_uses_theme_hues_end_to_end():
     """Full render path: the say-console + themed_markdown must emit the
     theme's own hues in the ANSI stream for a fenced code block."""
-    import io
-    from nx import _rich, _turn
-    console = _turn._say_console
+    from nx import _rich
+    import tests._nxtest as _nxtest
     orig = _ansi.C.name
 
     def rgb(h):
@@ -469,13 +460,10 @@ def test_rendered_code_block_uses_theme_hues_end_to_end():
 
     try:
         _ansi.set_theme("mocha")
-        rich_stdout = console._file   # None: resolved lazily (shared console)
-        buf = io.StringIO()
-        console.file = buf
-        console._force_terminal = True
-        console._color_system = "truecolor"
-        console.print(_rich.themed_markdown(
-            "```python\ndef f():  # c\n    return 42\n```"))
+        with _nxtest.captured_console_output(
+                {"TTY_COMPATIBLE": "1", "COLORTERM": "truecolor"}) as (console, buf):
+            console.print(_rich.themed_markdown(
+                "```python\ndef f():  # c\n    return 42\n```"))
         out = buf.getvalue()
         hexes = _ansi.THEMES["mocha"]
         assert rgb(hexes["blue"]) in out, "keyword not in accent hue"
@@ -484,7 +472,6 @@ def test_rendered_code_block_uses_theme_hues_end_to_end():
         # monokai's signature keyword cyan must be gone
         assert "102;217;239" not in out, "still rendering monokai hues"
     finally:
-        console.file = rich_stdout   # back to the lazy sys.stdout binding
         _ansi.set_theme(orig)
 
 

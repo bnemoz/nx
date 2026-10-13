@@ -275,6 +275,27 @@ def cprint(text: str = "", *, end: str = "\n") -> None:
             print(text, end=end)
 
 
+def grid_line(color: str, width: int, value: str, tail: str, *,
+              pad: str = "") -> str:
+    """One borderless-table line: `value` right-justified to `width` CELLS,
+    then `tail` — byte-compatible with the `f"{color}{value:>N}{RESET}  {tail}"`
+    idiom it replaces, but CJK-safe: rich measures cells with `cells.cell_len`,
+    the same width table the Live uses, so a wide glyph in `value` no longer
+    shifts `tail`. Rich's Table.grid owns the alignment; the caller's SGR goes
+    in as a pre-formatted prefix (same escape-then-render contract as cprint).
+    `pad` is prepended verbatim (the call sites' two-space indent)."""
+    from rich.table import Table
+    from rich.text import Text
+    table = Table.grid(padding=(0, 2))
+    table.add_column(justify="right", min_width=width, no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_row(Text.from_ansi(f"{color}{value}"), Text.from_ansi(tail))
+    console = shared_console()
+    segments = console.render(table)
+    lines = console._render_buffer(segments).splitlines()
+    return f"{pad}{lines[0]}" if lines else pad
+
+
 def retheme_console(console: Console) -> None:
     """Restyle an existing Console in place to the current theme, so a live
     `/theme` switch reaches the say-panel without constructing a new console

@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from ._ansi import DIM, RESET, C, strip_ansi_for_display
+from ._rich import grid_line
 from . import _fullscreen
 from ._sessions_io import _flatten_message_text, _short_id
 from . import _state as st
@@ -63,7 +64,7 @@ def _print_transcript(messages: list[dict[str, Any]], max_chars: int = 120) -> i
             continue
         content = strip_ansi_for_display(_flatten_message_text(m, per_msg=max_chars))
         color = {"user": C.ACCENT, "assistant": C.TEXT, "tool": DIM}.get(role, "")
-        print(f"  {color}{role:>9}{RESET}  {content}")
+        print(grid_line(color, 9, role, content, pad="  "))
         printed += 1
     return printed
 
@@ -364,11 +365,11 @@ def _cli_tokens(args: list[str]) -> bool:
     bg_note = "" if st._SESSION_HAS_BACKGROUNDED else ", wait_background excluded — nothing has backgrounded yet"
     print(f"nx prompt-token floor — {method}")
     print(f"  backend   {backend}")
-    print(f"  SYSTEM    {system_tokens:>5} tokens")
-    print(f"  TOOLS     {tools_tokens:>5} tokens  ({len(tools)} functions{bg_note})")
-    print(f"  'hey'     {user_tokens:>5} tokens")
+    print(grid_line("", 5, "SYSTEM", f"{system_tokens:>5} tokens", pad="  ").rstrip())
+    print(grid_line("", 5, "TOOLS", f"{tools_tokens:>5} tokens  ({len(tools)} functions{bg_note})", pad="  ").rstrip())
+    print(grid_line("", 5, "'hey'", f"{user_tokens:>5} tokens", pad="  ").rstrip())
     print(f"  {'-' * 28}")
-    print(f"  total     {total:>5} tokens  (+ ~50 of server-side chat-template framing, not counted here)")
+    print(grid_line("", 5, "total", f"{total:>5} tokens  (+ ~50 of server-side chat-template framing, not counted here)", pad="  ").rstrip())
     return True
 
 

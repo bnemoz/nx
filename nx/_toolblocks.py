@@ -206,10 +206,8 @@ def render_group(blocks: list[ToolBlock], elapsed: float, visible: bool) -> None
     # continuation rows. clip_display counts SGR as 0 columns, so the color
     # prefixes survive. chrome = tint+accent+ │+ rail+ padding ≈ 14 cols.
     from ._ansi import clip_display
-    from ._layout import TERM_FALLBACK_COLS, TERM_MIN_COLS
-    import shutil
-    width = max(TERM_MIN_COLS,
-                shutil.get_terminal_size((TERM_FALLBACK_COLS, 24)).columns)
+    from ._layout import term_width
+    width = term_width()
     chrome = 14
     cprint(f"\n{accent}  ┌─ {clip_display(_group_title(blocks), width - chrome)}{RESET}")
     calls = [b for b in blocks if b.name]

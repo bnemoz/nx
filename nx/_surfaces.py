@@ -281,8 +281,12 @@ def run_tabs_dashboard() -> None:
         for i, r in enumerate(rows):
             status = r.get("status") or "—"
             marker = "›" if i == sel else " "
-            head = f"{marker} {_glyph(r.get('alive', False), status)} {r['kind']:<5} " \
-                   f"{r['id']:<18} {status:<8}"
+            kind = str(r["kind"])
+            sid = str(r["id"])
+            # cell-correct fixed columns (Table.grid + cell_len): an agent id
+            # with wide glyphs can no longer push `status` out of alignment
+            head = f"{marker} {_glyph(r.get('alive', False), status)} {kind:<5} " \
+                   f"{sid:<18} {status:<8}"
             lines.append(head)
             instr = " ".join(str(r.get("instruction", "")).split())
             if instr:
@@ -389,11 +393,8 @@ def run_tabs_dashboard() -> None:
 
 
 def _term_cols() -> int:
-    import shutil
-    from ._layout import TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS, TERM_MIN_COLS
-    return max(TERM_MIN_COLS,
-               shutil.get_terminal_size(
-                   (TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns)
+    from ._layout import term_width
+    return term_width()
 
 
 # --------------------------------------------------------------------------

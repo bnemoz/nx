@@ -44,8 +44,7 @@ def test_resize_repaints_from_the_erased_frame_top(monkeypatch):
     monkeypatch.setattr(_chatbox.sys, "stdin", _Input(read_fd))
     monkeypatch.setattr(_chatbox.sys, "stdout", output)
     monkeypatch.setattr(_chatbox, "raw_mode", lambda *_a, **_kw: contextlib.nullcontext())
-    monkeypatch.setattr(_chatbox.shutil, "get_terminal_size",
-                        lambda _fallback: os.terminal_size((next(widths), 24)))
+    monkeypatch.setattr(_chatbox, "term_width", lambda: next(widths))
     ready = iter((False, True))
     monkeypatch.setattr(_chatbox, "wait_ready", lambda *_a: next(ready))
     monkeypatch.setattr(_chatbox, "_raw_read_key", lambda _fd: "\x11")

@@ -464,7 +464,7 @@ wheels = [
 
 [[package]]
 name = "nx"
-version = "0.153.4"
+version = "0.154.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -490,7 +490,7 @@ dev = [
 requires-dist = [
     { name = "httpx" },
     { name = "pymupdf4llm", marker = "extra == 'pdf'" },
-    { name = "rich" },
+    { name = "rich", specifier = ">=14.3,<16" },
 ]
 provides-extras = ["pdf"]
 

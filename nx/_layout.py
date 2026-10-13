@@ -23,6 +23,16 @@ TERM_FALLBACK_ROWS = 24
 # Surfaces' minimum usable terminal width (below it, clamp up).
 TERM_MIN_COLS = 40
 
+
+def term_width() -> int:
+    """Current terminal columns with the shared fallback and minimum: the ONE
+    probe every render path uses (was re-implemented at four call sites).
+    `cprint` emits lines verbatim (soft_wrap), so width-correctness is the
+    caller's job — clip against this, never a raw get_terminal_size()."""
+    import shutil
+    return max(TERM_MIN_COLS,
+               shutil.get_terminal_size((TERM_FALLBACK_COLS, TERM_FALLBACK_ROWS)).columns)
+
 # Reasoning-only step divider in the turn footer (_turn_footer.py): the dim
 # rule width above the "(step: reasoning ...)" hint.
 REASONING_DIVIDER_CELLS = 46

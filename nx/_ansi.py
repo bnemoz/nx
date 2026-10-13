@@ -18,6 +18,17 @@ def _rgb(hex_color: str) -> str:
     return f"\033[38;2;{r};{g};{b}m"
 
 
+def _no_color() -> bool:
+    """True when the user or the environment has asked for plain output.
+    Matches rich's own predicate (0.128.x/NO_COLOR gap fix): `NO_COLOR` counts
+    only when set to a non-empty value (rich >=14.0.0 semantics), and
+    `TERM=dumb` means no usable color. One shared predicate for --help and the
+    raw-ANSI core, so the two can't disagree."""
+    if os.environ.get("NO_COLOR"):
+        return True
+    return os.environ.get("TERM") == "dumb"
+
+
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 CLEAR_LINE = "\033[2K\r"   # erase entire line, return cursor to col 0
 
@@ -520,6 +531,15 @@ class _Colors:
         self._apply(THEMES[name])
 
     def _apply(self, hexes: dict[str, str]) -> None:
+        if _no_color():
+            # Plain output requested: emit no SGR at all, so every styled
+            # string round-trips to the empty decoration (ROADMAP gap fix).
+            self.CYAN = self.GREEN = self.YELLOW = self.RED = ""
+            self.MAGENTA = self.GRAY = self.BLUE = self.ORANGE = ""
+            self.PURPLE = self.TEAL = self.PINK = self.BROWN = self.SLATE = ""
+            for role in ROLE_DEFAULTS:
+                setattr(self, role, "")
+            return
         if self.light_bg is not None:
             hexes = _variant_hexes(self.name, self.light_bg)
         self.CYAN = _rgb(hexes["cyan"])

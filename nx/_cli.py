@@ -109,8 +109,8 @@ def _help_colored(text: str) -> str:
     mention flags ("--parallel N"). Falls back to plain text when stdout is
     not a TTY or NO_COLOR is set — help is written to stdout, so no ANSI may
     leak into a pipe."""
-    import os
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    from ._ansi import _no_color
+    if not sys.stdout.isatty() or _no_color():
         return text
     from ._ansi import BOLD, C, RESET
     accent, bold = C.ACCENT, BOLD

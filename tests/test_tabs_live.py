@@ -191,24 +191,13 @@ class TestRepaintRegionBounds(unittest.TestCase):
     def test_region_live_renders_a_frame_on_a_terminal(self):
         """End-to-end (no fakes): the Live actually PAINTS on a terminal — the
         frame text is emitted, transient=True erases it on close, and the cursor
-        is hidden/restored. Uses a real Console writing to a captured buffer so
-        this stays headless-safe (no pty, no stdio swap)."""
-        import io as _io
+        is hidden/restored. The shared console is rebuilt from documented env
+        hooks (TTY_INTERACTIVE/COLORTERM) writing to a captured buffer, so this
+        stays headless-safe (no pty, no stdio swap, no rich-privates patched)."""
+        import tests._nxtest as _nxtest
         from rich.live import Live
-        from nx._rich import shared_console
-        console = shared_console()
-        buf = _io.StringIO()
-        saved = (console._file, console._force_terminal, console._color_system)
-        console._file = buf
-        console._force_terminal = True
-        console._color_system = "truecolor"
-        # rich computes is_interactive ONCE in Console.__init__ from the stdout
-        # that existed then; the shared console is built for a real tty in
-        # production (is_interactive=True), so a headless test must say so or
-        # the Live never renders its frame.
-        saved_interactive = console.is_interactive
-        console.is_interactive = True
-        try:
+        with _nxtest.captured_console_output(
+                {"TTY_COMPATIBLE": "1", "TTY_INTERACTIVE": "1", "COLORTERM": "truecolor"}) as (console, buf):
             with mock.patch.object(_surfaces, "_make_region_live",
                                    lambda: Live(_surfaces._region_renderable(),
                                                 console=console, auto_refresh=False,
@@ -220,9 +209,6 @@ class TestRepaintRegionBounds(unittest.TestCase):
                 self.assertTrue(_surfaces.dashboard_open())
                 _surfaces.close_dashboard()
             out = buf.getvalue()
-        finally:
-            console._file, console._force_terminal, console._color_system = saved
-            console.is_interactive = saved_interactive
         # the real Live painted the real frame through the shared console: once
         # at start() and again on the repaint. (Cursor hide/restore and the
         # transient erase are rich's own bookkeeping on top of this.)
@@ -556,16 +542,15 @@ class TestWriteSerialization(unittest.TestCase):
         text must be emitted THROUGH the console (so rich composes it above the
         frame, with the frame's erase/reposition handled), not by a raw write
         the Live knows nothing about."""
-        import io as _io
+        import tests._nxtest as _nxtest
         from rich.live import Live
-        from nx._rich import cprint, shared_console
-        console = shared_console()
-        buf = _io.StringIO()
-        saved = console._file
-        saved_term = console._force_terminal
-        console._file = buf
-        console._force_terminal = False
-        try:
+        from nx._rich import cprint
+        # TTY_COMPATIBLE=0 + TTY_INTERACTIVE=0 rebuild the shared console as a
+        # plain (non-terminal, non-interactive) one — the no-Live-elsewhere
+        # headless baseline (the old test's _force_terminal=False) — with the
+        # output captured, no privates patched.
+        with _nxtest.captured_console_output(
+                {"TTY_COMPATIBLE": "0", "TTY_INTERACTIVE": "0"}) as (console, buf):
             live = Live("frame", console=console, auto_refresh=False)
             live.start(refresh=False)
             try:
@@ -573,15 +558,12 @@ class TestWriteSerialization(unittest.TestCase):
             finally:
                 live.stop()
             self.assertIn("└ 12 tok", buf.getvalue())
-        finally:
-            console._file = saved
-            console._force_terminal = saved_term
             # live.stop() already unregistered it (Console.clear_live); guard in
             # case start() never got that far.
             if console._live_stack:
                 console.clear_live()
 
-    def test_cprint_falls_back_to_plain_print_when_no_live(self):
+    def test_cprint_falls_back_to_plain_print_when_no_live(self):  # noqa: C901
         """No Live => no frame to compose against: keep the classic byte path
         (this is what every non-region caller and the whole test suite expect)."""
         import io as _io

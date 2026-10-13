@@ -129,10 +129,8 @@ def _term_width() -> int:
     panel* renderers to clip visible text: cprint emits lines verbatim
     (soft_wrap), so a raw grep hit longer than the terminal wraps and drags the
     │/╭ glyphs onto continuation rows. SGR counts 0 columns (clip_display)."""
-    from ._layout import TERM_FALLBACK_COLS, TERM_MIN_COLS
-    import shutil
-    return max(TERM_MIN_COLS,
-               shutil.get_terminal_size((TERM_FALLBACK_COLS, 24)).columns)
+    from ._layout import term_width
+    return term_width()
 
 
 def _clip_mid(s: str, w: int) -> str:

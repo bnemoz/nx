@@ -110,24 +110,37 @@ ALLOW_PRIVATE = _env_int("NX_WEBFETCH_ALLOW_PRIVATE", 0)
 def _host_is_private(host: str) -> bool:
     """True if `host` (IP literal or name) resolves to a private/loopback/
     link-local/reserved address. Unresolvable names return False (the fetch
-    will simply fail); IP literals are checked without DNS."""
+    will simply fail); IP literals are checked without DNS. Results are
+    memoized for _RESOLVE_TTL_SECS: getaddrinfo has no timeout of its own and
+    a stub resolver with no route can block ~10s — the cache keeps a slow
+    name from taxing every result row (0.153.7)."""
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
         return not addr.is_global
+    now = time.monotonic()
+    with _STATE_LOCK:
+        hit = _RESOLVED.get(host)
+        if hit and now - hit[0] < _RESOLVE_TTL_SECS:
+            return hit[1]
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, OSError):
-        return False
-    for fam, _, _, _, sockaddr in infos:
-        try:
-            if not ipaddress.ip_address(sockaddr[0]).is_global:
-                return True
-        except ValueError:
-            continue
-    return False
+        private = False
+    else:
+        private = False
+        for fam, _, _, _, sockaddr in infos:
+            try:
+                if not ipaddress.ip_address(sockaddr[0]).is_global:
+                    private = True
+                    break
+            except ValueError:
+                continue
+    with _STATE_LOCK:
+        _RESOLVED[host] = (time.monotonic(), private)
+    return private
 
 
 def _url_is_private(url: str) -> bool:
@@ -170,6 +183,13 @@ _ROBOTS: dict[str, object] = {}
 _ROBOTS_FAILED: set[str] = set()
 _INFLIGHT: dict[str, threading.Lock] = {}
 _STATE_LOCK = threading.Lock()
+# SSRF resolution cache (0.153.7): host -> (monotonic ts, is_private). A DNS
+# lookup inside _host_is_private can block the tool-call path for the full
+# resolver timeout (~10s on a stub resolver with no default route) — a name
+# seen once is remembered, so a slow NXDOMAIN is paid once per host, not per
+# result row. TTL bounds staleness of a re-pointed DNS record.
+_RESOLVED: dict[str, tuple[float, bool]] = {}
+_RESOLVE_TTL_SECS = 300.0
 
 # Web-cache persistence (0.71.0): one JSON object per line
 # {"k", "t" (epoch secs), "v"} under <SESSION_HOME>/web-cache/cache.jsonl.
