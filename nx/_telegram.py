@@ -795,9 +795,41 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
 
 # --- main loop ----------------------------------------------------------------
 
+def _offset_path() -> str:
+    """Where the getUpdates offset persists across restarts. Keyed by a hash
+    of the bot token: two bots on one host keep independent offsets."""
+    import hashlib
+    from . import _state
+    h = hashlib.sha256(_token().encode()).hexdigest()[:16]
+    return os.path.join(_state.SESSION_HOME, "telegram-offset-%s" % h)
+
+
+def _load_offset() -> int:
+    try:
+        with open(_offset_path(), encoding="ascii") as f:
+            return max(0, int(f.read().strip()))
+    except (OSError, ValueError):
+        return 0
+
+
+def _save_offset(offset: int) -> None:
+    try:
+        from . import _state
+        os.makedirs(_state.SESSION_HOME, exist_ok=True)
+        tmp = f"{_offset_path()}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="ascii") as f:
+            f.write(str(offset))
+        os.replace(tmp, _offset_path())
+    except OSError:
+        pass   # persistence is best-effort; the gateway runs without it
+
+
 def run_gateway() -> int:
     """`nx telegram`: long-poll getUpdates forever; each allowed-chat message
-    becomes one serialized turn. Ctrl-C exits cleanly."""
+    becomes one serialized turn. Ctrl-C exits cleanly. The update offset is
+    persisted under NX_HOME (0.153.5): a restart resumes where the last
+    process left off instead of replaying (or missing) the downtime window —
+    Telegram buffers updates for 24h."""
     from . import _state as st
     if not _token():
         print("nx telegram: NX_TELEGRAM_BOT_TOKEN is not set.")
@@ -828,7 +860,7 @@ def run_gateway() -> int:
     _LAST_TURN_AT.clear()
 
     print(f"nx telegram: polling for chats {sorted(allowed)} …")
-    offset = 0
+    offset = _load_offset()
     while True:
         try:
             r = _api("getUpdates",
@@ -853,6 +885,7 @@ def run_gateway() -> int:
             continue
         for upd in r.get("result") or []:
             offset = max(offset, upd["update_id"] + 1)
+            _save_offset(offset)
             try:
                 _handle_update(upd, allowed)
             except Exception as e:

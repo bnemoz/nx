@@ -882,7 +882,46 @@ def test_no_proxy_env_goes_direct(monkeypatch):
 
 
 
-def test_gateway_stops_on_rejected_token(capsys):
+def test_offset_persists_and_loads_per_token(monkeypatch):
+    monkeypatch.setattr(tg, "_token", lambda: "tok1")
+    monkeypatch.setattr(nx._state, "SESSION_HOME", _tmp)
+    tg._save_offset(1234)
+    assert tg._load_offset() == 1234
+    # a different bot token gets its own file
+    monkeypatch.setattr(tg, "_token", lambda: "tok2")
+    assert tg._load_offset() == 0
+    tg._save_offset(99)
+    assert tg._load_offset() == 99
+    monkeypatch.setattr(tg, "_token", lambda: "tok1")
+    assert tg._load_offset() == 1234   # untouched by tok2's save
+    # corrupt/missing file degrades to 0
+    monkeypatch.setattr(tg, "_offset_path",
+                        lambda: os.path.join(_tmp, "no-such-offset"))
+    assert tg._load_offset() == 0
+
+
+def test_gateway_resumes_from_saved_offset(monkeypatch, capsys):
+    monkeypatch.setattr(tg, "_token", lambda: "t")
+    monkeypatch.setenv("NX_TELEGRAM_ALLOWED_CHATS", "111")
+    monkeypatch.setattr(nx._state, "SESSION_HOME", _tmp)
+    tg._save_offset(500)
+    polls = []
+
+    def fake_api(method, payload=None, timeout=35.0):
+        if method == "getUpdates":
+            polls.append(payload["offset"])
+            raise KeyboardInterrupt()
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with unittest.mock.patch.object(tg, "_api", side_effect=fake_api):
+        try:
+            tg.run_gateway()
+        except KeyboardInterrupt:
+            pass
+    assert polls == [500]
+
+
+
     os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
     os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
     with unittest.mock.patch.object(
