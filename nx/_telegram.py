@@ -69,10 +69,28 @@ _LAST_TURN_AT: dict[int, float] = {}
 # Group chats are refused unless this is set: a group in the allowlist would
 # otherwise let every member drive the host.
 _GROUP_FLAG = "NX_TELEGRAM_ALLOW_GROUPS"
+# When set, status bubbles show tool ICONS ONLY — no arguments (commands,
+# paths, queries). Those currently echo to Telegram's cloud by design; this
+# flag is the opt-out for chats where even that is too much (0.153.3).
+_REDACT_FLAG = "NX_TELEGRAM_REDACT_ARGS"
+# Optional HTTPS/SOCKS proxy for the Bot API (the institute-firewall case in
+# docs/TELEGRAM_SETUP.md). Empty = direct, as before. urllib honors http_proxy
+# already; this adds an explicit, telegram-scoped knob. A socks5:// scheme
+# needs PySocks installed; anything urllib cannot speak surfaces as a poll
+# error at startup, not a silent hang.
+_PROXY_FLAG = "NX_TELEGRAM_PROXY"
 
 
 def _groups_allowed() -> bool:
     return os.environ.get(_GROUP_FLAG, "").strip().lower() in ("1", "true", "yes")
+
+
+def _redact_args() -> bool:
+    return os.environ.get(_REDACT_FLAG, "").strip().lower() in ("1", "true", "yes")
+
+
+def _proxy() -> str:
+    return os.environ.get(_PROXY_FLAG, "").strip()
 
 
 def _parse_ids(name: str) -> set[int]:
@@ -118,12 +136,21 @@ def _poll_interval() -> float:
 def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dict:
     """One Bot-API call. getUpdates long-polls with `timeout` inside the
     payload; everything else is a plain POST. Returns the parsed JSON; the
-    `ok` field is the caller's problem (fail-soft everywhere else)."""
+    `ok` field is the caller's problem (fail-soft everywhere else).
+    NX_TELEGRAM_PROXY routes every call through an HTTPS/SOCKS proxy (the
+    firewall case); an unparseable/unreachable proxy fails the call like any
+    network error — the poll loop already backs off and retries."""
     token = _token()
     if not token:
         raise RuntimeError("NX_TELEGRAM_BOT_TOKEN is not set")
     url = f"{API_BASE}/bot{token}/{method}"
     data = json.dumps(payload or {}).encode()
+    opener = None
+    proxy = _proxy()
+    if proxy:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+            {"http": proxy, "https": proxy}))
+
     # The loop body either returns or re-raises, so `r` is always bound by the
     # time the fall-through `return r` below is reached; the empty default just
     # makes that visible to the checker.
@@ -136,7 +163,11 @@ def _api(method: str, payload: dict | None = None, timeout: float = 35.0) -> dic
             headers={"Content-Type": "application/json",
                      "User-Agent": "nx-telegram-gateway"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            if opener is not None:
+                cm = opener.open(req, timeout=timeout)
+            else:
+                cm = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+            with cm as resp:
                 r = json.loads(resp.read().decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as e:
             # 429 arrives as an HTTP error whose body is still JSON
@@ -341,8 +372,12 @@ _ICON_DEFAULT = "\U0001f527"
 
 
 def _tool_line(name: str, args: dict) -> str:
-    """One line for a tool call, e.g. `run_bash: cargo test -p somatiq-dp`."""
+    """One line for a tool call, e.g. `run_bash: cargo test -p somatiq-dp`.
+    With NX_TELEGRAM_REDACT_ARGS=1 the arguments are withheld entirely —
+    commands/paths/queries otherwise echo to Telegram's cloud."""
     icon = _TOOL_ICONS.get(name, _ICON_DEFAULT)
+    if _redact_args():
+        return f"{icon} {name}"
     raw = str(args.get("command") or args.get("path") or args.get("url")
               or args.get("query") or "")
     first = raw.splitlines()[0] if raw.splitlines() else ""

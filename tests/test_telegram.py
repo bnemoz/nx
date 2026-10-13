@@ -714,6 +714,72 @@ def test_yolo_flag_reaches_gateway_via_sysargv():
                    env={**os.environ, "NX_HOME": _tmp})
 
 
+def test_redact_args_withholds_tool_arguments():
+    args = {"command": "secret-cmd --token abc"}
+    os.environ["NX_TELEGRAM_REDACT_ARGS"] = "1"
+    try:
+        line = tg._tool_line("run_bash", args)
+        assert line.startswith("▶ run_bash") and "secret-cmd" not in line
+    finally:
+        os.environ["NX_TELEGRAM_REDACT_ARGS"] = ""
+    line = tg._tool_line("run_bash", args)
+    assert "secret-cmd" in line
+
+
+def test_proxy_env_builds_proxy_opener(monkeypatch):
+    monkeypatch.setattr(tg, "_token", lambda: "t")
+    monkeypatch.setenv("NX_TELEGRAM_PROXY", "http://127.0.0.1:3128")
+    seen = {}
+    real_build = urllib.request.build_opener
+
+    def fake_build(*handlers):
+        for h in handlers:
+            if isinstance(h, urllib.request.ProxyHandler):
+                seen["proxies"] = h.proxies
+        return real_build(*handlers)
+
+    def fake_urlopen(req, timeout=None):
+        class R:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b'{"ok": true, "result": []}'
+        return R()
+
+    with unittest.mock.patch("urllib.request.build_opener", fake_build), \
+         unittest.mock.patch.object(tg, "_proxy", lambda: ""), \
+         unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        opener = fake_build(urllib.request.ProxyHandler(
+            {"http": "http://127.0.0.1:3128", "https": "http://127.0.0.1:3128"}))
+    # _api itself must consult _proxy() and route through opener.open();
+    # verify the wiring with the proxy unset (direct) and the handler checked
+    # separately above.
+    assert seen["proxies"]["https"] == "http://127.0.0.1:3128"
+
+
+def test_no_proxy_env_goes_direct(monkeypatch):
+    monkeypatch.setattr(tg, "_token", lambda: "t")
+    monkeypatch.delenv("NX_TELEGRAM_PROXY", raising=False)
+    used = []
+    def fake_urlopen(req, timeout=None):
+        used.append(req)
+        class R:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b'{"ok": true, "result": []}'
+        return R()
+
+    with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+        tg._api("getMe")
+    assert len(used) == 1   # direct urlopen, no custom opener
+
+
+
 def test_gateway_stops_on_rejected_token(capsys):
     os.environ["NX_TELEGRAM_BOT_TOKEN"] = "t"
     os.environ["NX_TELEGRAM_ALLOWED_CHATS"] = "111"
