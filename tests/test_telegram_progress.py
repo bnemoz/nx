@@ -22,7 +22,7 @@ def test_describe_turn_collapses_duplicate_calls():
         {"role": "tool", "tool_call_id": "2", "content": "x" * 300},
     ]
     lines, n = tg._describe_turn(msgs, 0)
-    assert lines == ["\U0001f4c2 list_dir: . \u00d72"]
+    assert lines == ["\U0001f4c2 <b>list_dir</b> <code>.</code> ×2"]
     assert n == 2
     # later slices see nothing
     assert tg._describe_turn(msgs, len(msgs)) == ([], 0)
@@ -49,21 +49,21 @@ def test_compose_status_first_and_last():
     assert out.startswith("line19\n")    # freshest activity is the header
     assert "earlier calls" in out
     assert "line18" in out and "line4" not in out
-    assert "7 tool calls" in out and "65s" in out
+    assert "<b>7</b> tool calls" in out and "<b>65s</b>" in out
     short = tg._compose_status(["only"], 1, "thinking...", None,
                                "agent turn 3/100")
     assert short.count("only") == 1      # header, not duplicated in a body
-    assert "total: 1 tool calls" in short
-    assert "\U0001f916 agent turn 3/100" in short
-    assert "\U0001f4ac thinking..." in short
+    assert "total: <b>1</b> tool calls" in short
+    assert "\U0001f916 <i>agent turn 3/100</i>" in short
+    assert "\U0001f4ac <i>thinking...</i>" in short
 
 
 def test_compose_status_zero_calls_and_single_line():
     out = tg._compose_status([], 0, None, 3.0)
-    assert out.startswith("\u23f3 Working\u2026\n")
-    assert "total: 0 tool calls" in out
+    assert out.startswith("\u23f3 <b>Working\u2026</b>\n")
+    assert "total: <b>0</b> tool calls" in out
     one = tg._compose_status(["📂 read_file: x"], 1, None, None)
-    assert one == "📂 read_file: x\n\ntotal: 1 tool calls"
+    assert one == "📂 read_file: x\n\ntotal: <b>1</b> tool calls"
 
 
 def test_progress_sink_receives_notes():

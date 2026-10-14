@@ -242,7 +242,7 @@ def test_describe_turn_collapses_duplicate_calls():
         {"role": "tool", "tool_call_id": "2", "content": "x" * 300},
     ]
     lines, n = tg._describe_turn(msgs, 0)
-    assert lines == ["📂 list_dir: . ×2"] and n == 2
+    assert lines == ["📂 <b>list_dir</b> <code>.</code> ×2"] and n == 2
 
 
 def test_describe_turn_home_shortening_and_bad_args():
@@ -262,9 +262,9 @@ def test_compose_status_tally_and_tail():
     out = tg._compose_status(lines, 7, None, 65.0)
     assert "earlier calls" in out
     assert "line19" in out and "line4" not in out
-    assert "7 tool calls" in out and "65s" in out
+    assert "<b>7</b> tool calls" in out and "<b>65s</b>" in out
     short = tg._compose_status(["only"], 1, None, None)
-    assert short == "only\n\ntotal: 1 tool calls"
+    assert short == "only\n\ntotal: <b>1</b> tool calls"
 
 
 def test_brief_collapses_whitespace_and_caps():
@@ -535,7 +535,7 @@ def test_describe_turn_collapses_three_identical_calls():
             {"role": "tool", "tool_call_id": i, "content": "x" * 300},
         ]
     lines, n = tg._describe_turn(msgs, 0)
-    assert lines == ["📂 list_dir: . ×3"] and n == 3
+    assert lines == ["📂 <b>list_dir</b> <code>.</code> ×3"] and n == 3
 
 
 def test_describe_turn_lists_distinct_calls_in_order():
@@ -859,7 +859,7 @@ def test_redact_args_withholds_tool_arguments():
     os.environ["NX_TELEGRAM_REDACT_ARGS"] = "1"
     try:
         line = tg._tool_line("run_bash", args)
-        assert line.startswith("▶ run_bash") and "secret-cmd" not in line
+        assert line.startswith("▶ <b>run_bash</b>") and "secret-cmd" not in line
     finally:
         os.environ["NX_TELEGRAM_REDACT_ARGS"] = ""
     line = tg._tool_line("run_bash", args)

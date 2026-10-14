@@ -492,18 +492,24 @@ _TOOL_ICONS = {
 _ICON_DEFAULT = "\U0001f527"
 
 
+def _esc(s: str) -> str:
+    """HTML-escape one fragment of a status line (0.158.2: the bubble is
+    HTML like everything else we send; tool arguments are untrusted)."""
+    return _html.escape(s, quote=False)
+
+
 def _tool_line(name: str, args: dict) -> str:
     """One line for a tool call, e.g. `run_bash: cargo test -p somatiq-dp`.
     With NX_TELEGRAM_REDACT_ARGS=1 the arguments are withheld entirely —
     commands/paths/queries otherwise echo to Telegram's cloud."""
     icon = _TOOL_ICONS.get(name, _ICON_DEFAULT)
     if _redact_args():
-        return f"{icon} {name}"
+        return f"{icon} <b>{_esc(name)}</b>"
     raw = str(args.get("command") or args.get("path") or args.get("url")
               or args.get("query") or "")
     first = raw.splitlines()[0] if raw.splitlines() else ""
-    shown = _brief(first)
-    return f"{icon} {name}" + (f": {shown}" if shown else "")
+    shown = _esc(_brief(first))
+    return f"{icon} <b>{_esc(name)}</b>" + (f" <code>{shown}</code>" if shown else "")
 
 
 # cap on how many recent lines the status message shows
@@ -522,19 +528,19 @@ def _compose_status(lines: list[str], tool_n: int,
         shown = rest[-_STATUS_TAIL:]
         overflow = len(lines) - len(shown) - 1
     else:
-        head = "⏳ Working…"
+        head = "⏳ <b>Working…</b>"
         rest = shown = []
         overflow = 0
-    body_lines = ([f"\u2026 ({overflow} earlier calls)"] if overflow > 0
+    body_lines = ([f"\u2026 <i>({overflow} earlier calls)</i>"] if overflow > 0
                   else []) + shown
     body = "\n".join(body_lines)
-    footer = f"total: {tool_n} tool calls"
+    footer = f"total: <b>{tool_n}</b> tool calls"
     if progress:
-        footer = f"🤖 {progress} · " + footer
+        footer = f"🤖 <i>{_esc(progress)}</i> \u00b7 " + footer
     if elapsed is not None:
-        footer += f" \u00b7 {int(elapsed)}s"
+        footer += f" \u00b7 <b>{int(elapsed)}s</b>"
     return (head + ("\n" + body if body else "") + "\n\n" + footer
-            + (f"\n\U0001f4ac {note}" if note else ""))
+            + (f"\n\U0001f4ac <i>{_esc(note)}</i>" if note else ""))
 
 
 def _typing(api: Callable, chat_id: int) -> None:
@@ -554,7 +560,7 @@ def _edit_status(api: Callable, chat_id: int, message_id: int,
     try:
         r = api("editMessageText", {"chat_id": chat_id,
                                     "message_id": message_id,
-                                    "text": text})
+                                    "text": text, "parse_mode": "HTML"})
         return bool(r.get("ok"))
     except Exception:
         return False
@@ -582,14 +588,15 @@ def _send(api: Callable, chat_id: int, text: str) -> dict:
             r = api("sendMessage", payload)
             if not r.get("ok") and "parse" in (r.get("description") or "").lower():
                 r = api("sendMessage", {"chat_id": chat_id, "text": chunk})
+                if r.get("ok"):
+                    rendered = chunk   # fallback: record what actually rendered
+            if r.get("ok"):
+                out["message_id"] = (r.get("result") or {}).get("message_id")
+            else:
+                out["ok"] = False
+                out["error"] = r.get("description") or "sendMessage failed"
         except Exception as e:
             out["ok"], out["error"] = False, f"{type(e).__name__}: {e}"
-            continue
-        if r.get("ok"):
-            out["message_id"] = (r.get("result") or {}).get("message_id")
-        else:
-            out["ok"] = False
-            out["error"] = r.get("description") or "sendMessage failed"
     return out
 
 
