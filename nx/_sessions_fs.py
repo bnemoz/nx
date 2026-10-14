@@ -396,6 +396,10 @@ def _write_session_snapshot(
     # Swarm P10: obsstore TTL/quota, amortized (own gate) -- a packed-
     # result store must not grow forever now that it is shared.
     _maybe_gc_obsstore()
+    # Phase-1 artifact GC: age/size rules over the durable files nothing ever
+    # cleaned (agents/ reports, undo/, logs/usage.jsonl, web-cache/,
+    # input_history.json). Own gate, own module — see nx/_gc.py.
+    _maybe_gc_artifacts()
 
 
 # --- amortized maintenance sweeps (swarm P6) -----------------------------------
@@ -425,8 +429,13 @@ def begin_exit() -> None:
     _EXITING = True
 
 
-def _sweep_due(kind: str) -> bool:
-    interval = _env_int("NX_SESSION_SWEEP_INTERVAL", 300)
+def _sweep_due(kind: str, interval_s: int | None = None) -> bool:
+    """Gate `kind` to at most one run per `interval_s` seconds (default
+    NX_SESSION_SWEEP_INTERVAL, 300 s). A sweep whose own work is coarser than a
+    save — the phase-1 artifact GC walks whole directories once a day-ish —
+    passes an explicit interval; the stamp shares this same process-wide dict."""
+    interval = (_env_int("NX_SESSION_SWEEP_INTERVAL", 300)
+                if interval_s is None else interval_s)
     if interval <= 0:
         return True  # 0/negative = legacy every-save behavior
     now = time.monotonic()
@@ -505,6 +514,32 @@ def _maybe_gc_obsstore() -> None:
         _obsstore.gc(grace_s=_obsstore.AGE_GRACE_S)
     except Exception:
         pass  # the store is an optimization; GC must never break a save
+
+
+def _maybe_gc_artifacts() -> None:
+    """Phase-1 artifact GC (nx/_gc.py): age/size retention over the durable
+    files under SESSION_HOME that no other sweep touches — sub-agent reports,
+    undo snapshots, usage.jsonl, the web cache, the input-history recall file.
+    Rides the same P6 amortization machinery as the obsstore sweep — the shared
+    _sweep_due("gc") gate — but on its OWN interval (NX_GC_SWEEP_INTERVAL,
+    default 86400 s = once a day) because the walk is over whole directories,
+    not one store. Removals are swallowed here on purpose: the sweep is
+    best-effort maintenance and must never break a save."""
+    try:
+        from . import _gc
+        if not _sweep_due("gc", _env_int("NX_GC_SWEEP_INTERVAL",
+                                         _gc.SWEEP_INTERVAL_DEFAULT)):
+            return
+        _gc.gc_sweep()
+        # Undo snapshots of sessions that no longer exist in the store: the
+        # opt-in retention sweep (and a hand `rm` / crash) bypasses
+        # `_delete_session`'s per-sid undo hook, so orphaned
+        # `undo/<session-id>.json` files drain here, during the sweep.
+        from . import _sessiondb, _undo
+        live_ids = _sessiondb.all_ids()
+        _undo.gc_orphaned_undo_files(live_ids)
+    except Exception:
+        pass  # GC must never break a save
 
 
 def _gc_image_quota() -> int:

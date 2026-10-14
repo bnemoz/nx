@@ -50,6 +50,15 @@ from ._env import _env_int
 WEBFETCH_ENABLED = _env_int("NX_WEBFETCH", 1)
 FETCH_MAX_BYTES = _env_int("NX_WEBFETCH_MAX_BYTES", 20000)
 CACHE_TTL_SECS = _env_int("NX_WEBFETCH_CACHE_TTL", 7 * 24 * 3600)
+# The persisted cache (below) is append-rewritten: _save_cache rewrites the WHOLE
+# store on every miss, so a long-lived home grows without bound once the entry
+# count (not the TTL) is what's large. Before the rewrite, a file past this cap
+# is rewritten keeping only entries still inside CACHE_TTL_SECS (the same
+# logical TTL _ensure_cache applies on load), so cache.jsonl stays bounded.
+# NX_WEBCACHE_MAX_MB=0 disables the check. 5 MB at ~2-8 KB/page text is a few
+# thousand pages — far more than one home's session set re-reads inside a week.
+WEB_CACHE_MAX_MB = _env_int("NX_WEBCACHE_MAX_MB", 5)
+WEB_CACHE_MAX_BYTES = WEB_CACHE_MAX_MB * 1024 * 1024
 # Courtesy floor between requests to duckduckgo.com (the shared free
 # resource). Page fetches of arbitrary sites get their own per-host floor
 # (0.113.0) so repeated fetches of one site stay one polite client.
@@ -229,6 +238,97 @@ def _ensure_cache() -> None:
         pass
 
 
+# One persisted-cache entry: (key, epoch timestamp, page text, etag,
+# last-modified) — the on-disk line shape _ensure_cache() parses.
+_CacheEntry = tuple[str, float, str, str, str]
+
+
+def _cache_line(e: _CacheEntry) -> str:
+    k, t, v, etag, lm = e
+    return json.dumps({"k": k, "t": t, "v": v, "e": etag, "m": lm})
+
+
+def _cache_entries_size(entries: list[_CacheEntry]) -> int:
+    """Encoded size of `entries` as the JSONL payload (bytes, like the cap)."""
+    return sum(len(_cache_line(e).encode()) + 1 for e in entries)
+
+
+def _trim_cache_entries(entries: list[_CacheEntry], max_bytes: int,
+                        ttl_secs: float) -> list[_CacheEntry]:
+    """The size policy for the persisted cache, applied to `entries` (the one
+    implementation shared by the in-memory save and the on-disk trim).
+
+    Under the cap: unchanged. Over it: first drop entries the logical TTL has
+    already expired — exactly the ones _ensure_cache() refuses to load on the
+    next start, so dropping them costs nothing. If that alone doesn't fit,
+    keep the NEWEST entries until the payload fits (`max_bytes <= 0` disables
+    the whole policy). Newest-first truncation is the second resort only
+    because a still-fresh entry is a cache hit that costs the origin nothing.
+    """
+    if max_bytes <= 0 or not entries:
+        return entries
+    if _cache_entries_size(entries) <= max_bytes:
+        return entries
+    now = time.time()
+    fresh = [e for e in entries if 0 <= now - e[1] < ttl_secs]
+    if _cache_entries_size(fresh) <= max_bytes:
+        return fresh
+    keep: list[_CacheEntry] = []
+    size = 0
+    for e in sorted(fresh, key=lambda e: e[1], reverse=True):  # newest first
+        line = len(_cache_line(e).encode()) + 1
+        if keep and size + line > max_bytes:
+            break
+        keep.append(e)
+        size += line
+    return keep
+
+
+def _trim_persisted_cache(path: str) -> None:
+    """File-level half of the cache size guard (WEB_CACHE_MAX_BYTES): when
+    cache.jsonl is over the cap, rewrite it in place through
+    _trim_cache_entries and atomically replace. Entries a concurrent session
+    appended after our in-memory load are not in _CACHE, so the save path's
+    own trim does not cover a file that grew behind us.
+
+    Best-effort: a trim failure must never fail the tool call. Only entries
+    the policy drops are removed, and an over-cap file that is entirely fresh
+    is left alone (nothing loadable may be thrown away to hit a byte target)."""
+    if WEB_CACHE_MAX_BYTES <= 0:
+        return
+    try:
+        if os.path.getsize(path) <= WEB_CACHE_MAX_BYTES:
+            return
+        parsed: list[_CacheEntry] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    parsed.append((str(obj["k"]), float(obj["t"]), str(obj["v"]),
+                                   str(obj.get("e", "")), str(obj.get("m", ""))))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue  # corrupt line — the loader skips it too
+        kept = _trim_cache_entries(parsed, WEB_CACHE_MAX_BYTES, CACHE_TTL_SECS)
+        if kept and len(kept) == len(parsed):
+            # Over cap, but the policy found nothing to drop (a single entry
+            # bigger than the cap, or only fresh ones): leave the file alone.
+            # `kept == []` DOES rewrite — an over-cap file with nothing loadable
+            # left in it (all expired, or all corrupt lines) is pure garbage.
+            return
+        d = os.path.dirname(path)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if kept:
+                f.write("\n".join(_cache_line(e) for e in kept) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
+
+
 def _save_cache() -> None:
     """Best-effort atomic write of the whole cache (tmp+rename, 0600). A cache
     write failure must never fail the tool call."""
@@ -241,15 +341,24 @@ def _save_cache() -> None:
             os.chmod(d, 0o700)
         except OSError:
             pass
+        path = os.path.join(d, "cache.jsonl")
+        _trim_persisted_cache(path)  # file half (entries we never loaded)
         now = time.time()
-        lines = [json.dumps({"k": k, "t": now - (time.monotonic() - v[0]),
-                             "v": v[1], "e": v[2], "m": v[3]})
-                 for k, v in _CACHE.items()]
+        entries: list[_CacheEntry] = [
+            (k, now - (time.monotonic() - v[0]), v[1], v[2], v[3])
+            for k, v in _CACHE.items()]
+        kept = _trim_cache_entries(entries, WEB_CACHE_MAX_BYTES, CACHE_TTL_SECS)
+        if len(kept) != len(entries):
+            # Memory half: the entries this rewrite drops must leave _CACHE too,
+            # or the next save would write them straight back.
+            for k in {e[0] for e in entries} - {e[0] for e in kept}:
+                _CACHE.pop(k, None)
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+            if kept:
+                f.write("\n".join(_cache_line(e) for e in kept) + "\n")
         os.chmod(tmp, 0o600)
-        os.replace(tmp, os.path.join(d, "cache.jsonl"))
+        os.replace(tmp, path)
     except OSError:
         pass
 

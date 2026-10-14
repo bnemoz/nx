@@ -97,6 +97,22 @@ def create_session_worktree(session_id: str) -> tuple[str | None, str | None]:
     return wt, None
 
 
+def _session_branch_for(path: str) -> str:
+    """The session branch a session worktree path implies, from the dir name
+    create_session_worktree() gives it (`nx-wt-session-<sid>` ->
+    `nx/session-<sid>`). "" when the name carries no session id.
+
+    Needed because `git rev-parse --abbrev-ref HEAD` reports nothing for a
+    worktree created by create_session_worktree's FALLBACK (`worktree add
+    --detach <stale-branch>`): nothing is checked out there, yet the branch
+    still exists in the parent repo and would otherwise leak forever."""
+    name = os.path.basename(os.path.realpath(path).rstrip(os.sep))
+    prefix = "nx-wt-session-"
+    if name.startswith(prefix) and len(name) > len(prefix):
+        return "nx/session-" + name[len(prefix):]
+    return ""
+
+
 def remove_session_worktree(path: str) -> None:
     """Best-effort cleanup of the session's tree AND its branch. Only called
     when the session ends with nothing to keep (the normal exit path asks
@@ -112,10 +128,16 @@ def remove_session_worktree(path: str) -> None:
     except (OSError, subprocess.TimeoutExpired):
         return
     base = st.PROJECT_ROOT
-    branch = _branch_of(path) or ""  # read BEFORE remove_worktree deletes the tree
+    # Read the branch BEFORE remove_worktree deletes the tree; the path-derived
+    # name covers the detached-fallback case where rev-parse reports nothing.
+    branch = _branch_of(path) or _session_branch_for(path)
     remove_worktree(path)
     if base and branch:
         try:
+            # -D, not -d: a session's commits are merged nowhere by design (the
+            # user merges what they want to keep), so -d would always refuse and
+            # the branch would leak on every clean exit. Never raise: the tree
+            # is already gone and a leftover ref must not break the REPL exit.
             subprocess.run(["git", "-C", base, "branch", "-D", branch],
                            capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
@@ -235,6 +257,38 @@ def remove_worktree(path: str) -> None:
             pass
 
 
+def _sweep_agent_tree(path: str) -> None:
+    """Reap ONE stale per-agent tree: a live tree at the normal TTL, or a
+    `-dirty` tree at its OWN, longer one.
+
+    remove_worktree() renames a dirty tree aside to `<path>-dirty` instead of
+    destroying it (0.107.0) so a crashed worker's uncommitted work survives for
+    manual recovery — but nothing ever revisited those dirs, so they
+    accumulated forever. The rename path is therefore NOT re-entered here: a
+    dirty tree past NX_SUBAGENT_DIRTY_WORKTREE_TTL_HOURS (default 72h, vs 24h
+    for a live tree — long enough to notice and recover the work, short enough
+    that a leak is eventually removed) is deleted outright. Best-effort.
+
+    The clock is the dir's mtime, which `os.rename` preserves — so a tree that
+    was ALREADY past the dirty TTL when it was renamed aside is reaped on the
+    very next sweep, and one renamed early gets its full 72h from its last
+    write. That is the age of the WORK, which is what the TTL is about."""
+    dirty = path.rstrip(os.sep).endswith("-dirty")
+    hours = _env_int("NX_SUBAGENT_DIRTY_WORKTREE_TTL_HOURS", 72) if dirty \
+        else _env_int("NX_SUBAGENT_WORKTREE_TTL_HOURS", 24)
+    if hours <= 0:
+        return  # 0 = never sweep this kind
+    try:
+        if os.stat(path).st_mtime >= time.time() - hours * 3600:
+            return
+    except OSError:
+        return
+    if dirty:
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        remove_worktree(path)
+
+
 def sweep_stale_worktrees() -> None:
     """Reap leftover per-AGENT worktrees older than a TTL (0.103.7).
 
@@ -243,19 +297,23 @@ def sweep_stale_worktrees() -> None:
     SESSION_HOME/worktrees forever. Every write-tier spawn calls this once
     before creating its own tree: a single os.scandir pass, remove_worktree
     only on dirs whose mtime is older than NX_SUBAGENT_WORKTREE_TTL_HOURS
-    (default 24; 0 = never sweep). Session worktrees (`nx-wt-session-*`) are
-    never touched — a live session's tree must survive. Best-effort: every
+    (default 24; 0 = never sweep). A `-dirty` tree is reaped under its own
+    longer TTL by _sweep_agent_tree (NX_SUBAGENT_DIRTY_WORKTREE_TTL_HOURS).
+    Session worktrees (`nx-wt-session-*`) are never touched — a live session's
+    tree must survive. Best-effort: every
     failure is swallowed; the sweep must never break the spawn it guards.
     One `git worktree prune` at the end (if a base repo is known) so
     registrations whose dirs are already gone are swept too."""
     try:
-        hours = _env_int("NX_SUBAGENT_WORKTREE_TTL_HOURS", 24)
-        if hours <= 0:
+        # NX_SUBAGENT_WORKTREE_TTL_HOURS=0 still means "never sweep": the
+        # whole pass is skipped, dirty trees included (and no `git worktree
+        # prune` either, exactly as before). The dirty TTL only ever SHORTENS
+        # what that pass reaps, it never widens when the sweep runs.
+        if _env_int("NX_SUBAGENT_WORKTREE_TTL_HOURS", 24) <= 0:
             return
         home = st.SESSION_HOME or os.path.expanduser("~/.nx")
         import nx as _m
         root = os.path.join(home, "worktrees", _m.project_store_slug())
-        cutoff = time.time() - hours * 3600
         # sweep this project's slug dir, then (transitionally, 0.145.2)
         # only entries sitting DIRECTLY in the legacy flat parent — never
         # recursing into other projects' slug dirs, which scandir's flat
@@ -272,8 +330,7 @@ def sweep_stale_worktrees() -> None:
                 try:  # per-entry: one unreadable dir must not stop the sweep
                     if not e.is_dir(follow_symlinks=False):
                         continue
-                    if e.stat(follow_symlinks=False).st_mtime < cutoff:
-                        remove_worktree(e.path)
+                    _sweep_agent_tree(e.path)
                 except OSError:
                     continue
         base = st.PROJECT_ROOT

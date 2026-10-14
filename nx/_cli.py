@@ -56,6 +56,10 @@ Commands:
                  --json]; exit 0 when all scenarios pass).
   update         Upgrade nx in place via its package manager (uv tool /
                  pipx / pip), or just report the install with --check.
+  gc             Report (default) or apply the artifact retention rules over
+                 the side-effect files under NX_HOME (sub-agent reports, undo
+                 snapshots, usage.jsonl, the web cache). Dry run by default;
+                 `nx gc --all` is the only flag that deletes.
 
 Options:
   -p, --prompt <text>       One-shot: run <text> as a prompt and exit (same as
@@ -151,7 +155,7 @@ def _cli_version() -> str:
         return "unknown"
 
 
-_VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup", "update")
+_VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune", "setup", "update", "gc")
 
 
 def _commands_markdown() -> str:
@@ -362,6 +366,16 @@ def main() -> None:
     if sys.argv[1:2] == ["update"]:
         from ._update import _cli_update
         sys.exit(_cli_update(sys.argv[2:]))
+    # `nx gc [--all]` — the artifact-GC command (nx/_gc_cmd.py, rules in
+    # nx/_gc.py). Purely local filesystem work over NX_HOME, so it dispatches
+    # before the onboarding/source path (nx/__init__.py skips switch_source()'s
+    # probes for this verb too); the env file still loads first so ~/.env
+    # NX_GC_* / NX_USAGE_LOG_MAX_MB / NX_WEBCACHE_MAX_MB knobs apply.
+    if sys.argv[1:2] == ["gc"]:
+        from ._env import _load_env_file
+        _load_env_file()
+        from ._gc_cmd import _cli_gc
+        sys.exit(_cli_gc(sys.argv[2:]))
     if sys.argv[1:2] != ["config"]:
         from ._env import _load_env_file
         _load_env_file()

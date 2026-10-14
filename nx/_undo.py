@@ -266,11 +266,55 @@ def delete_persisted_for(session_id: str | None) -> None:
     snapshots hold whole pre-edit file contents — up to MAX_UNDO_BYTES each,
     often secrets — so /delete and --prune must not leave them behind.
     (/reset deliberately KEEPS the old session's file: a later /resume of it
-    should still have its undo history — 0.128.3.)"""
+    should still have its undo history — 0.128.3.)
+
+    Phase 3 (GC): both the REPL `/delete` and the fullscreen browser's delete
+    call `_sessions_fs._delete_session`, which is the single deletion entry
+    point — it calls this. The `nx sessions --prune` sweep ALSO calls this per
+    dead sid, so a file leaked by an old /delete (predating the hook) or by a
+    hand-rm'd session is still collected. This function stays the one place
+    that knows the undo file layout."""
     try:
         os.unlink(undo_path_for(session_id))
     except OSError:
         pass
+
+
+def gc_orphaned_undo_files(live_ids) -> int:
+    """The self-contained half of the undo GC: walk `<SESSION_HOME>/undo` and
+    remove every per-session file whose id is NOT in `live_ids` (the ids the
+    store still holds). Returns how many were removed. The legacy shared
+    `<SESSION_HOME>/undo.json` is never touched — it is not a per-session file
+    at all (it does not even live in that dir).
+
+    Why this exists next to `delete_persisted_for` rather than only at the
+    deletion entry points: a session can disappear WITHOUT going through
+    `_sessions_fs._delete_session` — the opt-in retention sweep
+    (`_sessiondb.retention_sweep`, the NX_SESSION_RETAIN_* age gates) deletes
+    rows straight from the store, and a hand `rm` or a crash loses one too.
+    Those sessions used to strand their whole-content snapshot file forever,
+    which is the leak this closes (`nx sessions --prune` already reconciles by
+    hand; this gives any caller the same one-call form). Best-effort: an
+    unreadable file or dir is skipped, never an error."""
+    removed = 0
+    try:
+        d = os.path.join(st.SESSION_HOME, "undo")
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    keep = set(live_ids)
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        sid = name[:-len(".json")]
+        if sid in keep:
+            continue
+        try:
+            os.unlink(os.path.join(d, name))
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _mark_dirty() -> None:

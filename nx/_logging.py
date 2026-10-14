@@ -36,6 +36,14 @@ LOG_MAX_BYTES = _env_int("NX_LOG_MAX_BYTES", 10000000)
 # NX_USAGE_LOG=0 disables every emitter at the flag check below.
 USAGE_PATH = os.path.join(st.SESSION_HOME, "logs", "usage.jsonl")
 USAGE_LOG = _env_int("NX_USAGE_LOG", 1) != 0
+# usage.jsonl is one line per tool call / model call / agent lifecycle event, so
+# it grows monotonically and was NEVER trimmed (the request-log rotation below
+# only covered llamacpp.log). Size-based rotation, same policy as the request
+# log — rotate to usage.jsonl.1 (replacing any older .1) before the append that
+# would cross the cap. NX_USAGE_LOG_MAX_MB=0 disables rotation, same as
+# NX_LOG_MAX_BYTES=0. Lower default than the request log (5 MB vs 10 MB): the
+# usage stream is greppable telemetry, not a byte-level forensic record.
+USAGE_MAX_BYTES = _env_int("NX_USAGE_LOG_MAX_MB", 5) * 1024 * 1024
 
 # Swarm P4: the request log json.dumps's the ENTIRE prompt (and httpx
 # serializes it again for the wire) on every model call — pure harness CPU on
@@ -138,7 +146,7 @@ class _AsyncLogWriter:
 _llog = _AsyncLogWriter(LOG_PATH, LOG_MAX_BYTES)
 atexit.register(_llog.flush)
 
-_ulog = _AsyncLogWriter(USAGE_PATH, LOG_MAX_BYTES)
+_ulog = _AsyncLogWriter(USAGE_PATH, USAGE_MAX_BYTES)
 atexit.register(_ulog.flush)
 
 
