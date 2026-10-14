@@ -463,3 +463,50 @@ def test_e2e_midstream_http_error_frame(tmp_path, monkeypatch):
         _assert_honest_cut(summary, messages, start_idx=2)
     finally:
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# 5. cap-rescue forced-final turn that answers NOTHING -> honest error, cap
+# ---------------------------------------------------------------------------
+
+# Same pinned invariant, at the forced-final rescue seam: the turn-limit
+# rescue asks the model for its final answer and it emits an EMPTY
+# final_answer (no answer text, no actionable call). The handler used to
+# return TURN_DONE, so the loop reported the run as a clean "cap"; since
+# 0.154.7 it returns the honest TURN_GAVE_UP and the loop maps it to status
+# "error" with the stream-cut/give-up message — a silent non-answer is not a
+# result. (The final_answer-present rescue still ends TURN_DONE -> "cap".)
+def test_e2e_forced_final_empty_answer_honest_error(tmp_path, monkeypatch):
+    server = _StubServer([
+        # loop step 1: a real tool turn, so the loop walks into the turn cap
+        {"frames": _tool_call_frames(
+            "run_bash", {"command": "echo ok > e2e_ff_marker.txt"})},
+        # the cap rescue (forced_final=True): final_answer with an EMPTY
+        # answer and nothing else — the model produced no final answer and
+        # no actionable call
+        {"frames": _tool_call_frames("final_answer", {"answer": ""})},
+    ])
+    server.start()
+    try:
+        _stub_env(server, tmp_path, monkeypatch)
+        messages = m._initial_messages() + [{"role": "user", "content": INSTRUCTION}]
+        summary = m._run_model_turn_loop(messages, on_step=None,
+                                         max_turns_override=1)
+        # The old dishonesty: empty forced-final -> TURN_DONE -> status "cap"
+        # (headless exit 3, a scored partial-but-real result). The honest
+        # mapping is the give-up "error" (headless exit 4), never "cap".
+        assert summary["status"] == "error", (
+            "an empty forced-final rescue must not score cap/done: "
+            f"{summary}")
+        err = (summary.get("error") or "").lower()
+        assert "stream cut" in err and "forced-final" in err, summary
+        # the recorded cause names the actual failure, not silence
+        cause = m._turn._LAST_GIVE_UP_CAUSE.lower()
+        assert "no final_answer" in cause, m._turn._LAST_GIVE_UP_CAUSE
+        # (b) the handler-level vocabulary on the same script: the rescue
+        # call itself returns TURN_GAVE_UP, not TURN_DONE. The stub re-
+        # serves its last turn, so this replays the empty final_answer.
+        status = m.model_turn(messages, forced_final=True)
+        assert status == TURN_GAVE_UP, status
+    finally:
+        server.stop()

@@ -3,7 +3,9 @@
 `nx_state_reset` is the cheap, per-test teardown that resets the four state
 homes a module-dict rewind cannot see (sub-agent TLS, the async registry and
 its live workers, the notices ContextVar, the recovery store) plus the rich
-Live stack leak. It is autouse for every test via the re-export in
+Live leak (`_drain_shared_console_live`: *stops* each leaked Live, then clears
+the stack and restores a capture-swapped console file). It is autouse for every
+test via the re-export in
 conftest.py; conftest's expensive `nx.*` module-dict rewind is additionally
 gated behind the `globals` marker, so Tier A files (listed nowhere below and
 not marked) skip the walk entirely.
@@ -360,17 +362,78 @@ def nx_state_reset_body() -> None:
         defaults = getattr(st, "_NOTICE_DEFAULTS", {})
         for slot in _pending_slots(st):
             no.set_(slot, defaults.get(slot))
-    # A Live leaked by a dashboard test stays on the shared console's stack,
-    # which reroutes every later cprint through rich — invisible to the
-    # suite's builtins.print captures (the test_preview_visibility flake).
+    # The leaked-Live drain — COMPLETE (0.154.5). A Live leaked by a dashboard
+    # test keeps the shared console in live mode: every later `nx._rich.cprint`
+    # sees a non-empty `Console._live_stack` and takes the rich branch
+    # (nx/_rich.py:271), composing the line into the dead Live's frame instead
+    # of calling builtins.print — invisible to the suite's captures (the
+    # test_preview_visibility flake). Clearing the list was NOT enough: the Live
+    # object never ran stop(), so rich's own rendering state (the cursor-hiding
+    # render hook pushed on the console, `Live._started`, the alt-screen
+    # bookkeeping) stayed live, and the next Live on the same console composed
+    # as `_nested` against a frame nobody erases.
+    # STOP each leaked Live first (Live.stop() pops the stack via clear_live(),
+    # pops the render hook, restores the cursor and, for a transient Live,
+    # erases the frame) and only then clear whatever a half-crashed stop left.
     rich = sys.modules.get("nx._rich")
     if rich is not None:
         try:
-            stack = getattr(rich.shared_console(), "_live_stack", None)
-            if stack:
-                stack.clear()
+            _drain_shared_console_live(rich)
         except Exception:
             pass
+
+
+def _drain_shared_console_live(rich) -> None:
+    """STOP then clear every Live left on the shared console's stack, and
+    restore the console's `file` before it is handed to the next test.
+
+    `rich` is the live `nx._rich` module (resolved by the caller through
+    sys.modules, so a forked/reloaded module is drained too). Everything here
+    is defensive: this runs as teardown on mid-crash state and must never raise
+    into the next test.
+    """
+    console = rich.shared_console()
+    stack = getattr(console, "_live_stack", None)
+    if stack:
+        # stop() mutates the stack (clear_live -> pop), so walk a snapshot.
+        # Reversed: rich's stack is a stack, and stopping an outer Live before
+        # an inner one leaves the inner one's render state attached.
+        for live in list(stack)[::-1]:
+            try:
+                live.stop()
+            except Exception:
+                pass
+        stack = getattr(console, "_live_stack", None)
+        if stack:
+            # A Live whose stop() raised (or a fake that only records calls)
+            # can still be pinned here. `_started` False is what a later
+            # start() reads to decide `_nested`, and what rich's
+            # `Console.print` path consults, so flip it before the clear.
+            for live in list(stack):
+                try:
+                    live._started = False
+                except Exception:
+                    pass
+            stack.clear()
+    # A test that captured console output by swapping `con.file` (see
+    # captured_console_output above) and then died before its finally ran
+    # leaves the SHARED console writing into a dead StringIO: every later
+    # cprint's rich branch disappears there, and `Console.file` is a lazy
+    # property over `_file` (rich: `self._file or sys.stdout`). Only a capture
+    # buffer is reset — a real file object is someone's deliberate
+    # redirection and is left alone.
+    try:
+        if isinstance(getattr(console, "_file", None), io.StringIO):
+            console._file = None
+    except Exception:
+        pass
+    # NOT touched here: `nx._turn_footer._say_console`. It is the same
+    # singleton by construction (nx/_turn_footer.py:33 `_say_console =
+    # _shared_console()`), and re-binding it from teardown is actively wrong:
+    # test_preview_visibility's `_no_live` fixture monkeypatches
+    # `shared_console()` for the duration of a test, so a rebind here would
+    # pin the throwaway console on the footer — the very leak 0.154.2 fixed
+    # (see test_captured_console_output_restores_none_say_console).
 
 
 def _pending_slots(st) -> list[str]:

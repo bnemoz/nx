@@ -99,12 +99,21 @@ def test_forced_final_actionable_tool_call_executes():
     with _Patched([_FakeChunk(_FakeDelta(tool_calls=[
             _FakeTC(0, "call_1", "run_bash", json.dumps({"command": "echo hi"}))]))]):
         messages = _messages()
+        start = len(messages)          # hermetic: inspect only the appended slice
         status = m.model_turn(messages, forced_final=True)
     assert status == m.TURN_TOOL, f"expected TURN_TOOL, got {status!r}"
-    # assistant tool_call turn + tool observation were appended
-    assert messages[-1]["role"] == "tool", messages[-1]
-    assert messages[-2]["role"] == "assistant" and messages[-2].get("tool_calls")
-    assert "hi" in messages[-1]["content"], messages[-1]["content"][:200]
+    appended = messages[start:]
+    # answer to the issued call, located by tool_call_id — never by position
+    tool = [x for x in appended if x.get("role") == "tool"
+            and x.get("tool_call_id") == "call_1"]
+    assert len(tool) == 1, appended
+    assert "hi" in tool[0]["content"], tool[0]["content"][:200]
+    # the assistant turn carrying the call was appended too
+    assert any(x.get("role") == "assistant" and
+               any(tc.get("id") == "call_1" for tc in x.get("tool_calls") or [])
+               for x in appended), appended
+    # no unexpected appended messages: only assistant/tool kinds
+    assert all(x.get("role") in ("assistant", "tool") for x in appended), appended
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +126,17 @@ def test_forced_final_text_actionable_tool_call_executes():
             '{"command": "echo hi"}}' + closer)
     with _Patched([_FakeChunk(_FakeDelta(content=text))]):
         messages = _messages()
+        start = len(messages)          # hermetic: inspect only the appended slice
         status = m.model_turn(messages, forced_final=True)
     assert status == m.TURN_TOOL, f"expected TURN_TOOL, got {status!r}"
-    assert any(msg.get("role") == "assistant" and "run_bash" in (msg.get("content") or "")
-               for msg in messages), "assistant tool-call turn missing"
-    assert messages[-1]["role"] == "user" and "Observation (run_bash)" in messages[-1]["content"]
+    appended = messages[start:]
+    assert any(x.get("role") == "assistant" and "run_bash" in (x.get("content") or "")
+               for x in appended), "assistant tool-call turn missing"
+    # the observation landed as a user turn — asserted by kind, not index
+    assert any(x.get("role") == "user" and "Observation (run_bash)" in (x.get("content") or "")
+               for x in appended), appended
+    # no unexpected appended messages: only assistant/user kinds
+    assert all(x.get("role") in ("assistant", "user") for x in appended), appended
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +148,18 @@ def test_forced_final_mixed_calls_execute_actionable():
             _FakeTC(0, "c1", "final_answer", empty_final),
             _FakeTC(1, "c2", "run_bash", json.dumps({"command": "echo hi"}))]))]):
         messages = _messages()
+        start = len(messages)          # hermetic: inspect only the appended slice
         status = m.model_turn(messages, forced_final=True)
     assert status == m.TURN_TOOL, f"expected TURN_TOOL, got {status!r}"
-    assert messages[-1]["role"] == "tool"
+    appended = messages[start:]
+    # the actionable call was executed: the tool message answers call c2,
+    # located by tool_call_id — never by position
+    tool = [x for x in appended if x.get("role") == "tool"
+            and x.get("tool_call_id") == "c2"]
+    assert len(tool) == 1, appended
+    assert "hi" in tool[0]["content"], tool[0]["content"][:200]
+    # no unexpected appended messages: only assistant/tool kinds
+    assert all(x.get("role") in ("assistant", "tool") for x in appended), appended
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +247,17 @@ def test_forced_final_answer_still_done():
 
 
 # ---------------------------------------------------------------------------
-# 7. empty final_answer, nothing else → DONE with the empty message (unchanged)
+# 7. empty final_answer, nothing else → honest give-up (0.154.7: nothing was
+# produced, so headless callers must not score the silent non-answer as done)
 # ---------------------------------------------------------------------------
-def test_forced_final_empty_answer_still_done():
+def test_forced_final_empty_answer_gives_up():
+    from nx import _turn
     with _Patched([_FakeChunk(_FakeDelta(tool_calls=[
             _FakeTC(0, "f1", "final_answer", json.dumps({"answer": ""}))]))]):
         messages = _messages()
         status = m.model_turn(messages, forced_final=True)
-    assert status == m.TURN_DONE, f"expected TURN_DONE, got {status!r}"
+    assert status == m.TURN_GAVE_UP, f"expected TURN_GAVE_UP, got {status!r}"
+    assert "no final_answer" in _turn._LAST_GIVE_UP_CAUSE
 
 
 if __name__ == "__main__":

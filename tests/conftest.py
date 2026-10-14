@@ -426,11 +426,16 @@ def pytest_runtest_teardown(item, nextitem):
 # Workers execute pytest_runtest_protocol themselves (xdist/remote.py), so
 # this works under -n auto. Exactly one attempt's reports are logged, so
 # the controller's per-item report stream is unchanged.
-# 0.154.2 pruned the three test_preview_visibility entries (root cause: the
-# rebuilt_shared_console old_say restore skipped a legitimate None) and
-# test_batch_run's parallel-totals entry (root cause: st._METRICS_TLS was
-# drained by no one; the test hand-cleared it) - both fixed in
+# 0.154.2 pruned test_batch_run's parallel-totals entry (root cause:
+# st._METRICS_TLS was drained by no one; the test hand-cleared it) - fixed in
 # nx_state_reset_body now; no hand-clearing needed.
+# 0.154.5/0.154.7 preview_visibility saga: the leaked-Live drain was real and
+# is now complete (`_live_stack.clear()` never ran `Live.stop()`, so rich's
+# render hook, `Live._started`, and a capture-swapped `con.file` survived —
+# nx_state_reset_body now stops each Live; see test_state_reset_contract.py),
+# but the trio still fails under packing (0.154.7, idle box). The entries
+# STAY; open theory: process-global st.YOLO/APPROVE_LEVEL forced by a
+# sub-agent worker (nx/_subagent.py ~1224), inherited by a later Tier-A test.
 _FLAKY_RERUN_NODEIDS = (
     "tests/test_git_index_guard.py::test_gitcommit_staged_wip_does_not_prompt_this_session",
     # Load-sensitivity set (each passes standalone and on immediate rerun;
@@ -439,17 +444,19 @@ _FLAKY_RERUN_NODEIDS = (
     # that (a) passes standalone and (b) is in a file listed here.
     "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
     "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
-    # Re-added 0.154.4: 0.154.2 pruned these for the old_say restore fix, but
-    # all three failed together once under -n 8 at normal (17s) wall after the
-    # fix — necessary, not sufficient. Passes standalone + both serial orders;
-    # the deeper root cause (incomplete leaked-Live drain: _live_stack clears,
-    # the Live object / con.file do not) stays open.
+    # 0.154.7 pruned the three test_forced_final_recovery entries: the tests
+    # asserted positional messages[-1] identity while spawning real run_bash,
+    # so any late append flipped them; they now locate tool observations by
+    # tool_call_id inside the appended slice (no positional pins, no sleeps).
+    # 0.154.7: preview_visibility trio RE-added — the completed Live drain did
+    # not retire it (trio failed on an idle box with the drain merged). Open
+    # root cause (next probe, per agent-7's evidence): a sub-agent worker
+    # forces process-global st.YOLO=True / APPROVE_LEVEL at nx/_subagent.py
+    # ~1224 and a Tier-A later test on the same worker inherits it, so
+    # _confirm's quiet path auto-allows and the approval preview never prints.
     "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
     "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
     "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
-    "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
-    "tests/test_forced_final_recovery.py::test_forced_final_text_actionable_tool_call_executes",
-    "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
     # 0.154.5: same finish-line race family as the entry above (ledger §5.0:
     # "event_taps start-vs-finish tap ordering") — the finished-agent snapshot

@@ -87,7 +87,12 @@ def _handle_forced_final_tool_call(messages: list[Message], tcs: dict, text: str
                                          malformed_stream_cut_count)
     if not quiet:
         print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")
-    return TURN_DONE
+    # 0.154.7: the rescue turn produced no final_answer and no actionable call
+    # — nothing usable, so TURN_DONE here scored a silent non-answer as a clean
+    # pass for every headless caller (same rule as the malformed ladders above).
+    from ._turn import _gave_up  # lazy: _turn imports this module
+    return _gave_up("forced-final answer turn produced no final_answer and no "
+                    "actionable call")
 
 
 def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[str, dict]],
@@ -120,7 +125,12 @@ def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[s
         return delegated if delegated is not None else TURN_DONE
     if not quiet:
         print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")
-    return TURN_DONE
+    # 0.154.7: the rescue turn produced no final_answer and no actionable call
+    # — nothing usable, so TURN_DONE here scored a silent non-answer as a clean
+    # pass for every headless caller (same rule as the malformed ladders above).
+    from ._turn import _gave_up  # lazy: _turn imports this module
+    return _gave_up("forced-final answer turn produced no final_answer and no "
+                    "actionable call")
 
 
 def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, finish_reasons: Any,
