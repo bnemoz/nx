@@ -356,6 +356,17 @@ def nx_state_reset_body() -> None:
         ptls = getattr(st, "_POSTURE_TLS", None)
         if ptls is not None:
             ptls.__dict__.clear()
+    # 0.156.0: the per-TASK model routing target (`_subagent_model
+    # .call_target_scope` / `_CALL_TARGET_TLS`). Same shape as _POSTURE_TLS —
+    # installed by the scope and deleted in its finally, so a task that died
+    # between install and restore (or a test driving the scope by hand) would
+    # route EVERY later model call on this worker thread at the batch task's
+    # endpoint. Resolved through sys.modules for the same reload reason.
+    sm = sys.modules.get("nx._subagent_model")
+    if sm is not None:
+        ctls = getattr(sm, "_CALL_TARGET_TLS", None)
+        if ctls is not None:
+            ctls.__dict__.clear()
     # 0.155.1: the eventsink homes. _SINKS/_RETAINED_TAILS are keyed by job id
     # and read through the module attrs (sink_for/retained_tail), so a sink a
     # prior file registered (or a retained tail its worker's finally left)

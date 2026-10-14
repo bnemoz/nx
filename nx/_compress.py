@@ -234,14 +234,26 @@ def open_stream(
     # 0.86.0: sub-agent loops ride their own (client, model, extra) when
     # NX_SUBAGENT_SOURCE/_MODEL are set — resolved per-thread from the
     # agent's _SubagentContext, so concurrent agents never swap globals.
+    # 0.156.0: a BATCH TASK rides its own target too, installed on the worker
+    # thread by `_subagent_model.call_target_scope` (a dedicated slot — a batch
+    # task is a full agent and must never set `_SUBAGENT_TLS.ctx`). Resolution
+    # order: ctx target → batch call-target TLS → globals.
     # Everything downstream (window clamp, ladder pinning, the request)
     # uses this target instead of the parent's st.ACTIVE/st.MODEL.
-    target = None
     from ._subagent import _subagent_ctx
+    from ._subagent_model import call_target as _call_target
+    target = None
     ctx = _subagent_ctx()
     if ctx is not None:
         target = ctx.model_target
-    if target is not None and st.client is not None and st.MODEL is not None:
+    if target is None:
+        target = _call_target()
+    if target is not None:
+        # The resolved tuple is used UNCONDITIONALLY: the old guard also
+        # required st.client/st.MODEL to be set, which silently dropped a
+        # routed target (batch task, and a sub-agent outside a configured
+        # process too) back onto the globals. The tuple is complete by
+        # construction — client and model are what the producers validate.
         call_client, call_model, call_extra, call_src = target
     else:
         # Regression fix (0.103.2): 0.86.0 hardcoded call_extra=None here,
@@ -280,7 +292,7 @@ def open_stream(
     try:
         _prune_empty_assistant_messages(messages)
         token_limit = MAX_COMPLETION_TOKENS if max_tokens is None else max_tokens
-        token_limit = _clamp_max_tokens(messages, token_limit)
+        token_limit = _clamp_max_tokens(messages, token_limit, call_src)
         request_opts: dict[str, Any] = {}
         if token_limit > 0:
             request_opts["max_tokens"] = token_limit
@@ -298,7 +310,7 @@ def open_stream(
         # branches below carry it through unchanged.
         if call_extra:
             request_opts.update(call_extra)
-        grammar_extra = _grammar_extra_body(tools)
+        grammar_extra = _grammar_extra_body(tools, call_src)
         if grammar_extra:
             # Merge (not overwrite) — a source's own extra_body (e.g.
             # OpenRouter provider routing) must survive alongside grammar.
@@ -424,25 +436,33 @@ def _keep_target_tokens(auto: bool) -> int:
     return window // 4
 
 
-def _compress_call_target() -> tuple[Any, str, dict[str, Any]]:
-    """(client, model, extra_request_kwargs) for the summary call (2.4d).
+def _compress_call_target() -> tuple[Any, str, dict[str, Any], Any]:
+    """(client, model, extra_request_kwargs, pin_src) for the summary call (2.4d).
     NX_COMPRESS_SOURCE[/NX_COMPRESS_MODEL] routes the fold to a cheaper
     endpoint; anything unset/unknown falls back to the active source. The
-    fold target is never probed or switched-to — it is used as-is."""
+    fold target is never probed or switched-to — it is used as-is.
+
+    The 4th element is the Source the fold rides (None when unknown/none), so
+    the window clamp below is keyed to the FOLD's window rather than the
+    process default's (0.156.0) — the same threading open_stream does."""
     name = (st.COMPRESS_SOURCE or "").strip()
     if name:
         src = st.SOURCES.get(name)
         if src is not None:
             model = st.COMPRESS_MODEL or src.model
             if model:
-                return src.client, model, src.extra_request_kwargs()
+                pin_src = src if hasattr(src, "_request_shapes") else None
+                return (src.client, model, src.extra_request_kwargs(model), pin_src)
         from ._subagent import _subagent_quiet
         if not _subagent_quiet() and not st._COMPRESS_SOURCE_WARNED:
             st._COMPRESS_SOURCE_WARNED = True
             print(f"{C.WARNING}  ↳ NX_COMPRESS_SOURCE={name!r} unusable — folding "
                   f"on {getattr(st.ACTIVE, 'name', 'the active source')}{RESET}")
     return (st.client, st.MODEL,  # pyrefly: ignore[bad-return]  # Any-typed client
-            st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {})
+            # No model argument: the default IS st.MODEL, and the globals arm
+            # must keep working for duck-typed source stand-ins (tests, the
+            # embedded surfaces) that predate the 0.156.0 parameter.
+            st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}, st.ACTIVE)
 
 
 def _spill_tool_results(messages: list[dict[str, Any]], pins: set[int],
@@ -678,7 +698,7 @@ def compress(
     # 2.4d: route the fold to a cheaper endpoint when configured; the summary
     # answer itself is bounded (2.4e) by NX_COMPRESS_SUMMARY_TOKENS, clamped
     # by the same window-aware rule open_stream uses (1.8).
-    _client, _model, _extra = _compress_call_target()
+    _client, _model, _extra, _src = _compress_call_target()
     # A fold is a one-shot mechanical digest — thinking burns max_tokens
     # without contributing. Attach the common off-toggles (harmlessly ignored
     # by servers that don't know them, same convention as _thinking.py's
@@ -689,7 +709,7 @@ def compress(
     _body["chat_template_kwargs"].setdefault("thinking", False)
     _body["chat_template_kwargs"].setdefault("enable_thinking", False)
     _extra = {**_extra, "extra_body": _body}
-    _max_tokens = _clamp_max_tokens(payload, st.COMPRESS_SUMMARY_TOKENS)
+    _max_tokens = _clamp_max_tokens(payload, st.COMPRESS_SUMMARY_TOKENS, _src)
     try:
         _log_event("req", {"model": _model, "messages": payload, "stream": False,
                            "max_tokens": _max_tokens, "_purpose": "compress"})

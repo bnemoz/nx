@@ -142,11 +142,18 @@ class Source:
         # string) or the /provider slash command (ephemeral, per-session).
         self.extra_body = extra_body or None
 
-    def extra_request_kwargs(self) -> dict[str, Any]:
+    def extra_request_kwargs(self, model: str | None = None) -> dict[str, Any]:
         """extra_body kwarg to merge into every chat.completions.create(), or
         {} when none is configured. Non-consumers ignore unknown body keys, so
         this is a no-op for backends that don't understand it (llama.cpp,
-        Together, …)."""
+        Together, …).
+
+        `model` is the model id the CALL will ride (0.156.0): thinking
+        separation is keyed by model id, so a routed caller (a batch task on
+        this source, a sub-agent under another model) passes ITS model rather
+        than silently reading the process default. Defaults to ``st.MODEL`` —
+        the process-active model — so callers with no routing keep the exact
+        pre-0.156.0 behavior."""
         body: dict[str, Any] = {}
         if self.extra_body:
             # Deep copy (not the shallow dict-update) so the thinking merge
@@ -157,7 +164,8 @@ class Source:
         # overwrite) so a source's own configured EXTRA_BODY survives alongside
         # it — same precedence rule the grammar attach in open_stream() uses.
         from ._thinking import thinking_kwargs
-        tk = thinking_kwargs(self, st.MODEL) if st.MODEL else None
+        mid = model or st.MODEL
+        tk = thinking_kwargs(self, mid) if mid else None
         if tk:
             for k, v in tk.items():
                 if isinstance(v, dict) and isinstance(body.get(k), dict):

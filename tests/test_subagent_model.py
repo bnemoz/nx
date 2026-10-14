@@ -205,3 +205,264 @@ def test_install_resolves_env_knobs(nx_env):
     ctx2 = _SubagentContext({}, quiet=True)
     install(ctx2)
     assert ctx2.model_target is None
+
+
+# --- 0.156.0 phase M: the per-TASK call target (batch tasks) -------------------
+# `call_target_scope` is the batch-task sibling of NX_SUBAGENT_*: the task's
+# resolved 4-tuple lives on the worker thread and open_stream() prefers it over
+# the process globals. Same fake-client pattern as above — nothing hits a wire.
+
+
+def test_call_target_scope_sets_and_restores(nx_env):
+    """Scope installs the target for the body and DELETES it afterwards, so
+    'no target' stays observable (the _posture_scope contract)."""
+    from nx._subagent_model import call_target, call_target_scope
+    t = (_FakeClient(), "task-model", {}, None)
+    assert call_target() is None
+    with call_target_scope(t):
+        assert call_target() is t
+    assert call_target() is None
+    assert not hasattr(__import__("nx._subagent_model", fromlist=["x"])._CALL_TARGET_TLS,
+                       "target")
+
+
+def test_call_target_scope_nests_and_restores_prev(nx_env):
+    """scope inside scope restores the OUTER target, not None — and None means
+    INHERIT (nothing installed), so a nested None body keeps seeing the outer."""
+    from nx._subagent_model import call_target, call_target_scope
+    inner_client, outer_client = _FakeClient(), _FakeClient()
+    outer = (outer_client, "outer-model", {}, None)
+    inner = (inner_client, "inner-model", {}, None)
+    with call_target_scope(outer):
+        assert call_target() is outer
+        with call_target_scope(inner):
+            assert call_target() is inner
+        assert call_target() is outer
+        with call_target_scope(None):
+            assert call_target() is outer  # None = inherit, installs nothing
+        assert call_target() is outer
+    assert call_target() is None
+
+
+def test_call_target_scope_restores_on_exception(nx_env):
+    from nx._subagent_model import call_target, call_target_scope
+    t = (_FakeClient(), "task-model", {}, None)
+    with pytest.raises(RuntimeError):
+        with call_target_scope(t):
+            raise RuntimeError("boom")
+    assert call_target() is None
+
+
+def test_open_stream_prefers_ctx_over_call_target(nx_env):
+    """Resolution order ctx > batch TLS: a sub-agent body running INSIDE a batch
+    task must ride its OWN target, never the task's."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent import _SubagentContext, _SUBAGENT_TLS
+    from nx._subagent_model import call_target_scope
+
+    parent_client, task_client, agent_client = _FakeClient(), _FakeClient(), _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    ctx = _SubagentContext({}, quiet=True)
+    ctx.model_target = (agent_client, "agent-model", {}, None)
+    with call_target_scope((task_client, "task-model", {}, None)):
+        _SUBAGENT_TLS.ctx = ctx
+        try:
+            cp.open_stream([{"role": "user", "content": "hi"}], tools=[])
+        finally:
+            _SUBAGENT_TLS.ctx = None
+    assert [r["model"] for r in agent_client.chat.completions.requests] == ["agent-model"]
+    assert not task_client.chat.completions.requests
+    assert not parent_client.chat.completions.requests
+
+
+def test_open_stream_uses_call_target_over_globals(nx_env):
+    """A batch-task target wins over the globals — and its own extra body is
+    what rides the wire (the tuple's call_extra, not st.ACTIVE's)."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent_model import call_target_scope
+
+    parent_client, task_client = _FakeClient(), _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    task_extra = {"extra_body": {"provider": {"order": ["task-endpoint"]}}}
+    with call_target_scope((task_client, "task-model", task_extra, None)):
+        cp.open_stream([{"role": "user", "content": "hi"}], tools=[])
+    reqs = task_client.chat.completions.requests
+    assert len(reqs) == 1 and reqs[0]["model"] == "task-model"
+    assert reqs[0]["extra_body"]["provider"] == {"order": ["task-endpoint"]}
+    assert not parent_client.chat.completions.requests
+
+
+def test_open_stream_call_target_with_unconfigured_globals(nx_env):
+    """The guard fix: a task target reaches the wire even when st.client/
+    st.MODEL are unset (the old guard demanded globals and silently fell back)."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent_model import call_target_scope
+
+    task_client = _FakeClient()
+    nx._state.client = None
+    nx._state.MODEL = None
+    nx._state.ACTIVE = None
+    with call_target_scope((task_client, "task-model", {}, None)):
+        cp.open_stream([{"role": "user", "content": "hi"}], tools=[])
+    assert [r["model"] for r in task_client.chat.completions.requests] == ["task-model"]
+
+
+def test_open_stream_without_any_target_uses_globals(nx_env):
+    """Unrouted path unchanged: no ctx, no scope → globals, exactly as before."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+
+    parent_client = _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    nx._state.ACTIVE = None
+    cp.open_stream([{"role": "user", "content": "hi"}], tools=[])
+    assert [r["model"] for r in parent_client.chat.completions.requests] == ["parent-model"]
+
+
+def test_bare_model_agent_inside_scope_rides_scope_client(nx_env):
+    """Inherit-chain fix: a sub-agent with only a bare model id inside a batch
+    task rides the TASK's client (run → task → agent), not the run's globals."""
+    nx, tmp = nx_env
+    from nx._subagent_model import call_target_scope, subagent_call_target
+    from nx._subagent import _SubagentContext
+    from nx._sources import Source
+
+    parent_client, task_client = _FakeClient(), _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    task_src = Source("task", "http://task/v1", "k", model="task-src-model")
+    task_src.client = task_client
+    ctx = _SubagentContext({}, quiet=True)
+    nx.NX_SUBAGENT_MODEL = "pooled-model"
+    with call_target_scope((task_client, "task-model", {}, task_src)):
+        t = subagent_call_target()
+    nx.NX_SUBAGENT_MODEL = ""
+    assert t is not None
+    assert t[0] is task_client and t[1] == "pooled-model"
+    assert t[3] is task_src  # ladder memory stays the task endpoint's
+
+
+def test_bare_model_agent_outside_scope_still_rides_parent(nx_env):
+    """The pre-0.156.0 default is untouched: no scope → parent globals."""
+    nx, tmp = nx_env
+    from nx._subagent_model import subagent_call_target
+
+    parent_client = _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    nx._state.ACTIVE = None
+    nx.NX_SUBAGENT_MODEL = "glm-5.3-flash"
+    try:
+        t = subagent_call_target()
+    finally:
+        nx.NX_SUBAGENT_MODEL = ""
+    assert t is not None and t[0] is parent_client
+
+
+class _WindowSrc:
+    """Duck-typed source stand-in whose window the clamp must follow."""
+
+    def __init__(self, window):
+        self._window = window
+        self._request_shapes = {}
+        self._capability = None
+
+    def resolve_context_window(self):
+        return self._window
+
+    def extra_request_kwargs(self, model=None):
+        return {}
+
+
+def test_routed_target_clamp_follows_target_window(nx_env):
+    """The _request_opts wart fix: a routed target is clamped by ITS source's
+    window, not the process default's. Two sources, two windows — the wire's
+    max_tokens must follow the TARGET."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent_model import call_target_scope
+
+    parent_client, small_client = _FakeClient(), _FakeClient()
+    nx._state.client = parent_client
+    nx._state.MODEL = "parent-model"
+    nx._state.ACTIVE = _WindowSrc(200_000)      # roomy process default
+    small_src = _WindowSrc(4_000)               # cramped task endpoint
+    # a prompt that cannot fit the 4k task window but sits far inside 200k:
+    # routed → floored at MIN_COMPLETION_TOKENS, unrouted → MAX_COMPLETION_TOKENS
+    msgs = [{"role": "user", "content": "x" * 20_000}]
+    with call_target_scope((small_client, "task-model", {}, small_src)):
+        cp.open_stream(msgs, tools=[])
+    sent = small_client.chat.completions.requests[0]["max_tokens"]
+    expected = max(1, nx._state.MIN_COMPLETION_TOKENS)
+    assert sent == expected, (sent, expected)
+    assert not parent_client.chat.completions.requests
+    # and the unrouted path is unchanged: the roomy source never clamps
+    nx._state.ACTIVE = _WindowSrc(200_000)
+    cp.open_stream(msgs, tools=[])
+    assert parent_client.chat.completions.requests[-1]["max_tokens"] == cp.MAX_COMPLETION_TOKENS
+
+
+def test_grammar_attach_follows_routed_source(nx_env):
+    """The grammar half of the wart: the CAPABILITY verdict of the ROUTED
+    source decides the attach, not the process default's."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent_model import call_target_scope
+    from nx._capability import CAPABILITY_GRAMMAR, CAPABILITY_NATIVE
+
+    task_client = _FakeClient()
+    nx._state.ACTIVE = _WindowSrc(0)
+    nx._state.ACTIVE._capability = CAPABILITY_NATIVE   # globals: native → no grammar
+    routed = _WindowSrc(0)
+    routed._capability = CAPABILITY_GRAMMAR            # task: grammar helps → attach
+    with call_target_scope((task_client, "task-model", {}, routed)):
+        cp.open_stream([{"role": "user", "content": "hi"}], tools=list(cp.TOOLS))
+    body = task_client.chat.completions.requests[0].get("extra_body") or {}
+    assert "grammar" in body, task_client.chat.completions.requests[0]
+
+
+def test_sibling_threads_do_not_clobber_call_target(nx_env):
+    """Mirror of test_concurrent_agents_do_not_clobber for call_target_scope:
+    two threads in their own scopes each reach the wire on their own client."""
+    nx, tmp = nx_env
+    from nx import _compress as cp
+    from nx._subagent_model import call_target, call_target_scope
+
+    client_a, client_b = _FakeClient(), _FakeClient()
+    nx._state.client = _FakeClient()
+    nx._state.MODEL = "parent-model"
+    results = {}
+
+    def _run(name, client, model):
+        with call_target_scope((client, model, {}, None)):
+            cp.open_stream([{"role": "user", "content": "hi"}], tools=[])
+            results[name] = client.chat.completions.requests[0]["model"]
+        assert call_target() is None  # scope restored inside the worker thread
+
+    threads = [threading.Thread(target=_run, args=("a", client_a, "model-a")),
+               threading.Thread(target=_run, args=("b", client_b, "model-b"))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == {"a": "model-a", "b": "model-b"}
+
+
+def test_scope_never_touches_subagent_ctx(nx_env):
+    """Guard (spec: 'batch never sets _SUBAGENT_TLS.ctx'): the batch slot is a
+    full agent — entering a call_target_scope must leave the sub-agent ctx
+    exactly as it was."""
+    nx, tmp = nx_env
+    from nx._subagent_model import call_target_scope
+    from nx._subagent import _SUBAGENT_TLS
+
+    assert getattr(_SUBAGENT_TLS, "ctx", None) is None
+    with call_target_scope((_FakeClient(), "task-model", {}, None)):
+        assert getattr(_SUBAGENT_TLS, "ctx", None) is None
+    assert getattr(_SUBAGENT_TLS, "ctx", None) is None

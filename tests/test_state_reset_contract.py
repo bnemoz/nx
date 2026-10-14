@@ -33,6 +33,19 @@ def test_metrics_tls_is_cleared():
     assert vars(st._METRICS_TLS) == {}
 
 
+def test_call_target_tls_is_cleared():
+    """0.156.0 (phase M): the per-TASK model routing target
+    (`_subagent_model.call_target_scope` / `_CALL_TARGET_TLS`) is a TLS home
+    with the same leak shape as _POSTURE_TLS — installed by the scope, deleted
+    in its finally, so only a crash between install and restore (or a test
+    driving the scope by hand) leaves it set. Plant, drain, assert clean."""
+    import nx._subagent_model as sm
+    sm._CALL_TARGET_TLS.target = ("client", "model", {}, None)
+    nx_state_reset_body()
+    assert vars(sm._CALL_TARGET_TLS) == {}
+    assert sm.call_target() is None
+
+
 def test_eventsink_and_steer_homes_are_swept():
     """0.155.1 pin: the sink registry, retained tails and per-agent steer
     queues are keyed by job id; residue there leaks into the next test's

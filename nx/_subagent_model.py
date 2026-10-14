@@ -24,6 +24,14 @@ Threading: the resolved target is attached to the sub-agent's thread-local
 No process-global is swapped, so concurrent agents (sync fan-out and async
 workers) can each ride a different model without racing the parent's state —
 the same reason the restricted dispatch table is TLS and not a global.
+
+0.156.0 adds the sibling slot for BATCH TASKS: ``call_target_scope(target)``
+installs a resolved 4-tuple on the worker thread (``_CALL_TARGET_TLS`` +
+``call_target()``), and ``open_stream()`` resolves ctx target → that TLS
+target → the process globals. The two are deliberately distinct: a batch task
+is a FULL agent (full tool table), so it must never populate
+``_SUBAGENT_TLS.ctx``; a sub-agent spawned inside such a task inherits the
+TASK's target for its "bare model" form — the chain is run → task → agent.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from __future__ import annotations
 import itertools
 import os
 import threading
+from contextlib import contextmanager
 from typing import Any
 
 from . import _state as st
@@ -44,6 +53,55 @@ from . import _state as st
 _POOL_LOCK = threading.Lock()
 _POOL_CYCLE = None
 _POOL_SIGNATURE = None
+
+# --- active call target (0.156.0, batch tasks) ---------------------------------
+# A batch task may route its WHOLE agent — and every sub-agent it spawns — at a
+# different source/model than the run, exactly the way NX_SUBAGENT_* route one
+# agent. The resolved 4-tuple lives on the TASK's thread:
+#
+#   with call_target_scope(target):   # install, yield, restore-prev
+#       ...                           # open_stream/subagent_call_target read it
+#
+# This slot is deliberately NOT `_SUBAGENT_TLS.ctx`: a batch task is a FULL
+# agent, and ctx-presence is the "inside a sub-agent" test elsewhere (restricted
+# dispatch tables, tier gates, delegation notes). Conflating the two would strip
+# a task's tool table. Same install/yield/restore shape as
+# `_state._posture_scope` (_state.py:154-186) — the value is DELETED on restore
+# when nothing was installed, so "no target" stays observable through the
+# getattr below.
+_CALL_TARGET_TLS: threading.local = threading.local()
+
+
+def call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
+    """The call target installed on THIS thread by `call_target_scope`, or None
+    when no scope is active (readers then fall through to the process globals).
+
+    Same 4-tuple shape `subagent_call_target()` returns:
+    (client, model, extra_request_kwargs, pin_src)."""
+    return getattr(_CALL_TARGET_TLS, "target", None)
+
+
+@contextmanager
+def call_target_scope(target: "tuple[Any, str, dict[str, Any], Any] | None"):
+    """Install `target` as THIS thread's active call target for the `with` body
+    and restore the previous value in `finally` — nested-safe, and the restore is
+    unconditional (nothing sits between install and the body's own try).
+
+    `target=None` means INHERIT the globals: nothing is installed, so readers
+    keep falling through — the same semantics `_posture_scope(None)` carries."""
+    if target is None:
+        yield
+        return
+    had = hasattr(_CALL_TARGET_TLS, "target")
+    prev = getattr(_CALL_TARGET_TLS, "target", None)
+    _CALL_TARGET_TLS.target = target
+    try:
+        yield
+    finally:
+        if had:
+            _CALL_TARGET_TLS.target = prev
+        elif hasattr(_CALL_TARGET_TLS, "target"):
+            del _CALL_TARGET_TLS.target
 
 
 def _parse_pool():
@@ -96,6 +154,7 @@ def subagent_call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
     model = _subagent_model()
     name = _subagent_source()
     pooled = next_pool_model()
+    active_target = call_target()
     if pooled:
         # Pool entry wins over the single-model knobs. "source:model" rides
         # that endpoint; a bare name rides the parent's active source.
@@ -123,9 +182,18 @@ def subagent_call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
                 use_model = None
         client = src.client
         pin_src = src if hasattr(src, "_request_shapes") else None
+    elif active_target is not None:
+        # model id alone INSIDE a routed scope (0.156.0): "the parent" is the
+        # ACTIVE call target, not the process globals — a bare (or pooled) model
+        # in a batch task must ride the TASK's endpoint, so the chain is
+        # run → task → agent and not run → agent.
+        client = active_target[0]
+        src = active_target[3]
+        pin_src = src if hasattr(src, "_request_shapes") else None
+        use_model = model
     else:
-        # model id alone: ride the parent's active source (client, extra body,
-        # capability-ladder memory) under the new model name.
+        # model id alone, no routed scope: ride the parent's active source
+        # (client, extra body, capability-ladder memory) under the new model name.
         src = st.ACTIVE
         if src is None or st.client is None:
             client, pin_src = st.client, None
@@ -134,7 +202,17 @@ def subagent_call_target() -> tuple[Any, str, dict[str, Any], Any] | None:
         use_model = model
     if not client or not use_model:
         return None
-    extra = src.extra_request_kwargs() if src is not None and hasattr(src, "extra_request_kwargs") else {}
+    if src is not None and hasattr(src, "extra_request_kwargs"):
+        # Thread the ROUTED model through: thinking separation (nx/_thinking.py)
+        # is keyed by model id, so an agent on another model must not inherit
+        # the parent's kwarg (before 0.156.0 extra_request_kwargs() read st.MODEL).
+        extra = src.extra_request_kwargs(use_model)
+    elif active_target is not None:
+        # Source stand-in without the hook: keep the routed target's own extra
+        # body rather than dropping it on the floor.
+        extra = dict(active_target[2] or {})
+    else:
+        extra = {}
     # The 4th element is the Source (None for a duck-typed stand-in): the
     # capability ladder pins request shapes per (Source, model) in
     # _manifest.py, so the sub-agent's endpoint keeps its own learned rung

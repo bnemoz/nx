@@ -18,24 +18,31 @@ from . import _state as st
 MAX_COMPLETION_TOKENS = _env_int("NX_MAX_TOKENS", 16000)
 
 
-def _prompt_estimate(messages: list[dict[str, Any]]) -> int:
+def _prompt_estimate(messages: list[dict[str, Any]],
+                     active_source: Any = None) -> int:
     """Best-effort prompt size in tokens for the max_tokens clamp: the exact
     server /tokenize count when the source is local and has one (never a
     remote round-trip), else the chars/4 estimate — the same estimator /ctx
-    reports with, plus the per-turn tools-schema overhead it adds."""
+    reports with, plus the per-turn tools-schema overhead it adds.
+
+    `active_source` is the source the CALL will ride (0.156.0): a routed target
+    (batch task, sub-agent) must be estimated against ITS source, not the
+    process default. None → ``st.ACTIVE``, i.e. the pre-0.156.0 behavior."""
     try:
         from ._ctxreport import _message_tokens, _tokenize_total, _turn_overhead_est
-        if st.TOKENIZE_PREFLIGHT and st.ACTIVE is not None:
+        src = active_source if active_source is not None else st.ACTIVE
+        if st.TOKENIZE_PREFLIGHT and src is not None:
             n = _tokenize_total(messages)
             if isinstance(n, int) and n > 0:
                 return n
         body = sum(_message_tokens(m) for m in messages)
-        return body + (_turn_overhead_est() if st.ACTIVE is not None else 0)
+        return body + (_turn_overhead_est() if src is not None else 0)
     except Exception:  # noqa: BLE001 — an estimate must never break the request
         return 0
 
 
-def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
+def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int,
+                      active_source: Any = None) -> int:
     """Clamp `requested` to what the source's context window can actually
     answer: window - prompt_estimate - margin, never above `requested`.
 
@@ -44,10 +51,15 @@ def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
     no-op and the request is exactly what it was before 0.41. The floor keeps
     a degenerate (room <= 0) request well-formed: an 8k window with a 7.9k
     prompt still asks for a minimum-sized answer and lets the overflow-retry
-    machinery handle the refusal, instead of sending max_tokens=0."""
+    machinery handle the refusal, instead of sending max_tokens=0.
+
+    `active_source` (0.156.0) is the source the CALL will ride: a routed target
+    must be clamped by ITS OWN window, or a task/sub-agent on a smaller endpoint
+    is clamped by the run's — the `_request_opts` wart. None (the default) means
+    ``st.ACTIVE``, so unrouted callers clamp exactly as before."""
     if requested <= 0:
         return requested  # 0 = "omit the field" contract in open_stream
-    src = st.ACTIVE
+    src = active_source if active_source is not None else st.ACTIVE
     if src is None:
         return requested
     window = None
@@ -57,7 +69,7 @@ def _clamp_max_tokens(messages: list[dict[str, Any]], requested: int) -> int:
         window = None
     if not isinstance(window, int) or window <= 0:
         return requested
-    room = window - _prompt_estimate(messages) - st.TOKENS_MARGIN
+    room = window - _prompt_estimate(messages, active_source) - st.TOKENS_MARGIN
     floor = max(1, st.MIN_COMPLETION_TOKENS)
     return max(floor, min(requested, room))
 
@@ -102,7 +114,15 @@ def set_toolcalls_mode(mode: str | None) -> bool:
     return True
 
 
-def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+def _grammar_extra_body(tools: list[dict[str, Any]] | None,
+                        active_source: Any = None) -> dict[str, Any] | None:
+    """Grammar extra_body for this tool set, or None when the source must send
+    its tool_calls natively.
+
+    `active_source` (0.156.0) is the source the CALL will ride, so a routed
+    target's CAPABILITY probe verdict (the per-Source `_capability` cache) is
+    what decides the attach — previously a task/sub-agent on another endpoint
+    was grammar-checked by the run's source. None → ``st.ACTIVE``, unchanged."""
     if not tools:
         return None
     # /toolcalls text override (0.30.0): the user forced the text protocol for
@@ -120,7 +140,8 @@ def _grammar_extra_body(tools: list[dict[str, Any]] | None) -> dict[str, Any] | 
         # NX_GRAMMAR set; CAPABILITY_TEXT means it didn't help in the probe, so
         # skip it (plain text-protocol parsing only). While the probe is still
         # pending (None), fall back to the old NX_GRAMMAR env-var gate.
-        capability = getattr(st.ACTIVE, "_capability", None) if st.ACTIVE else None
+        src = active_source if active_source is not None else st.ACTIVE
+        capability = getattr(src, "_capability", None) if src else None
         from . import _compress as _c  # lazy: _compress imports this module
         if capability is not None:
             from ._capability import CAPABILITY_GRAMMAR
