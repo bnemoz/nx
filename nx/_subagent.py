@@ -617,7 +617,10 @@ def _async_duplicate_running(instruction: str) -> str | None:
 
 def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                      tier: str = "read",
-                     scope: "list[str] | None" = None) -> None:
+                     scope: "list[str] | None" = None,
+                     *, worktree: "str | None" = None,
+                     announce: bool = True,
+                     handle: "AgentJob | None" = None) -> None:
     """Worker body: run the sub-loop, then stage the parent's notice.
 
     On any failure the job is still finalized (status=error) and staged, so
@@ -631,7 +634,6 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     # agents into a last-writer-wins race (the file-claim protocol only
     # narrows that; isolation is the real fence). A run without
     # NX_SUBAGENT_WORKTREE is unchanged (shared tree, scope gates apply).
-    worktree = None
     wt_note = None
     # Outcome check base (0.108.x): for a write-tier agent we snapshot the
     # tree's HEAD before the loop; after it, "no edits" = empty `git status
@@ -641,7 +643,14 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     outcome_tree = None
     outcome_base = None
     try:
-        if tier in ("write", "implement"):
+        if tier in ("write", "implement") and worktree:
+            # Caller-supplied (pre-created) checkout — e.g. /build creates the
+            # package worktrees on the MAIN thread to dodge the git lock race:
+            # skip the enable check and create_worktree entirely, but still
+            # snapshot the outcome baseline against the given tree.
+            outcome_tree = worktree
+            outcome_base = _git_head(worktree)
+        elif tier in ("write", "implement"):
             from ._worktree import (_worktree_enabled, create_worktree,
                                     sweep_stale_worktrees)
             if _worktree_enabled():
@@ -682,7 +691,7 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
             _write_agent_report(job_id, instruction, status, answer)
         except Exception:  # noqa: BLE001 — the note below matters more
             pass
-        _stage_subagent_answer(job_id)
+        _finalize_async_record(job_id, handle, announce)
         return
     try:
         answer = _run_sync_agent_body(instruction, max_turns, tier=tier,
@@ -776,7 +785,27 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     # Effect sandwich, step 3 (0.147.2): the result is on disk — retire the
     # intent so a live process never sees its own agent as crash residue.
     _clear_agent_intent(job_id)
-    _stage_subagent_answer(job_id)
+    _finalize_async_record(job_id, handle, announce)
+
+
+def _finalize_async_record(job_id: str, handle: "AgentJob | None",
+                           announce: bool) -> None:
+    """Last worker-side step for a finalized record: capture the FULL answer
+    on the joinable handle BEFORE _stage_subagent_answer's RAM trim, then
+    either stage the [Runtime note] or (announce=False, the orchestrator
+    contract) mark the record announced so the parent sweep stages nothing
+    and the record still becomes an eviction candidate."""
+    if handle is not None:
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(job_id)
+            handle._full_answer = (rec or {}).get("answer")
+    if announce:
+        _stage_subagent_answer(job_id)
+    else:
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(job_id)
+            if rec is not None:
+                rec["announced"] = True
 
 
 def _stage_subagent_answer(job_id: str) -> None:
@@ -865,16 +894,62 @@ def _stage_subagent_answer(job_id: str) -> None:
             rec["answer"] = answer[:half] + marker + answer[-half:]
 
 
-def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
-                 scope: "list[str] | None" = None) -> str:
-    """Launch the agent's turn loop on a quiet daemon thread and return the
-    job id result the parent's tool message carries."""
-    job_id = _new_job_id()
+class AgentJob:
+    """Joinable handle over an async sub-agent's ledger record (0.156.3).
+
+    join(timeout) returns the FULL answer — captured on the handle at
+    finalize, BEFORE _stage_subagent_answer's RAM trim — while result()
+    reads the live record (under _ASYNC_LOCK) for status/report/turns."""
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self._full_answer: "str | None" = None
+        self.done = threading.Event()
+
+    def done(self) -> bool:
+        return self.done.is_set()
+
+    def join(self, timeout: "float | None" = None) -> "str | None":
+        """Block until the agent finalizes (or timeout) and return the FULL
+        answer string; None on timeout or if the record vanished."""
+        if not self.done.wait(timeout):
+            return None
+        if self._full_answer is not None:
+            return self._full_answer
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(self.job_id)
+        return (rec or {}).get("answer")
+
+    def result(self) -> dict[str, Any]:
+        """Live snapshot of the record: {answer, status, report, exit_state,
+        turns, worktree}. status is 'queued' while the record is parked on
+        the concurrency semaphore."""
+        with _ASYNC_LOCK:
+            rec = _ASYNC_AGENTS.get(self.job_id) or {}
+        return {
+            "answer": rec.get("answer"),
+            "status": rec.get("status", "queued"),
+            "report": rec.get("report"),
+            "exit_state": rec.get("exit_state") or "",
+            "turns": rec.get("turns") or 0,
+            "worktree": rec.get("worktree"),
+        }
+
+
+def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
+                    scope: "list[str] | None" = None, *,
+                    worktree: "str | None" = None,
+                    announce: bool = True) -> "AgentJob":
+    """The policy-layer-free async spawn: launch the agent's turn loop on a
+    quiet daemon thread and return a joinable handle. Sits BELOW spawn_agent's
+    refusal/duplicate/nudge policies (baked decision 3); /build and other
+    programmatic callers use this directly. announce=False (orchestrator
+    contract) skips the [Runtime note] staging and the wake-arm entirely."""
+    job = AgentJob(_new_job_id())
+    job_id = job.job_id
     sem = _async_semaphore()
     with _ASYNC_LOCK:
         _prune_queued()
         queued = sem is not None and sem._value == 0  # type: ignore[attr-defined]
-        queue_depth = 0  # only meaningful when queued; initialized so the read below is always bound
         _ASYNC_AGENTS[job_id] = {
             "instruction": instruction,
             "status": "queued" if queued else "running",
@@ -888,7 +963,6 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
         }
         if queued:
             _ASYNC_QUEUED.append(job_id)
-            queue_depth = len(_ASYNC_QUEUED)
 
     # EVENTSURFACE_SPEC §1 (Phase 2): register the job's sink BEFORE the worker
     # thread starts, so the first stream/tool/status event cannot be lost to a
@@ -909,10 +983,12 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
     # start — if the process dies mid-run, the sweep below finds the residue.
     _write_agent_intent(job_id, instruction, tier)
 
-    # A background agent's whole point is that its answer lands later; without
-    # this the finish notice would sit staged until the user typed something.
-    from ._autowake import arm_wake
-    arm_wake()
+    if announce:
+        # A background agent's whole point is that its answer lands later;
+        # without this the finish notice would sit staged until the user typed
+        # something. An orchestrator joining the handle itself needs no wake.
+        from ._autowake import arm_wake
+        arm_wake()
 
     def _worker() -> None:
         # Quiet: this thread never writes the shared terminal (no spinner,
@@ -930,8 +1006,13 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
         _ASYNC_QUIET_SLOTS.quiet = True
         try:
             _run_async_agent(job_id, instruction, max_turns, tier=tier,
-                             scope=scope)
+                             scope=scope, worktree=worktree,
+                             announce=announce, handle=job)
         finally:
+            # The record is final the moment _run_async_agent returns — set
+            # the join Event BEFORE the sink-drop / sem-release / eviction
+            # tail so a joiner never waits on bookkeeping.
+            job.done.set()
             _ASYNC_QUIET_SLOTS.quiet = False
             # EVENTSURFACE_SPEC §1: dropping here — not in _run_async_agent — is
             # what makes the retained tail COMPLETE. _run_async_agent has
@@ -959,6 +1040,18 @@ def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
     with _ASYNC_LOCK:
         _LIVE_WORKERS[job_id] = _t
     _t.start()
+    return job
+
+
+def _spawn_async(instruction: str, max_turns: int, tier: str = "read",
+                 scope: "list[str] | None" = None) -> str:
+    """Model-facing async spawn: a thin formatter over spawn_agent_job's
+    handle — the string contract the parent's tool message carries."""
+    job = spawn_agent_job(instruction, max_turns, tier=tier, scope=scope)
+    job_id = job.job_id
+    with _ASYNC_LOCK:
+        queued = (_ASYNC_AGENTS.get(job_id) or {}).get("status") == "queued"
+        queue_depth = len(_ASYNC_QUEUED) if queued else 0
     if queued:
         return (f"[background sub-agent] job {job_id} (queued)\n"
                 f"instruction: {instruction[:200]}\n"
