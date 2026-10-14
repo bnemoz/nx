@@ -840,10 +840,7 @@ class SessionsView(_fullscreen.View):
         sid, self.confirm_id = self.confirm_id, None
         if not sid:
             return "repaint"
-        ans = shell.ask(f"delete session {sid[:12]}? y/n ›")
-        if ans is None or ans.strip().lower() not in ("y", "yes"):
-            self.notice = "delete cancelled"
-            return "repaint"
+        # The armed 'y' keypress IS the confirmation (no second typed y/n).
 
         def _act() -> None:
             ok = _delete_session(sid)

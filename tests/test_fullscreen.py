@@ -664,14 +664,14 @@ def test_sessions_view_delete_defers_through_the_real_delete_path(monkeypatch, c
                         lambda sid: deleted.append(sid) or True)
 
     class Shell:
-        def ask(self, label, initial=""):
-            return "y"
+        def ask(self, label, initial=""):  # must not fire: one y only
+            raise AssertionError("second confirm prompt")
 
     view = _sessions_cmd.SessionsView(State())
     view.on_key("j", None)
     assert view.on_key("d", Shell()) == "repaint"  # arm the confirm
     assert view.confirm_id == "gone"
-    assert view.on_key("y", Shell()) == "run_stay"  # confirm -> deferred
+    assert view.on_key("y", Shell()) == "run_stay"  # ONE y -> deferred
     assert deleted == []                          # nothing deleted on-screen
     view.pending_action()
     assert deleted == ["gone"]
@@ -696,8 +696,8 @@ def test_sessions_view_delete_keeps_the_list_view_open(monkeypatch):
                         lambda sid: gone.append(sid) or True)
 
     class Shell:
-        def ask(self, label, initial=""):
-            return "y"
+        def ask(self, label, initial=""):  # must not fire: one y only
+            raise AssertionError("second confirm prompt")
 
     view = _sessions_cmd.SessionsView(State())
     view.on_key("j", None)
