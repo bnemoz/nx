@@ -31,6 +31,24 @@ def test_metrics_tls_is_cleared():
     assert vars(st._METRICS_TLS) == {}
 
 
+def test_eventsink_and_steer_homes_are_swept():
+    """0.155.1 pin: the sink registry, retained tails and per-agent steer
+    queues are keyed by job id; residue there leaks into the next test's
+    snapshot rows (the test_event_taps answer-tail flake). Plant, drain,
+    assert clean."""
+    import nx._eventsink as es
+    import nx._surfaces as surf
+    sink = es.register_sink("agent-snap-3")
+    sink.write("agent-snap-3", "stream", "chatter")
+    es._RETAINED_TAILS["agent-snap-3"] = ["[stream] retained residue"]
+    with surf._STEER_LOCK:
+        surf._AGENT_QUEUES["agent-snap-3"] = ["steer residue"]
+    nx_state_reset_body()
+    assert es.sink_for("agent-snap-3") is None
+    assert es.retained_tail("agent-snap-3") == []
+    assert surf.agent_steering_pending("agent-snap-3") == 0
+
+
 def test_pending_slots_are_derived_from_the_store():
     """dir()-oracle: every _PENDING_* attr on nx._state plus every routed
     default must be swept - a NEW slot added in nx/_state.py is covered by

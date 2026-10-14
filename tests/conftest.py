@@ -456,10 +456,16 @@ _FLAKY_RERUN_NODEIDS = (
     # was the root cause; the TLS migration closed it structurally (and the trio
     # had been pruned-and-held once before, in 0.154.2).
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
-    # 0.154.5: same finish-line race family as the entry above (ledger §5.0:
-    # "event_taps start-vs-finish tap ordering") — the finished-agent snapshot
-    # reads the sink tail before the finish tap lands. Failed once under -n 8,
-    # passes standalone and both runs after; not a new class, unpinning later.
+    # 0.155.1: the eventsink homes (_SINKS/_RETAINED_TAILS) + _AGENT_QUEUES are
+    # now drained centrally (tests/_nxtest.py, pinned by test_state_reset_contract
+    # .test_eventsink_and_steer_homes_are_swept) — correct hygiene, but it did
+    # NOT fix this entry and the entry STAYS (pruned, then re-added after it
+    # failed again at normal 17s wall). Captured live signature: IndexError —
+    # _surfaces_snapshot() returned NO agent row at all (empty list) for a
+    # registered, done-status agent; NOT a polluted-tail/residue failure. Next
+    # probe is module identity, not residue: a reload fork where the test's
+    # nx._subagent._ASYNC_AGENTS and the dict _surfaces_snapshot reads are
+    # different objects (docs/test-architecture.md §3.1 family).
     "tests/test_event_taps.py::test_snapshot_agent_row_prefers_the_answer_tail",
 )
 

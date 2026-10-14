@@ -323,6 +323,31 @@ def nx_state_reset_body() -> None:
         ptls = getattr(st, "_POSTURE_TLS", None)
         if ptls is not None:
             ptls.__dict__.clear()
+    # 0.155.1: the eventsink homes. _SINKS/_RETAINED_TAILS are keyed by job id
+    # and read through the module attrs (sink_for/retained_tail), so a sink a
+    # prior file registered (or a retained tail its worker's finally left)
+    # survives into the next test on the worker — a later snapshot test with a
+    # fixed job id then reads the residue's row/tail (the
+    # test_event_taps test_snapshot_agent_row_prefers_the_answer_tail flake:
+    # deterministic per worker, both rerun attempts died). _AGENT_QUEUES
+    # likewise routes a steer line to a job id from an earlier file. Same
+    # single-writer posture as the clears above: under the sink module lock.
+    es = sys.modules.get("nx._eventsink")
+    if es is not None:
+        try:
+            with es._LOCK:
+                getattr(es, "_SINKS", {}).clear()
+                getattr(es, "_RETAINED_TAILS", {}).clear()
+                es._TAIL_LINES = None
+        except Exception:
+            pass
+    surf = sys.modules.get("nx._surfaces")
+    if surf is not None:
+        try:
+            with surf._STEER_LOCK:
+                getattr(surf, "_AGENT_QUEUES", {}).clear()
+        except Exception:
+            pass
     # A wake poller left running by an async-agent test keeps sweeping after
     # its file ends and flips st._WAKE_DUE mid-LATER test (the exact
     # subagent_async -> bg_completion_seen poison: wake_due() asserts read
