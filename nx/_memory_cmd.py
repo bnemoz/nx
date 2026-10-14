@@ -394,15 +394,20 @@ def _memory_row(note: dict[str, Any], selected: bool, index: int,
                 width: int) -> str:
     """One note row: selection marker, the same columns the inline list prints
     (index, scope label, title, date)."""
-    from ._ansi import clip_display
+    from ._ansi import C, clip_display, display_width
     from ._render import RESET, role
     date = time.strftime("%Y-%m-%d %H:%M", time.localtime(note["mtime"]))
     marker = "›" if selected else " "
-    text = clip_display(
-        f"{index:>3}. [{note['label']}] {note['title']}  ({date})",
-        width - 3)
+    scope = f"[{note['label']}]"
+    scope_color = C.GREEN if note["label"] == "project" else C.MAGENTA
+    head = f"{index:>3}. {scope_color}{scope}{RESET} "
+    tail = f"  {C.YELLOW}{date}{RESET})"
+    # Clip the un-styled title first, then splice the styled scope/date in so
+    # clip_display never has to reason about our escapes.
+    visible = display_width(head) + display_width(tail)
+    title = clip_display(note["title"], max(0, width - 3 - visible)).rstrip()
     return (f"{role('ACCENT')}{marker}{RESET} "
-            f"{role('MUTED')}{text}{RESET}")
+            f"{head}{role('MUTED')}{title}{tail}{RESET}")
 
 class MemoryView(View):
     """The `/memory` view: note list → note body, `d` deletes (with confirm).
@@ -435,6 +440,8 @@ class MemoryView(View):
                 notes.append({"mtime": mtime, "name": name, "path": path,
                               "title": title, "label": label})
         notes.sort(key=lambda n: n["mtime"], reverse=True)
+        # global notes pinned above project ones, newest-first within each group
+        notes.sort(key=lambda n: n["label"] != "global", reverse=False)
         self.notes = notes
         self.sel = min(self.sel, max(0, len(notes) - 1))
         self.mode = "list"
