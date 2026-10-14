@@ -1,9 +1,9 @@
 # Batch task overrides — per-task approval posture and model (spec, 0.156.0)
 
-Status: DRAFT awaiting sign-off. Follows `docs/YOLO_POSTURE_SPEC.md` (0.155.0),
-which lists this as a non-goal: "Batch per-task posture (now trivially possible
-later; not part of this work)" (`YOLO_POSTURE_SPEC.md:53`). This spec is that
-later.
+Status: SHIPPED 0.156.0 (phases M=19064ae, A=4501f9e; all 5 calls signed off, plus the
+headless-level opt-in amendment at sign-off). Follows `docs/YOLO_POSTURE_SPEC.md`
+(0.155.0), which lists this as a non-goal: "Batch per-task posture (now trivially
+possible later; not part of this work)" (`YOLO_POSTURE_SPEC.md:53`).
 
 ## Problem
 
