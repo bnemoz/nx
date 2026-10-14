@@ -322,53 +322,16 @@ def _restore(fspath, item=None):
     # Kept universal (not marker-gated): ~1ms, and it deliberately stays in
     # the shared unmarked path too — it is the same body as _nxtest's
     # nx_state_reset fixture teardown, which runs for every test.
-    _sa = sys.modules.get("nx._subagent")
-    _tls = sys.modules.get("nx._subagent_tls")
-    if _tls is not None:
-        _tls._SUBAGENT_TLS.__dict__.clear()      # subagent ctx + residue
-    if _sa is not None:
-        # quiet is assigned, never deleted, by production — clear the whole
-        # TLS dict rather than popping one key (prod re-creates it anyway).
-        _sa._ASYNC_QUIET_SLOTS.__dict__.clear()
-        # Drain live workers BEFORE clearing their registry: _worker() re-reads
-        # its _ASYNC_AGENTS record under the lock, so clearing with a worker
-        # mid-flight loses the staged note and skips worktree removal.
-        for _t in _sa._live_worker_threads():
-            _t.join(timeout=2)
-        with _sa._ASYNC_LOCK:
-            _sa._ASYNC_AGENTS.clear()
-    _no = sys.modules.get("nx._notices")
-    if _no is not None:
-        _no._CURRENT.set(None)
-    # A Live leaked by a dashboard test (test_tabs_live / test_panel) stays on
-    # the shared console's stack, which reroutes every later cprint through
-    # rich — invisible to the suite's builtins.print captures (a source of the
-    # test_preview_visibility "auto-allow [rule:" flake under -n auto).
-    _rich = sys.modules.get("nx._rich")
-    if _rich is not None:
-        try:
-            _stack = getattr(_rich.shared_console(), "_live_stack", None)
-            if _stack:
-                _stack.clear()
-        except Exception:
-            pass
-
-    # 0.104.1: rewind nx._recovery's no-loop default store too. The ten
-    # per-loop recovery fields (_LAST_PROMPT_TOKENS, the breaker evidence, ...)
-    # route through descriptors on the state module's class, and that store
-    # deliberately lives ON the class rather than in a module-dict entry —
-    # conftest's module rewind used to clear it in place between tests, which
-    # left the descriptors reading None and crashed the first turn loop of the
-    # next test on the same worker (`cur_tokens > 0` with cur_tokens None,
-    # nx/_turn.py:1086). Being out of dict reach also means the rewind above
-    # no longer covers it, so reset it explicitly (cheap: ten entries).
-    # Only when already imported — nx._recovery is not imported by `import nx`,
-    # and importing it here would add a module to _BASELINE_MODS forever.
-    _rec = sys.modules.get("nx._recovery")
-    if _rec is not None:
-        _reset = getattr(_rec, "_reset_store", None)
-        if _reset is not None:
-            _reset()
+    # Phase 1 unification: the hidden-state drain contract lives ONCE, in
+    # _nxtest.nx_state_reset_body (subagent TLS/registry, recovery store,
+    # tool-result cache, metrics TLS, wake poller + wake residue, bg-scan
+    # state, notice ctx + every _PENDING_* slot, the leaked-Live stack).
+    # The two copies had drifted (the _PENDING_* hand list, _TOOL_RESULT_CACHE,
+    # _METRICS_TLS and the _WAKE_* resets existed only on one side); see
+    # docs/test-architecture.md section 5.0. conftest keeps only what is its
+    # own: the module-dict rewind above and the SESSION_HOME re-derive below.
+    from _nxtest import nx_state_reset_body
+    nx_state_reset_body()
 
     # Re-derive the SESSION_HOME mirror from the just-applied env intents.
     # The module-state rewind above restores nx.SESSION_HOME / st.SESSION_HOME
@@ -463,6 +426,11 @@ def pytest_runtest_teardown(item, nextitem):
 # Workers execute pytest_runtest_protocol themselves (xdist/remote.py), so
 # this works under -n auto. Exactly one attempt's reports are logged, so
 # the controller's per-item report stream is unchanged.
+# 0.154.2 pruned the three test_preview_visibility entries (root cause: the
+# rebuilt_shared_console old_say restore skipped a legitimate None) and
+# test_batch_run's parallel-totals entry (root cause: st._METRICS_TLS was
+# drained by no one; the test hand-cleared it) - both fixed in
+# nx_state_reset_body now; no hand-clearing needed.
 _FLAKY_RERUN_NODEIDS = (
     "tests/test_git_index_guard.py::test_gitcommit_staged_wip_does_not_prompt_this_session",
     # Load-sensitivity set (each passes standalone and on immediate rerun;
@@ -471,13 +439,9 @@ _FLAKY_RERUN_NODEIDS = (
     # that (a) passes standalone and (b) is in a file listed here.
     "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
     "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
-    "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
-    "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
-    "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
     "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_text_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
-    "tests/test_batch_run.py::test_parallel_task_sessions_carry_own_totals",
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
 )
 

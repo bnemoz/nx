@@ -54,15 +54,19 @@ def rebuilt_shared_console(env: dict[str, str]):
             rich._SHARED_CONSOLE = con
             # the say-footer binds the singleton at import time; rebind it too
             footer = sys.modules.get("nx._turn_footer")
+            # sentinel, not "old is not None": a pre-capture _say_console of
+            # None is legitimate and must be restored as None (a leaked temp
+            # console here was one source of the test_preview_visibility
+            # rerun-list entries).
+            _UNSET = object()
+            old_say = _UNSET
             if footer is not None:
                 old_say = footer._say_console
                 footer._say_console = con
-            else:
-                old_say = None
             yield con
         finally:
             rich._SHARED_CONSOLE = old_console
-            if footer is not None and old_say is not None:
+            if footer is not None and old_say is not _UNSET:
                 footer._say_console = old_say
             for k, v in old_env.items():
                 if v is None:
@@ -261,15 +265,16 @@ _GLOBALS_FILES = [
     "test_worktree_sweep.py",
 ]
 
-@pytest.fixture(autouse=True)
-def nx_state_reset():
-    """Reset hidden per-test state after each test (~1ms common case).
+def nx_state_reset_body() -> None:
+    """The FULL per-test teardown, callable from anywhere (the autouse
+    fixture below AND conftest's `_restore()`) — one implementation, so the
+    drain contract cannot drift between two copies again.
 
-    Resolve modules through sys.modules at teardown time: a test that
-    reloaded nx forked these objects, so a captured import would reset the
-    STALE fork, not the live one.
+    Resolve modules through sys.modules at call time: a test that reloaded nx
+    forked these objects, so a captured import would reset the STALE fork, not
+    the live one. Cheap (~1ms): everything must already be in sys.modules —
+    no imports here.
     """
-    yield
     sa = sys.modules.get("nx._subagent")
     tls = sys.modules.get("nx._subagent_tls") or sa
     no = sys.modules.get("nx._notices")
@@ -301,12 +306,17 @@ def nx_state_reset():
         cache = getattr(st, "_TOOL_RESULT_CACHE", None)
         if cache is not None:
             cache.clear()
+        # Same shape as _TOOL_RESULT_CACHE but per-thread: _METRICS_TLS holds
+        # the per-task metrics recorder; a test that armed it leaves the
+        # thread's dict polluted for every later metrics assertion.
+        mtls = getattr(st, "_METRICS_TLS", None)
+        if mtls is not None:
+            mtls.__dict__.clear()
     # A wake poller left running by an async-agent test keeps sweeping after
     # its file ends and flips st._WAKE_DUE mid-LATER test (the exact
-    # subagent_async → bg_completion_seen poison: wake_due() asserts read
+    # subagent_async -> bg_completion_seen poison: wake_due() asserts read
     # True). Same treatment test_autowake/test_wake_streak apply locally:
-    # stop the daemon, then forget it. _WAKE_DUE itself is swept with the
-    # state block below.
+    # stop the daemon, then forget it.
     aw = sys.modules.get("nx._autowake")
     if aw is not None:
         poller = getattr(aw, "_POLLER", None)
@@ -316,31 +326,40 @@ def nx_state_reset():
             except Exception:
                 pass
         aw._POLLER = None
-    # Background-completion scan state: st._BG_NOTICE_SEEN is read as "pids
-    # already announced" but None means "re-seed from the baseline", and
-    # _BG_SCAN_DONE gates the sweep — neither is rewound by anything else.
-    # A bare-fixture test (no nx_fresh) runs with whatever SESSION_HOME the
-    # module holds (the developer's real ~/.nx when conftest scrubbed it),
-    # so the sweep can announce a REAL just-finished bg job as a
-    # [Runtime note] mid-test (seen live: test_forced_final_recovery's
-    # messages[-1] was a heredoc job's completion note).
+    # Wake residue: the poller is stopped above, but the flags it (or a
+    # mid-flight test) set on st survive it. Reset each to its import-time
+    # initial value (nx/_state.py:189-196): _WAKE_DUE/_WAKE_ARMED start False,
+    # _WAKE_STREAK starts 0 — the REPL's own user-turn path (nx/_repl.py:455)
+    # treats exactly this combination as "clean". A leftover _WAKE_DUE=True
+    # makes wake_due() True in an unrelated later test on the worker.
     if st is not None:
+        st._WAKE_DUE = False
+        st._WAKE_ARMED = False
+        st._WAKE_STREAK = 0
+        # Background-completion scan state: st._BG_NOTICE_SEEN is read as "pids
+        # already announced" but None means "re-seed from the baseline", and
+        # _BG_SCAN_DONE gates the sweep — neither is rewound by anything else.
+        # A bare-fixture test (no nx_fresh) runs with whatever SESSION_HOME the
+        # module holds (the developer's real ~/.nx when conftest scrubbed it),
+        # so the sweep can announce a REAL just-finished bg job as a
+        # [Runtime note] mid-test (seen live: test_forced_final_recovery's
+        # messages[-1] was a heredoc job's completion note).
         st._BG_NOTICE_SEEN = None
         st._BG_SCAN_DONE = False
     if no is not None:
         no._CURRENT.set(None)
         # Drain the module-level pending-note slots too. A worker that finished
         # after the join timeout above stages its [Runtime note] into the
-        # module store (nx/_notices.set_ → setattr(st, ...)) — invisible to the
-        # ContextVar reset — and Tier A files (no module-dict rewind) would
+        # module store (nx/_notices.set_ -> setattr(st, ...)) — invisible to
+        # the ContextVar reset — and Tier A files (no module-dict rewind) would
         # otherwise inherit it: wake_due() sees a phantom notice (bg-completion
         # tests fail) and the notice flush appends it (yolo/background-gating
-        # plumbing tests fail).
-        for slot in ("_PENDING_SUBAGENT_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
-                     "_PENDING_BG_COMPLETION_NOTICE", "_PENDING_BACKGROUND_NOTICE",
-                     "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_DELEGATION_NOTICE",
-                     "_PENDING_VERIFY_NOTICE", "_PENDING_OCC_REMINDER"):
-            no.set_(slot, None)
+        # plumbing tests fail). The slots are derived from the store itself
+        # (st._NOTICE_DEFAULTS / the _PENDING_* module attrs), not hand-listed,
+        # so a slot added in nx/_state.py is swept by construction.
+        defaults = getattr(st, "_NOTICE_DEFAULTS", {})
+        for slot in _pending_slots(st):
+            no.set_(slot, defaults.get(slot))
     # A Live leaked by a dashboard test stays on the shared console's stack,
     # which reroutes every later cprint through rich — invisible to the
     # suite's builtins.print captures (the test_preview_visibility flake).
@@ -352,3 +371,21 @@ def nx_state_reset():
                 stack.clear()
         except Exception:
             pass
+
+
+def _pending_slots(st) -> list[str]:
+    """Every pending-note slot name the notices store knows about: the routed
+    slots (st._NOTICE_DEFAULTS keys — what nx/_notices.SLOTS is built from)
+    plus any st module attr matching _PENDING_ (slots without a routed
+    default). dir() here is the contract test's oracle too: a new slot in
+    nx/_state.py shows up automatically."""
+    names = set(getattr(st, "_NOTICE_DEFAULTS", {}) or {})
+    names.update(a for a in dir(st) if a.startswith("_PENDING_"))
+    return sorted(names)
+
+
+@pytest.fixture(autouse=True)
+def nx_state_reset():
+    """Reset hidden per-test state after each test (~1ms common case)."""
+    yield
+    nx_state_reset_body()
