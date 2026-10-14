@@ -1,6 +1,6 @@
 # Spec: Advisor strategy for sub-agents
 
-Status: proposed
+Status: shipped (0.112.0); tier merged into implement per docs/SIMPLIFY_SPEC.md (0.158.0)
 Version target: 0.111.0 (semver: new feature → minor bump)
 
 ## Summary

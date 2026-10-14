@@ -13,7 +13,7 @@ import nx._state as st  # noqa: E402
 import nx._subagent as S  # noqa: E402
 import nx._subagent_tiers as T  # noqa: E402
 from nx._worktree import (  # noqa: E402
-    _worktree_enabled, create_worktree, in_worktree, remove_worktree,
+    _worktree_enabled, create_worktree, remove_worktree,
     rewrite_path,
 )
 
@@ -70,14 +70,6 @@ def test_rewrite_path_rules():
     assert rewrite_path("~/.nx", wt) == "~/.nx"
     assert rewrite_path("", wt) == ""
     assert rewrite_path("nx/mod.py", "") == "nx/mod.py"
-
-
-def test_in_worktree():
-    wt = os.path.realpath("/tmp/wt-abc")
-    assert in_worktree(wt + "/nx/mod.py", wt)
-    assert in_worktree(wt, wt)
-    assert not in_worktree("/etc/passwd", wt)
-    assert not in_worktree(wt + "-sibling/x", wt)  # prefix must be path-boundary
 
 
 # --- worktree creation ------------------------------------------------------

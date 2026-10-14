@@ -1,7 +1,9 @@
-"""Advisor-tier sub-agents (0.112.0): the executor consults the parent model
-via consult_advisor — a one-shot, no-tools side-call. Covers tier gating, the
-dispatch/tool-schema surface, budget exhaustion, timeout/malformed fallbacks,
-the stop signal, and that the tool never reaches the always-on token floor."""
+"""Advisor/consult sub-agents: 0.112.0 introduced tier="advisor"; 0.158.0
+merged it into tier="implement" + consult eligibility (NX_SUBAGENT_WRITE=1
+and NX_SUBAGENT_CONSULT_BUDGET > 0), with "advisor" kept as a deprecated
+alias. Covers tier gating, the dispatch/tool-schema surface, budget
+exhaustion, timeout/malformed fallbacks, the stop signal, and that the tool
+never reaches the always-on token floor."""
 import json
 import os
 import sys
@@ -22,20 +24,39 @@ from nx import _subagent as sub
 
 # ---------------------------------------------------------------- tier gating
 
-def test_normalize_tier_accepts_advisor():
-    assert tiers._normalize_tier("advisor") == "advisor"
-    assert tiers._normalize_tier("ADVISOR") == "advisor"
+def test_normalize_tier_maps_advisor_to_implement():
+    # 0.158.0: "advisor" is a deprecated alias for "implement".
+    assert tiers._normalize_tier("advisor") == "implement"
+    assert tiers._normalize_tier("ADVISOR") == "implement"
     assert tiers._normalize_tier(" implement ") == "implement"
     assert tiers._normalize_tier(None) == "read"
     assert tiers._normalize_tier("bogus") == ""
 
 
-def test_advisor_dispatch_is_write_table_plus_consult():
-    table = tiers._advisor_tier_dispatch()
+def test_implement_dispatch_is_write_table_plus_consult():
+    table = tiers._implement_tier_dispatch()
     assert "consult_advisor" in table
     for name in tiers._WRITE_TIER_TOOL_NAMES:
         assert name in table
     assert "run_bash" in table
+
+
+def test_implement_dispatch_budget_zero_hides_consult():
+    os.environ["NX_SUBAGENT_CONSULT_BUDGET"] = "0"
+    try:
+        table = tiers._implement_tier_dispatch()
+        assert "consult_advisor" not in table
+        ctx = tiers._SubagentContext(tiers._implement_tier_dispatch(),
+                                     write=True)
+        ctx.advisor = True
+        tiers._SUBAGENT_TLS.ctx = ctx
+        try:
+            names = {t["function"]["name"] for t in tiers._subagent_tools()}
+            assert "consult_advisor" not in names
+        finally:
+            tiers._SUBAGENT_TLS.ctx = None
+    finally:
+        os.environ.pop("NX_SUBAGENT_CONSULT_BUDGET", None)
 
 
 def test_consult_tool_not_on_always_on_floor():
@@ -44,9 +65,9 @@ def test_consult_tool_not_on_always_on_floor():
     assert "consult_advisor" not in names
 
 
-def test_advisor_tier_requires_write_optin(monkeypatch):
+def test_implement_tier_requires_write_optin(monkeypatch):
     monkeypatch.setattr(nx := __import__("nx"), "NX_SUBAGENT_WRITE", 0, raising=False)
-    out = sub.spawn_agent("do the thing", tier="advisor", async_=False)
+    out = sub.spawn_agent("do the thing", tier="implement", async_=False)
     assert "NX_SUBAGENT_WRITE=1" in out
 
 
@@ -61,12 +82,25 @@ def test_read_tier_has_no_consult_tool():
 
 
 def test_advisor_tools_include_consult_schema():
-    ctx = tiers._SubagentContext(tiers._advisor_tier_dispatch())
+    # tier="advisor" still works (deprecated alias) and gets consult.
+    ctx = tiers._SubagentContext(tiers._implement_tier_dispatch(), write=True)
     ctx.advisor = True
     tiers._SUBAGENT_TLS.ctx = ctx
     try:
         names = {t["function"]["name"] for t in tiers._subagent_tools()}
         assert "consult_advisor" in names
+    finally:
+        tiers._SUBAGENT_TLS.ctx = None
+
+
+def test_write_tier_without_consult_flag_gets_no_consult(monkeypatch):
+    # plain write tier: no consult (0.158.0 eligibility is implement+budget)
+    monkeypatch.setattr(tiers, "_consult_budget", lambda: 0)
+    ctx = tiers._SubagentContext(tiers._write_tier_dispatch(), write=True)
+    tiers._SUBAGENT_TLS.ctx = ctx
+    try:
+        names = {t["function"]["name"] for t in tiers._subagent_tools()}
+        assert "consult_advisor" not in names
     finally:
         tiers._SUBAGENT_TLS.ctx = None
 
@@ -127,7 +161,7 @@ class _FakeClient:
 
 @pytest.fixture()
 def advisor_ctx():
-    ctx = tiers._SubagentContext(tiers._advisor_tier_dispatch())
+    ctx = tiers._SubagentContext(tiers._implement_tier_dispatch(), write=True)
     ctx.advisor = True
     tiers._SUBAGENT_TLS.ctx = ctx
     yield ctx
@@ -160,7 +194,8 @@ def test_consult_returns_decision_and_guidance(monkeypatch, advisor_ctx):
 
 def test_consult_budget_exhausts_to_conservative(monkeypatch):
     os.environ["NX_SUBAGENT_CONSULT_BUDGET"] = "2"
-    advisor_ctx = tiers._SubagentContext(tiers._advisor_tier_dispatch())
+    advisor_ctx = tiers._SubagentContext(tiers._implement_tier_dispatch(),
+                                         write=True)
     advisor_ctx.advisor = True
     tiers._SUBAGENT_TLS.ctx = advisor_ctx
     try:
@@ -220,3 +255,29 @@ def test_consult_outside_subagent_refused(monkeypatch):
     tiers._SUBAGENT_TLS.ctx = None
     out = tiers._consult_advisor(question="q")
     assert out.startswith("ERROR: consult_advisor used outside a sub-agent")
+
+
+# ------------------------------------------------ implement gets consult (0.158.0)
+
+def test_advisor_alias_routes_through_implement_gate():
+    # tier="advisor" normalizes to "implement"; the merged implement body is
+    # what runs (SUBAGENT_IMPLEMENT_SYSTEM + consult), not a separate advisor
+    # dispatch — pinned by _normalize_tier + _implement_tier_dispatch above,
+    # plus the spawn-layer gate here: the alias is still accepted (same
+    # NX_SUBAGENT_WRITE=1 delegation refusal as implement, not "invalid tier").
+    import nx
+    old = nx.NX_SUBAGENT_WRITE
+    nx.NX_SUBAGENT_WRITE = 1
+    try:
+        # policy layer: write tier + sub-agent context on this thread → the
+        # delegation refusal proves the alias reached the write-tier path.
+        ctx = tiers._SubagentContext(tiers._implement_tier_dispatch(),
+                                     write=True)
+        tiers._SUBAGENT_TLS.ctx = ctx
+        try:
+            out = sub.spawn_agent("noop", tier="advisor", async_=False)
+            assert "write-tier spawn_agent refused" in out
+        finally:
+            tiers._SUBAGENT_TLS.ctx = None
+    finally:
+        nx.NX_SUBAGENT_WRITE = old

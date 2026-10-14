@@ -85,8 +85,9 @@ class _SubagentContext:
         # thread's per-agent steering queue and stamp steer breadcrumbs on the
         # job record. None for foreground/parent loops.
         self.job_id = job_id
-        # Advisor-tier consult budget (0.112.0): remaining consult_advisor
-        # calls this agent may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
+        # Implement+consult budget (0.112.0, advisor tier; merged into the
+        # implement tier 0.158.0): remaining consult_advisor calls this agent
+        # may make (NX_SUBAGENT_CONSULT_BUDGET, default 3).
         self.consults_left = _consult_budget()
         # Write-churn tracking (0.117.0/0.118.0): successful file-mutation
         # calls and whether each mid-run "start editing" nudge has fired. A
@@ -96,8 +97,9 @@ class _SubagentContext:
         self.write_calls = 0
         self.churn_nudged = False
         self.churn_escalated = False
-        self.advisor = False  # True only for advisor-tier agents
-        # Spawn tier string (0.121.2): "read"/"write"/"implement"/"advisor".
+        self.advisor = False  # True for implement-tier agents with consult access
+        # Spawn tier string (0.121.2): "read"/"write"/"implement" (the old
+        # "advisor" normalizes to "implement" since 0.158.0).
         # Recovery-budget scoping in _subagent.py uses it to give write-tier
         # agents a larger rescue allowance than the read-tier clamp.
         self.tier = "read"
@@ -149,13 +151,13 @@ def _subagent_tools() -> list[dict[str, Any]]:
         return [t for t in _m.TOOLS if t["function"]["name"] in wanted]
     if ctx is not None and ctx.write:
         wanted.update(_WRITE_TIER_TOOL_NAMES)
-        if ctx.advisor and ctx.consults_left is not None:
-            wanted.add("consult_advisor")  # advisor tier (0.112.0)
+        if ctx.advisor and ctx.consults_left:
+            wanted.add("consult_advisor")  # implement+consult (0.158.0; was advisor-only 0.112.0)
     elif ctx is None and _write_tier_enabled():
         # legacy global-table fallback (serial tests/REPL)
         wanted.update(_WRITE_TIER_TOOL_NAMES)
     tools = [t for t in _m.TOOLS if t["function"]["name"] in wanted]
-    if ctx is not None and ctx.advisor and ctx.consults_left is not None:
+    if ctx is not None and ctx.advisor and ctx.consults_left:
         tools.append(CONSULT_ADVISOR_TOOL)
     return tools
 
@@ -229,12 +231,16 @@ def _write_tier_dispatch() -> dict[str, Any]:
     return table
 
 
-def _advisor_tier_dispatch() -> dict[str, Any]:
-    """Dispatch table for an advisor-tier sub-agent: the write-tier table
+def _implement_tier_dispatch() -> dict[str, Any]:
+    """Dispatch table for an implement-tier sub-agent with consult eligibility
+    (0.158.0; the old advisor tier merged into implement): the write-tier table
     (the executor must be able to edit and maintain implementation-notes.md)
-    plus consult_advisor, the round-trip to the parent model."""
+    plus consult_advisor, the round-trip to the parent model — offered only
+    when a consult budget remains (NX_SUBAGENT_CONSULT_BUDGET > 0; the schema
+    disappears when consults_left hits 0)."""
     table = _write_tier_dispatch()
-    table["consult_advisor"] = _consult_advisor
+    if _consult_budget() > 0:
+        table["consult_advisor"] = _consult_advisor
     return table
 
 
@@ -363,7 +369,11 @@ def _normalize_tier(tier: Any) -> str:
     if tier is None:
         return "read"
     v = str(tier).strip().lower()
-    return v if v in ("read", "write", "implement", "advisor", "critique") else ""
+    # 0.158.0: "advisor" is a deprecated alias for "implement" — the advisor
+    # tier merged into implement+consult, so it routes through the same path.
+    if v == "advisor":
+        return "implement"
+    return v if v in ("read", "write", "implement", "critique") else ""
 
 
 # The critique tier's severity floor, shared by the tier prompt injection and

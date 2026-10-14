@@ -100,10 +100,10 @@ from ._subagent_bash import (  # noqa: F401 (re-exports)
 
 from ._prompts import (  # prompt registry (re-exported)
     SUBAGENT_SYSTEM, SUBAGENT_WRITE_SYSTEM, SUBAGENT_IMPLEMENT_SYSTEM,
-    ADVISOR_EXEC_SYSTEM, CRITIQUE_SYSTEM,
+    CRITIQUE_SYSTEM,
 )
 from ._subagent_tiers import (
-    _advisor_tier_dispatch, _critique_tier_dispatch, _critique_severity,
+    _implement_tier_dispatch, _critique_tier_dispatch, _critique_severity,
 )
 
 # The default sub-agent budget and its hard ceiling. A default of 12 turns
@@ -160,7 +160,7 @@ SUBAGENT_TOOL = {"type": "function", "function": {
         "instruction": {"type": "string", "description": "The one question to answer, with the paths/context needed. The agent cannot see this conversation and cannot ask you back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement agents; both are FLOORS: a smaller request is raised to them; ceiling 500). Omit it for broad work — an agent that runs out spends its last turn answering instead of searching."},
         "async": {"type": "boolean", "description": "Leave unset (background, the default): job id now, answer arrives as a [Runtime note] on a later turn. false = foreground: it blocks the ENTIRE REPL — every other call in the turn and all user interaction — until the agent finishes, which for a real investigation is tens of minutes. Only pass false for a short, must-have-now answer."},
-        "tier": {"type": "string", "enum": ["read", "write", "implement", "advisor"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn. For write/implement tiers, BAKE THE SETTLED DESIGN INTO the instruction (approach, files to touch, what is out of scope): an agent given an open design question will deliberate instead of editing. 'advisor': an EXECUTOR that runs the task end-to-end with the parent model as an on-call advisor — it consults the advisor (consult_advisor tool) when a decision exceeds its judgment, keeps implementation-notes.md with a Plan and a Deviations log, and takes the conservative option on any advisor timeout/refusal (needs NX_SUBAGENT_WRITE=1). In the background (async, the default) write/implement/advisor tiers require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
+        "tier": {"type": "string", "enum": ["read", "write", "implement", "advisor"], "description": "'read' (default): read-only investigation. 'write' or 'implement': the agent may edit files (needs NX_SUBAGENT_WRITE=1); 'implement' adds the implementer discipline prompt — plan, verify as you go, no churn — plus consult_advisor (when NX_SUBAGENT_CONSULT_BUDGET > 0), a one-shot decision side-call to the parent model for decisions the agent cannot resolve itself. For write/implement tiers, BAKE THE SETTLED DESIGN INTO the instruction (approach, files to touch, what is out of scope): an agent given an open design question will deliberate instead of editing. 'advisor': DEPRECATED ALIAS for 'implement' (0.158.0 merged the advisor tier into implement) — still accepted, same behavior. In the background (async, the default) write/implement/advisor tiers require a yolo session (--yolo); without yolo they run in the foreground (the approval prompt needs the parent terminal). With NX_SUBAGENT_WORKTREE=1 a write-tier agent works in its own git worktree: its relative paths, test runs and commits land there, never the shared tree — safe to run several write agents at once; the finished report names the worktree to merge from."},
         "scope": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs (gitignore-style, relative to the project root) the agent's writes are confined to, e.g. ['nx/_turn*.py']. Writes outside the scope are refused with an explicit error. With NX_SUBAGENT_WORKTREE=1 parallel write agents are safe even without scopes (each works in its own checkout) — scope is then about reviewability: keep each agent's diff focused on one concern so its report is easy to merge and judge."},
     }, "required": ["instruction"]},
 }}
@@ -634,7 +634,6 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     # agents into a last-writer-wins race (the file-claim protocol only
     # narrows that; isolation is the real fence). A run without
     # NX_SUBAGENT_WORKTREE is unchanged (shared tree, scope gates apply).
-    wt_note = None
     # Outcome check base (0.108.x): for a write-tier agent we snapshot the
     # tree's HEAD before the loop; after it, "no edits" = empty `git status
     # --porcelain` AND an unmoved HEAD. This catches the seen-live failure
@@ -728,8 +727,6 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                    "(detached HEAD from the project root at spawn time) — "
                    "merge or cherry-pick from there; the shared tree is "
                    "untouched.]")
-    elif wt_note:
-        answer += f"\n\n[{wt_note}]"
     # EXIT_STATE convention: read the machine state off the report, strip the
     # line from the prose, and surface it on every delivery surface (record,
     # report file, [Runtime note], /bg listing). Applies to the FINAL answer
@@ -1217,7 +1214,9 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # Write tiers (write/implement): opt-in (NX_SUBAGENT_WRITE=1) and refused
     # from inside another sub-agent (only the parent holds the approval gate).
     write = tier in ("write", "implement", "advisor")
-    advisor = tier == "advisor"
+    # 0.158.0: the advisor tier merged into implement+consult — "advisor" is a
+    # deprecated alias, so consult access rides the implement tier (budget>0).
+    advisor = tier == "implement"
     # Critique tier (scoped minimal reviewer): a reviewer that cannot write
     # cannot quietly fix what it found, so it runs the plain read-only table —
     # no worktree, no scope rewrites, no approval prompts, no NX_SUBAGENT_WRITE
@@ -1237,8 +1236,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # A sub-loop inherits this thread's quiet mode (an async agent's own
     # nested spawn stays off the terminal).
     quiet = _subagent_quiet()
-    system = (ADVISOR_EXEC_SYSTEM if advisor
-              else CRITIQUE_SYSTEM if critique
+    system = (CRITIQUE_SYSTEM if critique
               else SUBAGENT_IMPLEMENT_SYSTEM if tier == "implement"
               else SUBAGENT_WRITE_SYSTEM if write else SUBAGENT_SYSTEM)
     # Write tiers get an edit-framed budget footer; the read-tier footer is
@@ -1267,8 +1265,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     # concurrent sibling's run_tool("spawn_agent") would see this thread's
     # restricted table mid-flight and refuse itself. The global stays a
     # manual, serial-only fallback for tests.
-    table = (_advisor_tier_dispatch() if advisor
-             else _write_tier_dispatch() if write else _read_only_dispatch())
+    table = _implement_tier_dispatch() if write else _read_only_dispatch()
     if critique:
         table = _critique_tier_dispatch()
     prev_ctx = _subagent_ctx()

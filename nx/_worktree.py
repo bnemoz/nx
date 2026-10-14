@@ -135,13 +135,6 @@ def _branch_of(worktree: str) -> str | None:
     return None
 
 
-def _session_worktree_enabled_with_fallback() -> bool:
-    """NX_SESSION_WORKTREE on + isolation actually possible? A repo whose
-    dirty tree can't be committed silently stays in the shared tree — the
-    caller prints the reason when this returns False."""
-    return _session_worktree_enabled() and bool(st.PROJECT_ROOT_IS_GIT)
-
-
 def _parent_worktree_roots() -> set[str]:
     """Real paths of the parent repo + all its linked worktrees — paths an
     agent must NOT be pointed into as ITS worktree (a worktree of a worktree
@@ -308,10 +301,3 @@ def rewrite_path(path: str, worktree: str) -> str:
         return path if rp == worktree or rp.startswith(worktree + os.sep) else path
     return os.path.join(worktree, p)
 
-
-def in_worktree(path: str, worktree: str) -> bool:
-    """True when `path` resolves inside the agent's worktree."""
-    if not worktree:
-        return False
-    rp = os.path.realpath(os.path.expanduser(path))
-    return rp == worktree or rp.startswith(worktree + os.sep)
