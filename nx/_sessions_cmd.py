@@ -176,7 +176,7 @@ def _session_next_hint(command: str, page: int, limit: int, query: str | None = 
 
 _SESSIONS_USAGE = """\
 usage: nx sessions [query] [--page N] [--limit N]
-       nx sessions --prune
+       nx sessions --prune [--reclaim]
 
 List saved sessions and exit. With a query: substring-filters (case-
 insensitive) across title, description, preview and id.
@@ -192,6 +192,14 @@ insensitive) across title, description, preview and id.
                        Opt-in retention (off by default) also runs: see
                        NX_SESSION_RETAIN_SMALL_DAYS / _SMALL_MAX_MSGS and
                        NX_SESSION_RETAIN_FLOOR_MSGS / _FLOOR_DAYS.
+
+  nx sessions --prune --reclaim
+                       additionally hand back the space the 0.115.0
+                       events-authoritative migration left behind: drop the
+                       dead pre-0.115 sessions_fts/fts_body index, blank the
+                       stale full-transcript session blobs whose events
+                       already hold the text, then VACUUM. Takes an exclusive
+                       lock on the store for the duration.
 
 Resume with: nx --resume <n|short-id|title>
 """
@@ -256,6 +264,11 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     one line per action. Returns True if it handled the invocation (caller
     exits)."""
     # `nx sessions --prune` (verb-first) or a bare `nx --prune`/`prune`.
+    # `--reclaim` is a modifier, not a verb: peel it off before the match so
+    # every spelling (`nx sessions --prune --reclaim`, `nx prune --reclaim`)
+    # reaches the same path.
+    reclaim = "--reclaim" in args
+    args = [a for a in args if a != "--reclaim"]
     if args[:2] not in (["--prune"], ["prune"], ["sessions", "--prune"],
                         ["sessions", "prune"]):
         return False
@@ -288,6 +301,17 @@ def _cli_prune_sessions(args: list[str]) -> bool:
     if stats.get("undo_removed"):
         print(f"  collected {stats['undo_removed']} orphaned undo file(s) "
               f"(dead sessions; their checkpoints held file snapshots)")
+    if reclaim:
+        # Store-residue reclamation (0.115.0 migration leftovers). Deliberately
+        # NOT part of plain --prune: reclaim_store VACUUMs, which takes an
+        # exclusive lock on the whole store — a user-asked-for cost, not one
+        # `--prune` should pay (or a lazy migration, ever).
+        from ._sessiondb import reclaim_store
+        rc = reclaim_store()
+        if rc["fts_dropped"]:
+            print("  dropped the dead pre-0.115 sessions_fts/fts_body index")
+        print(f"  reclaimed {rc['blobs_emptied']} stale transcript blob(s)"
+              f" and vacuumed the session store")
     return True
 
 

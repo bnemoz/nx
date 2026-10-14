@@ -132,6 +132,36 @@ def _fts_is_current(conn: sqlite3.Connection) -> bool:
     return row is not None and "content='fts_msgs'" in (row[0] or "")
 
 
+def _drop_legacy_fts_tables(conn: sqlite3.Connection) -> bool:
+    """Drop the dead 0.104-era `sessions_fts` + `fts_body` pair, if present.
+
+    The 0.115.0 move to the per-message trio (fts_msgs/fts_meta + external
+    content FTS) is forward-only, and it skipped exactly one case: a store
+    upgraded while `msgs_fts` was ALREADY current returned early and kept the
+    legacy external-content index (hundreds of MB on a real store). Nothing
+    reads or writes `sessions_fts`/`fts_body` anymore — search, the delete
+    path and prune all go through `_fts_*` helpers over fts_msgs/fts_meta —
+    so a store that still carries them reclaims the space here.
+
+    Best-effort in the same spirit as _ensure_fts_schema: any error leaves the
+    old shape in place rather than raising into an open/read path. Returns
+    True when a table was actually dropped (so callers can report it)."""
+    dropped = False
+    for name in ("sessions_fts", "fts_body"):
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?",
+                            (name,)).fetchone() is None:
+                continue
+        except sqlite3.Error:
+            return dropped
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {name}")
+            dropped = True
+        except sqlite3.Error:
+            pass  # keep whatever shape exists; reclaim is best-effort
+    return dropped
+
+
 def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
     """Create the 0.115.0 per-message FTS pair, migrating a pre-0.115
     store (external-content sessions_fts over fts_body, or the legacy
@@ -142,6 +172,11 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
     previous shape and search keeps working."""
     if _fts_is_current(conn):
         _create_external_fts(conn)
+        # Store-residue reclamation: this branch is the case the migration
+        # below cannot reach (the store was upgraded while msgs_fts was
+        # already current), so a legacy pair left by a pre-0.115 store is
+        # dropped here instead of living on as dead weight.
+        _drop_legacy_fts_tables(conn)
         return
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -181,9 +216,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # every write so a listing never has to read the event log at all.
     _ensure_listing_columns(conn)
     # Append-only event log (0.104.x): the authoritative transcript lives in
-    # per-message rows; the sessions.data blob becomes a lagging cache (only
-    # rebuilt on merge/compaction/fork/migration). session_chain is the
-    # per-session index into the log.
+    # per-message rows; since 0.115.0 the sessions.data blob is a small-meta
+    # shell only (todos/plan/wip/metrics — `{}` is the common value) and is
+    # never a transcript copy: load_session reads messages from the log and
+    # falls back to the blob only for a pre-0.104 session. session_chain is
+    # the per-session index into the log. A store upgraded from 0.104-0.114
+    # still carries the old full-transcript blobs as residue; they are
+    # reclaimed once per process by _reclaim_stale_blobs.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session_events("
         "session_id TEXT NOT NULL,"
@@ -412,10 +451,46 @@ def _import_legacy_shards(conn: sqlite3.Connection, d: str,
     return n
 
 
+# Stores already swept for 0.115.0 residue on this process (sessions dir ->
+# 1). The sweep is one full-table UPDATE scan, so it must not ride every
+# save/load once the store is clean: the first call reclaims, the rest are a
+# dict hit. Public `nx sessions --prune --reclaim` runs it unconditionally.
+# (plain dict — tests/conftest.py rewinds module dicts by design)
+_RECLAIMED: dict[str, int] = {}
+
+
 def _ensure_migrated() -> None:
     """Lazy migration hook, called from the read/write facade paths."""
     try:
         migrate_files(force=False)
+    except Exception:
+        pass  # never raise into a save/load path
+    _reclaim_residue_once()
+
+
+def _reclaim_residue_once() -> None:
+    """Blank the stale pre-0.115 transcript blobs, at most once per process
+    per store (step B of the store-residue reclamation).
+
+    Runs here — after the schema steps — rather than inside _ensure_schema so
+    the row rewrite is a discrete, gated step: the store is upgraded the first
+    time any facade path touches it, and later calls pay one dict lookup.
+    Never raises and never VACUUMs (a lazy migration must not take the
+    exclusive lock); the space is handed back by reclaim_store() from
+    `nx sessions --prune --reclaim`."""
+    d = _sessions_dir()
+    if _RECLAIMED.get(d):
+        return
+    _RECLAIMED[d] = 1  # set first: a re-entrant call must not rescan
+    try:
+        conn = _open()
+        if conn is None:
+            return
+        try:
+            if _reclaim_stale_blobs(conn):
+                conn.commit()
+        finally:
+            conn.close()
     except Exception:
         pass  # never raise into a save/load path
 
@@ -443,6 +518,76 @@ def _ensure_listing_columns(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE sessions ADD COLUMN n_msg INTEGER")
     except sqlite3.Error:
         pass  # the NULL fallback still serves the listing
+
+
+def _reclaim_stale_blobs(conn: sqlite3.Connection) -> int:
+    """Blank the stale full-transcript `sessions.data` blobs a pre-0.115
+    store still carries (session_events already holds the same text).
+
+    One UPDATE, on the rows whose every consumer is covered: a row WITH
+    events and a NON-NULL `image_shas` answers listing/search/columns from
+    its indexed columns, and load_session overwrites the blob's `messages`
+    with the event log anyway (the blob contributes only created_at + small
+    meta, both acceptable losses — that is already the 0.115+ contract).
+
+    Deliberately NOT touched: rows with NULL `image_shas` (their blob is the
+    only image-ref source for the sidecar-GC fallback in image_live_shas),
+    rows with no events (a pre-0.104 session's blob IS the transcript until
+    load_session inflates it), and anything under the size floor (a small
+    shell is the contract, not residue). Returns rows emptied."""
+    try:
+        cur = conn.execute(
+            "UPDATE sessions SET data='{}'"
+            " WHERE length(data) > 1048576"
+            "   AND image_shas IS NOT NULL"
+            "   AND EXISTS (SELECT 1 FROM session_events e"
+            "               WHERE e.session_id = sessions.session_id)")
+        return cur.rowcount or 0
+    except sqlite3.Error:
+        return 0
+
+
+def reclaim_store() -> dict[str, Any]:
+    """`nx sessions --prune --reclaim`: hand back the space the 0.115.0
+    events-authoritative migration left behind.
+
+    Runs the two residue steps explicitly — drop the dead 0.104-era FTS pair
+    (A) and blank the stale full-transcript blobs (B) — then VACUUMs the store
+    and truncates the WAL so the file actually shrinks on disk.
+
+    VACUUM is the reason this is not wired into _ensure_migrated: it rewrites
+    the whole database and takes an exclusive lock, which must never happen
+    inside a lazy migration on a hot save/load path. Idempotent — a second run
+    empties nothing and VACUUMs an already-tight store. Returns
+    {"blobs_emptied": n, "fts_dropped": bool}; a missing/locked store returns
+    the zero result rather than raising."""
+    out: dict[str, Any] = {"blobs_emptied": 0, "fts_dropped": False}
+    try:
+        conn = _connect()
+    except sqlite3.Error:
+        return out
+    try:
+        out["fts_dropped"] = _drop_legacy_fts_tables(conn)
+        _ensure_schema(conn)  # no-op on a current store (step A is idempotent)
+        out["blobs_emptied"] = _reclaim_stale_blobs(conn)
+        try:
+            conn.commit()
+        except sqlite3.Error:
+            pass
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.Error:
+            pass  # contended store: the row edits still stand
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+        _RECLAIMED[_sessions_dir()] = 1
+        return out
+    except sqlite3.Error:
+        return out
+    finally:
+        conn.close()
 
 
 def _preview_of(messages: list[dict[str, Any]]) -> Optional[str]:
@@ -898,13 +1043,16 @@ def store_session(
     section, in one BEGIN IMMEDIATE transaction (the writer lock the old
     per-file flock provided).
 
-    0.104.x: the authoritative transcript is the append-only event log
-    (session_events + session_chain); the sessions.data blob is a lagging
-    cache. A fast append (the committed chain tail matches the caller's
-    prefix) inserts only the new events and updates the indexed columns —
-    the blob is NOT rewritten. A full rebuild (compaction, fork, migration,
-    shorter than the chain, tail mismatch) merges via
-    _merge_session_messages, collapses the chain, and rewrites the blob.
+    0.115.0: the authoritative transcript is the append-only event log
+    (session_events + session_chain); the sessions.data blob is a small-meta
+    shell (todos/plan/wip/metrics, `{}` when there are none) — the transcript
+    JSON is never written here. A fast append (the committed chain tail
+    matches the caller's prefix) inserts only the new events and updates the
+    indexed columns. A full rebuild (compaction, fork, migration, shorter
+    than the chain, tail mismatch) merges via _merge_session_messages,
+    collapses the chain, and rewrites the shell (never the transcript). A
+    store upgraded from 0.104-0.114 keeps its old full-transcript blobs until
+    the one-time reclaim blanks them (see _reclaim_stale_blobs).
 
     Returns the authoritative merged message list on success (None = store
     unavailable; old truthiness checks still work)."""
