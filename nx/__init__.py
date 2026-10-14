@@ -590,7 +590,7 @@ Minimalism:
 - Verify every non-trivial change with the smallest useful check.
 - Clean up after yourself: delete scratch/scaffolding files you created once they served their purpose, and stop background jobs you started that outlive the task.
 - Communicate directly: technical substance first, no filler.
-- Use short, clear sentences. Compress wording only when meaning stays obvious.
+- Prose answers: telegraphic. Drop filler and hedging ("likely", "I'd recommend", "it seems"); lead with the finding; one clause per idea. Code, paths, error messages, commits, docs, and messages to other humans stay normal prose.
 - Use normal prose in code, comments, commits, documentation, tickets, and messages to other humans.
 
 Every write/edit/bash call prompts the user for approval (reads never do), so batch
