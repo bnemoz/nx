@@ -46,10 +46,10 @@ _ASSIGNMENT_HEAD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^=]*")
 _WRAPPER_HEADS = frozenset(
     {"sudo", "env", "time", "command", "nohup", "nice", "exec"})
 _CONTROL_HEADS = frozenset({"if", "while", "until", "do", "then"})
-# Characters whose meaning a token-level re-quote cannot preserve (command
-# substitution, globs, tilde expansion, brace expansion, heredoc bodies):
-# a command containing any of them is passed through verbatim.
-_UNSAFE_CHARS = frozenset("$`*?[~{")
+# Substitution a token-level re-quote cannot preserve (command substitution,
+# backticks): a command carrying these OUTSIDE quotes passes through verbatim.
+# Globs/tilde/braces are handled structurally by _unquoted_glob_tokens instead.
+_UNSAFE_CHARS = frozenset("$`")
 # Short flags shared by grep and rg, kept as-is; grep-only letters that must
 # disappear are in _DROP_CHARS.
 _KEEP_CHARS = set("niclqvwxFHoxasP")
