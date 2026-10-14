@@ -368,6 +368,19 @@ def check_required(name: str, args: Any) -> str | None:
     props, required = entry
     if not required:
         return None
+    # Mode-aware required (edit_file): the schema declares only `path`; the
+    # per-mode payload requirement is enforced in the body (edit_file returns
+    # a clear "needs a mode" error) so a diff-mode call without `new` is not
+    # refused here with a missing-arg error it cannot fix by re-sending.
+    if name == "edit_file":
+        payload = ("diff" if str(args.get("diff") or "").strip()
+                   else "edits" if args.get("edits")
+                   else None if not (args.get("old") or args.get("old_lines"))
+                   else "old")
+        if payload is None:
+            return ('ERROR: edit_file needs a mode: `diff` (unified diff), `edits` '
+                    '(batch of {old,new}), or `old`/`old_lines` + `new` (literal replace)')
+        required = [r for r in required if r != "new"]
     missing = [r for r in required if r not in args or args[r] is None]
     if not missing:
         return None

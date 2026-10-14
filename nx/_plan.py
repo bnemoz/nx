@@ -34,11 +34,11 @@ from . import _state as st
 from ._ansi import BOLD, DIM, RESET, C
 
 # Tools the gate blocks. NOT listed: read-only tools (which never mutate),
-# plan_edit (the gate's own pressure valve), and apply_patch/sed_edit/
-# delete_file/spawn_agent etc. are listed explicitly so an unreviewed addition
+# plan_edit (the gate's own pressure valve), and delete_file/spawn_agent etc.
+# are listed explicitly so an unreviewed addition
 # to the toolset stays *in* the safe default (deny-by-default for the rest).
 PLAN_GATE_TOOLS = frozenset((
-    "write_file", "edit_file", "sed_edit", "apply_patch",
+    "write_file", "edit_file", "sed_edit",
     "delete_file", "run_bash", "run_tests", "memory_write", "memory_delete",
     "git_commit", "duckdb",
 ))
@@ -369,7 +369,8 @@ def _cmd_plan(user: str, state: Any) -> None:
         f"[Plan mode active — goal: {goal}\n"
         f"Plan file: {path}\n"
         "While the plan is active every mutating tool call (write_file, "
-        "edit_file, multi_edit, sed_edit, apply_patch, delete_file, run_bash, "
+        "edit_file (all modes, incl. `diff`), multi_edit, sed_edit, delete_file, "
+        "run_bash, "
         "memory_write/delete) is refused with a gate message. Read-only tools "
         "and plan_edit still work.\n"
         "Read the plan with read_file, refine it with plan_edit until it "

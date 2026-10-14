@@ -91,7 +91,9 @@ def test_every_tool_appears_once():
     # offered floor (still dispatchable) — 31. 0.132.0: critique joins (32;
     # registered in TOOLS, withheld per-turn by its NX_SUBAGENTS gate).
     # 0.158.9: git_status/git_diff/git_log/sed_edit retire (still dispatchable) — 28.
-    assert len(names) == 28
+    # 0.158.11: apply_patch retires outright (its body is edit_file's `diff`
+    # mode, and the name no longer dispatches) — 27.
+    assert len(names) == 27
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -267,8 +269,10 @@ def test_steering_phrases_tests_and_readme_copy_depend_on():
     assert "callers" in desc
     assert "default 100" in \
         by_name["spawn_agent"]["parameters"]["properties"]["max_turns"]["description"]
-    # edit_file must stay requirable without `old` (old_lines is an alternative).
-    assert by_name["edit_file"]["parameters"]["required"] == ["path", "new"]
+    # Mode-aware required: only `path` is schema-required; the per-mode payload
+    # (`diff` / `edits` / `old`+`new`) is enforced in the body + check_required.
+    assert by_name["edit_file"]["parameters"]["required"] == ["path"]
+    assert "diff" in by_name["edit_file"]["parameters"]["properties"]
 
 
 def test_active_tool_schemas_are_json_clean_and_within_budget():

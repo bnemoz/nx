@@ -236,21 +236,113 @@ def edit_file(path: str, old: str = "", new: str = "", replace_all: bool = False
               old_lines: str = "", edits: list[dict[str, str]] | None = None,
               diff: str = "", **_: Any) -> str:
     """The one file-edit tool, three modes by args:
-    - `diff` set -> apply_patch body (unified diff, possibly multi-file).
+    - `diff` set -> the diff engine (apply_patch body: unified diff, possibly
+      multi-file, atomic — it is this mode's implementation, not a tool).
     - `edits` set -> multi_edit body (atomic batch of literal replacements).
     - otherwise -> the literal `old`/`old_lines`/`new` replace.
     (The historical standalone bodies are kept below and re-exported; the
     dispatcher, fence, and undo plumbing all read this merged signature.)"""
     if isinstance(diff, str) and diff.strip():
-        if edits or old or old_lines:
+        if edits or old or old_lines or new:
             return "ERROR: pass `diff` alone, or old/old_lines/edits — not both"
+        guard = _diff_mode_guard(diff, path or ".")
+        if guard:
+            return guard
         return apply_patch(diff, path=path or ".")
     if edits is not None:
-        if old or old_lines:
-            return "ERROR: pass either `edits` or `old`/`old_lines`, not both"
+        if old or old_lines or (isinstance(diff, str) and diff.strip()):
+            return "ERROR: pass either `edits` or old/old_lines/diff, not both"
         return multi_edit(path, edits)
+    # Literal mode: `new` (with `old` or `old_lines`) is REQUIRED here even
+    # though the schema only requires `path` — diff mode and edits mode don't
+    # carry a `new`, so the payload requirement is enforced per-mode.
+    if not new and not (old or old_lines):
+        return ("ERROR: edit_file needs a mode: `diff` (unified diff), `edits` "
+                "(batch of {old,new}), or `old`/`old_lines` + `new` (literal replace)")
     return _edit_file_literal(path, old=old, new=new, replace_all=replace_all,
                               old_lines=old_lines)
+
+
+def _diff_hunk_payloads(diff_text: str) -> dict[str, list[str]]:
+    """file -> the added-line payload of each hunk, in order (the `+++ b/x`
+    header names the file, `/dev/null` targets skipped; a hunk with no `+`
+    lines — a pure deletion — contributes nothing). Diff mode's guard reads
+    one hunk payload the way literal mode reads one `new`."""
+    out: dict[str, list[str]] = {}
+    cur: str | None = None
+    hunk: list[str] | None = None
+    for line in diff_text.splitlines():
+        m = re.match(r"^(---|\+\+\+) (?:[ab]/)?(\S+)", line)
+        if m:
+            tgt = m.group(2)
+            cur = None if tgt == "/dev/null" else tgt
+            hunk = None
+            continue
+        if cur is None:
+            continue
+        if line.startswith("@@"):
+            if hunk:
+                out.setdefault(cur, []).append("\n".join(hunk))
+            hunk = []
+            continue
+        if line.startswith("+") and hunk is not None:
+            hunk.append(line[1:])
+    if cur is not None and hunk:
+        out.setdefault(cur, []).append("\n".join(hunk))
+    return out
+
+
+def _diff_mode_guard(diff: str, base: str) -> str:
+    """The literal-mode guards, applied to diff mode (0.158.11 consolidation):
+    every file a patch touches crosses the staleness check and the cross-process
+    file claim, and each hunk's added lines cross the garble guard — all BEFORE
+    apply_patch's dry-run and approval prompt, so one guarded file refuses the
+    whole call without a partial write (the same all-or-nothing contract the
+    diff itself gives).
+
+    Best-effort by construction: staleness/claim are per file and refuse it; the
+    garble scan is per hunk and needs the on-disk text as its novelty
+    reference, so a file the diff creates (nothing readable yet) skips it.
+    Returns "" when everything passes, else the ERROR refusal."""
+    payloads = _diff_hunk_payloads(diff)
+    # Deleted files (`+++ /dev/null`) have no added lines, so they never reach
+    # the per-hunk guards above — check the `--- a/x` source path explicitly.
+    for rel in _patch_delete_sources(diff):
+        target = os.path.join(base, rel) if base not in ("", ".") else rel
+        stale = _staleness_error(target)
+        if stale:
+            return f"ERROR: edit_file diff mode refused before applying — {stale}"
+        claim = _claim_error(target)
+        if claim:
+            return f"ERROR: edit_file diff mode refused before applying — {claim}"
+    if not payloads:
+        return ""
+    problems: list[str] = []
+    for rel, hunks in payloads.items():
+        target = os.path.join(base, rel) if base not in ("", ".") else rel
+        stale = _staleness_error(target)
+        if stale:
+            problems.append(stale)
+            continue
+        claim = _claim_error(target)
+        if claim:
+            problems.append(claim)
+            continue
+        try:
+            with open(target) as fh:
+                src = fh.read()
+        except OSError:
+            continue  # new file: no novelty reference to scan the hunks against
+        for payload in hunks:
+            status, msg, _text = garble_check(payload, src, path=target)
+            if status == "error":
+                problems.append(
+                    f"{target}: {msg or 'garble guard rejected the patch'}")
+                break
+    if not problems:
+        return ""
+    return ("ERROR: edit_file diff mode refused before applying — "
+            + " ".join(problems))
 
 
 def _edit_file_literal(path: str, old: str = "", new: str = "", replace_all: bool = False,
@@ -642,12 +734,45 @@ def sed_edit(pattern: str, replacement: str, path: str, count: int = 0, flags: s
 
 
 def _patch_affected_files(diff_text: str) -> list[str]:
-    files = []
+    """Write targets of a unified diff: `+++ b/x` paths; a `+++ /dev/null`
+    (file deletion) contributes its `--- a/x` source path instead."""
+    files: list[str] = []
+    pending_source: str | None = None
     for line in diff_text.splitlines():
-        m = re.match(r"^\+\+\+ (?:b/)?(\S+)", line)
-        if m and m.group(1) != "/dev/null" and m.group(1) not in files:
-            files.append(m.group(1))
+        m = re.match(r"^(---|\+\+\+) (?:[ab]/)?(\S+)", line)
+        if not m:
+            continue
+        target = m.group(2)
+        if m.group(1) == "---":
+            pending_source = None if target == "/dev/null" else target
+            continue
+        if target == "/dev/null":
+            target = pending_source or ""
+        if target and target not in files:
+            files.append(target)
+        pending_source = None
     return files
+
+
+def _patch_delete_sources(diff_text: str) -> list[str]:
+    """Files a diff DELETES (`--- a/x` followed by `+++ /dev/null`). These skip
+    the hunk-payload guards, so they get their own staleness and claim checks
+    (in _diff_mode_guard) and their own undo snapshots — an /undo must restore
+    a diff-mode deletion."""
+    sources: list[str] = []
+    pending_source: str | None = None
+    for line in diff_text.splitlines():
+        m = re.match(r"^(---|\+\+\+) (?:[ab]/)?(\S+)", line)
+        if not m:
+            continue
+        target = m.group(2)
+        if m.group(1) == "---":
+            pending_source = None if target == "/dev/null" else target
+            continue
+        if target == "/dev/null" and pending_source and pending_source not in sources:
+            sources.append(pending_source)
+        pending_source = None
+    return sources
 
 
 def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
@@ -665,9 +790,29 @@ def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
     """
     if not diff or not diff.strip():
         return "ERROR: `diff` is empty"
+    # A caller may pass the target FILE as `path` (edit_file diff mode's
+    # `path` arg); the patch tools need the base DIRECTORY.
+    if path and os.path.isfile(path):
+        path = os.path.dirname(os.path.abspath(path)) or "."
+    if not path or not os.path.isdir(path):
+        return f"ERROR: {path} is not a directory (apply_patch needs a base dir)"
     files = _patch_affected_files(diff)
     if not files:
         return "ERROR: no `--- a/x` / `+++ b/x` file headers found in diff"
+    # Deleted files (`+++ /dev/null`) ride the `--- a/x` source path for the
+    # undo snapshot — a deletion is a write to that file too (staleness and
+    # claim were already checked per-file in _diff_mode_guard; when apply_patch
+    # is the entry point, check them here).
+    deletes = _patch_delete_sources(diff)
+    guarded = list(dict.fromkeys(files + deletes))
+    for f in guarded:
+        target = os.path.join(path, f)
+        stale = _staleness_error(target)
+        if stale:
+            return stale
+        claim = _claim_error(target)
+        if claim:
+            return claim
     has_git = bool(shutil.which("git"))
     has_patch = bool(shutil.which("patch"))
     if not has_git and not has_patch:
@@ -694,12 +839,41 @@ def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
         if check.returncode != 0:
             return f"ERROR: patch does not apply cleanly: {(check.stderr or check.stdout).strip()}"
         preview = diff if len(diff) < 4000 else diff[:4000] + "\n... [truncated]"
-        if not _confirm(f"apply_patch: {len(files)} file(s): {', '.join(files)}", preview=preview):
+        if not _confirm(f"edit_file diff: {len(files)} file(s): {', '.join(files)}", preview=preview):
             return "DENIED by user"
-        befores = [_undo_snapshot(os.path.join(path, f)) for f in files]
+        befores = [_undo_snapshot(os.path.join(path, f)) for f in guarded]
         if backend == "git":
+            # Atomicity: git apply has no --atomic flag (checked: git 2.43),
+            # and without it a later file failing after earlier ones already
+            # landed leaves a partial write. So the whole patch is applied
+            # against a temp COPY of the target files first; only when it all
+            # lands there do we apply for real.
+            with tempfile.TemporaryDirectory(prefix=".nx-patch-tree-") as tmp_tree:
+                for f in guarded:
+                    dst = os.path.join(tmp_tree, f)
+                    os.makedirs(os.path.dirname(dst) or tmp_tree, exist_ok=True)
+                    if os.path.exists(os.path.join(path, f)):
+                        shutil.copy2(os.path.join(path, f), dst)
+                trial = subprocess.run(["git", "apply", tmp_path], cwd=tmp_tree,
+                                        capture_output=True, text=True)
+                if trial.returncode != 0:
+                    return f"ERROR: patch application failed: {(trial.stderr or trial.stdout).strip()}"
             result = subprocess.run(["git", "apply", tmp_path], cwd=path, capture_output=True, text=True)
         else:
+            # POSIX `patch` has no atomicity either. Same temp-tree trial:
+            # apply to a copy first; only if the whole patch lands there do we
+            # re-run it on the real files. A crash between the two runs is the
+            # residual (documented) risk window.
+            with tempfile.TemporaryDirectory(prefix=".nx-patch-tree-") as tmp_tree:
+                for f in guarded:
+                    dst = os.path.join(tmp_tree, f)
+                    os.makedirs(os.path.dirname(dst) or tmp_tree, exist_ok=True)
+                    if os.path.exists(os.path.join(path, f)):
+                        shutil.copy2(os.path.join(path, f), dst)
+                trial = subprocess.run(["patch", "-p1", "-i", tmp_path], cwd=tmp_tree,
+                                        capture_output=True, text=True)
+                if trial.returncode != 0:
+                    return f"ERROR: patch application failed: {(trial.stderr or trial.stdout).strip()}"
             result = subprocess.run(["patch", "-p1", "-i", tmp_path], cwd=path, capture_output=True, text=True)
         if result.returncode != 0:
             return f"ERROR: patch application failed: {(result.stderr or result.stdout).strip()}"
@@ -708,7 +882,7 @@ def apply_patch(diff: str, path: str = ".", **_: Any) -> str:
             os.unlink(tmp_path)
         except OSError:
             pass
-    _undo_push("apply_patch", befores)
+    _undo_push("edit_file(diff)", befores)
     return f"applied patch ({backend}) to {len(files)} file(s): {', '.join(files)}"
 
 

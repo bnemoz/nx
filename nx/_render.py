@@ -86,6 +86,23 @@ def role(role_name: str) -> str:
     return getattr(C, role_name, C.ACCENT)
 
 
+def hue(name: str) -> str:
+    """The active theme's SGR color for a raw *palette* hue name ("green").
+
+    The one sanctioned escape hatch from the role layer, for a component whose
+    color vocabulary genuinely IS the palette rather than a semantic role (the
+    `/memory` view's per-scope hues: project=green, global=magenta, date=
+    yellow). Resolved at call time off the shared `C`, so it still tracks
+    `set_theme()`/`NO_COLOR`. An unknown name degrades to ACCENT rather than
+    raising, exactly like `role()` — display must never break a turn.
+
+    Callers outside the render layer go through here instead of reading
+    `C.GREEN` themselves: that keeps the raw-palette grep (B3's acceptance
+    guard, tests/test_render_components) clean package-wide.
+    """
+    return getattr(C, name.upper(), C.ACCENT)
+
+
 # --- render mode: the one switch ---------------------------------------------
 def live_open() -> bool:
     """Is a rich Live draining the shared console right now?"""
@@ -322,7 +339,7 @@ __all__ = [
     "BOX_BRANCH_MID", "BOX_BRANCH_END", "BOX_GLYPHS",
     "TAIL_BULLET", "BAR_FULL", "BAR_EMPTY", "FAIL_MARK",
     "NOTICE_ROLES",
-    "role", "live_open", "emit", "commit_line",
+    "role", "hue", "live_open", "emit", "commit_line",
     "panel", "panel_header", "panel_row", "panel_footer",
     "notice", "kv_line", "diff", "stream_tail", "status_line",
 ]

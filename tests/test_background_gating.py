@@ -54,7 +54,7 @@ def test_active_tools_excludes_wait_background_by_default():
     assert "multi_edit" in names
     assert set(names) == {"read_file", "write_file", "edit_file", "delete_file",
                           "run_bash", "search_files", "multi_edit",
-                          "apply_patch", "todo_write", "memory_write",
+                          "todo_write", "memory_write",
                           "memory_search", "memory_delete", "recall_lessons",
                           "run_tests",
                           "git_commit", "search_tools", "web_fetch", "duckdb"}
@@ -82,7 +82,9 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # + critique (0.132.0, the scoped reviewer; in TOOLS, gated on NX_SUBAGENTS)
     # 0.158.9: git_status/git_diff/git_log/sed_edit retire from the floor
     # (still dispatchable, like list_dir at 0.129.8)
-    assert len(m.TOOLS) == 28
+    # 0.158.11: apply_patch leaves the schema entirely — its body is edit_file's
+    # `diff` mode now, so the floor carries one fewer tool
+    assert len(m.TOOLS) == 27
 
 
 # ---------------------------------------------------------------------------

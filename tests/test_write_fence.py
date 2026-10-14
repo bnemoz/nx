@@ -115,20 +115,20 @@ def test_sed_edit_inside_glob_allowed(_fence_env, monkeypatch):
                                                  "pattern": "a", "replacement": "b"}) == ""
 
 
-# --- apply_patch targets --------------------------------------------------------
+# --- edit_file diff mode targets (the former standalone apply_patch) -----------
 
-def test_apply_patch_target_outside_refused(_fence_env):
+def test_diff_mode_target_outside_refused(_fence_env):
     diff = ("--- a/ok.py\n+++ b/ok.py\n@@ -1 +1 @@\n-a\n+b\n"
             "--- a/../../evil.py\n+++ b/../../evil.py\n@@ -1 +1 @@\n-a\n+b\n")
-    r = _fence.check_write_fence("apply_patch", {"diff": diff, "path": "."})
+    r = _fence.check_write_fence("edit_file", {"diff": diff, "path": "."})
     assert r.startswith("ERROR: write fence:")
     assert "evil.py" in r
 
 
-def test_apply_patch_clean_allowed(_fence_env, monkeypatch):
+def test_diff_mode_clean_allowed(_fence_env, monkeypatch):
     monkeypatch.chdir(_fence_env)  # patch paths are relative to the cwd like the body's git apply
     diff = "--- a/src/m.py\n+++ b/src/m.py\n@@ -1 +1 @@\n-a\n+b\n"
-    assert _fence.check_write_fence("apply_patch", {"diff": diff, "path": "."}) == ""
+    assert _fence.check_write_fence("edit_file", {"diff": diff, "path": "."}) == ""
 
 
 # --- symlink / TOCTOU ------------------------------------------------------------

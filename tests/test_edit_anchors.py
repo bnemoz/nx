@@ -78,7 +78,9 @@ def test_edit_file_old_lines_preserves_trailing_newline_shape(nx_fresh):
 def test_edit_file_old_lines_schema_no_longer_requires_old(nx_fresh):
     nx, tmp = nx_fresh
     schema = next(t for t in nx.TOOLS if t["function"]["name"] == "edit_file")
-    assert schema["function"]["parameters"]["required"] == ["path", "new"]
+    # mode-aware required: only `path` is schema-required; old/old_lines/new
+    # requirements are enforced per-mode in the body + check_required.
+    assert schema["function"]["parameters"]["required"] == ["path"]
     assert "old_lines" in schema["function"]["parameters"]["properties"]
 
 

@@ -38,8 +38,7 @@ from ._approval import _EscToChat
 # in the T-9 conftest snapshot).
 from ._surfaces import write_lock
 from ._bash_jobs import run_bash, wait_background, kill_background
-from ._edit_tools import (write_file, edit_file, multi_edit, sed_edit,
-                          apply_patch, delete_file)
+from ._edit_tools import (write_file, edit_file, multi_edit, sed_edit, delete_file)
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
 from ._render import commit_line as _commit_line
@@ -88,7 +87,7 @@ DISPATCH = {
     "kill_background": kill_background,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
-    "todo_write": todo_write, "apply_patch": apply_patch, "delete_file": delete_file,
+    "todo_write": todo_write, "delete_file": delete_file,
     "memory_write": memory_write, "memory_search": memory_search,
     "memory_delete": memory_delete, "recall_lessons": recall_lessons,
     "spawn_agent": spawn_agent, "read_image": read_image,
@@ -753,7 +752,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         # store_cacheable_result re-bounds the cache (PF-16/I-8) — both the
         # entry cap and the byte cap, oldest first.
     elif name in ("write_file", "edit_file", "multi_edit", "delete_file",
-                  "sed_edit", "apply_patch") and not tail_text.startswith("ERROR"):
+                  "sed_edit") and not tail_text.startswith("ERROR"):
         if isinstance(args.get("diff"), str) and args.get("diff").strip():
             from ._edit_tools import _patch_affected_files
             base = args.get("path") or "."
@@ -767,7 +766,7 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
         _commit_tool_cache()
         if result != "DENIED by user":
             # push_if_absent (0.47.0, ROADMAP 2.2): a body that pushes its own
-            # checkpoint (delete_file, sed_edit, apply_patch) is not stacked
+            # checkpoint (delete_file, sed_edit, edit_file's diff mode) is not stacked
             # twice — the dispatcher only fills the gap for the single-path
             # write tools whose bodies don't push. One approved call, one
             # /undo press, one depth slot.

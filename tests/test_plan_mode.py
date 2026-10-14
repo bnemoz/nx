@@ -91,7 +91,7 @@ assert "/plan done" in state.messages[-1]["content"]
 assert m.plan_active() and m.plan_path() == ppath
 
 # --- gate: mutating tools refused, read-only pass -----------------------------
-for tool in ("write_file", "edit_file", "sed_edit", "apply_patch",
+for tool in ("write_file", "edit_file", "sed_edit",
              "delete_file", "run_bash", "memory_write", "memory_delete"):
     msg = m.check_gate(tool)
     assert msg and "Plan mode is active" in msg, f"{tool} must be gated"

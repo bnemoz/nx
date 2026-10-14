@@ -4,7 +4,8 @@ every path-carrying tool call, enforced in run_tool() *before* the tool body.
 Why a fence when there is already a risk classifier and an approval prompt:
 both are judgement. The classifier is a model call keyed off the approval
 ACTION string (`_extract_action_path` only parses "edit/delete/write <path>"
-prefixes — sed_edit/apply_patch had no path judgement at all), and YOLO
+prefixes — sed_edit and the multi-file diff writer had no path judgement at
+all), and YOLO
 skips the prompt entirely. A committed `config -> ~/.ssh/authorized_keys`
 symlink converts an approved in-project edit into an out-of-project write,
 because `_atomic_write` deliberately follows symlinks (link-farm dotfile
@@ -37,8 +38,9 @@ _TOOL_PATH_TOOLS = ("write_file", "edit_file", "multi_edit", "delete_file")
 # Tools with extra write surfaces beyond `path`.
 #   sed_edit: `path` is a glob — the body expands it against the real cwd,
 #     so fence each matched file plus the literal (pre-expansion) arg.
-#   apply_patch: `diff` headers name files relative to `path`; also fence
-#     each extracted +++/--- target joined against the patch base.
+#   edit_file `diff` mode (the former standalone apply_patch): its `diff`
+#     headers name files relative to `path`; also fence each extracted
+#     +++/--- target joined against the patch base.
 #   run_bash: no `path` args, but shell is still a write surface — a model
 #     routed a refused edit through `python3 - <<'EOF' ... open(p,'w') ... EOF`
 #     in the wild. A full shell parser still isn't worth it, but the common
@@ -135,7 +137,7 @@ def _fence_candidates(name: str, args: dict[str, Any]) -> list[tuple[str, str]]:
 
     _diff = args.get("diff")
     if isinstance(_diff, str) and _diff.strip():
-        # diff mode (merged edit_file, or the legacy apply_patch name): the
+        # edit_file diff mode (the engine the former apply_patch tool used): the
         # patch headers name the real targets, `path` is only the base dir.
         base = args.get("path") or "."
         add(base)

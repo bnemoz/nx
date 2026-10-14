@@ -40,7 +40,7 @@ def test_string_boolean_coerced(clean_env):
     # git_diff retired from the floor (0.158.9): still dispatchable, but its
     # schema is no longer in TOOLS — repair goes pass-through, so use a live
     # boolean arg (run_tests.targets is a str-list oneOf → treated as string;
-    # apply_patch.diff is a plain string) to exercise the coercion.
+    # edit_file.diff is a plain string) to exercise the coercion.
     args, notes = _argrepair.repair_args("write_file", {"path": "x", "content": 42})
     assert args == {"path": "x", "content": "42"}
     assert notes == ['content: 42 -> "42"']

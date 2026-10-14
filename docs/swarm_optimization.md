@@ -42,7 +42,8 @@ All findings verified against current source (v0.97.0). Baselines quoted from
   `tree_stamp(entry.path)` per `search_files` entry, each walking up to
   `NX_TOOL_CACHE_TREE_FILES` = **5000 entries, one `os.stat` each** (`:179-196`).
 - Callers: `_dispatch.py:580` (after every successful
-  `write_file/edit_file/multi_edit/sed_edit/apply_patch`) and `_dispatch.py:593`
+  `write_file/edit_file/multi_edit/sed_edit` (incl. edit_file's `diff` mode) and
+  `_dispatch.py:593`
   (after every `run_bash`). With the 512-entry cache (`:277`) holding a few dozen
   search entries, **one edit costs tens of thousands of stats**. PERF.md measures
   `_walk_tree` at 35 ms / 19.7k entries ⇒ ~9 ms per `tree_stamp`.

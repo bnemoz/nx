@@ -483,7 +483,7 @@ a subdirectory changes. These are correctness bugs with a performance shape
 directory's and file's mtime under `NX_TOOL_CACHE_TREE_FILES`, default 5000)
 so a subdirectory change invalidates it. A committed edit additionally runs
 `drop_changed_entries` (`_dispatch._commit_tool_cache`), so the fix also covers
-`sed_edit`/`apply_patch` and any path the pre-body drop never named.
+`sed_edit`/`edit_file(diff=…)` and any path the pre-body drop never named.
 
 **PF-19 · LOW-MED · `_approval.py:45-46, :76-77` diffs are unbounded in output
 size.** CPU is fine (9.8 ms on 30k lines) but a one-line change in a repetitive

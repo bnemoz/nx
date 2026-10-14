@@ -122,6 +122,19 @@ def _scrub_env():
 # ---------------------------------------------------------------------------
 _scrub_env()
 
+# The baseline import must happen in the SAME cwd `_restore()` pins every test
+# to, because `nx._risk` derives `st.PROJECT_ROOT`/`PROJECT_ROOT_IS_GIT` at
+# import time from os.getcwd(). Invoked from outside the repo (`pytest
+# /path/to/repo/tests`), the old order snapshotted a baseline whose PROJECT_ROOT
+# was the invocation dir while every test then ran with cwd == _ROOT — so the
+# in-project shortcuts never fired (test_local_risk_hint's "medium" write hint
+# returned None, plus the .nx-path readers in test_lessons /
+# test_session_retention / test_session_eventlog / test_nx_home_isolation).
+# Same invariant nx keeps for itself: it re-runs `_detect_project_root()` after
+# every cwd change (_resume.py:116, _repl.py:346). A no-op when run from the
+# repo root, and it costs one chdir per worker at import (no per-test cost).
+os.chdir(_ROOT)
+
 import nx  # noqa: E402,F401  (baseline import; probes skipped)
 
 

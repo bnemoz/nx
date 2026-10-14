@@ -58,9 +58,10 @@ import nx as m  # noqa: E402
 # With the active schema gated by _active_tools() (wait_background excluded
 # until a command backgrounds — currently read_file, write_file, edit_file,
 # list_dir, run_bash, search_files, git_status, git_diff, git_log, multi_edit,
-# sed_edit, apply_patch, todo_write, memory_write, memory_search, memory_delete,
+# sed_edit, todo_write, memory_write, memory_search, memory_delete,
 # delete_file) the chars/3.5 content floor is ~2680; the README's figure adds
-# ~50 of server-side framing. git_log + apply_patch (two new tools) plus
+# ~50 of server-side framing. git_log + apply_patch (two new tools at the time;
+# apply_patch was folded back into edit_file's `diff` mode in 0.158.11) plus
 # read_file/search_files list-argument params pushed the floor up from
 # ~1990; memory_write + memory_search (model-driven memory, two more tools)
 # plus the SYSTEM memory line raised it again from ~2263; a 0.3.1 pass that

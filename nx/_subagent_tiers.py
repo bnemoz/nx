@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 from typing import Any
 
 from . import _state as st
@@ -34,7 +35,8 @@ _READ_ONLY_TOOL_NAMES = (
 # they resolve to the confirm-through wrappers in _write_tier_dispatch().
 # delete_file is deliberately excluded (removal, not creation — a delete is
 # one edit away from a recreate, but its undo snapshot belongs to the parent);
-# so are apply_patch (one call already covers multi-file restructures),
+# so are edit_file's `diff` mode (one call already covers multi-file
+# restructures, and the sub-agent write tier already carries edit_file),
 # memory_write, and run_bash (the read-only allowlist tier covers inspection).
 # run_tests IS included (0.49.0): a write-tier agent that can edit but not
 # verify can only guess. It runs through the same user-gated _confirm() the
@@ -404,6 +406,8 @@ def _write_tier_wrapper(name: str):
         worktree = getattr(ctx, "worktree", None)
         if worktree:
             args = _worktree_args(name, args, worktree)
+            if isinstance(args.get("diff"), str) and args["diff"].strip():
+                args = _worktree_diff_args(args, worktree)
         # Path scope gate BEFORE the body/approval: an out-of-scope write is
         # an explicit refusal, never a prompt and never a silent denial.
         target = _scope_target(name, args)
@@ -411,6 +415,13 @@ def _write_tier_wrapper(name: str):
             refusal = _scope_check(target)
             if refusal is not None:
                 return refusal
+        # Diff mode: the args' `path` is at most a base dir — the real write
+        # targets live in the diff body's `+++ b/...` headers, so every one of
+        # them crosses the scope gate too (a `+++ b/../../outside.py` must not
+        # smuggle a write outside the agent's scope or worktree).
+        refusal = _diff_scope_refusal(args)
+        if refusal is not None:
+            return refusal
         prev_ctx = _SUBAGENT_TLS.ctx
         _SUBAGENT_TLS.ctx = None  # body + _confirm() run as the parent
         try:
@@ -426,6 +437,54 @@ def _write_tier_wrapper(name: str):
 
     _run.__name__ = f"_subagent_write_{name}"
     return _run
+
+
+_DIFF_HEADER = re.compile(r"^(\+\+\+|---) (\S+)")
+
+
+def _diff_scope_targets(diff: str) -> list[str]:
+    """Filesystem paths a unified diff writes to, for the sub-agent scope gate.
+
+    `+++ b/x` headers are the write targets; a `+++ /dev/null` header means the
+    file is DELETED, and its target is the `--- a/x` source path of the same
+    file section. Absolute paths and any path with an empty or `..` component
+    are returned as-is so `_scope_check` can refuse them (a diff body must
+    never smuggle a write outside the agent's scope/worktree)."""
+    targets: list[str] = []
+    pending_source: str | None = None
+    for line in diff.splitlines():
+        m = _DIFF_HEADER.match(line)
+        if not m:
+            continue
+        raw = m.group(2).rstrip("\r")
+        if m.group(1) == "---":
+            pending_source = raw[2:] if raw.startswith(("a/", "b/")) else raw
+            continue
+        # `+++` line: the write target (or the deletion source just seen)
+        target = raw[2:] if raw.startswith(("a/", "b/")) else raw
+        if target == "/dev/null":
+            target = pending_source or ""
+        if target and target not in targets:
+            targets.append(target)
+        pending_source = None
+    return targets
+
+
+def _diff_scope_refusal(args: dict[str, Any]) -> str | None:
+    """Scope-check every file a diff-mode edit_file/apply_patch call touches.
+    Returns the first refusal, or None when every target is in scope."""
+    diff = args.get("diff")
+    if not isinstance(diff, str) or not diff.strip():
+        return None
+    for target in _diff_scope_targets(diff):
+        if (not target or os.path.isabs(target) or ".." in target.split("/")
+                or ".." in target.split(os.sep)):
+            return (f"REFUSED: diff touches path outside this agent's scope: "
+                    f"{target or '(unresolvable)'}")
+        refusal = _scope_check(target)
+        if refusal is not None:
+            return refusal
+    return None
 
 
 def _worktree_args(name: str, args: dict[str, Any], worktree: str) -> dict[str, Any]:
@@ -448,6 +507,34 @@ def _worktree_args(name: str, args: dict[str, Any], worktree: str) -> dict[str, 
     if name == "run_tests":
         args["cwd"] = worktree
     return args
+
+
+def _worktree_diff_args(args: dict[str, Any], worktree: str) -> dict[str, Any]:
+    """Rewrite the `+++ b/...` / `--- a/...` header paths of a diff-mode call's
+    body into the agent's worktree, mirroring what _worktree_args does for a
+    plain `path`. Relative header paths map to the tree; absolute and `..`
+    paths are left untouched for _diff_scope_refusal to refuse."""
+    from ._worktree import rewrite_path
+
+    def _rewrite_header_path(p: str) -> str:
+        prefix, _, rest = p.partition("/")
+        if prefix in ("a", "b") and rest:
+            return f"{prefix}/{rewrite_path(rest, worktree)}"
+        return p
+
+    diff = args.get("diff")
+    if not isinstance(diff, str) or not diff.strip():
+        return args
+    lines = []
+    for line in diff.splitlines(keepends=True):
+        m = _DIFF_HEADER.match(line)
+        if m:
+            eol = "\n" if line.endswith("\n") else ""
+            line = f"{m.group(1)} {_rewrite_header_path(m.group(2).rstrip(chr(13)))}{eol}"
+        lines.append(line)
+    out = dict(args)
+    out["diff"] = "".join(lines)
+    return out
 
 
 def _scope_target(name: str, args: dict[str, Any]) -> str | None:

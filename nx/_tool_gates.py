@@ -245,9 +245,15 @@ def _unknown_tool_error(name: str) -> str:
         "git_log": ("ERROR: git_log is retired in this session — run "
                     "run_bash `git log --oneline` (scope with `-- <file>`)."),
         "sed_edit": ("ERROR: sed_edit is retired in this session — use "
-                     "edit_file for a literal one-file replacement, apply_patch "
-                     "for a regex/multi-file restructure, or run_bash for anything "
-                     "else."),
+                     "edit_file for a literal one-file replacement, edit_file "
+                     "`diff` mode for a regex/multi-file restructure, or run_bash "
+                     "for anything else."),
+        # 0.158.11: apply_patch stopped being a tool at all — the same engine is
+        # edit_file's `diff` mode, so the name is not even dispatchable now.
+        "apply_patch": ("ERROR: apply_patch is retired in this session — pass the "
+                        "same unified diff to edit_file as its `diff` argument "
+                        "(atomic, every file the diff touches, `path` = the base "
+                        "directory)."),
     }
     if name in _RETIRED_REFUSALS:
         try:
@@ -276,31 +282,10 @@ def _unknown_tool_error(name: str) -> str:
         except Exception:  # noqa: BLE001 — telemetry must never break a refusal
             pass
         return f"ERROR: {name} is not available in this session {_GATE_REFUSALS[name]}"
-    # Retired-from-the-floor tools: dispatchable but never offered, so a model
-    # emitting one gets the same actionable "withheld" story — with the native
-    # replacement named — instead of a bare unknown-tool error.
-    _RETIRED_REFUSALS = {
-        "list_dir": ("ERROR: list_dir is retired in this session — list a "
-                     "directory with run_bash `ls [path]` (flags/pipes/filters "
-                     "work), and search file NAMES + contents with search_files."),
-        "git_status": ("ERROR: git_status is retired in this session — run "
-                       "run_bash `git status --short -b` for branch + changed files."),
-        "git_diff": ("ERROR: git_diff is retired in this session — run "
-                     "run_bash `git diff` (or `git diff --staged`, `git diff -- <file>`)."),
-        "git_log": ("ERROR: git_log is retired in this session — run "
-                    "run_bash `git log --oneline` (scope with `-- <file>`)."),
-        "sed_edit": ("ERROR: sed_edit is retired in this session — use "
-                     "edit_file for a literal one-file replacement, apply_patch "
-                     "for a regex/multi-file restructure, or run_bash for anything "
-                     "else."),
-    }
-    if name in _RETIRED_REFUSALS:
-        try:
-            from ._logging import usage_gate
-            usage_gate(name, "retired")
-        except Exception:  # noqa: BLE001 — telemetry must never break a refusal
-            pass
-        return _RETIRED_REFUSALS[name]
+    # (The retired-tool table lives above the unknown-name check — a retired
+    # name is by definition absent from TOOLS, so it must be answered there or
+    # it degrades to a bare unknown-tool error. 0.158.11 removed the duplicate
+    # copy that used to sit here; it was unreachable behind that first check.)
     try:
         from ._logging import usage_gate
         usage_gate(name, "withheld")

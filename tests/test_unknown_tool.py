@@ -63,13 +63,16 @@ def test_retired_tools_get_the_re_route_refusal():
     """0.158.9: git_status/git_diff/git_log/sed_edit retire from the offered
     floor like list_dir (0.129.8) — still dispatchable for direct callers, but
     a MODEL that emits a close miss gets the actionable refusal naming
-    run_bash / edit_file / apply_patch, never a bare unknown-tool error."""
+    run_bash / edit_file, never a bare unknown-tool error.
+    0.158.11 adds apply_patch to the same table, with one difference: its body
+    moved into edit_file's `diff` mode, so the name no longer dispatches at all."""
     expectations = {
         "git_status": "git status --short -b",
         "git_diff": "git diff",
         "git_log": "git log --oneline",
         "sed_edit": "edit_file",
         "list_dir": "run_bash `ls",
+        "apply_patch": "`diff` argument",
     }
     for name, needle in expectations.items():
         # the refusal lives on the unknown-tool path (direct emission still
@@ -83,6 +86,10 @@ def test_retired_tools_get_the_re_route_refusal():
     assert out.startswith("ERROR: git_status is retired"), out
     out = run_tool("sed_edt", {})
     assert out.startswith("ERROR: sed_edit is retired"), out
+    # 0.158.11: apply_patch's engine is edit_file's diff mode now, so the name
+    # is refused AND no longer dispatchable for direct callers.
+    out = run_tool("apply_patch", {"diff": ""})
+    assert out.startswith("ERROR: apply_patch is retired"), out
 
 
 def test_retired_tools_still_dispatch_for_direct_callers():

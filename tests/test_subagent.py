@@ -442,7 +442,7 @@ def test_subagent_system_and_toolset(nx_fresh):
     names = {t["function"]["name"] for t in tools}
     assert names == set(_READ_ONLY_TOOL_NAMES)
     assert "run_bash" in names  # read-only allowlisted tier — see test below
-    forbidden = {"write_file", "edit_file", "multi_edit", "sed_edit", "apply_patch",
+    forbidden = {"write_file", "edit_file", "multi_edit", "sed_edit",
                  "wait_background", "memory_write", "spawn_agent"}
     assert not (names & forbidden)
 

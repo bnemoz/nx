@@ -14,7 +14,11 @@ import json
 # not listed here degrades the nudge to "use one of: <remaining tools>"
 # (computed live, so it never names a tool the breaker itself dropped).
 FALLBACK_FOR = {
-    "multi_edit": "edit_file", "apply_patch": "edit_file", "sed_edit": "edit_file",
+    "multi_edit": "edit_file", "sed_edit": "edit_file",
+    # apply_patch was retired into edit_file diff mode; a stale apply_patch
+    # name still sitting in the breaker gets pointed at that mode explicitly
+    # (plain "use edit_file" alone would invite a literal-mode call).
+    "apply_patch": "edit_file diff mode (pass the unified diff as `diff`)",
     "read_image": "read_file", "delete_file": "edit_file",
     "plan_edit": "edit_file", "wait_background": "read_file",
     "memory_write": "memory_search", "memory_delete": "memory_search",
@@ -91,7 +95,8 @@ def _malformed_args_nudge(tool_name: str, broken_now: bool) -> str:
 def _salvage_truncated_args(raw: str) -> dict | None:
     """0.30.0, CARVE-OUT — read-only tools only, and only when the stricter
     required-args check passes at dispatch. WHY NOT EVERYWHERE: closure/bracket
-    repair INVENTS content. On write_file/edit_file/multi_edit/apply_patch the
+    repair INVENTS content. On write_file/edit_file/multi_edit (diff mode
+    included) the
     truncated tail is usually the payload itself (cutting a "content" string
     mid-line and closing the braces would WRITE a silently-truncated file —
     exactly the degenerate-output-into-history failure this stack exists to

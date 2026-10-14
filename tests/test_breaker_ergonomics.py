@@ -22,7 +22,11 @@ from nx._turn import _malformed_args_nudge, FALLBACK_FOR  # noqa: E402
 
 def test_nudge_fallback_map_covers_edit_siblings():
     assert FALLBACK_FOR["multi_edit"] == "edit_file"
-    assert FALLBACK_FOR["apply_patch"] == "edit_file"
+    # A stale apply_patch name in the breaker still nudges somewhere useful:
+    # edit_file's DIFF mode (not plain edit_file, which would invite a
+    # literal-mode call).
+    assert FALLBACK_FOR["apply_patch"].startswith("edit_file")
+    assert "diff" in FALLBACK_FOR["apply_patch"]
     assert FALLBACK_FOR["read_image"] == "read_file"
 
 

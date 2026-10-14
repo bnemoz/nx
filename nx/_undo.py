@@ -202,7 +202,8 @@ def push_checkpoint(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
 
 def push_if_absent(tool: str, snaps: list[Optional[FileSnapshot]]) -> None:
     """Dedup layer over `push_checkpoint` for the dispatcher (0.47.0): a tool
-    body that pushes its own checkpoint (delete_file, sed_edit, apply_patch)
+    body that pushes its own checkpoint (delete_file, sed_edit, edit_file's
+    diff mode)
     must not be stacked twice. A path that is already pending gets its
     snapshot UPDATED in place with the incoming one, so the stack keeps
     exactly one pending state per file — the most recently pushed snapshot —

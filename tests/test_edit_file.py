@@ -70,6 +70,74 @@ def test_ambiguous_match_errors():
     assert "matched 2 times" in res
 
 
+# --- diff mode (the consolidated apply_patch engine, 0.158.11) -----------------
+
+def _diff(a="a", b="b"):
+    return (f"--- {os.path.join(_tmp, 'dm.py')}\n"
+            f"+++ b/dm.py\n@@ -1 +1 @@\n-{a}\n+{b}\n")
+
+
+def test_diff_mode_applies_through_edit_file(tmp_path, monkeypatch):
+    saved_confirm = m._confirm
+    try:
+        _allow_edits()
+        (tmp_path / "dm.py").write_text("a\n")
+        monkeypatch.chdir(tmp_path)
+        res = m.edit_file(path=str(tmp_path), diff=_diff())
+        assert "applied patch" in res, res
+        assert (tmp_path / "dm.py").read_text() == "b\n"
+    finally:
+        m._confirm = saved_confirm
+
+
+def test_diff_mode_refuses_mixed_modes():
+    res = m.edit_file("x.py", old="a", new="b", diff="--- a/x\n+++ b/x\n")
+    assert res.startswith("ERROR") and "not both" in res
+
+
+def test_diff_mode_denial_writes_nothing(tmp_path, monkeypatch):
+    saved_confirm = m._confirm
+    try:
+        _deny_edits()
+        (tmp_path / "dm.py").write_text("a\n")
+        monkeypatch.chdir(tmp_path)
+        res = m.edit_file(path=str(tmp_path), diff=_diff())
+        assert res.startswith("DENIED"), res
+        assert (tmp_path / "dm.py").read_text() == "a\n"
+    finally:
+        m._confirm = saved_confirm
+
+
+def test_diff_mode_staleness_guard_refuses(tmp_path, monkeypatch):
+    """Diff mode crosses the same cross-session staleness guard the literal
+    mode uses: a file read this session and changed underneath refuses the
+    whole patch before the dry-run/approval flow (0.158.11 guard routing)."""
+    from nx import _staleness
+    saved_confirm = m._confirm
+    try:
+        _allow_edits()
+        f = tmp_path / "dm.py"
+        f.write_text("a\n")
+        _staleness.record_read(str(f))          # anchor at the current mtime
+        st = f.stat()
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))  # newer
+        monkeypatch.chdir(tmp_path)
+        res = m.edit_file(path=str(tmp_path), diff=_diff())
+        assert res.startswith("ERROR"), res
+        assert "changed on disk since this session last read it" in res
+        assert (tmp_path / "dm.py").read_text() == "a\n"
+    finally:
+        m._confirm = saved_confirm
+
+
+def test_apply_patch_name_no_longer_dispatches():
+    from nx._dispatch import DISPATCH
+    assert "apply_patch" not in DISPATCH
+    assert "apply_patch" not in {t["function"]["name"] for t in m.TOOLS}
+    # the engine itself stays, as edit_file's diff-mode implementation
+    from nx._edit_tools import apply_patch  # noqa: F401
+
+
 if __name__ == "__main__":
     test_no_op_edit_errors_without_prompting()
     test_real_edit_still_prompts_and_writes()
