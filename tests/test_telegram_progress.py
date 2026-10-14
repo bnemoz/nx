@@ -44,16 +44,26 @@ def test_describe_turn_home_shortening_and_bad_args():
 
 def test_compose_status_first_and_last():
     lines = ["line%d" % i for i in range(20)]
-    out = tg._compose_status("fix the bug", lines, 7, None, 65.0)
-    assert "\u2753 fix the bug" in out
+    out = tg._compose_status(lines, 7, None, 65.0)
+    assert "\u2753" not in out
+    assert out.startswith("line19\n")    # freshest activity is the header
     assert "earlier calls" in out
-    assert "line19" in out and "line5" not in out
+    assert "line18" in out and "line4" not in out
     assert "7 tool calls" in out and "65s" in out
-    short = tg._compose_status("q", ["only"], 1, "thinking...", None,
+    short = tg._compose_status(["only"], 1, "thinking...", None,
                                "agent turn 3/100")
+    assert short.count("only") == 1      # header, not duplicated in a body
     assert "total: 1 tool calls" in short
     assert "\U0001f916 agent turn 3/100" in short
     assert "\U0001f4ac thinking..." in short
+
+
+def test_compose_status_zero_calls_and_single_line():
+    out = tg._compose_status([], 0, None, 3.0)
+    assert out.startswith("\u23f3 Working\u2026\n")
+    assert "total: 0 tool calls" in out
+    one = tg._compose_status(["📂 read_file: x"], 1, None, None)
+    assert one == "📂 read_file: x\n\ntotal: 1 tool calls"
 
 
 def test_progress_sink_receives_notes():

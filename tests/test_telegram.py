@@ -259,12 +259,12 @@ def test_describe_turn_home_shortening_and_bad_args():
 
 def test_compose_status_tally_and_tail():
     lines = ["line%d" % i for i in range(20)]
-    out = tg._compose_status("fix the bug", lines, 7, None, 65.0)
+    out = tg._compose_status(lines, 7, None, 65.0)
     assert "earlier calls" in out
-    assert "line19" in out and "line5" not in out
+    assert "line19" in out and "line4" not in out
     assert "7 tool calls" in out and "65s" in out
-    short = tg._compose_status("q", ["only"], 1, None, None)
-    assert short == "❓ q\nonly\n\ntotal: 1 tool calls"
+    short = tg._compose_status(["only"], 1, None, None)
+    assert short == "only\n\ntotal: 1 tool calls"
 
 
 def test_brief_collapses_whitespace_and_caps():
@@ -315,6 +315,44 @@ def test_run_turn_sends_progress_and_final_answer():
     assert final[0] == "sendMessage"
     assert "The paper says X." in final[1]["text"]
     assert conv[-1]["role"] == "assistant"         # conversation persists
+
+
+def test_run_turn_closing_edit_drops_the_answer_echo():
+    """0.158.1: the status bubble's closing edit is a clean activity log —
+    no 💬 prose line (that would be a truncation of the answer arriving in
+    the very next bubble) and no stale sub-agent note."""
+    calls = []
+    api = _fake_api(calls)
+    conv = []
+
+    def fake_loop(messages, on_step=None, **kw):
+        messages.append({"role": "assistant", "content": None,
+                         "tool_calls": [{"id": "1", "function": {
+                             "name": "web_fetch",
+                             "arguments": json.dumps(
+                                 {"url": "https://arxiv.org/abs/x"})}}]})
+        on_step()
+        messages.append({"role": "tool", "tool_call_id": "1",
+                         "content": "page text"})
+        on_step()
+        messages.append({"role": "assistant", "content": "The paper says X."})
+        return {"status": "done", "turns": 2}
+
+    with unittest.mock.patch.object(nx._state, "ACTIVE", _FakeSource()), \
+         unittest.mock.patch.object(nx, "_assess_risk", lambda *a, **k: ("low", "t")), \
+         unittest.mock.patch("nx._turn._run_model_turn_loop",
+                             side_effect=fake_loop), \
+         unittest.mock.patch("nx._dispatch._initial_messages", return_value=[
+             {"role": "system", "content": "s"}]), \
+         unittest.mock.patch("nx._turn._ensure_ctx_probe", lambda *a, **k: None):
+        tg._run_turn(api, 111, "read this", conv)
+
+    edits = [p["text"] for m, p in calls if m == "editMessageText"]
+    assert edits, "the status bubble must get a closing edit"
+    assert "\U0001f4ac" not in edits[-1]
+    assert "The paper says X." not in edits[-1]
+    assert "web_fetch" in edits[-1]               # activity still shown
+    assert calls[-1][0] == "sendMessage"          # answer still comes last
 
 
 def test_run_turn_reports_loop_failure():

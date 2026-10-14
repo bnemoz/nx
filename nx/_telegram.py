@@ -32,10 +32,12 @@ rejects the generated entities; a 4096-cut inside a code fence is closed
 and reopened across chunks). Messages > 4096 chars are chunked; the phone gets ONE
 status bubble per turn, edited in place at each model-turn boundary via
 editMessageText through the on_step seam of _run_model_turn_loop. Since
-0.95.0 the bubble is a first-and-last summary (the user's ask, the ×N-
-collapsed tool calls, the latest assistant prose, any live sub-agent
-progress, elapsed time) instead of a full transcript diff — the
-first and the final message are what matter on a phone. The model's own
+0.95.0 the bubble is a summary instead of a full transcript diff; since
+0.158.1 it is progress-only — the ×N-collapsed tool calls (freshest line as
+the header), the latest assistant prose, any live sub-agent progress and
+elapsed time, with no echo of the user's own message (it is already the
+bubble right above) and a closing edit that drops the prose line so the
+status never duplicates the answer. The model's own
 auto-compression keeps a long session bounded; `/new` from the phone wipes
 the conversation in place for a fresh context without a process restart.
 """
@@ -430,10 +432,10 @@ def _call_base(line: str) -> str:
 
 
 def _describe_turn(messages: list, turn_start: int) -> tuple[list[str], int]:
-    """A first-and-last summary of the whole turn (0.95.0 contract, replaces
-    the per-step transcript diff): the user's ask (truncated), one line per
-    tool call (consecutive identical ones collapse to ×N), and the turn's
-    most recent assistant prose. Returns (lines, real tool call count)."""
+    """A summary of the whole turn (0.95.0 contract, replaces
+    the per-step transcript diff; 0.158.1 drops the ask echo): one line per
+    tool call (consecutive identical ones collapse to ×N), plus the turn's
+    tool-call total. Returns (lines, real tool call count)."""
     calls: list[str] = []
     total = 0
     for m in messages[turn_start:]:
@@ -508,22 +510,30 @@ def _tool_line(name: str, args: dict) -> str:
 _STATUS_TAIL = 14
 
 
-def _compose_status(ask: str, lines: list[str], tool_n: int,
+def _compose_status(lines: list[str], tool_n: int,
                     note: str | None, elapsed: float | None,
                     progress: str | None = None) -> str:
-    """The whole status message (0.95.0): the user's ask, the latest tool
-    activity, the most recent assistant prose, a live sub-agent progress
-    note, and a footer tally."""
-    shown = lines[-_STATUS_TAIL:]
-    if len(lines) > _STATUS_TAIL:
-        shown.insert(0, f"\u2026 ({len(lines) - _STATUS_TAIL} earlier calls)")
-    body = "\n".join(shown)
+    """The whole status message (0.158.1): progress only — no echo of the
+    user's ask. The freshest call line is the header, earlier lines are the
+    body (with an overflow line), then a footer tally."""
+    if lines:
+        head = lines[-1]
+        rest = lines[:-1]      # head is the last line; never duplicated
+        shown = rest[-_STATUS_TAIL:]
+        overflow = len(lines) - len(shown) - 1
+    else:
+        head = "⏳ Working…"
+        rest = shown = []
+        overflow = 0
+    body_lines = ([f"\u2026 ({overflow} earlier calls)"] if overflow > 0
+                  else []) + shown
+    body = "\n".join(body_lines)
     footer = f"total: {tool_n} tool calls"
     if progress:
         footer = f"🤖 {progress} · " + footer
     if elapsed is not None:
         footer += f" \u00b7 {int(elapsed)}s"
-    return (f"\u2753 {ask}\n" + body + "\n\n" + footer
+    return (head + ("\n" + body if body else "") + "\n\n" + footer
             + (f"\n\U0001f4ac {note}" if note else ""))
 
 
@@ -690,12 +700,7 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
     # answer when the turn was a pure one-shot reply).
     status_id = None
     turn_start = len(messages)   # activity re-renders the whole turn
-    # the ask shown in the status bubble: the text of a parts instruction
-    ask_src = instruction
-    if isinstance(instruction, list):
-        ask_src = " ".join(p.get("text", "") for p in instruction
-                           if isinstance(p, dict) and p.get("type") == "text")
-    ask = _brief(ask_src, 100)
+    # 0.158.1: the status bubble is progress-only; no echo of the ask.
     started = time.monotonic()
     # live sub-agent feedback (0.95.0): spawn_agent's per-step note_progress
     # lands here so the phone sees `🤖 agent turn 3/100` while it waits.
@@ -706,9 +711,10 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
             progress_note[0] = text
             on_step()
 
-    def _render() -> tuple[str, int, str | None]:
-        """First-and-last status body: the ask, tool calls (×N-collapsed),
-        the latest assistant prose, elapsed time."""
+    def _render(quiet: bool = False) -> tuple[str, int, str | None]:
+        """Status body (0.158.1, progress-only): tool calls (×N-collapsed),
+        the latest assistant prose, elapsed time. `quiet` drops the live
+        notes: the closing edit has nothing left to report live."""
         calls, tool_n = _describe_turn(messages, turn_start)
         note = None
         for m in reversed(messages):
@@ -717,9 +723,9 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
                 if text:
                     note = _brief(text, 160)
                     break
-        return _compose_status(ask, calls, tool_n, note,
+        return _compose_status(calls, tool_n, None if quiet else note,
                                time.monotonic() - started,
-                               progress_note[0]), tool_n, note
+                               None if quiet else progress_note[0]), tool_n, note
 
     def on_step() -> None:
         # progress is best-effort; never kill the turn over it
@@ -783,6 +789,18 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
     # turn's activity re-edited the bubble.
     if not answer:
         answer = "(no final answer — status: %s)" % (summary or {}).get("status", "?")
+    # The status bubble's last live edit still carries the 💬 prose line, which
+    # by now is a truncation of the answer about to arrive in full, plus a
+    # stale sub-agent note. Re-render it without either so the two bubbles
+    # never read as the same message twice: bubble 1 ends as a clean activity
+    # log, bubble 2 is the report. Fail-soft — the answer is already settled
+    # and an un-editable status (deleted, rate-limited) is cosmetic.
+    if status_id is not None:
+        try:
+            closing, _n, _note = _render(quiet=True)
+            _edit_status(api, chat_id, status_id, closing)
+        except Exception:
+            pass
     _send(api, chat_id, answer)
     # 0.153.4: the pictures the turn produced (a read_image the user asked
     # about, a rendered plot) go back to the phone after the answer text —
