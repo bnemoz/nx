@@ -429,16 +429,16 @@ def pytest_runtest_teardown(item, nextitem):
 # 0.154.2 pruned test_batch_run's parallel-totals entry (root cause:
 # st._METRICS_TLS was drained by no one; the test hand-cleared it) - fixed in
 # nx_state_reset_body now; no hand-clearing needed.
-# 0.154.5/0.154.7 preview_visibility saga: CLOSED in 0.155.0 — the leak was
-# process-global st.YOLO/APPROVE_LEVEL forced by a sub-agent worker
-# (nx/_subagent.py ~1224) and inherited by a later Tier-A test, so _confirm's
-# YOLO fast path auto-allowed and the approval preview never printed. The swap
-# sat BEFORE the loop's try, so a raise in between (spinner stop, model-target
-# install) skipped the restore for good. Sub-agent posture is now thread-local
-# (nx/_state.py _POSTURE_TLS + _posture()/_posture_scope(), pinned by
-# tests/test_subagent_posture.py), so no agent can move the globals and no
-# window can skip a restore; the trio skipped the tuple in 0.154.2 too and held
-# then, and the five-run bar was re-cleared on the way in.
+# 0.154.5/0.154.7 preview_visibility saga: the posture leak (process-global
+# st.YOLO/APPROVE_LEVEL forced by a sub-agent worker, swap sitting BEFORE the
+# loop's try so a raise in between skipped the restore for good) was real and
+# is closed for its class since 0.155.0's TLS migration (nx/_state.py
+# _POSTURE_TLS + _posture()/_posture_scope(), pinned by
+# tests/test_subagent_posture.py). But the trio is NOT closed: it re-failed
+# together twice post-migration at normal wall on an idle box (see the
+# 0.155.3 comment below the tuple head) — either the migration is incomplete
+# or a second mechanism remains. Entries re-added; capture a live signature
+# before pruning again.
 _FLAKY_RERUN_NODEIDS = (
     "tests/test_git_index_guard.py::test_gitcommit_staged_wip_does_not_prompt_this_session",
     # Load-sensitivity set (each passes standalone and on immediate rerun;
@@ -447,14 +447,23 @@ _FLAKY_RERUN_NODEIDS = (
     # that (a) passes standalone and (b) is in a file listed here.
     "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
     "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
-    # 0.154.7 pruned the three test_forced_final_recovery entries: the tests
-    # asserted positional messages[-1] identity while spawning real run_bash,
-    # so any late append flipped them; they now locate tool observations by
-    # tool_call_id inside the appended slice (no positional pins, no sleeps).
-    # 0.154.7: preview_visibility trio PRUNED in 0.155.0 — the open theory in the
-    # saga comment above (a sub-agent worker forcing the process-global posture)
-    # was the root cause; the TLS migration closed it structurally (and the trio
-    # had been pruned-and-held once before, in 0.154.2).
+    # 0.155.3 RE-ADDED: the trio was pruned in 0.155.0 on the TLS-posture fix,
+    # but failed together twice since at NORMAL wall on an idle box (agent-13
+    # six-run bar run 4; coordinator hunt run 6 at 17.4s). The posture leak was
+    # real and is closed for its class — but it was not the trio's only cause
+    # (or the TLS fix is incomplete); no live signature captured yet. Prune
+    # only after capturing one and tying it to a fixed mechanism.
+    "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
+    "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
+    "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
+    # 0.155.3 RE-ADDED (two of three): the 0.154.7 rewrite (locate by
+    # tool_call_id in the appended slice) removed the positional fragility, but
+    # the pair still failed ~3 times across the 0.155.0-2 era (never the text
+    # variant; standalone always green). Real run_bash subprocesses — the
+    # ledger's load-sensitive family; capture the signature before pruning
+    # again.
+    "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
+    "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
     # 0.155.2 CLOSED: test_snapshot_agent_row_prefers_the_answer_tail pruned.
     # Root cause: _surfaces_snapshot's finished-row window (_DONE_KEEP=4)
