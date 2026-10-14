@@ -39,9 +39,55 @@ class TestGrepRewrite(unittest.TestCase):
                          "rg -i 'unlimited-ocr|ipv6|gai.conf' file")
 
     def test_include_and_exclude_dir(self):
+        # --include='*.py' contains `*`, an unsafe-for-requote character, so
+        # the whole command passes through verbatim (deliberate since the
+        # _UNSAFE_CHARS guard): the --include/--exclude-dir mapping only
+        # applies to glob-free flags.
         self.assertEqual(
             prefer_ripgrep("grep -rn --include='*.py' --exclude-dir=.venv foo ."),
-            "rg -n -g '*.py' -g '!.venv' foo .")
+            "grep -rn --include='*.py' --exclude-dir=.venv foo .")
+
+    def test_semicolon_chain_rewritten(self):
+        # `;` is a command separator even though shlex's default punctuation
+        # set omits it — the 0.158.3 rewrite would leave grep un-rewritten.
+        self.assertEqual(prefer_ripgrep("cd build; grep foo f"),
+                         "cd build ; rg foo f")
+        self.assertEqual(prefer_ripgrep("set -e; grep foo f"), "set -e ; rg foo f")
+
+    def test_env_assignment_head_rewritten(self):
+        self.assertEqual(prefer_ripgrep("FOO=1 grep -rn foo ."),
+                         "FOO=1 rg -n foo .")
+        self.assertEqual(prefer_ripgrep("LC_ALL=C grep -i foo f"),
+                         "LC_ALL=C rg -i foo f")
+
+    def test_wrapper_binary_head_rewritten(self):
+        self.assertEqual(prefer_ripgrep("sudo grep -rn foo /etc"),
+                         "sudo rg -n foo /etc")
+        self.assertEqual(prefer_ripgrep("time grep -rn foo ."), "time rg -n foo .")
+
+    def test_control_keyword_head_rewritten(self):
+        self.assertEqual(prefer_ripgrep("if grep -q foo f; then echo y; fi"),
+                         "if rg -q foo f ; then echo y ; fi")
+
+    def test_unsafe_chars_pass_through_verbatim(self):
+        # $(), globs, tilde: a token-level re-quote would turn them into
+        # literals, so the ORIGINAL string is returned, not a re-quoted copy.
+        self.assertEqual(prefer_ripgrep("echo $(grep foo f)"), "echo $(grep foo f)")
+        self.assertEqual(prefer_ripgrep("grep foo *.py"), "grep foo *.py")
+        self.assertEqual(prefer_ripgrep("grep foo $HOME/x"), "grep foo $HOME/x")
+
+    def test_no_grep_word_verbatim_no_requote(self):
+        # Regression (0.158.2): "ls -la && cat f.md" used to come back
+        # re-quoted ("ls -la && cat f.md" unchanged here, but quoted args and
+        # `;` chains got mangled). Verbatim in, verbatim out.
+        self.assertEqual(prefer_ripgrep("ls -la && cat 'my file.md'"),
+                         "ls -la && cat 'my file.md'")
+
+    def test_no_grep_at_command_position_no_requote(self):
+        # The grep word exists (inside a quoted arg) but never at command
+        # position: verbatim, no re-quote mangling.
+        self.assertEqual(prefer_ripgrep("echo 'grep foo f'; ls"),
+                         "echo 'grep foo f' ; ls")
 
     def test_hidden_flag_dropped_filenames_kept(self):
         # -h (suppress filenames) is a no-op lie in rg; -H is already default.
