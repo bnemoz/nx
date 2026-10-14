@@ -127,8 +127,12 @@ Verified per-process budgets (all ×N agents):
   `_async_duplicate_running` (`:410-420`) same-instruction dedup: keep.
 - Fresh `ThreadPoolExecutor` per turn (`_tool_prefetch.py:86,224`) — thread churn;
   a shared bounded pool makes the concurrency cap one knob instead of two.
-- `_SPAWN_LOCK` is **not** a bottleneck (verified: only wraps YOLO/APPROVE_LEVEL
-  snapshot-restore, `_subagent.py:699-704,741-742`).
+- `_SPAWN_LOCK` is **gone** (0.155.0): it only ever guarded the process-global
+  YOLO/APPROVE_LEVEL snapshot-restore that a sub-agent loop used to do. Posture
+  is thread-local now (`nx/_state.py: _POSTURE_TLS`, `_posture()`,
+  `_posture_scope()` installed around the agent body in `nx/_subagent.py`), so
+  there is no shared global left for two concurrent agents to race over and the
+  lock had no remaining users.
 
 ### 6. Per-save O(store) work on every indexed session write
 `_write_session` (`_sessions_fs.py:266-352`) per indexed save:

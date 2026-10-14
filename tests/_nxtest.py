@@ -314,6 +314,15 @@ def nx_state_reset_body() -> None:
         mtls = getattr(st, "_METRICS_TLS", None)
         if mtls is not None:
             mtls.__dict__.clear()
+        # 0.155.0: the per-AGENT approval posture override. Installed by
+        # `_state._posture_scope` around a sub-agent body and deleted in its
+        # `finally`, so a clean run leaves nothing — but a spawn that died
+        # between install and restore (or a test driving the scope by hand)
+        # would leave THIS thread resolving the agent's posture for every later
+        # decision read on it (the leak the globals-swap had, one layer down).
+        ptls = getattr(st, "_POSTURE_TLS", None)
+        if ptls is not None:
+            ptls.__dict__.clear()
     # A wake poller left running by an async-agent test keeps sweeping after
     # its file ends and flips st._WAKE_DUE mid-LATER test (the exact
     # subagent_async -> bg_completion_seen poison: wake_due() asserts read

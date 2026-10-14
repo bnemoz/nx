@@ -34,6 +34,9 @@ from ._render import notice as _role_notice
 from ._tty import read_byte, wait_ready
 from ._risk import _local_risk_hint, LEVEL_ORDER
 from . import _state as st
+# Posture resolution (0.155.0) goes through `st._posture()` — resolved off the
+# live module at CALL time, not a name captured at import, so the same
+# one-resolver rule holds however the module got loaded.
 
 # Approval diff-preview context lines (nx/_layout.py, pure move).
 _DIFF_CONTEXT = DIFF_CONTEXT_LINES
@@ -111,11 +114,14 @@ def _normalize_approval(arg: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _approval_display() -> str:
-    if st.YOLO:
+    # THIS thread's posture (0.155.0): inside an agent body the line must show
+    # the level the decision actually used, not the parent's.
+    yolo, level = st._posture()
+    if yolo:
         return "off (yolo)"
-    if st.APPROVE_LEVEL is None:
+    if level is None:
         return "all"
-    return st.APPROVE_LEVEL
+    return level
 
 
 def _apply_approval(kind: Optional[str], level: Optional[str] = None, *, update_default: bool = True) -> bool:
@@ -318,9 +324,16 @@ def _confirm(action: str, preview: Optional[str] = None,
          given, it's printed just above the prompt. `a` saves a persistent
          allow rule for this action's shape (see nx/_allowed.py).
 
-    Reads module globals YOLO and APPROVE_LEVEL at call time — /yolo and
-    /approval reassign them mid-session, and we must always see the latest
-    value, not a snapshot from when the tool function was defined.
+    Resolves the posture through `_state._posture()` at call time: the
+    AGENT's thread-local override when a sub-agent body is running on this
+    thread, else the process globals — which /yolo and /approval reassign
+    mid-session, so the latest value is always what the decision uses (never a
+    snapshot from when the tool function was defined).
+
+    0.155.0: the globals are the PARENT's posture only. Shift+Tab at a prompt
+    and the /yolo //approval writers keep writing them (an agent body must not
+    have its forced posture toggled away); the four DECISION reads below are
+    the ones routed through `_posture()`.
     """
     # A quiet loop (async sub-agent, batch task) can never prompt and must
     # never write to the shared terminal — not even the YOLO diff preview,
@@ -333,7 +346,7 @@ def _confirm(action: str, preview: Optional[str] = None,
     # reach _confirm.
     from ._subagent import _subagent_quiet
     if _subagent_quiet():
-        if st.YOLO:
+        if st._posture()[0]:
             return True
         # C4 (0.135.1): NX_APPROVAL_POLICY=headless-allow:<glob> lets an
         # operator pre-approve tool names on headless surfaces (Telegram,
@@ -346,7 +359,7 @@ def _confirm(action: str, preview: Optional[str] = None,
     # diff, edit_file's before/after), so /tooloutput collapsed must collapse
     # it like any other result body — the decision is unchanged either way.
     show_preview = bool(preview) and st.TOOL_OUTPUT_VISIBLE
-    if st.YOLO:
+    if st._posture()[0]:
         if show_preview:
             _commit_line("\n" + preview)
         return True
@@ -394,7 +407,8 @@ def _confirm(action: str, preview: Optional[str] = None,
     try:
         level, reason = _local_risk_hint(action) or _m._assess_risk(action)
         # APPROVE_LEVEL is the max level to AUTO-APPROVE. level ≤ threshold → run.
-        if st.APPROVE_LEVEL is not None and LEVEL_ORDER[level] <= LEVEL_ORDER[st.APPROVE_LEVEL]:
+        _threshold = st._posture()[1]
+        if _threshold is not None and LEVEL_ORDER[level] <= LEVEL_ORDER[_threshold]:
             # Auto-allow. Show the assessment so the user has a paper trail.
             short = reason if len(reason) <= 80 else reason[:77] + "..."
             pause_spinner()

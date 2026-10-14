@@ -429,13 +429,16 @@ def pytest_runtest_teardown(item, nextitem):
 # 0.154.2 pruned test_batch_run's parallel-totals entry (root cause:
 # st._METRICS_TLS was drained by no one; the test hand-cleared it) - fixed in
 # nx_state_reset_body now; no hand-clearing needed.
-# 0.154.5/0.154.7 preview_visibility saga: the leaked-Live drain was real and
-# is now complete (`_live_stack.clear()` never ran `Live.stop()`, so rich's
-# render hook, `Live._started`, and a capture-swapped `con.file` survived —
-# nx_state_reset_body now stops each Live; see test_state_reset_contract.py),
-# but the trio still fails under packing (0.154.7, idle box). The entries
-# STAY; open theory: process-global st.YOLO/APPROVE_LEVEL forced by a
-# sub-agent worker (nx/_subagent.py ~1224), inherited by a later Tier-A test.
+# 0.154.5/0.154.7 preview_visibility saga: CLOSED in 0.155.0 — the leak was
+# process-global st.YOLO/APPROVE_LEVEL forced by a sub-agent worker
+# (nx/_subagent.py ~1224) and inherited by a later Tier-A test, so _confirm's
+# YOLO fast path auto-allowed and the approval preview never printed. The swap
+# sat BEFORE the loop's try, so a raise in between (spinner stop, model-target
+# install) skipped the restore for good. Sub-agent posture is now thread-local
+# (nx/_state.py _POSTURE_TLS + _posture()/_posture_scope(), pinned by
+# tests/test_subagent_posture.py), so no agent can move the globals and no
+# window can skip a restore; the trio skipped the tuple in 0.154.2 too and held
+# then, and the five-run bar was re-cleared on the way in.
 _FLAKY_RERUN_NODEIDS = (
     "tests/test_git_index_guard.py::test_gitcommit_staged_wip_does_not_prompt_this_session",
     # Load-sensitivity set (each passes standalone and on immediate rerun;
@@ -448,15 +451,10 @@ _FLAKY_RERUN_NODEIDS = (
     # asserted positional messages[-1] identity while spawning real run_bash,
     # so any late append flipped them; they now locate tool observations by
     # tool_call_id inside the appended slice (no positional pins, no sleeps).
-    # 0.154.7: preview_visibility trio RE-added — the completed Live drain did
-    # not retire it (trio failed on an idle box with the drain merged). Open
-    # root cause (next probe, per agent-7's evidence): a sub-agent worker
-    # forces process-global st.YOLO=True / APPROVE_LEVEL at nx/_subagent.py
-    # ~1224 and a Tier-A later test on the same worker inherits it, so
-    # _confirm's quiet path auto-allows and the approval preview never prints.
-    "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
-    "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
-    "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
+    # 0.154.7: preview_visibility trio PRUNED in 0.155.0 — the open theory in the
+    # saga comment above (a sub-agent worker forcing the process-global posture)
+    # was the root cause; the TLS migration closed it structurally (and the trio
+    # had been pruned-and-held once before, in 0.154.2).
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
     # 0.154.5: same finish-line race family as the entry above (ledger §5.0:
     # "event_taps start-vs-finish tap ordering") — the finished-agent snapshot

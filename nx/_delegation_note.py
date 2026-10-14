@@ -60,10 +60,14 @@ _WRITE_BG_NON_YOLO = (
 
 def _write_bg_sentence() -> str:
     """The background-mode sentence for THIS session, resolved from the live
-    st.YOLO (getattr-default: a conftest rewind can drop names from _state's
-    dict)."""
+    posture. 0.155.0: `_state._posture()` — the AGENT's own posture while an
+    agent builds a note (a read-only agent runs yolo-forced, so a note it
+    builds must describe ITS posture, not the parent's), else the process
+    globals. getattr-defaults throughout: a conftest rewind can drop names
+    from _state's dict)."""
     from . import _state as st
-    if bool(getattr(st, "YOLO", False)):
+    yolo, _level = st._posture()
+    if bool(yolo):
         return _WRITE_BG_YOLO
     return _WRITE_BG_NON_YOLO
 

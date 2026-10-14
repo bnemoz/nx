@@ -999,7 +999,7 @@ def run_build(issue: str, state=None) -> str:
     if refusal:
         return f"/build refused: {refusal}"
 
-    parallel = bool(st.YOLO) and _env_int("NX_BUILD_PARALLEL", 1) > 0
+    parallel = bool(st._posture()[0]) and _env_int("NX_BUILD_PARALLEL", 1) > 0
     # Preflight proved this IS a git repo, so the worktree machinery's cached
     # flag is truthful — without it create_worktree refuses and a repro that
     # started outside the project root would silently run in the shared tree.

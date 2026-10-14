@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -117,6 +118,72 @@ def toggle_yolo() -> bool:
     YOLO = not YOLO
     APPROVE_LEVEL = None if YOLO else DEFAULT_APPROVE_LEVEL
     return YOLO
+
+
+# --- per-agent approval posture (0.155.0) -------------------------------------
+# A sub-agent's posture belongs to the agent, ON ITS THREAD — never to the
+# process globals. Until 0.155.0 a read-only agent forced `st.YOLO=True /
+# APPROVE_LEVEL="high"` process-wide and restored them in a `finally`; the swap
+# sat BEFORE the try, so anything raising in between (spinner stop, model-target
+# install) leaked YOLO=True onto the thread forever (the confirmed
+# test_preview_visibility flake: a later test's _confirm() hit its YOLO fast path
+# and the approval preview never printed), and the async worker's swap was
+# visible to the PARENT thread for the agent's whole run.
+#
+# Same shape as `_METRICS_TLS` above (which replaced the identical swap-and-
+# restore race for the batch recorder): threading.local + install-at-body-start
+# + finally-restore + a resolver that falls back to the process globals.
+# Decision reads (the approval gate, the sub-agent gates, the parallel-work
+# checks) go through `_posture()`; parent-facing reads/writes (the UI, /yolo,
+# /approval, Shift+Tab, CLI init, `nx eval`) stay on the globals, which remain
+# the single source of truth for the PARENT's posture.
+_POSTURE_TLS: threading.local = threading.local()
+
+
+def _posture() -> tuple[bool, str | None]:
+    """Live approval posture for THIS thread: the installed agent override when
+    a sub-agent body is running, else the process globals.
+
+    The read is deliberately LIVE (no snapshot): Shift+Tab at an approval prompt
+    and /yolo //approval mutate the globals mid-turn and the parent thread must
+    keep seeing the new value on its very next decision."""
+    return (getattr(_POSTURE_TLS, "yolo", YOLO),
+            getattr(_POSTURE_TLS, "level", APPROVE_LEVEL))
+
+
+@contextmanager
+def _posture_scope(force: "tuple[bool, str | None] | None"):
+    """Install an agent-scoped posture override on THIS thread for the duration
+    of the `with` body; restore (i.e. delete the override) in `finally`.
+
+    `force=None` means INHERIT: nothing is installed, so `_posture()` keeps
+    reading the globals live — exactly the semantics a write-tier agent needs.
+
+    The body of a sub-agent loop is this scope's content: there is no code
+    between install and the loop's own `try`, so no window exists in which an
+    exception (a watchdog kill included) can skip the restore. TLS values are
+    DELETED, not assigned back, so "no override installed" stays observable
+    (and `_POSTURE_TLS.__dict__.clear()` in the test drain restores the same
+    fresh-thread state the finally does)."""
+    if force is None:
+        yield
+        return
+    had_yolo = hasattr(_POSTURE_TLS, "yolo")
+    had_level = hasattr(_POSTURE_TLS, "level")
+    prev_yolo = getattr(_POSTURE_TLS, "yolo", None)
+    prev_level = getattr(_POSTURE_TLS, "level", None)
+    _POSTURE_TLS.yolo, _POSTURE_TLS.level = force
+    try:
+        yield
+    finally:
+        if had_yolo:
+            _POSTURE_TLS.yolo = prev_yolo
+        elif hasattr(_POSTURE_TLS, "yolo"):
+            del _POSTURE_TLS.yolo
+        if had_level:
+            _POSTURE_TLS.level = prev_level
+        elif hasattr(_POSTURE_TLS, "level"):
+            del _POSTURE_TLS.level
 
 
 # The id of the session this process is currently serving. Mirrored from the

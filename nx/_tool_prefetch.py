@@ -175,7 +175,7 @@ def _should_parallelize(calls: list[tuple[str, dict[str, Any]]]) -> bool:
         if _write_capable_agent(calls):
             from ._worktree import _worktree_enabled
             from . import _state as _st
-            if not (_st.YOLO and _worktree_enabled()):
+            if not (_st._posture()[0] and _worktree_enabled()):
                 return False  # prompts could interleave / trees would trample
         return all(n in _m._CACHEABLE_READ_TOOLS or n == "spawn_agent" for n, _ in calls)
     return _all_read_only(calls)

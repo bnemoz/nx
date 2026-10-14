@@ -225,7 +225,7 @@ def test_subagent_loop_never_consumes_parents_notice(nx_fresh, monkeypatch):
     st._PENDING_SUBAGENT_NOTICE = None
 
 
-def test_async_string_boolean_and_gating(nx_fresh):
+def test_async_string_boolean_and_gating(nx_fresh, monkeypatch):
     from nx._subagent import spawn_agent
     # text-protocol models send booleans as strings — accepted
     out = spawn_agent("q", async_="true")
@@ -236,7 +236,12 @@ def test_async_string_boolean_and_gating(nx_fresh):
     def fake_loop(messages, *a, **kw):
         messages.append({"role": "assistant", "content": "sync"})
         return {"status": "done", "turns": 1}
-    nx_fresh._run_model_turn_loop = fake_loop
+    # monkeypatch, NOT a bare assignment: this used to set nx._run_model_turn_loop
+    # directly and rely on the fixture's old importlib.reload(nx) to undo it.
+    # Without the reload the fake loop survives the test and every later
+    # sub-agent test on this worker returns "sync" (observed: the whole of
+    # test_subagent_write.py failing when it shares a worker with this file).
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     assert spawn_agent("q", async_="false") == "sync"
     assert spawn_agent("q", async_=False) == "sync"
     # no model source: async is refused like sync
@@ -266,10 +271,16 @@ def test_schema_async_key_routes_via_extra_kwargs(nx_fresh, monkeypatch):
     assert "SYNC LEAK" not in out
 
 
-def test_async_worker_is_quiet_and_never_swaps_yolo(nx_fresh, monkeypatch):
-    """The worker thread runs quiet (no terminal writes, no YOLO swap): an
-    async agent must not silence/stomp the parent's spinner state or leave
-    YOLO=True behind — that would silently disable the approval gate."""
+def test_async_worker_posture_is_quiet_and_thread_local(nx_fresh, monkeypatch):
+    """The worker thread runs quiet (no terminal writes) and installs its own
+    thread-local posture: an async agent must not leave YOLO behind, and — since
+    0.155.0 — it must not write the process globals either, because the parent
+    turn is mid-flight for its whole (minutes-long) run.
+
+    (Pre-0.155.0 this test asserted `st.YOLO is False` DURING the worker loop,
+    which the worker's quiet branch satisfied by simply not swapping the
+    globals. That assertion is vacuous now: nothing swaps them at all. The pin
+    has to look at the WORKER's posture install instead.)"""
     from nx._subagent import spawn_agent, _subagent_quiet
     from nx import _state as st
     nx_fresh.YOLO = False
@@ -277,18 +288,89 @@ def test_async_worker_is_quiet_and_never_swaps_yolo(nx_fresh, monkeypatch):
 
     def fake_loop(messages, *a, **kw):
         seen["quiet"] = _subagent_quiet()
-        seen["yolo_during"] = st.YOLO
+        # The worker's own view: quiet agents INHERIT (nothing installed), so
+        # `_posture()` falls back to the globals it was spawned with...
+        seen["posture"] = st._posture()
+        # ...and NOTHING is installed on the worker's thread.
+        tls = getattr(st, "_POSTURE_TLS", None)
+        seen["tls"] = {} if tls is None else dict(vars(tls))
         messages.append({"role": "assistant", "content": "ok"})
         return {"status": "done", "turns": 1}
 
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
     out = spawn_agent("q", async_=True)
     assert out.startswith("[background sub-agent] job agent-")
-    _wait_for(lambda: "quiet" in seen, "worker loop to record quiet/yolo state")
-    assert seen.get("quiet") is True          # worker runs quiet
-    assert seen.get("yolo_during") is False   # no process-global YOLO swap
+    _wait_for(lambda: "quiet" in seen, "worker loop to record quiet/posture state")
+    assert seen.get("quiet") is True            # worker runs quiet
+    assert seen.get("posture") == (False, None)  # inherits the parent's posture
+    assert seen.get("tls") == {}                # nothing installed on the worker
     _wait_for(lambda: _drain(nx_fresh) is not None, "worker's staged runtime note")
-    assert st.YOLO is False                   # parent posture untouched after
+    assert (st.YOLO, st.APPROVE_LEVEL) == (False, None)  # globals untouched
+    assert dict(vars(st._POSTURE_TLS)) == {}
+
+    # READ-ONLY, foreground: this is the shape that FORCES a posture. It must
+    # install it on ITS OWN thread and nowhere else. (Pre-0.155.0 the same spawn
+    # wrote st.YOLO=True process-wide for the whole run.)
+    st.YOLO = False
+    st.APPROVE_LEVEL = "medium"
+    forced = {}
+
+    def forced_loop(messages, *a, **kw):
+        forced["posture"] = st._posture()
+        forced["globals"] = (st.YOLO, st.APPROVE_LEVEL)
+        messages.append({"role": "assistant", "content": "ro"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", forced_loop)
+    monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_ASYNC", 0)
+    assert spawn_agent("q") == "ro"
+    assert forced["posture"] == (True, "high"), forced
+    assert forced["globals"] == (False, "medium"), (
+        "a read-only spawn wrote the process globals: " + repr(forced["globals"]))
+    assert (st.YOLO, st.APPROVE_LEVEL) == (False, "medium")
+    assert dict(vars(st._POSTURE_TLS)) == {}
+
+
+def test_async_readonly_agent_leaves_the_parents_posture_alone(nx_fresh,
+                                                              monkeypatch):
+    """§5.3 — while a read-only async agent runs, the PARENT thread's posture
+    reads are the parent's. Pre-0.155.0 the worker wrote the process globals
+    BEFORE installing anything else, so `st.YOLO` read True (and
+    `_confirm()`'s YOLO fast path auto-allowed) for the agent's whole run."""
+    import threading
+
+    from nx import _state as st
+    from nx._subagent import spawn_agent
+
+    monkeypatch.setattr(st, "YOLO", False)
+    monkeypatch.setattr(st, "APPROVE_LEVEL", "medium")
+    entered = threading.Event()
+    release = threading.Event()
+    seen = {}
+
+    def fake_loop(messages, *a, **kw):
+        # The worker runs QUIET, so it installs nothing: its posture read is the
+        # globals — still the parent's values, which is the inherit contract.
+        seen["worker_posture"] = st._posture()
+        entered.set()
+        assert release.wait(30), "release never signalled"
+        messages.append({"role": "assistant", "content": "ok"})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx_fresh, "_run_model_turn_loop", fake_loop)
+    out = spawn_agent("q", async_=True)
+    assert out.startswith("[background sub-agent] job agent-")
+    try:
+        assert entered.wait(30), "the worker never entered the loop"
+        # Parent-side reads while the agent is mid-run.
+        assert (st.YOLO, st.APPROVE_LEVEL) == (False, "medium"), (
+            "a background agent moved the process globals")
+        assert st._posture() == (False, "medium"), st._posture()
+    finally:
+        release.set()
+    _wait_for(lambda: _drain(nx_fresh) is not None, "worker's staged runtime note")
+    assert seen["worker_posture"] == (False, "medium")
+    assert (st.YOLO, st.APPROVE_LEVEL) == (False, "medium")
 
 
 def test_quiet_run_tool_prints_nothing(nx_fresh, monkeypatch, capsys):

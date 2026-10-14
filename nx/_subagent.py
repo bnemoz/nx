@@ -77,6 +77,7 @@ from ._env import _env_int
 from . import _notices
 from ._progress import note_progress
 from ._subagent_tls import tap_event  # EVENTSURFACE_SPEC Phase 2 writer
+from ._state import _posture_scope  # 0.155.0 per-agent posture installer
 # NOTE: `_eventsink` is imported lazily at its two call sites (register/drop)
 # rather than here — a module-level import adds `nx._eventsink` to the conftest
 # module snapshot, which tests/perf/test_static_budgets.py budgets.
@@ -169,10 +170,6 @@ class _SpawnRefused(Exception):
     requested but creation failed). Finalized as an ERROR note to the
     parent, never a silent fallback into the shared tree."""
 
-
-# Serializes the process-global YOLO/APPROVE_LEVEL snapshot+swap around a
-# sub-agent loop (TLS handles per-agent state; this only guards the globals).
-_SPAWN_LOCK = threading.Lock()
 
 # Recovery-failsafe retries (reasoning-only stalls, empty turns) inside a
 # sub-agent loop. The parent's defaults (NX_REASONING_ONLY_RETRIES=3,
@@ -272,9 +269,10 @@ def _subagent_quiet() -> bool:
 # sub-agent context and restores it, so concurrent agents (sync fan-out or
 # async) each keep their own restricted dispatch table. Async is read-only
 # even when NX_SUBAGENT_WRITE=1 — a detached agent has nobody to show a Y/n
-# prompt to, and it must not inherit the process-global YOLO/APPROVE_LEVEL
-# swap while the parent turn is mid-flight (a leaked YOLO=True would silently
-# disable the parent's approval gate — see _SPAWN_LOCK).
+# prompt to, and since 0.155.0 its posture ALSO lives in the worker's own
+# thread-local (st._POSTURE_TLS, installed by _run_sync_agent_body), so the
+# parent thread's approval gate can never read an agent's forced posture —
+# and there is no window in which a failed spawn could leak one.
 # Async answers go to disk: the worker writes a markdown report per job and the
 # [Runtime note] carries a short inline head + the report path — the model
 # read_file's the full report only when the head isn't enough. Same shape as
@@ -1092,6 +1090,22 @@ def _lean_result(answer, job_id, instruction):
     return "[sub-agent " + tag + "]\n" + head
 
 
+def _agent_posture(write: bool, quiet: bool) -> "tuple[bool, str | None] | None":
+    """The posture a sub-agent body runs with: `(True, "high")` for a read-only
+    non-quiet agent (nothing its read-only toolset runs can prompt, and this
+    keeps an auto-allow threshold in place for any guard that does), or None =
+    INHERIT (write-tier and quiet agents read the parent's live globals —
+    their confirm-through wrappers must run the parent's real _confirm()).
+
+    Since 0.155.0 this is a per-THREAD installer (_state._posture_scope), not a
+    process-global swap: the parent's posture is never mutated, and the install
+    and the restore are the same context manager, so no code can raise in a
+    window between them."""
+    if write or quiet:
+        return None
+    return (True, "high")
+
+
 def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                          scope: "list[str] | None" = None,
                          worktree: "str | None" = None,
@@ -1103,7 +1117,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     checkout, never the parent's working tree."""
     if st.client is None or st.MODEL is None:
         return "ERROR: no active model source"
-    if st.YOLO is None:  # pragma: no cover — defensive; YOLO is always a bool
+    if st._posture()[0] is None:  # pragma: no cover — defensive; YOLO is always a bool
         return "ERROR: approval state unavailable"
 
     import nx as _m  # lazy: monkeypatch-friendly, same pattern as _repl.py
@@ -1121,7 +1135,7 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     if write and _subagent_ctx() is not None:
         return ("ERROR: write-tier spawn_agent refused — sub-agents cannot "
                 "delegate; report the change and let the parent make it")
-    if write and _subagent_quiet() and not st.YOLO:
+    if write and _subagent_quiet() and not st._posture()[0]:
         return ("ERROR: write-tier spawn_agent refused — a quiet (background/"
                 "headless) thread cannot show the approval prompt an edit "
                 "raises, and this session is not in yolo mode, so the edits "
@@ -1209,23 +1223,17 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     except Exception:  # noqa: BLE001 — telemetry must never break a spawn
         pass
     _SUBAGENT_TLS.ctx = ctx
-    # YOLO/APPROVE_LEVEL are process-global: snapshot+swap under the spawn lock
-    # so two concurrent agents can't restore each other's snapshot out of order
-    # (a leaked YOLO=True would silently disable the parent's approval gate).
-    # Read-only agents force YOLO (their tools never prompt anyway) — EXCEPT
-    # quiet ones: an async agent's swap would outlive the parent turn and
-    # silently disable the approval gate for the agent's whole (minutes-long)
-    # run, so quiet agents run with the parent's real posture and rely on
-    # their read-only toolset never prompting. Write-tier agents inherit the
-    # parent's real approval posture (the confirm-through wrappers must see
-    # it; they also drop the TLS context around each body, so _confirm()
-    # runs exactly as it would for a parent write).
-    with _SPAWN_LOCK:
-        prev_yolo, prev_level = st.YOLO, st.APPROVE_LEVEL
-        if write or quiet:
-            st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level
-        else:
-            st.YOLO, st.APPROVE_LEVEL = True, "high"  # read-only tools never prompt anyway
+    # 0.155.0: the agent's approval posture is THREAD-LOCAL and installed by the
+    # `with _posture_scope(...)` below, whose body is the sub-loop TRY ITSELF —
+    # read-only non-quiet agents force (True, "high") there, write/quiet agents
+    # install nothing and inherit the parent's live globals. The old shape
+    # (snapshot+swap of st.YOLO/st.APPROVE_LEVEL under a spawn lock, restore in
+    # the loop's finally) had two defects this kills: the swap sat BEFORE the
+    # try, so anything raising in between (spinner stop, model-target install)
+    # leaked YOLO=True process-wide for every later test/turn; and an async
+    # worker's swap was visible to the PARENT thread's _confirm() for the whole
+    # run. Nothing about posture touches the process globals now.
+
     # A foreground agent is the longest-running tool call there is (its own
     # model loop, minutes), and until 0.35.0 the parent showed only
     # `running spawn_agent` for all of it. Each step of its loop posts a turn
@@ -1292,11 +1300,12 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                     note_progress(f"write-churn ESCALATION sent (turn {_steps[0]}, still no edits)")
 
     try:
-        summary = _m._run_model_turn_loop(
-            messages,
-            max_turns_override=max_turns,
-            on_step=_progress_step,
-        )
+        with _posture_scope(_agent_posture(write, quiet)):
+            summary = _m._run_model_turn_loop(
+                messages,
+                max_turns_override=max_turns,
+                on_step=_progress_step,
+            )
     except Exception as e:  # noqa: BLE001 — a failed subagent is a tool error, not a crash
         return f"ERROR: sub-agent failed: {type(e).__name__}: {e}"
     finally:
@@ -1322,8 +1331,6 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
             except Exception:
                 pass
         _SUBAGENT_TLS.ctx = prev_ctx
-        with _SPAWN_LOCK:
-            st.YOLO, st.APPROVE_LEVEL = prev_yolo, prev_level
     # Extract the last assistant text as the answer (the loop's final turn).
     answer = ""
     for msg in reversed(messages):
@@ -1411,7 +1418,7 @@ def _maybe_nudge_yolo_async(tier: Any, explicit_async: Any) -> None:
     from ._session_preamble import YOLO_ASYNC_GUIDANCE
     if getattr(st, "_YOLO_ASYNC_NUDGED", False):
         return
-    if tier not in ("write", "implement") or not st.YOLO:
+    if tier not in ("write", "implement") or not st._posture()[0]:
         return
     # explicit_async is not None ⇒ the MODEL chose foreground (bool or
     # "false"/"0" string); want_async False here means the request was
@@ -1512,10 +1519,11 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         # agent's edits would raise — so async + write tier is refused with
         # the fix spelled out. EXCEPT under YOLO: the approval gate's quiet
         # path (_approval._confirm) auto-approves without prompting when
-        # st.YOLO holds, so a yolo headless run CAN host background writers
+        # the thread's posture is yolo (st._posture()), so a yolo headless run
+        # CAN host background writers
         # honestly — the user opted out of approval entirely. Refuse only when
         # the posture could not approve a quiet write.
-        if t in ("write", "implement", "advisor") and not st.YOLO:
+        if t in ("write", "implement", "advisor") and not st._posture()[0]:
             # Don't burn a turn on a refusal when a foreground spawn works:
             # downgrade to foreground (same contract the error message told
             # the model to use) instead of erroring out.
