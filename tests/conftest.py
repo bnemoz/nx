@@ -439,6 +439,14 @@ _FLAKY_RERUN_NODEIDS = (
     # that (a) passes standalone and (b) is in a file listed here.
     "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
     "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
+    # Re-added 0.154.4: 0.154.2 pruned these for the old_say restore fix, but
+    # all three failed together once under -n 8 at normal (17s) wall after the
+    # fix — necessary, not sufficient. Passes standalone + both serial orders;
+    # the deeper root cause (incomplete leaked-Live drain: _live_stack clears,
+    # the Live object / con.file do not) stays open.
+    "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
+    "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
+    "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
     "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_text_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
