@@ -148,7 +148,9 @@ def test_searx_answer_infobox_suggestions_and_notes():
             ' "number_of_results": 4242,'
             ' "unresponsive_engines": [["bing", "timeout"]]}')
     try:
-        with unittest.mock.patch.object(w, "_http_get", return_value=body):
+        with unittest.mock.patch.object(w, "_http_get", return_value=body), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             out = w.web_fetch(query="python")
     finally:
         w.SEARX_URL = saved
@@ -197,7 +199,9 @@ def test_searx_basic_auth_header():
         return '{"results": [{"title": "R", "url": "https://r.example/", "content": ""}]}'
 
     try:
-        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get):
+        with unittest.mock.patch.object(w, "_http_get", side_effect=fake_get), \
+             unittest.mock.patch.object(socket, "getaddrinfo",
+                                        side_effect=socket.gaierror(-2, "offline")):
             w.web_fetch(query="authed")
     finally:
         w.SEARX_URL = saved
