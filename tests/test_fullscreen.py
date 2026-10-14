@@ -115,9 +115,10 @@ def test_run_view_draws_frames_and_leaves_on_esc():
     text = out.getvalue()
     assert text.startswith(_fullscreen.ALT_ENTER)
     assert text.endswith(_fullscreen.ALT_EXIT)
-    # frames are painted inside the alternate buffer (home + erase, never
-    # in-place cursor arithmetic in the normal buffer)
-    assert text.count(_fullscreen.FRAME_ERASE) >= 2
+    # the frame is painted inside the alternate buffer (home + erase) — and
+    # exactly once: the "j" repaint re-renders a byte-identical frame, which
+    # the flicker fix (0.156.2) must NOT erase+redraw
+    assert text.count(_fullscreen.FRAME_ERASE) == 1
 
 
 def test_run_view_overlay_repaints_from_the_keys_registry():
@@ -133,6 +134,8 @@ def test_run_view_overlay_repaints_from_the_keys_registry():
     assert "any key closes" in body
     assert "j/k" in body  # the registry's own hint row
     assert keys_for("tabs"), "tabs has no registry entry"
+    # entering the overlay clears the screen (its rows replace the view's)
+    assert body.count(_fullscreen.FRAME_ERASE) >= 2
 
 
 def test_open_view_declines_off_tty_and_calls_the_fallback(monkeypatch):
@@ -194,28 +197,135 @@ def test_resize_notifier_posts_and_drains_a_wake():
     assert n.fds() == []
 
 
-def test_run_view_repaints_on_a_resize_wake():
-    from nx import _fullscreen
+def test_run_view_repaints_on_a_resize_wake(monkeypatch):
+    """The resize half of the flicker fix (0.156.2): a SIGWINCH wake forces a
+    FULL erase+repaint even when the re-rendered frame is byte-identical (the
+    rows were clipped for the old size). wait_ready_any is scripted: wake
+    first, then the key fd — so the wake path is exercised deterministically
+    instead of racing select()."""
+    from nx import _fullscreen, _tty
     from nx._surfaces import tabs_view
     out = FakeOut()
     notifier = _fullscreen._ResizeNotifier()
     notifier.open()
-    fired = []
+    wake_then_key = iter([1])
 
-    def _reader(fd):
-        if not fired:
-            fired.append(1)
-            notifier.trigger()   # a simulated SIGWINCH mid-loop
-            return "j"           # ... and a key that repaints, not a quit
-        return "esc"
+    def _ready(fds, timeout):
+        # fds arrives as [fd, *notifier.fds()]: hand back the wake fd once,
+        # then the key fd forever (the scripted reader ends the run)
+        return fds[1] if next(wake_then_key, None) else fds[0]
 
+    monkeypatch.setattr(_tty, "wait_ready_any", _ready)
     try:
-        _fullscreen.run_view(tabs_view(), fd=0, out=out, _reader=_reader,
+        _fullscreen.run_view(tabs_view(), fd=0, out=out, _reader=_reader_for(["esc"]),
                              _notifier=notifier)
     finally:
         notifier.close()
-    # the first frame plus at least one repaint
-    assert out.getvalue().count(_fullscreen.FRAME_ERASE) >= 2
+    # the first frame, then the resize repaint — and nothing else
+    assert out.getvalue().count(_fullscreen.FRAME_ERASE) == 2
+
+
+# ---------------------------------------------------------------------------
+# flicker: the line-diff paint (0.156.2)
+# ---------------------------------------------------------------------------
+
+from nx._fullscreen import View as _View
+
+
+class _ToggleView(_View):
+    """Rows where only the middle one ever changes, so the diff paint's
+    output is exactly assertable."""
+    surface = "tabs"
+    title = "toggle"
+
+    def __init__(self):
+        super().__init__()
+        self.n = 0
+
+    def render(self, width, height):  # noqa: ARG002
+        return ["line a", f"count {self.n}", "line c"]
+
+    def on_key(self, key, shell):  # noqa: ARG002
+        if key in ("q", "esc"):
+            return "quit"
+        if key == "t":
+            self.n += 1
+        return "repaint"
+
+
+def test_unchanged_frame_writes_nothing_and_changed_rows_paint_in_place():
+    from nx import _fullscreen
+    out = FakeOut()
+    # "x" repaints an identical frame (must write NOTHING); "t" changes only
+    # the count row (must rewrite exactly that row, in place)
+    _fullscreen.run_view(_ToggleView(), fd=0, out=out,
+                         _reader=_reader_for(["x", "t", "esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    text = out.getvalue()
+    assert text.count(_fullscreen.FRAME_ERASE) == 1        # first frame only
+    assert text.count(_fullscreen.FRAME_ERASE_BELOW) == 0  # frame never shrank
+    assert "\033[2H" in text   # the changed row (row 2) is repositioned to
+    assert text.count("line a") == 1   # unchanged rows are never rewritten
+
+
+def test_a_shrunk_frame_erases_the_rows_it_gave_up():
+    from nx import _fullscreen
+
+    class _ShrinkView(_View):
+        surface = "tabs"
+        title = "shrink"
+
+        def __init__(self):
+            super().__init__()
+            self.short = False
+
+        def render(self, width, height):  # noqa: ARG002
+            return ["a"] if self.short else ["a", "b", "c"]
+
+        def on_key(self, key, shell):  # noqa: ARG002
+            if key in ("q", "esc"):
+                return "quit"
+            if key == "s":
+                self.short = True
+            return "repaint"
+
+    out = FakeOut()
+    _fullscreen.run_view(_ShrinkView(), fd=0, out=out,
+                         _reader=_reader_for(["s", "esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    text = out.getvalue()
+    assert text.count(_fullscreen.FRAME_ERASE) == 1
+    # rows 2..end of the old frame are erased below the frame's new last row
+    assert f"\033[2H{_fullscreen.FRAME_ERASE_BELOW}" in text
+
+
+def test_a_prompt_between_frames_forces_a_full_clear(monkeypatch):
+    """`shell.ask` draws onto the frame outside `paint`'s knowledge, so the
+    frame after one must be a full erase+repaint (the cache is stale)."""
+    from nx import _fullscreen
+
+    class _AskView(_View):
+        surface = "tabs"
+        title = "ask"
+
+        def render(self, width, height):  # noqa: ARG002
+            return ["a", "b"]
+
+        def on_key(self, key, shell):
+            if key in ("q", "esc"):
+                return "quit"
+            if key == "a":
+                shell.ask("confirm \u203a")
+            return "repaint"
+
+    out = FakeOut()
+    monkeypatch.setattr(_fullscreen, "read_line",
+                        lambda fd, o, label, **kw: "yes")
+    _fullscreen.run_view(_AskView(), fd=0, out=out,
+                         _reader=_reader_for(["a", "esc"]),
+                         _notifier=_fullscreen._ResizeNotifier())
+    # the first frame, then the post-prompt full repaint — no diff paint
+    assert out.getvalue().count(_fullscreen.FRAME_ERASE) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -48,10 +48,14 @@ from typing import Any, Callable, Optional
 # scrollback, so pair-for-pair they restore the pre-entry state exactly.
 ALT_ENTER = "\033[?1049h"
 ALT_EXIT = "\033[?1049l"
-# A frame is drawn inside the alternate buffer: home + erase below, so no
-# cursor arithmetic has to be kept in sync between frames.
+# The first frame of a run (and every frame after a resize, a prompt, or the
+# overlay) is drawn with home + erase below, so no cursor arithmetic has to be
+# kept in sync with it; later frames are line-diffed against the previous one.
 FRAME_HOME = "\033[H"
 FRAME_ERASE = "\033[2J"
+# Erase from the cursor to the end of the screen: how a repainted frame sheds
+# the rows it gave up, and (with FRAME_HOME) the full-repaint clear.
+FRAME_ERASE_BELOW = "\033[J"
 
 # How long to wait after a lone ESC for the rest of a CSI/SS3 sequence before
 # calling it a bare Esc (the same disambiguation the chatbox uses).
@@ -339,8 +343,13 @@ class Shell:
         self.width = width
         self.height = height
         self._stack = _stack if _stack is not None else []
+        #: `ask` sets this: the prompt drew onto the frame outside `paint`'s
+        #: knowledge, so the shell's row cache no longer describes the screen
+        #: and the next frame must be a full repaint.
+        self.screen_dirty = False
 
     def ask(self, label: str, initial: str = "") -> Optional[str]:
+        self.screen_dirty = True
         return read_line(self.fd, self.out, label, initial=initial)
 
     def push(self, view: "View") -> None:
@@ -359,10 +368,15 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
              _stack: Optional[list[View]] = None) -> Optional[Callable[[], None]]:
     """Run one view until it quits; returns the deferred action (or None).
 
-    The loop is the chatbox's discipline, not cursor arithmetic: each frame is
-    `FRAME_HOME + FRAME_ERASE + lines`, and the next frame erases the previous
-    one wholesale. Resizes repaint immediately (SIGWINCH wake pipe on POSIX,
-    the poll slice elsewhere). `?` paints the `_keys` overlay for one frame.
+    The loop is the chatbox's discipline, not cursor arithmetic: the first
+    frame (and any frame after a resize, a prompt, or the `?` overlay) is
+    `FRAME_HOME + FRAME_ERASE + lines`; later frames are line-diffed against
+    the previous one — identical frames write nothing, changed rows are
+    rewritten in place. That kills the flicker the wholesale erase caused
+    below content-height frames (the views repaint on every 250 ms poll tick
+    and mostly re-render the same bytes). Resizes repaint immediately
+    (SIGWINCH wake pipe on POSIX, the poll slice elsewhere). `?` paints the
+    `_keys` overlay for one frame.
 
     `_stack` (normally not passed; `push_view`/`pop_view` manage it) makes the
     loop a view STACK: a view's `on_key` may call `push_view(shell, next)` and
@@ -387,13 +401,43 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
         notifier = _ResizeNotifier()
         notifier.open()
 
+    # The last painted frame, for the diff paint below.
+    prev: list[str] = []
+
     def paint(lines: list[str]) -> None:
         # Enforce the render contract ("clipped to width") centrally: a view
         # line wider than the terminal autowraps into an extra physical row,
         # desyncing the frame. clip_display is ANSI-aware, so SGR survives.
-        from ._ansi import clip_display
+        nonlocal prev
+        from ._ansi import CLEAR_LINE, clip_display
         rows = [clip_display(ln, width) for ln in lines][:max(1, height)]
-        out.write(FRAME_HOME + FRAME_ERASE + "\n".join(rows))
+        changed = [i for i, r in enumerate(rows)
+                   if i >= len(prev) or prev[i] != r]
+        if not changed and len(rows) >= len(prev):
+            # The poll tick repaints 4x/s and views re-snapshot live state, so
+            # most frames are byte-identical: an erase+redraw of those is pure
+            # terminal traffic + flicker (the _surfaces live region suppresses
+            # the same thing; the alternate screen is no cure — a full-screen
+            # erase flashes the blank rows below a content-height frame).
+            return
+        if not prev:
+            # first frame, resize, or a prompt drew over the rows: full clear
+            out.write(FRAME_HOME + FRAME_ERASE + "\n".join(rows))
+        else:
+            # Line-diff paint: rewrite only the rows that changed, each at its
+            # absolute position (CUP cannot scroll, unlike a relative move
+            # from the bottom row), cleared first so a shorter row leaves no
+            # tail. Rows the frame gave up are erased below the last one.
+            buf = [f"\033[{i + 1}H{CLEAR_LINE}{rows[i]}" for i in changed]
+            if len(rows) < len(prev):
+                buf.append(f"\033[{len(rows) + 1}H{FRAME_ERASE_BELOW}")
+            if rows:
+                # Park the cursor at the end of the frame's last row (what a
+                # full paint leaves): `ask` draws its prompt at the cursor, so
+                # it must not land mid-frame on whichever row changed last.
+                buf.append(f"\033[{len(rows)}H{CLEAR_LINE}{rows[-1]}")
+            out.write("".join(buf))
+        prev = rows
         out.flush()
 
     overlay = False
@@ -420,6 +464,7 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
                         except EOFError:
                             break
                         overlay = False
+                        prev = []   # the overlay drew over the cached rows
                         continue
                     extra = notifier.fds()
                     ready = (wait_ready_any([fd, *extra], POLL) if extra
@@ -427,20 +472,35 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
                     if extra and ready in extra:
                         notifier.drain()
                         width, height = _term_lines(_term_size())
+                        prev = []          # rows were clipped for the old size
                         continue
                     if ready is None:
-                        continue  # poll timeout: repaint (clock/live rows)
+                        # poll timeout: repaint (clock/live rows). Re-probe the
+                        # size here too — on a platform with no SIGWINCH wake
+                        # pipe (Windows) this is the ONLY resize trigger, and a
+                        # stale `prev` after a real resize would let the
+                        # line-diff skip the repaint the new size needs (the
+                        # notifier branch above is the POSIX fast path).
+                        size = _term_lines(_term_size())
+                        if size != (width, height):
+                            width, height = size
+                            prev = []
+                        continue
                     try:
                         key = reader(fd)
                     except EOFError:
                         break
                     if key == OVERLAY_KEY:
                         overlay = True
+                        prev = []   # the overlay starts on a cleared screen
                         continue
                     if key == "esc" and len(_stack) > 1:
                         _stack.pop()               # a stacked view: pop to below
                         continue
                     verdict = view.on_key(key, shell)
+                    if shell.screen_dirty:   # a prompt drew over the frame
+                        shell.screen_dirty = False
+                        prev = []            # next paint must clear the screen
                     if verdict == "quit":
                         _stack.pop()
                         if _stack:
@@ -636,6 +696,7 @@ def open_view(view: View, *, fallback: Optional[Callable[[], None]] = None) -> b
 
 __all__ = [
     "ALT_ENTER", "ALT_EXIT", "OVERLAY_KEY",
+    "FRAME_HOME", "FRAME_ERASE", "FRAME_ERASE_BELOW",
     "View", "Shell", "read_key", "read_line",
     "alternate_screen", "run_view", "open_view",
     "wants_fullscreen", "owns_screen", "tabs", "review", "sessions", "todos",
