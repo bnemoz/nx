@@ -63,7 +63,22 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     message (never rewrites an earlier one) so it can't invalidate a
     server's prompt-prefix cache. Also drains worker-staged notes that landed
     in the module store outside this loop's notice frame (see
-    _flush_module_store_notes)."""
+    _flush_module_store_notes).
+
+    Ownership gate (0.156.1): a no-op inside a sub-agent sub-loop. run_tool
+    already refuses to STAGE the parent's notices there (_dispatch.py's
+    first-tool-of-turn gate); this closes the matching flush hole — a sibling
+    async agent's (or a sync agent's) tool-call flush used to drain the
+    parent's staged notes, including worker-staged module-store notes, into
+    the sub-loop's doomed messages list. The note's `announced`/seen marks
+    were already burned at staging, so the parent never re-received it and
+    wake_due() saw nothing pending: /tabs showed every agent done while the
+    main loop sat un-woken. Notes staged by the sub-loop itself fold back
+    into the parent frame at pop (_notices), and parent-owned notes simply
+    wait for the parent's own flush — the same rule, both ends."""
+    from ._subagent import _subagent_ctx
+    if _subagent_ctx() is not None:
+        return
     _delivered: set[str] = set()
     if st._PENDING_BACKGROUND_NOTICE:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
