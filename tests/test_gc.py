@@ -276,8 +276,13 @@ def test_hook_gate_interval_zero_sweeps_every_call(sweep_gate, monkeypatch):
 # --- save-path wiring -----------------------------------------------------------
 
 def test_maybe_gc_artifacts_invokes_gc_sweep(sweep_gate, monkeypatch):
+    # Resolve at test time, not via the module-level binding: a Tier B
+    # restore (conftest globals walk) pops sys.modules["nx._gc"] between
+    # tests, so _maybe_gc_artifacts' lazy `from . import _gc` can see a
+    # fresh module object under xdist; patch whichever it will resolve.
+    import nx._gc as gc_now
     calls = []
-    monkeypatch.setattr(gc, "gc_sweep", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr(gc_now, "gc_sweep", lambda *a, **kw: calls.append((a, kw)))
     sfs._maybe_gc_artifacts()
     assert len(calls) == 1, "save hook must invoke gc_sweep exactly once"
 
