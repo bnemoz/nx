@@ -112,8 +112,11 @@ def test_forced_final_actionable_tool_call_executes():
     assert any(x.get("role") == "assistant" and
                any(tc.get("id") == "call_1" for tc in x.get("tool_calls") or [])
                for x in appended), appended
-    # no unexpected appended messages: only assistant/tool kinds
-    assert all(x.get("role") in ("assistant", "tool") for x in appended), appended
+    from nx._runtime_notes import _is_runtime_note
+    # the test pins the turn's own message kinds; runtime-note appends (bg
+    # completions et al.) are orthogonal machinery, still possible in production
+    assert all(x.get("role") in ("assistant", "tool") or _is_runtime_note(x)
+               for x in appended), appended
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +161,11 @@ def test_forced_final_mixed_calls_execute_actionable():
             and x.get("tool_call_id") == "c2"]
     assert len(tool) == 1, appended
     assert "hi" in tool[0]["content"], tool[0]["content"][:200]
-    # no unexpected appended messages: only assistant/tool kinds
-    assert all(x.get("role") in ("assistant", "tool") for x in appended), appended
+    from nx._runtime_notes import _is_runtime_note
+    # the test pins the turn's own message kinds; runtime-note appends are
+    # orthogonal machinery, still possible in production
+    assert all(x.get("role") in ("assistant", "tool") or _is_runtime_note(x)
+               for x in appended), appended
 
 
 # ---------------------------------------------------------------------------

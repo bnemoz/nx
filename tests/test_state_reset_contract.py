@@ -8,6 +8,8 @@ tripwire for the two ways the contract regresses - someone adds a new
 _PENDING_* slot in nx/_state.py (the derivation must see it) and someone
 re-forks conftest's copy (the conftest-wired test fails).
 """
+import importlib
+import os
 import sys
 
 import nx._state as st
@@ -87,6 +89,124 @@ def test_conftest_restore_wires_the_same_body():
     conftest._restore(__file__)
     assert st._WAKE_DUE is False
     assert vars(st._METRICS_TLS) == {}
+
+
+def test_conftest_restore_rewinds_sys_argv():
+    """0.155.4 family A: a test that leaves a fake sys.argv behind (bare
+    assignment or monkeypatch leak) must be rewound by _restore — otherwise a
+    later importlib.reload(nx) re-scans the poisoned argv and re-arms posture
+    (st.YOLO=True inside unrelated tests)."""
+    import conftest
+    saved = list(sys.argv)
+    try:
+        sys.argv[:] = ["nx.py", "--resume", "--yolo"]
+        conftest._restore(__file__)
+        assert sys.argv == saved, sys.argv
+    finally:
+        sys.argv[:] = saved
+
+
+def test_reload_after_argv_rewind_leaves_posture_clean():
+    """Second family-A pin: with a clean argv a reload leaves posture alone;
+    with '--yolo' injected, _restore()'s argv rewind (NOT the reload) is what
+    keeps a later reload from re-arming it. The pin restores the posture it
+    mutated: reload once more after rewinding argv and assert clean."""
+    import conftest
+    import nx
+    saved_argv = list(sys.argv)
+    saved_yolo, saved_level = st.YOLO, st.APPROVE_LEVEL
+    try:
+        importlib.reload(nx)
+        assert st.YOLO is False and st.APPROVE_LEVEL is None, \
+            (st.YOLO, st.APPROVE_LEVEL)
+        sys.argv[:] = ["nx.py", "--yolo"]
+        conftest._restore(__file__)
+        assert sys.argv == saved_argv, sys.argv
+        importlib.reload(nx)
+        assert st.YOLO is False and st.APPROVE_LEVEL is None, \
+            "the rewound argv must not re-arm posture on a later reload"
+    finally:
+        sys.argv[:] = saved_argv
+        importlib.reload(nx)
+        st.YOLO = saved_yolo
+        st.APPROVE_LEVEL = saved_level
+
+
+def _stage_finished_bg_job(home, command="echo residue-01554"):
+    """Stage a finished, owned bg job the way test_bg_completion_seen stages
+    them: a real backgrounded bash job whose log still exists. Caller pins
+    st.SESSION_HOME to `home` (monkeypatch) BEFORE calling — the completion
+    sweep lists jobs from SESSION_HOME, so it must stay pointed there."""
+    bj = sys.modules.get("nx._bash_jobs")
+    if bj is None:
+        import nx._bash_jobs as bj
+    pid, _log = bj._run_bash(command)
+    assert bj._poll_pid(pid, 30.0) == "exited"
+    jobs = bj.list_bg_jobs(mine_only=True)
+    job = [j for j in jobs if str(j["pid"]) == str(pid)]
+    return pid, (job[0] if job else None)
+
+
+def test_bg_baseline_seeding_silences_worker_residue(tmp_path, monkeypatch):
+    """0.155.4 family B: file-based bg residue from the worker's shared home
+    (finished, log present, owner_pid == worker pid) used to be announced as a
+    user-role [Runtime note] by the completion sweep on a later turn's first
+    tool call. nx_state_reset_body now seeds st._BG_NOTICE_BASELINE once per
+    worker from exactly those jobs. Pin both directions."""
+    import nx._bg_completions as bc
+    home = str(tmp_path / "nxhome")
+    os.makedirs(home, exist_ok=True)
+    monkeypatch.setattr(st, "SESSION_HOME", home)
+    pid, job = _stage_finished_bg_job(home)
+    assert job and not job.get("alive") and os.path.exists(job["log_path"])
+    # the harness seed itself: reset the once-per-worker latch, clear any
+    # baseline, and let _seed_bg_notice_baseline compute it from the same
+    # public view the sweep reads.
+    import _nxtest
+    monkeypatch.setattr(st, "_BG_NOTICE_BASELINE", None, raising=False)
+    monkeypatch.setattr(_nxtest, "_BG_NOTICE_BASELINE_SEEDED", False)
+    _nxtest._seed_bg_notice_baseline(st)
+    assert st._BG_NOTICE_BASELINE == {str(pid)}, st._BG_NOTICE_BASELINE
+    # direction 1: with the baseline seeded (what _seed_bg_notice_baseline
+    # computes), the sweep announces nothing for the residue.
+    monkeypatch.setattr(st, "_BG_NOTICE_BASELINE", {str(pid)}, raising=False)
+    st._BG_NOTICE_SEEN = None
+    assert bc._scan_background_completions() is None
+    # direction 2: WITHOUT the baseline seeding the note lands.
+    monkeypatch.setattr(st, "_BG_NOTICE_BASELINE", set(), raising=False)
+    st._BG_NOTICE_SEEN = None
+    note = bc._scan_background_completions()
+    assert note is not None and "[Runtime note:" in note, note
+
+
+def test_bg_note_is_silent_on_a_turn_with_seeded_baseline(tmp_path, monkeypatch):
+    """End-to-end shape of the forced_final flake: a staged finished owned bg
+    job + a turn path that flushes module-store notices must NOT append a
+    user-role runtime note when the harness seeded the baseline."""
+    from nx._runtime_notes import _is_runtime_note, _flush_module_store_notes
+    home = str(tmp_path / "nxhome")
+    os.makedirs(home, exist_ok=True)
+    monkeypatch.setattr(st, "SESSION_HOME", home)
+    pid, job = _stage_finished_bg_job(home)
+    assert job and not job.get("alive") and os.path.exists(job["log_path"])
+    old_base = getattr(st, "_BG_NOTICE_BASELINE", None)
+    old_seen = st._BG_NOTICE_SEEN
+    try:
+        st._BG_NOTICE_BASELINE = {str(pid)}   # what _seed_bg_notice_baseline computes
+        st._BG_NOTICE_SEEN = None
+        note = sys.modules["nx._bg_completions"]._scan_background_completions()
+        assert note is None, note
+        messages = []
+        _flush_module_store_notes(messages, set())
+        assert not any(_is_runtime_note(m) for m in messages), messages
+        # and without the baseline the note DOES land (both directions pinned)
+        st._BG_NOTICE_BASELINE = set()
+        st._BG_NOTICE_SEEN = None
+        note = sys.modules["nx._bg_completions"]._scan_background_completions()
+        assert note is not None and "[Runtime note:" in note, note
+    finally:
+        st._BG_NOTICE_BASELINE = old_base
+        st._BG_NOTICE_SEEN = old_seen
 
 
 def test_leaked_live_is_stopped_not_just_unstacked():

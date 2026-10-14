@@ -219,30 +219,31 @@ def test_safe_title_collapses_and_clamps():
     print("PASS — title sanitization collapses whitespace + clamps length")
 
 
-def test_bare_resume_picks_most_recent():
+def test_bare_resume_picks_most_recent(monkeypatch):
     """`nx --resume` (no target) should resume the newest session."""
     # clear the temp dir first
     _clear_test_sessions_dir()
-    # no sessions yet → bare --resume resolves to None (clean fresh start)
-    sys.argv = ["nx.py", "--resume"]
+    # 0.155.4: patch, never bare-assign — a bare sys.argv assignment poisoned
+    # later tests on the worker (nx/__init__'s import-time argv scan re-armed
+    # st.YOLO=True inside every later preview-visibility test).
     assert m._session_id_from_args() is None, "should be None with no sessions"
     # now create two sessions; newest should win
     old = "20250101-120000-old123"
     m._write_session(old, [_msg("user", "old")], {"updated_at": 100})
     newest = "20250101-120001-new123"
     m._write_session(newest, [_msg("user", "newest")], {"updated_at": 101})
-    sys.argv = ["nx.py", "--resume"]
+    monkeypatch.setattr(sys, "argv", ["nx.py", "--resume"])
     resolved = m._session_id_from_args()
     assert resolved == newest, f"bare --resume should pick newest {newest}, got {resolved}"
     # --resume <n> still works alongside it
-    sys.argv = ["nx.py", "--resume", "1"]
+    monkeypatch.setattr(sys, "argv", ["nx.py", "--resume", "1"])
     assert m._session_id_from_args() == m._list_sessions()[0]["id"]
     print("PASS — bare --resume resumes the most recent session")
 
 
-def test_resume_flag_without_target_ignores_following_dash_flags():
+def test_resume_flag_without_target_ignores_following_dash_flags(monkeypatch):
     """`--resume --yolo` must not treat '--yolo' as the resume target."""
-    sys.argv = ["nx.py", "--resume", "--yolo"]
+    monkeypatch.setattr(sys, "argv", ["nx.py", "--resume", "--yolo"])
     # newest session from the previous test still exists → resolves to it,
     # NOT to the literal string "--yolo"
     resolved = m._session_id_from_args()

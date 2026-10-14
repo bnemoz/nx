@@ -209,8 +209,13 @@ def pytest_collectreport(report):
     _scrub_env()  # next module's import starts clean too
 
 
+# 0.155.4: argv snapshot for the _restore() rewind below. test_sessions.py's
+# argv fixtures poisoned later tests (see comment at its assignment sites).
+_BASELINE_ARGV = list(sys.argv)
+
+
 def _restore(fspath, item=None):
-    """Rewind NX_* env, cwd, and nx.* module state to the pristine baseline.
+    """Rewind NX_* env, argv, cwd, and nx.* module state to the pristine baseline.
 
     Runs before every test's setup (so no state leaks in from earlier tests,
     whether serial or xdist-scrambled) and after every test's teardown (so a
@@ -232,6 +237,12 @@ def _restore(fspath, item=None):
     # wakes a parked watcher thread, whose wake path pays the interrupt-restore
     # handshake — doing that 2x per test added ~2 minutes to the serial run.
     # Events are snapshotted/restored as plain state below instead.
+
+    # 0.155.4 family: rewind sys.argv too — a test that bare-assigned a fake
+    # argv (e.g. ["nx.py", "--resume", "--yolo"]) left "--yolo" in the process
+    # argv, which a later importlib.reload(nx) re-scans at import and uses to
+    # re-arm YOLO=True for every later test on the worker.
+    sys.argv[:] = _BASELINE_ARGV
 
     # env: NX_* (+ the non-NX source keys) -> baseline, then this module's own
     # import-time deltas (value None = the module deleted it at import)
@@ -447,21 +458,25 @@ _FLAKY_RERUN_NODEIDS = (
     # that (a) passes standalone and (b) is in a file listed here.
     "tests/test_perf_interrupt_disarm.py::test_disarm_wakes_the_watcher_immediately",
     "tests/test_perf_interrupt_disarm.py::test_stale_wake_bytes_do_not_spin_the_loop",
-    # 0.155.3 RE-ADDED: the trio was pruned in 0.155.0 on the TLS-posture fix,
-    # but failed together twice since at NORMAL wall on an idle box (agent-13
-    # six-run bar run 4; coordinator hunt run 6 at 17.4s). The posture leak was
-    # real and is closed for its class — but it was not the trio's only cause
-    # (or the TLS fix is incomplete); no live signature captured yet. Prune
-    # only after capturing one and tying it to a fixed mechanism.
+    # 0.155.3 → 0.155.4 CLOSED: the trio's live signature was captured
+    # deterministically (test_sessions.py's bare sys.argv assignment leaving
+    # "--yolo" in process argv; nx_fresh's importlib.reload(nx) re-executes
+    # nx/__init__.py's argv scan and re-arms st.YOLO=True inside every later
+    # test on that worker). Fixed at the root: _restore() rewinds sys.argv,
+    # and test_sessions.py's argv fixtures are monkeypatched (hygienic).
+    # The product variant (nx/__init__.py's import-time argv scan) is a
+    # pinned contract (test_telegram.py) and stays; the harness rewind is the
+    # wall. See docs/test-architecture.md §5.0.
     "tests/test_preview_visibility.py::test_prompt_path_hides_preview_but_keeps_the_prompt",
     "tests/test_preview_visibility.py::test_auto_allow_path_hides_preview_when_collapsed",
     "tests/test_preview_visibility.py::test_saved_rule_path_hides_preview_when_collapsed",
-    # 0.155.3 RE-ADDED (two of three): the 0.154.7 rewrite (locate by
-    # tool_call_id in the appended slice) removed the positional fragility, but
-    # the pair still failed ~3 times across the 0.155.0-2 era (never the text
-    # variant; standalone always green). Real run_bash subprocesses — the
-    # ledger's load-sensitive family; capture the signature before pruning
-    # again.
+    # 0.155.3 → 0.155.4 CLOSED (two of three): the actionable/mixed pair's
+    # role-shape assert broke because _handle_native_tool_calls flushes
+    # pending bg-completion notices mid-turn — the sweep announced file-based
+    # residue from the worker's shared home because _BG_NOTICE_BASELINE was
+    # read (getattr default set()) but never seeded. Fixed: the harness seeds
+    # it once per worker; the asserts also skip _is_runtime_note messages.
+    # (Never the text variant — its allowed roles include "user".)
     "tests/test_forced_final_recovery.py::test_forced_final_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",

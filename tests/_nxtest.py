@@ -267,6 +267,39 @@ _GLOBALS_FILES = [
     "test_worktree_sweep.py",
 ]
 
+# 0.155.4: seeded ONCE per worker (first nx_state_reset_body call): the pids of
+# bg jobs that already existed (owned by this worker, finished, logs still
+# present) before the worker's first test. The completion sweep
+# (nx/_bg_completions.py) treats baseline pids as already-announced, so
+# file-based residue from a shared/previous run's home can never be injected
+# as a [Runtime note] into a later test's turn. A test that monkeypatches
+# st._BG_NOTICE_BASELINE itself (raising=False) still wins — we only assign
+# when the attr is absent or None.
+_BG_NOTICE_BASELINE_SEEDED = False
+
+
+def _seed_bg_notice_baseline(st) -> None:
+    global _BG_NOTICE_BASELINE_SEEDED
+    if _BG_NOTICE_BASELINE_SEEDED:
+        return
+    _BG_NOTICE_BASELINE_SEEDED = True
+    cur = getattr(st, "_BG_NOTICE_BASELINE", None)
+    if cur:
+        return  # a test/fixture pinned a real baseline — keep it
+    try:
+        from nx._bash_jobs import list_bg_jobs
+        mine = os.getpid()
+        pids = {
+            str(j.get("pid")) for j in list_bg_jobs(mine_only=True)
+            if not j.get("alive") and j.get("owner_pid") == mine
+            and j.get("log_path") and os.path.exists(j["log_path"])
+        }
+    except Exception:
+        return  # exception-safe: no baseline better than a broken harness
+    if pids:
+        st._BG_NOTICE_BASELINE = pids
+
+
 def nx_state_reset_body() -> None:
     """The FULL per-test teardown, callable from anywhere (the autouse
     fixture below AND conftest's `_restore()`) — one implementation, so the
@@ -380,6 +413,18 @@ def nx_state_reset_body() -> None:
         # so the sweep can announce a REAL just-finished bg job as a
         # [Runtime note] mid-test (seen live: test_forced_final_recovery's
         # messages[-1] was a heredoc job's completion note).
+        # 0.155.4: seed _BG_NOTICE_BASELINE once per worker from the bg jobs
+        # that already exist (finished, with logs) at first reset — the same
+        # public view the completion sweep reads (list_bg_jobs(mine_only=True)).
+        # Without it the sweep announced file-based residue from the worker's
+        # shared home (owner_pid == the worker pid) as a user-role [Runtime
+        # note] mid-turn, breaking forced_final_recovery's role-shape asserts.
+        # Computed ONCE (not per reset): later finished jobs are newsworthy;
+        # residue that predates the worker's first test is not.
+        try:
+            _seed_bg_notice_baseline(st)
+        except Exception:
+            pass
         st._BG_NOTICE_SEEN = None
         st._BG_SCAN_DONE = False
     if no is not None:
