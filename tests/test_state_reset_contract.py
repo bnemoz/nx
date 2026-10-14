@@ -46,6 +46,30 @@ def test_call_target_tls_is_cleared():
     assert sm.call_target() is None
 
 
+def test_task_level_tls_is_cleared():
+    """0.156.0 (batch task overrides): the per-task headless threshold
+    (`_approval.task_level_scope` / `_TASK_LEVEL_TLS`) — same plant/drain/
+    assert shape as the slot above. Residue would auto-approve actions whose
+    local risk hint is at/below the stale level on every later quiet decision."""
+    import nx._approval as ap
+    ap._TASK_LEVEL_TLS.level = "high"
+    nx_state_reset_body()
+    assert vars(ap._TASK_LEVEL_TLS) == {}
+    assert ap._task_level() is None
+
+
+def test_policy_tls_is_cleared():
+    """0.156.0 (batch task overrides): the per-task approval policy
+    (`_approval_policy.policy_scope` / `_POLICY_TLS`) — residue would keep
+    policy-allowing tools on every later quiet decision on this thread."""
+    from nx import _approval_policy as apol
+    apol._POLICY_TLS.spec = "headless-allow:bash*"
+    nx_state_reset_body()
+    assert vars(apol._POLICY_TLS) == {}
+    # env-only again after the drain (NX_APPROVAL_POLICY unset in this suite)
+    assert apol._policy_globs() == ()
+
+
 def test_eventsink_and_steer_homes_are_swept():
     """0.155.1 pin: the sink registry, retained tails and per-agent steer
     queues are keyed by job id; residue there leaks into the next test's

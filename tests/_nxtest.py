@@ -367,6 +367,22 @@ def nx_state_reset_body() -> None:
         ctls = getattr(sm, "_CALL_TARGET_TLS", None)
         if ctls is not None:
             ctls.__dict__.clear()
+    # 0.156.0 (batch task overrides): the per-task headless threshold
+    # (_approval.task_level_scope) and the per-task approval policy
+    # (_approval_policy.policy_scope). Same leak shape as the slots above —
+    # installed by the scope around a task body, deleted in its finally, so
+    # only a crash between install and restore leaves residue that would
+    # auto-approve (or policy-allow) every later quiet decision on this thread.
+    ap = sys.modules.get("nx._approval")
+    if ap is not None:
+        ttls = getattr(ap, "_TASK_LEVEL_TLS", None)
+        if ttls is not None:
+            ttls.__dict__.clear()
+    pol = sys.modules.get("nx._approval_policy")
+    if pol is not None:
+        ptls = getattr(pol, "_POLICY_TLS", None)
+        if ptls is not None:
+            ptls.__dict__.clear()
     # 0.155.1: the eventsink homes. _SINKS/_RETAINED_TAILS are keyed by job id
     # and read through the module attrs (sink_for/retained_tail), so a sink a
     # prior file registered (or a retained tail its worker's finally left)

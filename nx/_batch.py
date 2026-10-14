@@ -49,6 +49,7 @@ task relies on async sub-agents.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import threading
@@ -58,7 +59,10 @@ from pathlib import Path
 from typing import Any
 
 from ._env import _env_int
+from . import _approval
+from . import _approval_policy
 from . import _state as st
+from . import _subagent_model
 
 # Exit codes a batch run (or any one-shot task) can exit with. Exported for
 # tests and for consumers that want to mirror the contract.
@@ -92,6 +96,16 @@ string or an object:
 
   {"instruction": "refactor foo.py", "id": "t1", "session": "my-session"}
 
+Per-task override keys (object tasks only; each wins over its run flag):
+  "approval"         ABSOLUTE posture for this task: "yolo", "low",
+                     "medium", "high" (a level headless-auto-approves
+                     actions whose LOCAL risk hint is at or below it; a
+                     task level inside a --yolo run demotes — e.g.
+                     "low" in a --yolo run prompts-deny above low)
+  "model"            model for this task, same syntax as --model
+  "approval_policy"  "headless-allow:<globs>" for this task (the same
+                     value NX_APPROVAL_POLICY takes)
+
 flags:
   -f, --prompt-file <path>   JSONL task file ("-" reads stdin; required)
       --parallel <N>         run up to N tasks concurrently (default 1)
@@ -99,7 +113,12 @@ flags:
                              scheduling new tasks after the first error)
       --yolo / --approval <level>
                              approval posture for the tasks (batch is
-                             headless: without yolo, gated calls are DENIED)
+                             headless: without yolo, gated calls are DENIED
+                             unless a task opts in — see task keys below)
+      --model <id|source:id>
+                             default model for the tasks (a bare id rides the
+                             active source; "source:id" rides that source).
+                             A task's own "model" field wins over this.
       --source <name>        endpoint to run the tasks against
       --max-turns <N>        per-task turn cap (default NX_MAX_MODEL_TURNS)
       --timeout <seconds>    per-task wall-clock cap (default
@@ -125,7 +144,7 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
     one-task batch."""
     opts: dict[str, Any] = {
         "file": None, "parallel": 1, "continue_on_error": False,
-        "max_turns": None, "timeout": None,
+        "max_turns": None, "timeout": None, "model": None,
     }
     i = 0
     while i < len(argv):
@@ -168,6 +187,15 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
                 raise _BatchUsageError("--timeout must be >= 0 (0 disables the cap)")
             opts["timeout"] = t
             i += 2
+        elif a == "--model":
+            if i + 1 >= len(argv):
+                raise _BatchUsageError("--model requires a model id argument")
+            spec = argv[i + 1].strip()
+            if not spec:
+                raise _BatchUsageError("--model requires a non-empty model id")
+            _validate_model_spec(spec, f"--model {spec!r}")
+            opts["model"] = spec
+            i += 2
         elif a == "--continue-on-error":
             opts["continue_on_error"] = True
             i += 1
@@ -183,6 +211,19 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
     if not opts["file"]:
         raise _BatchUsageError("nx run requires -f/--prompt-file <tasks.jsonl>")
     return opts
+
+
+def _validate_model_spec(spec: str, where: str) -> None:
+    """Shared model grammar for the `--model` flag and the task `model` key:
+    a bare model id, or "<source>:<model>" with <source> in the registered
+    SOURCES registry. An unknown source prefix is a PARSE error (an operator
+    authored it — tell them before any tokens burn; sub-agents, by contrast,
+    warn-once-and-inherit because a spawn is best-effort)."""
+    name, sep, _model = spec.partition(":")
+    if sep and name not in st.SOURCES:
+        raise _BatchUsageError(
+            f"{where}: unknown source {name!r} in model spec {spec!r} "
+            f"(registered sources: {', '.join(sorted(st.SOURCES)) or 'none'})")
 
 
 def _read_task_lines(path: str) -> list[str]:
@@ -216,6 +257,32 @@ def _parse_tasks(path: str) -> list[dict[str, Any]]:
             if not isinstance(task.get("instruction"), str) or not task["instruction"].strip():
                 raise _BatchUsageError(
                     f"task line {lineno} needs a non-empty \"instruction\" string")
+            # 0.156.0: the three override keys validate HERE — a bad posture or
+            # model must never reach the API (exit 2, no JSONL line). Unknown
+            # OTHER keys keep being silently ignored (forward-compat schema).
+            for key in ("approval", "model", "approval_policy"):
+                if key in task and not isinstance(task[key], str):
+                    raise _BatchUsageError(
+                        f"task line {lineno}: {key} must be a string, "
+                        f"got {type(task[key]).__name__}: {task[key]!r}")
+            if "approval" in task:
+                kind, _lvl = _approval._normalize_approval(task["approval"])
+                if kind is None:
+                    raise _BatchUsageError(
+                        f"task line {lineno}: invalid approval "
+                        f"{task['approval']!r} (expected yolo, low, medium, "
+                        f"high, or prompt-all)")
+            if "model" in task:
+                _validate_model_spec(task["model"].strip(),
+                                     f"task line {lineno}: model")
+            if "approval_policy" in task:
+                spec = task["approval_policy"].strip()
+                if not spec.lower().startswith(_approval_policy._PREFIX) \
+                        or not spec[len(_approval_policy._PREFIX):].strip():
+                    raise _BatchUsageError(
+                        f"task line {lineno}: invalid approval_policy "
+                        f"{task['approval_policy']!r} (expected "
+                        f"\"headless-allow:<globs>\" with non-empty globs)")
         else:
             raise _BatchUsageError(
                 f"task line {lineno} must be a JSON string or object, got {type(parsed).__name__}")
@@ -281,9 +348,68 @@ def _task_timeout(task: dict[str, Any], default: float | None) -> float | None:
     return secs if secs > 0 else None
 
 
+def _resolve_model_target(spec: str) -> "tuple[str, tuple[Any, str, dict[str, Any], Any]] | tuple[None, None]":
+    """Resolve a batch model spec (bare id, or `source:id` — validated up
+    front) into (model_id, call_target) for `call_target_scope`. The same
+    normalization `subagent_call_target()` applies to pool entries: a bare id
+    rides the active source's client, `source:id` rides that Source's client
+    and per-model extra_request_kwargs (0.156.0: the ROUTED model is threaded
+    through so thinking separation keys off the task's model, not st.MODEL).
+    (None, None) = the run's globals (no spec, or nothing resolvable)."""
+    name, sep, model = spec.partition(":")
+    if sep:
+        src = st.SOURCES.get(name)
+        if src is None or getattr(src, "client", None) is None:
+            return None, None
+        client = src.client
+        use_model = model or getattr(src, "model", None)
+        if not use_model and hasattr(src, "resolve_model"):
+            try:
+                use_model = src.resolve_model()
+            except Exception:  # noqa: BLE001 — degrade to the globals
+                use_model = None
+        pin_src = src if hasattr(src, "_request_shapes") else None
+    else:
+        src = st.ACTIVE
+        client = st.client
+        use_model = spec
+        pin_src = src if (src is not None and hasattr(src, "_request_shapes")) else None
+    if not client or not use_model:
+        return None, None
+    if src is not None and hasattr(src, "extra_request_kwargs"):
+        extra = src.extra_request_kwargs(use_model)
+    else:
+        extra = {}
+    return use_model, (client, use_model, extra or {}, pin_src)
+
+
+def _task_posture(task: dict[str, Any]) -> "tuple[tuple[bool, str | None] | None, str]":
+    """Resolve a task's effective approval posture: the task's `approval` key
+    is an ABSOLUTE posture (task `"low"` inside a --yolo run demotes — the
+    signed-off semantics); absent, the run's own posture (the process globals:
+    --yolo/--approval consumed at import) governs, unchanged.
+
+    Returns (scope_or_None, display): scope is the `_posture_scope` force
+    tuple when the task set the key, None to keep today's globals; display is
+    the effective posture rendered in the NX_APPROVAL vocabulary
+    ("yolo" | "low" | "medium" | "high" | "prompt-all")."""
+    raw = task.get("approval")
+    if raw is None:
+        yolo, level = st._posture()
+        return None, ("yolo" if yolo else (level or "prompt-all"))
+    kind, level = _approval._normalize_approval(raw)
+    if kind == "yolo":
+        return (True, None), "yolo"
+    if kind == "level":
+        assert level is not None
+        return (False, level), level
+    return (False, None), "prompt-all"  # prompt_all
+
+
 def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
                   max_turns: int | None,
-                  timeout_seconds: float | None = None) -> dict[str, Any]:
+                  timeout_seconds: float | None = None,
+                  model_default: str | None = None) -> dict[str, Any]:
     """Run one task headlessly: fresh messages, fresh metrics, fresh session
     id; the turn loop's chat output is suppressed (quiet). Returns the merged
     result dict (the JSONL line's content). Never raises — a raise is an
@@ -318,6 +444,10 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         "tokens": None,
         "tool_calls": [],
         "error": None,
+        # 0.156.0: per-task provenance — the model that answered and the
+        # posture the decisions used (see _task_posture for the rendering).
+        "model": st.MODEL,
+        "approval": _task_posture(task)[1],
     }
     started = time.time()
     # Quiet the whole worker thread (no spinner/stream/footer/tool box) and
@@ -337,7 +467,33 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     # slot and _TASK_TLS). prev is None except for a nested installation.
     prev_metrics = None
     _task_deadline_at(None if timeout_seconds is None else started + timeout_seconds)
+    # 0.156.0: per-task overrides, resolved once and installed as TLS scopes
+    # around the try body (all nested-safe, all finally-restored). No task key
+    # set → no scope entered → the byte-identical legacy path.
+    posture_scope_force, _approval_disp = _task_posture(task)
+    model_spec = task.get("model") or model_default
+    policy_spec = task.get("approval_policy")
+    scopes = contextlib.ExitStack()
     try:
+        # (i) posture: yolo → (True, None); a level or prompt-all → (False, x)
+        if posture_scope_force is not None:
+            scopes.enter_context(st._posture_scope(posture_scope_force))
+        # (ii) model: task field > --model flag > the run's globals (no scope)
+        if model_spec:
+            model_id, target = _resolve_model_target(model_spec.strip())
+            if target is not None:
+                scopes.enter_context(_subagent_model.call_target_scope(target))
+                result["model"] = model_id
+        # (iii) headless threshold opt-in for LEVEL postures only — yolo
+        # short-circuits _confirm before the threshold is ever read
+        kind = _approval._normalize_approval(task["approval"])[0] \
+            if "approval" in task else None
+        if kind == "level":
+            scopes.enter_context(_approval.task_level_scope(
+                _approval._normalize_approval(task["approval"])[1]))
+        # (iv) per-task approval policy (headless-allow globs)
+        if policy_spec:
+            scopes.enter_context(_approval_policy.policy_scope(policy_spec))
         prev_metrics = st._set_thread_metrics(_fresh_metrics(session_id))
         if st.ACTIVE is None:
             raise RuntimeError("no active model source — set NX_BASE_URL/NX_SOURCE_* or use --source")
@@ -366,6 +522,7 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         result["exit_code"] = EXIT_ERROR
         result["elapsed_seconds"] = round(time.time() - started, 2)
     finally:
+        scopes.close()
         _task_deadline_at(None)
         st._set_thread_metrics(prev_metrics)
         _TASK_TLS.task = None
@@ -388,7 +545,11 @@ def _save_task_session(session_id: str, messages: list[dict[str, Any]]) -> None:
         m_obj = st._active_metrics()
         m = dict(m_obj.as_meta()) if m_obj is not None else {}
         m["source"] = st.ACTIVE.name if st.ACTIVE else None
-        m["model"] = st.MODEL
+        # 0.156.0: the EFFECTIVE model — the task's routed target when one is
+        # installed, else st.MODEL — so a resumed transcript doesn't lie about
+        # what answered.
+        target = _subagent_model.call_target()
+        m["model"] = target[1] if target is not None else st.MODEL
         import os
         m["cwd"] = os.getcwd()
         _m._write_session(session_id, messages, m)
@@ -515,7 +676,8 @@ def run_batch(argv: list[str]) -> int:
             _emit(res)
             stop_scheduling.set()
             return
-        res = _run_one_task(task, run_id, idx, max_turns, task_timeout)
+        res = _run_one_task(task, run_id, idx, max_turns, task_timeout,
+                            model_default=opts["model"])
         with lock:
             results.append(res)
         _emit(res)

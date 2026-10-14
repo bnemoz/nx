@@ -24,14 +24,49 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import threading
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 ENV_VAR = "NX_APPROVAL_POLICY"
 _PREFIX = "headless-allow:"
 
+# 0.156.0 (BATCH_TASK_OVERRIDES_SPEC): per-task policy override. A batch task's
+# "approval_policy" key installs its spec string here; `_policy_globs` reads
+# it BEFORE os.environ. Sub-agents spawned inside the task inherit it for free
+# (same thread). Unset = env-only, exactly as before.
+_POLICY_TLS: threading.local = threading.local()
+
+
+@contextmanager
+def policy_scope(spec: Optional[str]) -> Iterator[None]:
+    """Install an `NX_APPROVAL_POLICY`-shaped spec (e.g.
+    `headless-allow:bash*`) as THIS thread's policy for the `with` body;
+    nested-safe, finally-restore. `spec=None` (or a non-`headless-allow`
+    value) is a no-op inherit — the env governs, as before."""
+    if not isinstance(spec, str) or not spec.strip().lower().startswith(_PREFIX):
+        yield
+        return
+    had = hasattr(_POLICY_TLS, "spec")
+    prev = getattr(_POLICY_TLS, "spec", None)
+    _POLICY_TLS.spec = spec
+    try:
+        yield
+    finally:
+        if had:
+            _POLICY_TLS.spec = prev
+        elif hasattr(_POLICY_TLS, "spec"):
+            del _POLICY_TLS.spec
+
 
 def _policy_globs() -> tuple[str, ...]:
-    """Parse NX_APPROVAL_POLICY into tool-name globs; () = deny (default)."""
-    raw = os.environ.get(ENV_VAR, "").strip()
+    """Parse the active policy spec into tool-name globs; () = deny (default).
+    The per-task TLS spec (policy_scope) wins over os.environ."""
+    raw: str | None
+    if hasattr(_POLICY_TLS, "spec"):
+        raw = str(_POLICY_TLS.spec or "").strip()
+    else:
+        raw = os.environ.get(ENV_VAR, "").strip()
     if not raw.lower().startswith(_PREFIX):
         return ()
     spec = raw[len(_PREFIX):].strip()

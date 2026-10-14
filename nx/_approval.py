@@ -21,8 +21,9 @@ approval prompt back to the chat input.
 """
 import difflib
 import sys
+import threading
 from contextlib import contextmanager
-from typing import Optional
+from typing import Iterator, Optional
 
 from ._ansi import DIM, RESET, C, notice, raw_mode
 from ._env import _env_int
@@ -37,6 +38,42 @@ from . import _state as st
 # Posture resolution (0.155.0) goes through `st._posture()` — resolved off the
 # live module at CALL time, not a name captured at import, so the same
 # one-resolver rule holds however the module got loaded.
+
+# 0.156.0 (BATCH_TASK_OVERRIDES_SPEC): per-TASK threshold opt-in for headless
+# surfaces. A batch task that sets "approval" to a LEVEL (low/medium/high —
+# never yolo, which short-circuits first) installs its threshold here so the
+# quiet branch of `_confirm` can honor it. Local risk hints ONLY: headless
+# there is nobody to answer a prompt, so a hintless action stays denied and
+# the model classifier is never consulted. Unset = today's exact behavior.
+_TASK_LEVEL_TLS: threading.local = threading.local()
+
+
+def _task_level() -> Optional[str]:
+    """The headless threshold installed on THIS thread by
+    `task_level_scope` (a batch task's `"approval": "<level>"`), or None when
+    unset — the unset case keeps the quiet branch's byte-identical legacy flow."""
+    return getattr(_TASK_LEVEL_TLS, "level", None)
+
+
+@contextmanager
+def task_level_scope(level: Optional[str]) -> Iterator[None]:
+    """Install a headless auto-approve threshold on THIS thread for the body.
+    Nested-safe (finally-restore of the previous value, deleted when nothing
+    was previously installed). `level=None` is a no-op inherit."""
+    if level is None:
+        yield
+        return
+    had = hasattr(_TASK_LEVEL_TLS, "level")
+    prev = getattr(_TASK_LEVEL_TLS, "level", None)
+    _TASK_LEVEL_TLS.level = level
+    try:
+        yield
+    finally:
+        if had:
+            _TASK_LEVEL_TLS.level = prev
+        elif hasattr(_TASK_LEVEL_TLS, "level"):
+            del _TASK_LEVEL_TLS.level
+
 
 # Approval diff-preview context lines (nx/_layout.py, pure move).
 _DIFF_CONTEXT = DIFF_CONTEXT_LINES
@@ -353,6 +390,15 @@ def _confirm(action: str, preview: Optional[str] = None,
         # async sub-agent bash, `nx run` batch) — all three funnel through
         # this one deny point. Anything unmatched, and any unset/other
         # policy value, keeps the documented auto-deny.
+        # 0.156.0: per-task level opt-in (batch "approval": "<level>") — the
+        # LOCAL risk hint decides, never the model classifier, and a hintless
+        # action (or one above the threshold) keeps the deny.
+        task_level = _task_level()
+        if task_level is not None:
+            hint = _local_risk_hint(action)
+            if hint and LEVEL_ORDER.get(hint[0]) is not None \
+                    and LEVEL_ORDER[hint[0]] <= LEVEL_ORDER[task_level]:
+                return True
         from ._approval_policy import headless_allow
         return headless_allow(action)
     # The approval preview is tool output on screen too (git_commit's staged

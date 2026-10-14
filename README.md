@@ -959,7 +959,10 @@ naming the timeout, and `timed_out: true` — a task can also set its own
 `--continue-on-error` keeps scheduling after a
 task fails (default: stop scheduling new tasks at the first error — a
 timed-out task counts as an error),
-`--source <name>` picks the endpoint. stdout carries ONLY the JSONL result
+`--model <id|source:id>` sets the default model for every task (a bare id
+rides the active source; `source:id` rides that registered source — the
+same syntax as `NX_SUBAGENT_MODEL_POOL` entries), `--source <name>` picks
+the endpoint. stdout carries ONLY the JSONL result
 lines — every human-facing render is suppressed; progress and the summary go
 to stderr.
 
@@ -978,6 +981,28 @@ Approval: batch is headless — nobody can answer a Y/n prompt. Without
 Each task's transcript is saved like an interactive session's, so a scored run
 is also a resumable one.
 
+Per-task overrides (0.156.0) — three optional keys on an object task, each
+winning over its run-level flag (task field > run flag > env/default):
+
+- `"approval"` — an ABSOLUTE posture for that task: `"yolo"`, `"low"`,
+  `"medium"`, or `"high"`. A task level opts into headless auto-approval of
+  actions whose LOCAL risk hint is at or below it (no model classifier call;
+  a hintless action still denies). The key is absolute, not a merge: a task
+  `"low"` inside a `--yolo` run prompts-denies above low, so a mixed corpus
+  can demote one task without loosening the rest.
+- `"model"` — that task's model, same grammar as `--model`: a bare id rides
+  the active source, `"source:id"` rides the named registered source (an
+  unknown prefix is a parse error — the run exits 2 before any API call).
+  Sub-agents spawned inside the task inherit the task's model.
+- `"approval_policy"` — `"headless-allow:<globs>"` for that task, the same
+  value `NX_APPROVAL_POLICY` takes; it wins over the env var for the task
+  (and only for it).
+
+The result line echoes the effective provenance for forensics: `model` (the
+model that actually answered) and `approval` (`yolo`, the level, or
+`prompt-all`), and the saved session transcript stamps the effective model —
+so a resumed session records what really produced it.
+
 Result-line shape (one JSON object per task):
 
 ```
@@ -986,7 +1011,7 @@ Result-line shape (one JSON object per task):
  "elapsed_seconds": 12.4, "final_answer": "…", "tokens": {"input": 2630,
  "output": 412, "cache_read": 1980, "reasoning": 0, "api_calls": 4},
  "tool_calls": [{"tool": "read_file", "args": "…", "result": "…"}],
- "error": null}
+ "model": "glm-5.3", "approval": "yolo", "error": null}
 ```
 
 Tasks compose with sub-agents: a task's model may call `spawn_agent`

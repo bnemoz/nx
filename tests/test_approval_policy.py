@@ -132,3 +132,119 @@ def test_interactive_confirm_ignores_the_policy(nx_fresh, monkeypatch):
     nx._state.YOLO = False
     nx._state.APPROVE_LEVEL = None
     assert nx._approval._confirm("bash echo hi") is False  # prompt said n
+
+
+# --- 0.156.0: per-task policy scope (batch task overrides spec) ---------------
+
+def test_policy_scope_overrides_env(nx_fresh, monkeypatch):
+    from nx import _approval_policy as ap
+    monkeypatch.setenv(ap.ENV_VAR, "headless-allow:env_tool")
+    with ap.policy_scope("headless-allow:task_tool"):
+        assert ap._policy_globs() == ("task_tool",)
+    # nested: the inner scope wins, restore lands on the outer
+    with ap.policy_scope("headless-allow:outer"):
+        with ap.policy_scope("headless-allow:inner"):
+            assert ap._policy_globs() == ("inner",)
+        assert ap._policy_globs() == ("outer",)
+    # outside any scope the env governs again
+    assert ap._policy_globs() == ("env_tool",)
+
+
+def test_policy_scope_none_is_noop_inherit(nx_fresh, monkeypatch):
+    from nx import _approval_policy as ap
+    monkeypatch.setenv(ap.ENV_VAR, "headless-allow:env_tool")
+    with ap.policy_scope(None):
+        assert ap._policy_globs() == ("env_tool",)
+    assert ap._policy_globs() == ("env_tool",)
+
+
+def test_policy_scope_allows_via_confirm(nx_fresh):
+    """policy_scope feeds the headless deny branch of _confirm exactly like
+    the env var does — a per-task policy allows its tool, others stay denied."""
+    from nx import _approval_policy as ap
+    import nx
+    nx._subagent._ASYNC_QUIET_SLOTS.quiet = True
+    nx._state.YOLO = False
+    try:
+        with ap.policy_scope("headless-allow:bash*"):
+            assert nx._approval._confirm("bash git status") is True
+            assert nx._approval._confirm("edit_file x.py") is False
+    finally:
+        nx._subagent._ASYNC_QUIET_SLOTS.quiet = False
+        nx._state.YOLO = False
+
+
+# --- 0.156.0: per-task headless threshold (task_level_scope) ------------------
+
+def test_task_level_scope_allows_hint_at_or_below(nx_fresh):
+    """The quiet branch honors the installed threshold via the LOCAL risk hint
+    only: a hint at/below the level allows, above it or hintless denies — and
+    the model classifier is never reached."""
+    import nx as _m
+    from nx import _approval as ap
+    from nx._risk import _local_risk_hint
+    import nx
+    nx._subagent._ASYNC_QUIET_SLOTS.quiet = True
+    nx._state.YOLO = False
+
+    def _never(*a, **kw):
+        raise AssertionError("task-level path must not call the classifier")
+
+    monkeypatch_risk = None
+    try:
+        # _assess_risk must never fire on this path
+        orig = _m._assess_risk
+        _m._assess_risk = _never
+        with ap.task_level_scope("medium"):
+            # find actions with local hints below/at/above medium
+            below = at = above = hintless = None
+            for probe in ("read_file x", "edit_file x", "bash rm -rf /",
+                          "totally_unknown_tool arg"):
+                h = _local_risk_hint(probe)
+                if h and h[0] == "low" and below is None:
+                    below = probe
+                elif h and h[0] == "medium" and at is None:
+                    at = probe
+                elif h and h[0] == "high" and above is None:
+                    above = probe
+                elif h is None and hintless is None:
+                    hintless = probe
+            if below is not None:
+                assert ap._confirm(below) is True
+            if at is not None:
+                assert ap._confirm(at) is True
+            if above is not None:
+                assert ap._confirm(above) is False
+            # a hintless action denies (local hint ONLY — never the classifier)
+            if hintless is not None:
+                assert ap._confirm(hintless) is False
+        _m._assess_risk = orig
+    finally:
+        nx._subagent._ASYNC_QUIET_SLOTS.quiet = False
+        nx._state.YOLO = False
+        _m._assess_risk = orig
+
+
+def test_task_level_unset_keeps_legacy_deny(nx_fresh):
+    """Unset task level = today's exact behavior: quiet + no yolo denies."""
+    from nx import _approval as ap
+    import nx
+    nx._subagent._ASYNC_QUIET_SLOTS.quiet = True
+    nx._state.YOLO = False
+    try:
+        assert ap._task_level() is None
+        assert ap._confirm("read_file x") is False
+    finally:
+        nx._subagent._ASYNC_QUIET_SLOTS.quiet = False
+        nx._state.YOLO = False
+
+
+def test_task_level_nested_and_restore(nx_fresh):
+    from nx import _approval as ap
+    assert ap._task_level() is None
+    with ap.task_level_scope("low"):
+        assert ap._task_level() == "low"
+        with ap.task_level_scope("high"):
+            assert ap._task_level() == "high"
+        assert ap._task_level() == "low"
+    assert ap._task_level() is None  # deleted, not just None

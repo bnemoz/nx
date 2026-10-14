@@ -186,7 +186,7 @@ def test_arg_parsing(nx_fresh):
     o = nx._batch._parse_batch_args(["-f", "t.jsonl", "--parallel", "4",
                                      "--continue-on-error", "--max-turns", "9"])
     assert o == {"file": "t.jsonl", "parallel": 4, "continue_on_error": True,
-                 "max_turns": 9, "timeout": None}
+                 "max_turns": 9, "timeout": None, "model": None}
     assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "900"])["timeout"] == 900.0
     assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "2.5"])["timeout"] == 2.5
     with pytest.raises(nx._batch._BatchUsageError):
@@ -811,3 +811,242 @@ def test_parallel_bad_timeout_field_is_misuse(nx_fresh, tmp_path, monkeypatch):
     assert code == nx._batch.EXIT_MISUSE
     assert "timeout_seconds" in err.getvalue()
     assert buf.getvalue() == ""  # nothing ran
+
+
+# --- 0.156.0: per-task overrides (approval / model / approval_policy) ----------
+
+def test_arg_parsing_model_flag(nx_fresh):
+    nx, _ = nx_fresh
+    o = nx._batch._parse_batch_args(["-f", "t", "--model", "glm-5.3"])
+    assert o["model"] == "glm-5.3"
+    with pytest.raises(nx._batch._BatchUsageError, match="requires a model id"):
+        nx._batch._parse_batch_args(["-f", "t", "--model"])
+    with pytest.raises(nx._batch._BatchUsageError, match="unknown nx run flag"):
+        nx._batch._parse_batch_args(["-f", "t", "--modle", "x"])
+    assert "usage: nx run" in nx._batch._USAGE_TEXT and "--model" in nx._batch._USAGE_TEXT
+
+
+def test_parse_tasks_rejects_bad_override_keys(nx_fresh, tmp_path):
+    nx, tmp = nx_fresh
+    bad = [
+        '{"instruction": "x", "approval": "nuke"}',                 # bad value
+        '{"instruction": "x", "approval": 1}',                      # non-string
+        '{"instruction": "x", "model": "nonesource:m"}',            # unknown prefix
+        '{"instruction": "x", "model": ["m"]}',                     # non-string
+        '{"instruction": "x", "approval_policy": "allow-all:bash"}',  # wrong prefix
+        '{"instruction": "x", "approval_policy": "headless-allow:"}',  # empty globs
+        '{"instruction": "x", "approval_policy": 7}',
+    ]
+    for line in bad:
+        with pytest.raises(nx._batch._BatchUsageError, match="task line 1"):
+            nx._batch._parse_tasks(_write_tasks(tmp, [line]))
+    # valid values parse through (bare id + a registered source prefix)
+    ok = nx._batch._parse_tasks(_write_tasks(tmp, [
+        '{"instruction": "x", "approval": "yolo", "model": "local:whatever",'
+        ' "approval_policy": "headless-allow: bash* , edit_file"}']))
+    assert ok[0]["approval"] == "yolo" and ok[0]["model"] == "local:whatever"
+
+
+def test_precedence_task_beats_flag_beats_env(nx_fresh, tmp_path, monkeypatch):
+    """Per-key resolution precedence, parse/unit level (plan item 1): the
+    `approval` task key is ABSOLUTE — "low" inside a --yolo run demotes
+    ((False, "low"), not a merge) — while a key-less task renders the run's
+    own posture from the globals."""
+    nx, _ = nx_fresh
+    tasks = nx._batch._parse_tasks(_write_tasks(tmp_path, [
+        '{"instruction": "a", "approval": "low"}',
+        '{"instruction": "b"}',
+    ]))
+    monkeypatch.setattr(nx.st, "YOLO", True)
+    monkeypatch.setattr(nx.st, "APPROVE_LEVEL", None)
+    # task key wins absolutely: "low" in a --yolo run demotes
+    assert nx._batch._task_posture(tasks[0]) == ((False, "low"), "low")
+    # absent key → the run's yolo posture (today's behavior)
+    assert nx._batch._task_posture(tasks[1]) == (None, "yolo")
+
+
+def test_task_approval_absolute_demotes_yolo(fake_loop, tmp_path, monkeypatch):
+    """A task `approval: "low"` in a --yolo run is ABSOLUTE: the task's own
+    posture scope installs (False, "low") for the body — while a sibling with
+    no key keeps the run's yolo."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "y", "id": "yolo-task", "approval": "yolo"}',
+        '{"instruction": "d", "id": "low-task", "approval": "low"}',
+        '{"instruction": "g", "id": "global"}',
+    ])
+    monkeypatch.setattr(nx.st, "YOLO", True)
+    monkeypatch.setattr(nx.st, "APPROVE_LEVEL", None)
+
+    def probe(messages, on_step=None, max_turns_override=None, **kw):
+        yolo, level = nx.st._posture()
+        task = nx._batch._batch_task()
+        calls.append({"id": task.get("id"), "yolo": yolo, "level": level,
+                      "task_level": nx._approval._task_level(),
+                      "policy": nx._approval_policy._policy_globs()})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", probe)
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--continue-on-error"])
+    assert code == 0, f"exit={code}, stderr={err.getvalue()!r}"
+    by_id = {c["id"]: c for c in calls}
+    assert by_id["yolo-task"] == {"id": "yolo-task", "yolo": True, "level": None,
+                                  "task_level": None, "policy": ()}
+    assert by_id["low-task"]["yolo"] is False and by_id["low-task"]["level"] == "low"
+    assert by_id["low-task"]["task_level"] == "low"  # LEVEL opt-in installed
+    # the key-less task rides the run's yolo globals untouched
+    assert by_id["global"]["yolo"] is True and by_id["global"]["task_level"] is None
+    # globals restored after the run
+    assert nx.st._posture() == (True, None)
+    lines = {json.loads(l)["id"]: json.loads(l) for l in buf.getvalue().strip().splitlines()}
+    assert lines["yolo-task"]["approval"] == "yolo"
+    assert lines["low-task"]["approval"] == "low"
+    assert lines["global"]["approval"] == "yolo"
+
+
+def test_per_task_model_reaches_call_target(fake_loop, tmp_path, monkeypatch):
+    """Task `model` > `--model` flag > globals: the resolved target rides
+    _CALL_TARGET_TLS during the task body and is gone after it."""
+    nx, calls, holder = fake_loop
+    from nx._sources import Source
+    other = Source("other", "http://127.0.0.1:8/v1", "k", "other-model")
+    monkeypatch.setattr(nx.st, "SOURCES", {**nx.st.SOURCES, "other": other})
+    monkeypatch.setattr(nx.st, "SOURCE_ORDER", list(nx.st.SOURCE_ORDER) + ["other"])
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "id": "src", "model": "other:other-model"}',
+        '{"instruction": "b", "id": "bare", "model": "bare-model"}',
+        '{"instruction": "c", "id": "flag"}',
+        '{"instruction": "d", "id": "none"}',
+    ])
+    seen = []
+
+    def probe(messages, on_step=None, max_turns_override=None, **kw):
+        t = nx._subagent_model.call_target()
+        seen.append({"task": nx._batch._batch_task().get("id"), "target": t})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", probe)
+    buf, _ = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--model", "flag-model", "--continue-on-error"])
+    assert code == 0
+    by_id = {s["task"]: s for s in seen}
+    assert by_id["src"]["target"][0] is other.client
+    assert by_id["src"]["target"][1] == "other-model"
+    assert by_id["src"]["target"][3] is other  # pin_src
+    assert by_id["bare"]["target"][1] == "bare-model"
+    assert by_id["bare"]["target"][0] is nx.st.client  # active source's client
+    assert by_id["flag"]["target"][1] == "flag-model"  # --model run default
+    # a key-less task rides the RUN's --model default too (run-level flag)
+    assert by_id["none"]["target"] is not None
+    assert by_id["none"]["target"][1] == "flag-model"
+    lines = {json.loads(l)["id"]: json.loads(l) for l in buf.getvalue().strip().splitlines()}
+    assert lines["src"]["model"] == "other-model"
+    assert lines["bare"]["model"] == "bare-model"
+    assert lines["flag"]["model"] == "flag-model"
+    # no scope left installed after the run
+    assert nx._subagent_model.call_target() is None
+    # and without --model a key-less task stays on the globals (legacy)
+    f2 = _write_tasks(tmp_path, ['{"instruction": "legacy", "id": "legacy"}'])
+    seen.clear()
+    buf2, _ = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f2])
+    assert code == 0 and seen[0]["target"] is None
+
+
+def test_session_meta_stamps_effective_model(fake_loop, tmp_path, monkeypatch):
+    """The saved session meta carries the task's EFFECTIVE model, not st.MODEL."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "id": "routed", "model": "routed-model"}',
+    ])
+    buf, _ = _capture_stdout(monkeypatch)
+    _run(nx, ["-f", f])
+    sid = json.loads(buf.getvalue().strip())["session"]
+    sess = nx._load_session(sid)
+    assert sess["model"] == "routed-model"
+    assert sess["model"] != nx.st.MODEL
+
+
+def test_per_task_policy_scope_in_batch(fake_loop, tmp_path, monkeypatch):
+    """`approval_policy` on a task policy-allows its tool headless; the run
+    keeps the env-only behavior for tasks without the key."""
+    nx, calls, holder = fake_loop
+    monkeypatch.setenv("NX_APPROVAL_POLICY", "headless-allow:env_tool")
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "id": "task-pol", "approval_policy": "headless-allow:task_tool"}',
+        '{"instruction": "b", "id": "no-key"}',
+    ])
+    seen = []
+
+    def probe(messages, on_step=None, max_turns_override=None, **kw):
+        seen.append({"task": nx._batch._batch_task().get("id"),
+                     "globs": nx._approval_policy._policy_globs()})
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", probe)
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--continue-on-error"])
+    assert code == 0, f"exit={code}, stderr={err.getvalue()!r}"
+    by_id = {s["task"]: s for s in seen}
+    assert by_id["task-pol"]["globs"] == ("task_tool",)
+    assert by_id["no-key"]["globs"] == ("env_tool",)  # env governs without the key
+    assert nx._approval_policy._policy_globs() == ("env_tool",)  # restored
+
+
+def test_batch_never_sets_subagent_ctx(fake_loop, tmp_path, monkeypatch):
+    """Guard: a batch task routes via _CALL_TARGET_TLS, never via
+    _SUBAGENT_TLS.ctx (a batch task is a FULL agent — spec §Rejected)."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "model": "other-m", "approval": "low"}',
+    ])
+
+    def probe(messages, on_step=None, max_turns_override=None, **kw):
+        from nx._subagent import _subagent_ctx
+        calls.append(_subagent_ctx())
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", probe)
+    buf, _ = _capture_stdout(monkeypatch)
+    _run(nx, ["-f", f])
+    assert calls == [None]
+
+
+def test_parallel_sibling_divergence_yolo_vs_deny(fake_loop, tmp_path, monkeypatch):
+    """Two parallel tasks: the yolo task's _confirm is True, the sibling's is
+    'DENIED by user' — drive _confirm directly inside each task body."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "id": "loose", "approval": "yolo"}',
+        '{"instruction": "b", "id": "tight"}',
+    ])
+    verdicts = {}
+
+    def probe(messages, on_step=None, max_turns_override=None, **kw):
+        task = nx._batch._batch_task()
+        verdicts[task["id"]] = nx._approval._confirm("write: secret file")
+        return {"status": "done", "turns": 1}
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", probe)
+    barrier = threading.Barrier(2, timeout=10)
+
+    def slow(messages, **kw):
+        barrier.wait()
+        return probe(messages)
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", slow)
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--parallel", "2", "--continue-on-error"])
+    assert code == 0, f"exit={code}, stderr={err.getvalue()!r}"
+    assert verdicts == {"loose": True, "tight": False}
+
+
+def test_unknown_flag_values_still_misuse(nx_fresh, tmp_path, monkeypatch):
+    """--model with an unknown source prefix is a parse error before any run."""
+    nx, tmp = nx_fresh
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", _write_tasks(tmp, ['"x"']), "--model", "ghost:m"])
+    assert code == nx._batch.EXIT_MISUSE
+    assert "ghost" in err.getvalue()
+    assert buf.getvalue() == ""  # no API call, no JSONL line
