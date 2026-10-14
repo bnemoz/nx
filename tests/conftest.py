@@ -451,6 +451,11 @@ _FLAKY_RERUN_NODEIDS = (
     "tests/test_forced_final_recovery.py::test_forced_final_text_actionable_tool_call_executes",
     "tests/test_forced_final_recovery.py::test_forced_final_mixed_calls_execute_actionable",
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
+    # 0.154.5: same finish-line race family as the entry above (ledger §5.0:
+    # "event_taps start-vs-finish tap ordering") — the finished-agent snapshot
+    # reads the sink tail before the finish tap lands. Failed once under -n 8,
+    # passes standalone and both runs after; not a new class, unpinning later.
+    "tests/test_event_taps.py::test_snapshot_agent_row_prefers_the_answer_tail",
 )
 
 

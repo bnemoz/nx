@@ -98,8 +98,12 @@ def test_eval_list_lists_every_scenario():
 def test_eval_run_scores_whole_corpus(tmp_path):
     """The full seed corpus passes end to end through the real batch harness —
     including the honest-timeout contract (a mid-stream read timeout scores
-    status "error" naming the timeout, never "done")."""
-    code, out, err = _capture(ec._eval_main, ["run", "--out", str(tmp_path / "eval")])
+    status "error" naming the timeout, never "done"). Runs --parallel: the stub
+    resolves the scenario from each request payload and keeps a per-scenario
+    turn cursor, so concurrency is part of the contract exercised here (the
+    serial single-scenario path is pinned by test_eval_run_filter_single_scenario)."""
+    code, out, err = _capture(ec._eval_main,
+                              ["run", "--parallel", "4", "--out", str(tmp_path / "eval")])
     assert code == 0, out + err
     summary = json.loads((tmp_path / "eval" / "summary.json").read_text())
     assert summary["failed"] == 0
