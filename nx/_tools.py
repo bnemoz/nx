@@ -74,6 +74,14 @@ def read_file(path: str | list[str], offset: int = 1, limit: int | None = None, 
         start = max(1, int(offset)) - 1
     except (TypeError, ValueError):
         start = 0
+    # Image files (0.158.9): render like read_image instead of dying in the
+    # UTF-8 error path. Deliberately NOT routed through the read-result cache
+    # or prefetch: the result is a content-parts array, not cacheable text —
+    # the same posture read_image has (it never enters _CACHEABLE_READ_TOOLS).
+    from ._images import _EXT_TO_MIME
+    if os.path.splitext(path)[1].lower() in _EXT_TO_MIME:
+        from ._images import read_image
+        return read_image(path)
     if limit is None:
         limit = _env_int("NX_READ_FILE_LINES", 400)
     try:

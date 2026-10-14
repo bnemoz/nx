@@ -59,6 +59,39 @@ def test_withheld_read_image_names_the_gate():
     assert "unknown tool" not in out
 
 
+def test_retired_tools_get_the_re_route_refusal():
+    """0.158.9: git_status/git_diff/git_log/sed_edit retire from the offered
+    floor like list_dir (0.129.8) — still dispatchable for direct callers, but
+    a MODEL that emits a close miss gets the actionable refusal naming
+    run_bash / edit_file / apply_patch, never a bare unknown-tool error."""
+    expectations = {
+        "git_status": "git status --short -b",
+        "git_diff": "git diff",
+        "git_log": "git log --oneline",
+        "sed_edit": "edit_file",
+        "list_dir": "run_bash `ls",
+    }
+    for name, needle in expectations.items():
+        # the refusal lives on the unknown-tool path (direct emission still
+        # dispatches — the list_dir precedent), so drive it there directly
+        out = _unknown_tool_error(name)
+        assert out.startswith(f"ERROR: {name} is retired"), (name, out)
+        assert needle in out, (name, out)
+        assert "unknown tool" not in out
+    # name repair still resolves into the retired tool (the refusal, not a run)
+    out = run_tool("gitstat", {})
+    assert out.startswith("ERROR: git_status is retired"), out
+    out = run_tool("sed_edt", {})
+    assert out.startswith("ERROR: sed_edit is retired"), out
+
+
+def test_retired_tools_still_dispatch_for_direct_callers():
+    """The list_dir precedent: retirement only removes the schema rent. A
+    direct caller (test, @mention, eval script) still gets the real body."""
+    out = run_tool("git_log", {"path": "."})
+    assert "ERROR" not in out.splitlines()[0]
+
+
 def test_withheld_spawn_agent_names_the_gate():
     # spawn_agent is ON by default since 0.77.0; force the withheld path.
     saved, m.NX_SUBAGENTS = m.NX_SUBAGENTS, 0

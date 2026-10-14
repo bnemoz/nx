@@ -231,6 +231,31 @@ def _unknown_tool_error(name: str) -> str:
     import nx as _m
     known = {t["function"]["name"] for t in _m.TOOLS}
     known.update(t["function"]["name"] for t in getattr(_m, "_EXTRA_TOOL_SCHEMAS", ()) or ())
+    # Retired-from-the-floor tools: dispatchable but never offered, so a model
+    # emitting one gets the actionable "retired, use X instead" story — with
+    # the native replacement named — instead of a bare unknown-tool error.
+    _RETIRED_REFUSALS = {
+        "list_dir": ("ERROR: list_dir is retired in this session — list a "
+                     "directory with run_bash `ls [path]` (flags/pipes/filters "
+                     "work), and search file NAMES + contents with search_files."),
+        "git_status": ("ERROR: git_status is retired in this session — run "
+                       "run_bash `git status --short -b` for branch + changed files."),
+        "git_diff": ("ERROR: git_diff is retired in this session — run "
+                     "run_bash `git diff` (or `git diff --staged`, `git diff -- <file>`)."),
+        "git_log": ("ERROR: git_log is retired in this session — run "
+                    "run_bash `git log --oneline` (scope with `-- <file>`)."),
+        "sed_edit": ("ERROR: sed_edit is retired in this session — use "
+                     "edit_file for a literal one-file replacement, apply_patch "
+                     "for a regex/multi-file restructure, or run_bash for anything "
+                     "else."),
+    }
+    if name in _RETIRED_REFUSALS:
+        try:
+            from ._logging import usage_gate
+            usage_gate(name, "retired")
+        except Exception:  # noqa: BLE001 — telemetry must never break a refusal
+            pass
+        return _RETIRED_REFUSALS[name]
     if name not in known:
         import difflib
         suggestions = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.7)
@@ -251,18 +276,31 @@ def _unknown_tool_error(name: str) -> str:
         except Exception:  # noqa: BLE001 — telemetry must never break a refusal
             pass
         return f"ERROR: {name} is not available in this session {_GATE_REFUSALS[name]}"
-    # Retired-from-the-floor tools (0.129.8): dispatchable but never offered,
-    # so a model emitting one gets the same actionable "withheld" story — with
-    # the native replacement named — instead of a bare unknown-tool error.
-    if name == "list_dir":
+    # Retired-from-the-floor tools: dispatchable but never offered, so a model
+    # emitting one gets the same actionable "withheld" story — with the native
+    # replacement named — instead of a bare unknown-tool error.
+    _RETIRED_REFUSALS = {
+        "list_dir": ("ERROR: list_dir is retired in this session — list a "
+                     "directory with run_bash `ls [path]` (flags/pipes/filters "
+                     "work), and search file NAMES + contents with search_files."),
+        "git_status": ("ERROR: git_status is retired in this session — run "
+                       "run_bash `git status --short -b` for branch + changed files."),
+        "git_diff": ("ERROR: git_diff is retired in this session — run "
+                     "run_bash `git diff` (or `git diff --staged`, `git diff -- <file>`)."),
+        "git_log": ("ERROR: git_log is retired in this session — run "
+                    "run_bash `git log --oneline` (scope with `-- <file>`)."),
+        "sed_edit": ("ERROR: sed_edit is retired in this session — use "
+                     "edit_file for a literal one-file replacement, apply_patch "
+                     "for a regex/multi-file restructure, or run_bash for anything "
+                     "else."),
+    }
+    if name in _RETIRED_REFUSALS:
         try:
             from ._logging import usage_gate
             usage_gate(name, "retired")
         except Exception:  # noqa: BLE001 — telemetry must never break a refusal
             pass
-        return ("ERROR: list_dir is retired in this session — list a "
-                "directory with run_bash `ls [path]` (flags/pipes/filters "
-                "work), and search file NAMES + contents with search_files.")
+        return _RETIRED_REFUSALS[name]
     try:
         from ._logging import usage_gate
         usage_gate(name, "withheld")

@@ -53,14 +53,16 @@ def test_active_tools_excludes_wait_background_by_default():
     # only a usage nudge is deferred, not availability (see _active_tools()).
     assert "multi_edit" in names
     assert set(names) == {"read_file", "write_file", "edit_file", "delete_file",
-                          "run_bash", "search_files", "git_status",
-                          "git_diff", "git_log", "sed_edit", "multi_edit",
+                          "run_bash", "search_files", "multi_edit",
                           "apply_patch", "todo_write", "memory_write",
                           "memory_search", "memory_delete", "recall_lessons",
                           "run_tests",
                           "git_commit", "search_tools", "web_fetch", "duckdb"}
-    # list_dir retired from the floor (0.129.8): still dispatchable, never offered
+    # list_dir retired from the floor (0.129.8); git_status/git_diff/git_log/
+    # sed_edit retired (0.158.9) — still dispatchable, never offered
     assert "list_dir" not in names
+    assert "git_status" not in names and "git_diff" not in names
+    assert "git_log" not in names and "sed_edit" not in names
 
 
 def test_active_tools_includes_wait_background_once_flag_set():
@@ -78,7 +80,9 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # + lint_check (0.94.0) + recall_lessons (0.102.0) + stable project gateways
     # + kill_background (0.113.2, model-facing /bg kill)
     # + critique (0.132.0, the scoped reviewer; in TOOLS, gated on NX_SUBAGENTS)
-    assert len(m.TOOLS) == 32
+    # 0.158.9: git_status/git_diff/git_log/sed_edit retire from the floor
+    # (still dispatchable, like list_dir at 0.129.8)
+    assert len(m.TOOLS) == 28
 
 
 # ---------------------------------------------------------------------------

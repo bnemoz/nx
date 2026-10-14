@@ -48,7 +48,8 @@ write tier the four file-mutation tool schemas are offered and resolve to
 confirm-through wrappers (_write_tier_dispatch): they run the parent's real
 body, whose own _confirm() — the same risk-classified Y/n gate with a diff
 preview the parent shows — appears while the sub-agent loop is suspended.
-Only write/edit/multi_edit/sed_edit are tier-eligible: delete_file is not
+Only write/edit/multi_edit are tier-eligible (sed_edit retired 0.158.9):
+delete_file is not
 (removal is one `edit away` from a recreate, while a delete needs its own
 undo snapshot the parent should own), and spawn_agent stays nested-refused.
 Because every write still crosses the real approval gate, the sub-loop is

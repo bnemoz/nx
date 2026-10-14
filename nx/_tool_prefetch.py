@@ -15,8 +15,8 @@ from typing import Any
 from . import _state as st
 from ._approval import _EscToChat
 
-_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files", "git_status",
-                         "git_diff", "git_log", "memory_search")
+_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files",
+                         "git_status", "git_diff", "git_log", "memory_search")
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:

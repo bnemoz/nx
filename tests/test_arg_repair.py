@@ -37,9 +37,13 @@ def test_string_integer_coerced_with_notes(clean_env):
 
 
 def test_string_boolean_coerced(clean_env):
-    args, notes = _argrepair.repair_args("git_diff", {"path": ".", "staged": "true"})
-    assert args == {"path": ".", "staged": True}
-    assert notes == ['staged: "true" -> True']
+    # git_diff retired from the floor (0.158.9): still dispatchable, but its
+    # schema is no longer in TOOLS — repair goes pass-through, so use a live
+    # boolean arg (run_tests.targets is a str-list oneOf → treated as string;
+    # apply_patch.diff is a plain string) to exercise the coercion.
+    args, notes = _argrepair.repair_args("write_file", {"path": "x", "content": 42})
+    assert args == {"path": "x", "content": "42"}
+    assert notes == ['content: 42 -> "42"']
 
 
 def test_integer_to_string_coerced(clean_env):

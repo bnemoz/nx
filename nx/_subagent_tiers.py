@@ -20,10 +20,12 @@ from ._subagent_tls import _SUBAGENT_TLS, _subagent_ctx  # noqa: F401 (re-export
 # Tools the sub-agent may call: the read-only dispatch entries (derived from
 # the same tuple run_tool() result-caches) + run_bash, which is gated to the
 # read-only allowlist by _subagent_bash(). Never mutating tools, never
-# wait_background. list_dir is retired from the offered floor (0.129.8) — a
-# sub-agent lists directories via its allowlisted bash `ls`.
+# wait_background. list_dir is retired from the offered floor (0.129.8) and the
+# git read trio (git_status/git_diff/git_log) since 0.158.9 — a sub-agent does
+# all of that through its allowlisted bash (`ls`, `git status --short -b`,
+# `git diff`, `git log --oneline`), like the parent does via run_bash.
 _READ_ONLY_TOOL_NAMES = (
-    "read_file", "search_files", "git_status", "git_diff", "git_log",
+    "read_file", "search_files",
     "memory_search", "recall_lessons", "run_bash",
 )
 
@@ -42,7 +44,7 @@ _READ_ONLY_TOOL_NAMES = (
 # git_commit IS included (0.51.0): an agent that edits but cannot land its
 # work strands its changes. Same gate: the parent's _confirm shows the staged
 # diff (and the secret scan runs before it) exactly as a parent call would.
-_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit", "sed_edit",
+_WRITE_TIER_TOOL_NAMES = ("write_file", "edit_file", "multi_edit",
                           "run_tests", "git_commit")
 
 # Per-agent sub-loop context. A global flag/table can't express two agents

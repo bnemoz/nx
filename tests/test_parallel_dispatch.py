@@ -73,7 +73,7 @@ class _ConcurrencyProbe:
 def test_all_read_only_detector(nx_fresh):
     nx, tmp = nx_fresh
     from nx._turn import _all_read_only
-    assert _all_read_only([("read_file", {"path": "a"}), ("git_status", {})]) is True
+    assert _all_read_only([("read_file", {"path": "a"}), ("search_files", {"pattern": "x"})]) is True
     assert _all_read_only([]) is False
     assert _all_read_only([("read_file", {}), ("run_bash", {"command": "ls"})]) is False
     assert _all_read_only([("write_file", {"path": "x", "content": "y"})]) is False

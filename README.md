@@ -1102,13 +1102,13 @@ than the provider's `tools=` request, preserving the stable schema prefix.
 | `edit_file` | `path`, `old`, `new`, `replace_all?`, `old_lines?` | `old` must match exactly once (or `replace_all`); `old_lines="10-14"` replaces a 1-based line range instead; unique indentation-only mismatches apply whitespace-tolerantly; `new` passes the garble guard (see `NX_GARBLE_GUARD`) |
 | `multi_edit` | `path`, `edits` | batch of `{old, new}`, one confirmation; atomic — a garbled or unmatched edit rolls back the whole batch; each `new` passes the garble guard |
 | `delete_file` | `path` | delete one file; restorable via `/undo` (unlike `rm` via bash); fence-checked like the other writers (see `NX_WRITE_FENCE`) |
-| `sed_edit` | `pattern`, `replacement`, `path` | regex find/replace over a file or glob; every matched file must sit inside a writable root (see `NX_WRITE_FENCE`) |
+| `sed_edit` | `pattern`, `replacement`, `path` | **retired from the offered schema (0.158.9)** — still dispatches for direct callers (tests, scripts); the literal case is `edit_file`'s, the regex/multi-file case `apply_patch`'s, anything else `run_bash`. Emits an actionable refusal naming those when a model calls it |
 | `apply_patch` | `diff`, `path?` | apply a unified diff; for multi-file restructure; each `+++` target is fence-checked against the writable roots (see `NX_WRITE_FENCE`) |
 | `list_dir` | `path`, `pattern?` | **retired from the offered schema (0.129.8)** — still dispatches for direct callers (@dir mentions, tests, scripts); models list directories with `run_bash ls` (which also gives filters/counts/metadata the flat listing never had). Emits an actionable refusal pointing at `ls`/`search_files` when a model calls it |
 | `search_files` | `pattern`, `path?`, `glob?`, … | regex content search; read-only |
-| `git_status` | `path?` | `git status --short -b`; read-only. `path` is a directory (repo), never a file |
-| `git_diff` | `path?`, `staged?`, `file?` | `git diff`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
-| `git_log` | `path?`, `max_count?`, `file?` | `git log --oneline`; read-only. `path` is a directory; pass the target file as `file` (absolute paths ok) |
+| `git_status` | `path?` | **retired from the offered schema (0.158.9)** — still dispatches for direct callers; models run `run_bash` `git status --short -b` (same output, plus any flags). Emits an actionable refusal pointing there when a model calls it |
+| `git_diff` | `path?`, `staged?`, `file?` | **retired from the offered schema (0.158.9)** — same contract; `run_bash` `git diff` (`--staged`, `-- <file>`) |
+| `git_log` | `path?`, `max_count?`, `file?` | **retired from the offered schema (0.158.9)** — same contract; `run_bash` `git log --oneline` |
 | `run_bash` | `command`, `timeout?` | requires confirmation; backgrounds long-running commands. A command whose heredoc delimiter is a quoting idiom (e.g. the ssh quote-embedding dance fused onto `<< 'EOF'`) is refused pre-flight with a diagnosis naming the fused spelling — the shell would otherwise die at parse time with the exact signature of the old exit-trailer bug |
 | `wait_background` | `pid`, `timeout?` | only offered after a `run_bash` call has backgrounded; waits for the PID and returns its output (a caller-supplied `log_path` is ignored — the path is resolved from the PID) |
 | `run_tests` | `targets?` | detect the suite (pytest/go/cargo/npm via marker files) and run the fixed per-ecosystem command, returning a failure-focused summary. See below |
@@ -1137,7 +1137,8 @@ than the provider's `tools=` request, preserving the stable schema prefix.
 
 `read_file` results are cached per-path and invalidated on writes
 or any `run_bash`. `list_dir` results cache the same way for the direct callers
-that still dispatch it.
+that still dispatch it. The retired `git_*` tools keep their stamped cache
+entries on the same terms for those callers.
 
 `run_tests` (0.49.0, ROADMAP P3-5) is the closed-loop verification tier: the
 model runs the suite after edits without spending a turn composing a shell

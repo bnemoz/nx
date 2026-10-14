@@ -98,9 +98,9 @@ def test_write_tier_off_by_default(nx_fresh):
     write tools are neither offered nor dispatched."""
     from nx._subagent import _subagent_tools, _read_only_dispatch
     names = {t["function"]["name"] for t in _subagent_tools()}
-    assert not (names & {"write_file", "edit_file", "multi_edit", "sed_edit"})
+    assert not (names & {"write_file", "edit_file", "multi_edit"})
     table = _read_only_dispatch()
-    for name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
+    for name in ("write_file", "edit_file", "multi_edit"):
         assert name not in table
 
 
@@ -130,13 +130,14 @@ def test_write_tier_on_offers_and_wraps(nx_fresh, monkeypatch, tmp_path):
     monkeypatch.setattr(nx_fresh, "NX_SUBAGENT_WRITE", 1)
     assert _write_tier_enabled() is True
     names = {t["function"]["name"] for t in _subagent_tools()}
-    assert {"write_file", "edit_file", "multi_edit", "sed_edit"} <= names
+    assert {"write_file", "edit_file", "multi_edit"} <= names
+    assert "sed_edit" not in names  # retired from the floor 0.158.9
 
     table = _write_tier_dispatch()
-    for name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
+    for name in ("write_file", "edit_file", "multi_edit"):
         assert table[name] is not _dispatch.DISPATCH[name]  # wrapped, not the raw body
     # the parent's table stays untouched
-    for name in ("write_file", "edit_file", "multi_edit", "sed_edit"):
+    for name in ("write_file", "edit_file", "multi_edit"):
         assert _dispatch.DISPATCH[name] is getattr(nx_fresh, name)
 
     seen_ctx = {}

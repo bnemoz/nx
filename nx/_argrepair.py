@@ -71,6 +71,7 @@ _TOOL_ALIASES: dict[str, str] = {
     "grep": "search_files", "search": "search_files",
     "find": "search_files", "ripgrep": "search_files",
     "ls": "list_dir", "dir": "list_dir",  # list_dir retired (0.129.8): still dispatches
+    "gst": "git_status", "git_status_short": "git_status",  # retired (0.158.9)
     "cat": "read_file", "read": "read_file",
     "str_replace_editor": "edit_file", "str_replace": "edit_file",
     "edit": "edit_file",
@@ -83,7 +84,8 @@ _TOOL_ALIASES: dict[str, str] = {
 # Tools retired from the offered floor (0.129.8) that still dispatch: part of
 # the resolution universe so the alias table and near-miss repair reach them
 # (run_tool() then answers with the actionable retired-tool refusal).
-_RETIRED_DISPATCHABLE = frozenset({"list_dir"})
+_RETIRED_DISPATCHABLE = frozenset({"list_dir", "git_status", "git_diff",
+                                   "git_log", "sed_edit"})
 
 # Per-tool ARG aliases for near-miss keys the 0.8 similarity cutoff
 # deliberately rejects ("cmd"→"command" is 0.6; lowering the cutoff starts

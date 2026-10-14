@@ -392,7 +392,7 @@ def test_should_parallelize_shapes(nx_fresh):
     assert _should_parallelize([("spawn_agent", {}), ("read_file", {"path": "a"})]) is True
     assert _should_parallelize([("spawn_agent", {})]) is False
     # plain read batches unchanged; mutations never parallel
-    assert _should_parallelize([("read_file", {"path": "a"}), ("git_status", {})]) is True
+    assert _should_parallelize([("read_file", {"path": "a"}), ("search_files", {"pattern": "x"})]) is True
     assert _should_parallelize([("read_file", {"path": "a"}),
                                 ("write_file", {"path": "b", "content": "c"})]) is False
     assert _should_parallelize([("spawn_agent", {}), ("write_file", {"path": "b", "content": "c"})]) is False

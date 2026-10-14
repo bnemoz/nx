@@ -117,8 +117,8 @@ def test_pre_hook_cannot_be_bypassed_by_cache(nx_fresh):
     from nx import _dispatch
     _dispatch.st._TOOL_RESULT_CACHE.clear()
     os.environ["NX_PRE_TOOL_HOOK"] = _script(tmp, '#!/bin/sh\ncat >/dev/null\nexit 1\n', name="blockall.sh")
-    out1 = _dispatch.run_tool("git_status", {"path": "."})
-    out2 = _dispatch.run_tool("git_status", {"path": "."})  # second call would be a cache hit
+    out1 = _dispatch.run_tool("search_files", {"pattern": "x", "path": "."})
+    out2 = _dispatch.run_tool("search_files", {"pattern": "x", "path": "."})  # second call would be a cache hit
     assert out1.startswith("ERROR: blocked by NX_PRE_TOOL_HOOK")
     assert out2.startswith("ERROR: blocked by NX_PRE_TOOL_HOOK")
 
@@ -151,15 +151,15 @@ def test_post_hook_fires_on_cache_hit_with_marker(nx_fresh):
     # Read a stable dir rather than the cwd: the hook's own post.json write and
     # this test's unlink would bump the cwd's mtime, turning the second call
     # into a fresh miss before the cache-hit path is ever reached.
-    args = {"path": "stable"}
-    _dispatch.run_tool("git_status", args)   # miss: populates the cache
+    args = {"pattern": "def ", "path": "stable"}
+    _dispatch.run_tool("search_files", args)   # miss: populates the cache
     first = json.loads((tmp / "post.json").read_text())
     assert "cached" not in first
     (tmp / "post.json").unlink()
-    _dispatch.run_tool("git_status", args)   # hit: hook still fires
+    _dispatch.run_tool("search_files", args)   # hit: hook still fires
     payload = json.loads((tmp / "post.json").read_text())
     assert payload["cached"] is True
-    assert payload["tool"] == "git_status"
+    assert payload["tool"] == "search_files"
     assert payload["result"]  # cached entries store the sanitized result string
 
 

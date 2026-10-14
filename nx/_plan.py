@@ -46,10 +46,14 @@ PLAN_GATE_TOOLS = frozenset((
 # Read-only tools are never gated. Listed explicitly (rather than "everything
 # else") so a future state-touching tool can't silently slip past the gate.
 PLAN_READONLY_TOOLS = frozenset((
-    "read_file", "list_dir", "search_files", "git_status", "git_diff",
-    "git_log", "memory_search", "recall_lessons", "read_image", "plan_edit",
+    "read_file", "list_dir", "search_files",
+    "memory_search", "recall_lessons", "read_image", "plan_edit",
     "todo_write", "spawn_agent", "wait_background",
 ))
+# git_status/git_diff/git_log (0.158.9) retired from the floor like list_dir
+# (0.129.8) — they still dispatch for direct callers, but a model drives git
+# through run_bash (which the gate blocks while a plan is active, so the
+# plan-mode read posture is unchanged).
 
 
 def slugify(goal: str, max_words: int = 8) -> str:

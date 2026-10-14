@@ -46,9 +46,6 @@ UNDOCUMENTED_OK = {
     ("edit_file", "path"),
     ("multi_edit", "path"),
     ("sed_edit", "pattern"),
-    ("git_status", "path"),
-    ("git_diff", "path"),
-    ("git_log", "path"),
     ("run_bash", "command"),
     ("multi_edit-item", "old"),
     ("multi_edit-item", "new"),
@@ -93,7 +90,8 @@ def test_every_tool_appears_once():
     # 0.113.2: kill_background joins (32). 0.129.8: list_dir retires from the
     # offered floor (still dispatchable) — 31. 0.132.0: critique joins (32;
     # registered in TOOLS, withheld per-turn by its NX_SUBAGENTS gate).
-    assert len(names) == 32
+    # 0.158.9: git_status/git_diff/git_log/sed_edit retire (still dispatchable) — 28.
+    assert len(names) == 28
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -248,7 +246,7 @@ def test_mutating_and_read_only_sets_stay_in_agreement_with_plan_gating():
     the model gets inconsistent affordances -- so cross-check against
     PLAN_GATE_TOOLS, which is the explicit mutating list."""
     from nx._plan import PLAN_GATE_TOOLS, PLAN_READONLY_TOOLS
-    names = {_fn(t)["name"] for t in _all_tools()} | {"final_answer", "list_dir"}
+    names = {_fn(t)["name"] for t in _all_tools()} | {"final_answer", "list_dir", "git_status", "git_diff", "git_log", "sed_edit"}
     # list_dir is retired from the offered floor (0.129.8) but stays in the
     # dispatch tables and PLAN_READONLY_TOOLS (still a read-only tool for
     # callers that emit it) — allowlisted here explicitly.
