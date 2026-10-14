@@ -39,13 +39,11 @@ class TestGrepRewrite(unittest.TestCase):
                          "rg -i 'unlimited-ocr|ipv6|gai.conf' file")
 
     def test_include_and_exclude_dir(self):
-        # --include='*.py' contains `*`, an unsafe-for-requote character, so
-        # the whole command passes through verbatim (deliberate since the
-        # _UNSAFE_CHARS guard): the --include/--exclude-dir mapping only
-        # applies to glob-free flags.
+        # --include='*.py' is a QUOTED glob: shlex de-quoted it, so it is
+        # re-quoted verbatim and the --include/--exclude-dir mapping applies.
         self.assertEqual(
             prefer_ripgrep("grep -rn --include='*.py' --exclude-dir=.venv foo ."),
-            "grep -rn --include='*.py' --exclude-dir=.venv foo .")
+            "rg -n -g '*.py' -g '!.venv' foo .")
 
     def test_semicolon_chain_rewritten(self):
         # `;` is a command separator even though shlex's default punctuation
@@ -69,12 +67,24 @@ class TestGrepRewrite(unittest.TestCase):
         self.assertEqual(prefer_ripgrep("if grep -q foo f; then echo y; fi"),
                          "if rg -q foo f ; then echo y ; fi")
 
-    def test_unsafe_chars_pass_through_verbatim(self):
-        # $(), globs, tilde: a token-level re-quote would turn them into
-        # literals, so the ORIGINAL string is returned, not a re-quoted copy.
+    def test_unsafe_chars_verbatim_rules(self):
+        # $/backtick OUTSIDE quotes: command substitution a token-level
+        # re-quote would freeze — the ORIGINAL string is returned verbatim.
         self.assertEqual(prefer_ripgrep("echo $(grep foo f)"), "echo $(grep foo f)")
-        self.assertEqual(prefer_ripgrep("grep foo *.py"), "grep foo *.py")
-        self.assertEqual(prefer_ripgrep("grep foo $HOME/x"), "grep foo $HOME/x")
+        self.assertEqual(prefer_ripgrep("grep foo `ls`"), "grep foo `ls`")
+        # $ INSIDE quotes is a literal: the command is rewritten normally.
+        self.assertEqual(prefer_ripgrep('grep "a$b" f'), "rg 'a$b' f")
+
+    def test_unquoted_glob_reemitted_bare(self):
+        # An unquoted glob token is re-emitted bare so the shell re-expands it
+        # exactly as it would have; quoting it would freeze it into a literal.
+        self.assertEqual(prefer_ripgrep("grep -rn foo src/*.py"),
+                         "rg -n foo src/*.py")
+        self.assertEqual(prefer_ripgrep("grep foo ~/x/*.log | head"),
+                         "rg foo ~/x/*.log | head")
+        # A QUOTED glob is re-quoted verbatim (it is a pattern, not a glob).
+        self.assertEqual(prefer_ripgrep('grep "literal *.py" f'),
+                         "rg 'literal *.py' f")
 
     def test_no_grep_word_verbatim_no_requote(self):
         # Regression (0.158.2): "ls -la && cat f.md" used to come back

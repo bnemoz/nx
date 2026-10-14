@@ -85,10 +85,18 @@ def _split_shell(command: str) -> list[str] | None:
         return None
 
 
-def _requote(tokens: list[str]) -> str:
-    """Rejoin tokens, quoting words but never shell operators."""
-    return " ".join(t if t in _OPERATORS or _REDIRECTION.match(t)
-                    else shlex.quote(t) for t in tokens)
+def _requote(tokens: list[str], bare_glob: frozenset[str] = frozenset()) -> str:
+    """Rejoin tokens, quoting words but never shell operators. A token whose
+    glob characters were UNQUOTED in the source (a member of `bare_glob`) is
+    emitted bare, so the shell re-expands it exactly as it would have —
+    quoting it would turn the glob into a dead literal."""
+    def emit(t: str) -> str:
+        if t in _OPERATORS or _REDIRECTION.match(t):
+            return t
+        if t in bare_glob:
+            return t
+        return shlex.quote(t)
+    return " ".join(emit(t) for t in tokens)
 
 
 def _merge_fd_redirects(tokens: list[str]) -> list[str]:
@@ -152,20 +160,65 @@ def _command_head_len(tokens: list[str], i: int) -> int:
     return j - i
 
 
+def _strip_quoted(command: str) -> str:
+    """The command with quoted spans blanked (kept as empty quotes), so a
+    guard can test characters OUTSIDE quotes only. Handles backslash-escaped
+    double quotes and single-quoted spans (which cannot contain a quote)."""
+    out: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == '"':
+            i += 1
+            while i < n:
+                if command[i] == "\\":
+                    i += 2
+                    continue
+                if command[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            out.append('""')
+        elif ch == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                out.append(command[i:])
+                break
+            out.append("''")
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _unquoted_glob_tokens(command: str) -> frozenset[str]:
+    """Exact token texts whose glob characters appear OUTSIDE quotes in the
+    original command (the shell will re-expand them), so _requote may emit
+    them bare instead of quoting them into dead literals."""
+    stripped = _strip_quoted(command)
+    return frozenset(tok for tok in stripped.replace(";", " ").split()
+                     if any(ch in tok for ch in "*?[{")
+                     and not any(c.isspace() for c in tok))
+
+
 def prefer_ripgrep(command: str) -> str:
     """Return `command` with grep-family calls rewritten to ripgrep.
 
     Returns the original string unchanged when rg is absent, the command
-    doesn't shell-split, contains characters a token-level re-quote would
-    corrupt ($(), globs, tilde, heredocs), or no grep-family word appears at
-    command position (including after assignment/wrapper/control heads).
+    doesn't shell-split, it carries `$`/backtick OUTSIDE quotes (command
+    substitution a token-level re-quote would freeze), or no grep-family word
+    appears at command position (including after assignment/wrapper/control
+    heads). Glob characters in a quoted pattern are safe: shlex already
+    de-quoted them and they are re-quoted verbatim; glob characters UNQUOTED
+    in the source are re-emitted bare so the shell re-expands them.
     """
     if not shutil.which("rg") or not _GREP_WORD.search(command):
         return command
-    # A token-level split/re-quote cannot preserve these: pass through whole.
-    # Heredocs are covered by `<<` in the same spirit (the body is data).
-    if any(ch in command for ch in _UNSAFE_CHARS):
+    if any(ch in _strip_quoted(command) for ch in "$`"):
         return command
+    bare_glob = _unquoted_glob_tokens(command)
     tokens = _split_shell(command)
     if tokens is None:
         return command
@@ -221,4 +274,4 @@ def prefer_ripgrep(command: str) -> str:
         # echo after a pipe, ...) passes through byte-for-byte.
         out.append(tok)
         i += 1
-    return _requote(out)
+    return _requote(out, bare_glob)
