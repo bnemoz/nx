@@ -71,14 +71,14 @@ from ._memory_cmd import (
 # over the MAX_NOTES-bounded store: with a reasoning source each round-trip
 # thinks for minutes, so the per-pass calls were the run's slow path, and the
 # cross-batch carryover that motivated splitting (0.33.0) is moot when one
-# pass sees everything. The index stays bounded (~6K tokens at the
-# MAX_NOTES=120 default with 480-char digests); set NX_MEMORY_OPTIMIZE_BATCH
+# pass sees everything. The index stays bounded (~12K tokens at the
+# MAX_NOTES=240 default with 480-char digests); set NX_MEMORY_OPTIMIZE_BATCH
 # to split it again for a tiny-context model.
 OPTIMIZE_DEFAULT_BATCH = 0
 
 # Hard ceiling on how many notes one run reviews (newest first; the rest are
 # reported as unexamined rather than silently skipped). 0 = no ceiling.
-OPTIMIZE_DEFAULT_MAX_NOTES = 120
+OPTIMIZE_DEFAULT_MAX_NOTES = 240
 
 # Archived run dirs kept per memories dir by `/memory optimize` (0 = keep all).
 # The archive exists so a bad librarian plan is reversible with `mv`, so the
