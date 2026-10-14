@@ -767,16 +767,16 @@ WEB_FETCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "Keyless web access, GET-only and rate-limited to stay polite to free endpoints (results are cached globally for 7 days, stale pages revalidated via ETag/Last-Modified, robots.txt honored). Pass `query` for a web search (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo-lite) returning title/URL/snippet results, or `url` to fetch a page as readable text (links kept as [text](url)). Never both. For the sandbox's own docs, prefer the local files — this is for the outside world.",
+        "description": "Keyless web access; GET-only, rate-limited (results cached 7 days, stale revalidated via ETag/Last-Modified, robots.txt honored). `query` = web search (SearXNG via NX_SEARX_URL when set, else DuckDuckGo-lite) -> title/URL/snippet results; `url` = fetch page as readable text (links kept as [text](url)). Never both. Local docs -> local files; this is for the outside world.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Web search string (SearXNG via NX_SEARX_URL when configured, else DuckDuckGo lite); returns title/URL/snippet results to follow up with a url fetch"},
+                "query": {"type": "string", "description": "Web search string (SearXNG via NX_SEARX_URL when set, else DuckDuckGo lite); returns title/URL/snippet results to follow with a url fetch"},
                 "engines": {"type": "string", "description": "SearXNG only: comma-separated engines to pin (e.g. 'github,stackoverflow,pypi')"},
-                "categories": {"type": "string", "description": "SearXNG only: comma-separated categories (e.g. 'it', 'science', 'news'); 'it' is auto-picked for package/API queries"},
-                "time_range": {"type": "string", "enum": ["day", "month", "year"], "description": "SearXNG only: freshness filter; 'day' is auto-picked for release/CVE queries"},
+                "categories": {"type": "string", "description": "SearXNG only: comma-separated categories (e.g. 'it', 'science', 'news'); 'it' auto-picked for package/API queries"},
+                "time_range": {"type": "string", "enum": ["day", "month", "year"], "description": "SearXNG only: freshness filter; 'day' auto-picked for release/CVE queries"},
                 "pageno": {"type": "integer", "description": "SearXNG only: result page number (1-based), for digging past the first page"},
-                "url": {"type": "string", "description": "Absolute http(s) URL to fetch and convert to readable text; truncated at NX_WEBFETCH_MAX_BYTES"},
+                "url": {"type": "string", "description": "Absolute http(s) URL to fetch as readable text; truncated at NX_WEBFETCH_MAX_BYTES"},
             },
             # The body has always required exactly one operation.  Encode the
             # same contract for native/schema-aware callers; the text grammar

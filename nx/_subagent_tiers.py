@@ -189,21 +189,12 @@ CONSULT_ADVISOR_TOOL = {"type": "function", "function": {
 # spawn_agent: no sub-agents, no reviewer, 0 schema tokens on the floor.
 CRITIQUE_TOOL = {"type": "function", "function": {
     "name": "critique",
-    "description": "Hand the work in progress to a read-only REVIEWER sub-agent "
-        "and get back ranked findings. The reviewer cannot fix, edit or run "
-        "tests, so a finding is never quietly patched before you judge it. Use "
-        "it after a substantive change or before a risky merge: critique(focus="
-        "'the timeout changes in _turn.py vs the claim that every wait is "
-        "bounded') returns AT MOST 5 findings, one per line — SEVERITY — "
-        "file:line — what is wrong — fix sketch — or the literal 'No findings "
-        "above the floor.' with what was checked. Not for: style nits a linter "
-        "catches, a review with no focus (the scope IS the feature — it returns "
-        "noise), or asking the reviewer to fix what it finds (it cannot; you do).",
+    "description": "Hand work in progress to a read-only REVIEWER sub-agent; get ranked findings. The reviewer cannot fix, edit, or run tests — a finding is never quietly patched before you judge it. Use after a substantive change or before a risky merge: critique(focus='the timeout changes in _turn.py vs the claim that every wait is bounded') returns AT MOST 5 findings, one per line — SEVERITY — file:line — what is wrong — fix sketch — or the literal 'No findings above the floor.' + what was checked. Not for: style nits a linter catches; a review with no focus (the scope IS the feature — returns noise); asking the reviewer to fix (it cannot; you do).",
     "parameters": {"type": "object", "properties": {
-        "focus": {"type": "string", "description": "The claim, change or diff to judge, and against what — e.g. 'the retry loop in nx/_turn.py as changed by this diff: does it ever exit early?'. Required: without a focus the reviewer returns noise."},
-        "paths": {"type": "string", "description": "Optional paths/globs to confine the reading to, space- or comma-separated (e.g. 'nx/_turn.py nx/_compact*.py'). The reviewer reads them; it never writes."},
-        "severity": {"enum": ["critical", "major", "minor", "info"], "description": "Findings below this floor are dropped (default 'major'). 'critical' = would this lose data or lie to the user; 'minor' = show me everything the reviewer sees."},
-        "max_turns": {"type": "integer", "description": "Tool-turn budget for the reviewer (default 100; a smaller request is raised to the floor, ceiling 500). A review wraps up in far fewer turns than an investigation — 30 is usually ample."},
+        "focus": {"type": "string", "description": "The claim/change/diff to judge, and against what — e.g. 'the retry loop in nx/_turn.py as changed by this diff: does it ever exit early?'. Required: no focus = noise."},
+        "paths": {"type": "string", "description": "Paths/globs confining the reading, space- or comma-separated (e.g. 'nx/_turn.py nx/_compact*.py'). The reviewer reads; never writes."},
+        "severity": {"enum": ["critical", "major", "minor", "info"], "description": "Findings below this floor are dropped (default 'major'). 'critical' = would lose data or lie to the user; 'minor' = show everything."},
+        "max_turns": {"type": "integer", "description": "Reviewer tool-turn budget (default 100; smaller requests are raised to the floor, ceiling 500). A review wraps in far fewer than an investigation — 30 is usually ample."},
     }, "required": ["focus"]},
 }}
 

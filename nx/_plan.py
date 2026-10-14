@@ -160,7 +160,7 @@ def check_gate(name: str) -> str | None:
 # --- plan_edit tool ----------------------------------------------------------
 PLAN_EDIT_TOOL = {"type": "function", "function": {
     "name": "plan_edit",
-    "description": "Edit the active plan file (.nx/<slug>.md) while plan mode is active -- the only mutation plan mode allows.",
+    "description": "Edit the active plan file (.nx/<slug>.md) while plan mode is active — the only mutation plan mode allows.",
     "parameters": {"type": "object", "properties": {
         "new": {"type": "string", "description": "The text to put in place (required unless using `write`)"},
         "old": {"type": "string", "description": "Literal passage to replace, matching exactly once"},

@@ -214,12 +214,7 @@ OBS_RECALL_TOOL = {
     "type": "function",
     "function": {
         "name": "obs_recall",
-        "description": (
-            "Page back the archived original of a large tool result that was "
-            "replaced by an observation handle (a result whose header said "
-            "`id: obs_…`). Returns whole lines plus a next_offset; pass "
-            "next_offset back in until eof=true."
-        ),
+        "description": "Page back the archived original of a large tool result replaced by an observation handle (header said `id: obs_…`). Returns whole lines + next_offset; pass next_offset back in until eof=true.",
         "parameters": {
             "type": "object",
             "properties": {

@@ -161,7 +161,7 @@ LINT_CHECK_TOOL = {
     "type": "function",
     "function": {
         "name": "lint_check",
-        "description": "Run the project's linter (ruff + ty for python, go vet, cargo check, eslint) read-only over the given files — or, with no paths, over the files edited this session. Fixed command shapes (never free-text shell, never writes, no approval). For arbitrary lint flags or fixes, use run_bash instead.",
+        "description": "Run the project's linter (ruff + ty for python, go vet, cargo check, eslint) read-only over given files — or, no paths, the files edited this session. Fixed command shapes (never free-text shell, never writes, no approval). Arbitrary lint flags/fixes -> run_bash.",
         "parameters": {
             "type": "object",
             "properties": {

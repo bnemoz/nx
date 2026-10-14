@@ -64,7 +64,7 @@ IMAGE_MAX_BYTES = 8 * 1024 * 1024
 # when NX_VISION=1.
 IMAGE_VISION_TOOL = {"type": "function", "function": {
     "name": "read_image",
-    "description": "Show a local image to the model as a picture so you can read what's in it: an error screenshot, UI state, mockup, diagram. Returns the image itself, not a text description. png/jpeg/gif/webp/bmp.",
+    "description": "Show a local image to the model as a picture: error screenshot, UI state, mockup, diagram. Returns the image itself, not a text description. png/jpeg/gif/webp/bmp.",
     "parameters": {"type": "object", "properties": {
         "path": {"type": "string", "description": "Path to the image file (~ works)"},
     }, "required": ["path"]},
