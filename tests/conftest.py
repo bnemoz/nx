@@ -456,17 +456,27 @@ _FLAKY_RERUN_NODEIDS = (
     # was the root cause; the TLS migration closed it structurally (and the trio
     # had been pruned-and-held once before, in 0.154.2).
     "tests/test_event_taps.py::test_tool_tap_reports_error_outcome_for_failed_call",
-    # 0.155.1: the eventsink homes (_SINKS/_RETAINED_TAILS) + _AGENT_QUEUES are
-    # now drained centrally (tests/_nxtest.py, pinned by test_state_reset_contract
-    # .test_eventsink_and_steer_homes_are_swept) — correct hygiene, but it did
-    # NOT fix this entry and the entry STAYS (pruned, then re-added after it
-    # failed again at normal 17s wall). Captured live signature: IndexError —
-    # _surfaces_snapshot() returned NO agent row at all (empty list) for a
-    # registered, done-status agent; NOT a polluted-tail/residue failure. Next
-    # probe is module identity, not residue: a reload fork where the test's
-    # nx._subagent._ASYNC_AGENTS and the dict _surfaces_snapshot reads are
-    # different objects (docs/test-architecture.md §3.1 family).
-    "tests/test_event_taps.py::test_snapshot_agent_row_prefers_the_answer_tail",
+    # 0.155.2 CLOSED: test_snapshot_agent_row_prefers_the_answer_tail pruned.
+    # Root cause: _surfaces_snapshot's finished-row window (_DONE_KEEP=4)
+    # sliced the MIXED census with bg rows first, so 4+ finished bg rows —
+    # from the worker's OWN bg-logs store (owner_pid = the long-lived xdist
+    # worker pid, written by any earlier bg test; file-based, so permanent —
+    # no process-side drain sweeps it) — evicted every finished AGENT row.
+    # Hence: no agent row for a registered done-status agent (the captured
+    # IndexError), deterministic per worker once its job count hit 4 (survived
+    # the tuple's silent retry), invisible standalone (fresh process, zero
+    # maps). The 0.155.1 residue theory was refuted by that empty-list
+    # signature; its eventsink/steer drain stays as correct hygiene, not the
+    # cause. Fix: the window is bg-only now (agents are bounded upstream by
+    # _evict_finished_agents; the constant's own comment always said "bg
+    # jobs"). The coordinator's module-IDENTITY-fork theory also reproduces
+    # the same signature deterministically (stale nx.list_async_agents
+    # re-export after a sys.modules fork) — a real second hazard; hardened
+    # the same way as queue_agent_steering by lazy-importing
+    # list_async_agents/list_bg_jobs in the snapshot. Pinned by test_event_taps
+    # .test_snapshot_agent_row_survives_subagent_module_fork (fork repro,
+    # fails pre-hardening; bg-residue eviction covered by the same pin's
+    # shape + the live suite).
 )
 
 

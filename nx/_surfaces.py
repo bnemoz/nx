@@ -189,7 +189,6 @@ def _surfaces_snapshot(*, include_bg: bool = True) -> list[dict]:
     surface shows live-status rows only (main turn + async agents), so the two
     dashboards no longer duplicate each other. The live-region frame and
     `maybe_close_if_idle` keep the full snapshot."""
-    import nx as _m
     rows: list[dict] = [{
         "kind": "main", "id": "main",
         "alive": bool(st._TURN_ACTIVE), "status": "running" if st._TURN_ACTIVE else "idle",
@@ -200,8 +199,13 @@ def _surfaces_snapshot(*, include_bg: bool = True) -> list[dict]:
     if include_bg:
         try:
             # mine_only default: the shared bg-logs dir holds every session's
-            # jobs on the machine; /tabs is a per-session dashboard.
-            for job in _m.list_bg_jobs():
+            # jobs on the machine; /tabs is a per-session dashboard. Live
+            # resolution (0.155.2): the lazy import rebinds to the CURRENT
+            # sys.modules fork; `import nx as _m; _m.list_bg_jobs()` would
+            # call the import-time re-export, a stale binding if a test
+            # reloaded nx._bash_jobs without rebinding nx (0.155.1 fork).
+            from ._bash_jobs import list_bg_jobs
+            for job in list_bg_jobs():
                 alive = job.get("alive", False)
                 rows.append({"instruction": job.get("command") or job.get("instruction") or "",
                              "status": _process_status(job),
@@ -210,7 +214,13 @@ def _surfaces_snapshot(*, include_bg: bool = True) -> list[dict]:
         except Exception:
             pass
     try:
-        for ag in _m.list_async_agents():
+        # Live resolution (0.155.2): lazy-import the function so the call
+        # resolves through sys.modules to the LIVE module fork, immune to a
+        # stale nx re-export left behind when a test reloads nx._subagent
+        # without reloading nx (the 0.155.1 event_taps snapshot flake; same
+        # shape as queue_agent_steering's lazy import above).
+        from ._subagent import list_async_agents
+        for ag in list_async_agents():
             # EVENTSURFACE_SPEC §2 agent-row tails: a RUNNING agent has no
             # answer yet, which is why its row used to render an empty tail.
             # Fall back to the event sink's live ring (6 display lines), and
@@ -233,8 +243,18 @@ def _surfaces_snapshot(*, include_bg: bool = True) -> list[dict]:
     # finished surfaces accumulate across the session; keep the newest few so
     # the dashboard stays a live view (a job's full history, finished rows
     # included, is the /bg view's own windowed list).
-    done = [r for r in rows if not r.get("alive") and r["kind"] != "main"]
-    rows = [r for r in rows if r.get("alive") or r["kind"] == "main"] + done[:_DONE_KEEP]
+    # 0.155.2: the window is BG-ONLY. _DONE_KEEP always meant "newest finished
+    # bg jobs" (mirrored by _bg_completions._BG_DONE_KEEP) and the agent census
+    # is bounded upstream by _evict_finished_agents. Windowing the MIXED census
+    # put bg rows first, so four finished maps from the worker's own bg-logs
+    # store (owner_pid matches the long-lived xdist worker pid) evicted every
+    # finished AGENT row — the snapshot returned no agent row for a registered
+    # done-status agent, the captured event_taps flake, deterministic per
+    # worker once its bg job count reached four.
+    done_bg = [r for r in rows if not r.get("alive") and r["kind"] == "bg"]
+    rows = ([r for r in rows if r.get("alive") or r["kind"] == "main"]
+            + done_bg[:_DONE_KEEP]
+            + [r for r in rows if not r.get("alive") and r["kind"] == "agent"])
     return rows
 
 

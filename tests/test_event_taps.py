@@ -485,5 +485,85 @@ def test_snapshot_agent_row_prefers_the_answer_tail(nx_fresh):
             _ASYNC_AGENTS.pop(job, None)
 
 
+def test_snapshot_agent_row_survives_the_finished_bg_window(nx_fresh, monkeypatch):
+    """0.155.2 pin for the answer-tail flake's ROOT cause: the finished-row
+    window sliced the MIXED census. With _DONE_KEEP=4 and bg rows entering the
+    done list first, four finished bg jobs evicted EVERY finished agent row —
+    _surfaces_snapshot returned no agent row for a registered done-status
+    agent (the captured IndexError). The four maps came from the worker's own
+    bg-logs store (owner_pid = the long-lived xdist worker pid), so the poison
+    was file-based: permanent per worker, invisible standalone. Here the bg
+    census is patched (the snapshot lazy-imports list_bg_jobs, so the module
+    attr is read live); a done-status agent must still surface."""
+    from nx import _bash_jobs
+    from nx._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+    from nx._surfaces import _surfaces_snapshot, _DONE_KEEP
+
+    def fake_bg(*a, **kw):
+        return [{"pid": 900000 + i, "command": f"sleep {i}", "status": "finished",
+                 "alive": False, "tail": "", "killed": None}
+                for i in range(_DONE_KEEP + 1)]
+    monkeypatch.setattr(_bash_jobs, "list_bg_jobs", fake_bg)
+    job = "agent-snap-window"
+    with _ASYNC_LOCK:
+        _ASYNC_AGENTS[job] = {
+            "instruction": "i", "status": "done", "answer": "the answer tail",
+            "started": time.time(), "announced": True, "turns": 3,
+            "max_turns": 10, "tier": "read",
+        }
+    try:
+        rows = _surfaces_snapshot()
+        agent_rows = [r for r in rows if r["kind"] == "agent"]
+        assert len(agent_rows) == 1 and agent_rows[0]["id"] == job, rows
+        assert "the answer tail" in agent_rows[0]["tail"]
+    finally:
+        with _ASYNC_LOCK:
+            _ASYNC_AGENTS.pop(job, None)
+
+
+def test_snapshot_agent_row_survives_subagent_module_fork(nx_fresh):
+    """0.155.2 pin for the SECOND hazard that produced the identical captured
+    signature: a module-identity fork. conftest's _restore() pops
+    nx._subagent copies that aren't in its baseline snapshot out of
+    sys.modules; the next import rebuilds the module FRESH under the same
+    name while nx's import-time re-export (nx.list_async_agents) stays bound
+    to the popped dict. _surfaces_snapshot must resolve list_async_agents
+    LIVE through sys.modules (lazy import, the queue_agent_steering
+    precedent) — with the stale binding it reads the dead dict, returns no
+    agent row, and reproduces the captured IndexError deterministically.
+    sys.modules is restored in finally by identity so the pin itself leaks no
+    fork (docs/test-architecture.md §3.1 discipline)."""
+    import nx
+    from nx._surfaces import _surfaces_snapshot
+
+    name = "nx._subagent"
+    orig_mod = sys.modules[name]
+    orig_attr = getattr(nx, "_subagent", None)
+    job = "agent-snap-fork"
+    live = None
+    try:
+        # Fork: a fresh module under the same name, nx NOT reloaded, so
+        # nx.list_async_agents is still the OLD fork's function object.
+        del sys.modules[name]
+        import nx._subagent  # noqa: F401  (rebinds sys.modules[name] AND the
+        # nx._subagent package attr — both restored in finally)
+        live = sys.modules[name]
+        assert nx.list_async_agents.__globals__ is not live.__dict__, \
+            "fork did not form: the re-export is not stale, the pin tests nothing"
+        live._ASYNC_AGENTS[job] = {
+            "instruction": "i", "status": "done", "answer": "the answer tail",
+            "started": time.time(), "announced": True, "turns": 3,
+            "max_turns": 10, "tier": "read",
+        }
+        rows = _surfaces_snapshot()
+        row = [r for r in rows if r["kind"] == "agent"][0]
+        assert row["id"] == job and "the answer tail" in row["tail"], rows
+    finally:
+        if live is not None:
+            live._ASYNC_AGENTS.pop(job, None)
+        sys.modules[name] = orig_mod
+        nx._subagent = orig_attr
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
