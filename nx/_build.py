@@ -15,9 +15,16 @@ reviewable feature branch:
                      yolo mode, so parallel writers cannot trample each other);
                      the orchestrator commits each package's work into the
                      feature branch (a merge conflict re-runs that package ONCE
-                     with the conflict as its spec, then stops).
-  phase 3  critique  the existing scoped reviewer (`nx._subagent.critique`),
-                     focus = the spec's acceptance criteria.
+                     with the conflict as its spec, then stops). Since 0.157.0
+                     every agent is a joinable job from `nx._subagent.
+                     spawn_agent_job` (announce=False — no [Runtime note], the
+                     pipeline joins the handle itself), so the packages are
+                     visible in `/tabs` and the sub-agent layer's concurrency
+                     semaphore caps the fan-out.
+  phase 3  critique  the scoped reviewer tier (`tier="critique"`), focus = the
+                     spec's acceptance criteria. Run through the joinable job so
+                     the findings parse from the reviewer's COMPLETE answer (the
+                     `critique` tool's sync path returns a 600-char head).
   phase 4  correct   a one-file mechanical finding is fixed inline by the main
                      model; a structural finding gets ONE follow-up write-tier
                      agent with a mini-spec written from the finding. At most
@@ -34,8 +41,11 @@ always-on budget in tests/test_initial_context.py must not move). The model may
 *suggest* `/build` in prose when a task looks complex; the user decides.
 
 State is the run dir's files plus one in-memory object per invocation; there is
-no new storage, no sqlite, and no new dependency. `NX_BUILD_VERBOSE=1` prints a
-progress line per step (default: the spec, the gate, and the final report).
+no new storage, no sqlite, and no new dependency. Every agent it runs is a job
+on the shared sub-agent layer (`spawn_agent_job`, 0.157.0), so `/build` owns no
+threads of its own — it starts jobs and joins handles. `NX_BUILD_VERBOSE=1`
+prints a progress line per step (default: the spec, the gate, and the final
+report).
 """
 from __future__ import annotations
 
@@ -44,7 +54,6 @@ import os
 import re
 import shutil
 import subprocess
-import threading
 import time
 
 from . import _state as st
@@ -207,7 +216,7 @@ class _BuildRun:
     __slots__ = ("repo", "issue", "run_id", "branch", "start_branch", "base_head",
                  "run_dir", "spec_path", "spec", "packages", "critique_rounds",
                  "critique_texts", "remaining", "notes", "aborted", "started",
-                 "verbose", "parallel", "use_worktrees", "owns_active", "threads")
+                 "verbose", "parallel", "use_worktrees", "owns_active", "jobs")
 
     def __init__(self, repo: str, issue: str, verbose: bool, parallel: bool,
                  use_worktrees: bool) -> None:
@@ -231,9 +240,11 @@ class _BuildRun:
         self.parallel = parallel
         self.use_worktrees = use_worktrees
         self.owns_active = False
-        # Live package worker threads (parallel mode). Kept so an abort can wait
-        # for them before moving HEAD out from under a still-writing agent.
-        self.threads: list[threading.Thread] = []
+        # Live package jobs (parallel mode) as (package, AgentJob) pairs. Kept so
+        # an abort can wait — bounded — for them before moving HEAD out from
+        # under a still-writing agent (0.157.0: the sub-agent layer's joinable
+        # handle, not a hand-rolled thread).
+        self.jobs: list[tuple[_BuildPackage, object]] = []
 
 
 def _step(run: _BuildRun, msg: str) -> None:
@@ -381,12 +392,19 @@ def _confirm_spec(run: _BuildRun) -> bool:
 # phase 2 — parallel implementers
 # --------------------------------------------------------------------------
 
-def _run_agent(run: _BuildRun, instruction: str, *, tier: str, scope,
-               worktree: str | None, max_turns: int, quiet: bool,
-               system_prompt: str | None = None) -> str:
-    """Run one sub-agent through the shared sub-loop (lazy module access so
-    tests can patch `nx._subagent._run_sync_agent_body`, exactly the way the
-    existing sub-agent tests fake the model).
+def _start_agent(instruction: str, *, tier: str, scope,
+                 worktree: str | None, max_turns: int,
+                 system_prompt: str | None = None):
+    """Hand one sub-agent to the shared harness as a joinable, UNANNOUNCED job
+    (0.157.0) and return its handle. The spawn half of `_run_agent`, split out
+    because the parallel package phase starts N jobs from one thread and reads
+    them one at a time, while `_run_agent` is the one-job-and-wait shape.
+
+    `announce=False` is the orchestrator contract — no [Runtime note] is staged
+    and no wake is armed, because `/build` joins the handle itself; the package
+    answer goes into the run dir instead of the parent's context. There is no
+    quiet-slot handling here: `spawn_agent_job` owns the quiet worker thread
+    (the parent thread keeps the terminal and the interrupt watcher).
 
     The phase's satellite prompt (nx/_prompts.py) rides the head of the
     instruction: the sub-loop picks its system prompt from the TIER, and the
@@ -395,16 +413,25 @@ def _run_agent(run: _BuildRun, instruction: str, *, tier: str, scope,
     from . import _subagent as S
     if system_prompt:
         instruction = f"{system_prompt}\n\n---\n\n{instruction}"
-    job_id = S._new_job_id()
-    slots = S._ASYNC_QUIET_SLOTS
-    prev = getattr(slots, "quiet", False)
-    slots.quiet = quiet
-    try:
-        return S._run_sync_agent_body(instruction, max_turns, tier=tier,
-                                      scope=scope, worktree=worktree,
-                                      job_id=job_id)
-    finally:
-        slots.quiet = prev
+    return S.spawn_agent_job(instruction, max_turns, tier=tier, scope=scope,
+                             worktree=worktree, announce=False)
+
+
+def _run_agent(run: _BuildRun, instruction: str, *, tier: str, scope,
+               worktree: str | None, max_turns: int, quiet: bool = True,
+               system_prompt: str | None = None) -> str:
+    """Run one sub-agent and BLOCK for its full answer — the driver's "wait for
+    this phase" shape, on top of `_start_agent`'s joinable job. `quiet` is
+    accepted for call-site compatibility and IGNORED: the job's worker thread is
+    quiet by construction (it cannot touch the parent's terminal), which is what
+    the sequential phases passed `quiet=False/True` to influence before."""
+    job = _start_agent(instruction, tier=tier, scope=scope, worktree=worktree,
+                       max_turns=max_turns, system_prompt=system_prompt)
+    answer = job.join()
+    if answer is None:
+        return ("ERROR: the sub-agent did not report a final answer (it failed "
+                "or its record was evicted before the join)")
+    return answer
 
 
 def _phase_prompt(name: str) -> str:
@@ -469,11 +496,13 @@ def _create_pkg_worktree(run: _BuildRun, pkg: _BuildPackage) -> str | None:
 
 
 def _package_agent(run: _BuildRun, pkg: _BuildPackage, quiet: bool) -> None:
-    """One package's agent run: its own worktree (when enabled), its own scope.
-    Never raises — a failed package is a reported status, not a dead pipeline.
-    In parallel mode the caller has already created the worktree (so the repo's
-    worktree lock is never touched from two threads); `pkg.worktree is None`
-    here therefore means isolation is off, not "create it now"."""
+    """The SEQUENTIAL package run: create its worktree (when enabled) on this
+    thread, run the agent, land the answer. Never raises — a failed package is
+    a reported status, not a dead pipeline. The parallel phase does not use this
+    path (see `_start_package_job`): it creates every worktree on the main
+    thread first (the repo's worktree lock is never touched from two threads)
+    and starts joinable jobs, so `pkg.worktree is None` here means isolation is
+    off, not "create it now"."""
     try:
         if pkg.worktree is None and not run.parallel:
             pkg.worktree = _create_pkg_worktree(run, pkg)
@@ -482,14 +511,36 @@ def _package_agent(run: _BuildRun, pkg: _BuildPackage, quiet: bool) -> None:
                             max_turns=_env_int("NX_BUILD_PACKAGE_TURNS", 80),
                             quiet=quiet,
                             system_prompt=_phase_prompt("BUILD_PACKAGE_SYSTEM"))
-        pkg.answer = answer or ""
-        if isinstance(answer, str) and answer.startswith("ERROR"):
-            pkg.status = "failed"
-            pkg.note = answer[:400]
-        _write_package_report(run, pkg)
+        _collect_package(run, pkg, answer)
     except Exception as e:  # noqa: BLE001 — one package must not kill the run
         pkg.status = "failed"
         pkg.note = f"{type(e).__name__}: {e}"
+
+
+def _start_package_job(run: _BuildRun, pkg: _BuildPackage):
+    """Start ONE package as a joinable job (parallel phase). Called from the
+    main thread, after the worktrees exist; the job's own worker thread runs
+    the agent loop, so the answer is joined later instead of blocking here."""
+    return _start_agent(_package_instruction(run, pkg), tier="implement",
+                        scope=pkg.paths or None, worktree=pkg.worktree,
+                        max_turns=_env_int("NX_BUILD_PACKAGE_TURNS", 80),
+                        system_prompt=_phase_prompt("BUILD_PACKAGE_SYSTEM"))
+
+
+def _collect_package(run: _BuildRun, pkg: _BuildPackage,
+                     answer: str | None) -> None:
+    """Land a finished package job's answer on the package and write its report
+    file. `answer is None` (the join timed out, or the record was evicted before
+    the join) leaves the package untouched — its work is in its own worktree and
+    the abort note says where. Idempotent: safe to call again from the abort
+    path for a job that finished during the bounded wait."""
+    if answer is None:
+        return
+    pkg.answer = answer
+    if answer.startswith("ERROR"):
+        pkg.status = "failed"
+        pkg.note = answer[:400]
+    _write_package_report(run, pkg)
 
 
 def _write_package_report(run: _BuildRun, pkg: _BuildPackage) -> None:
@@ -510,13 +561,14 @@ def _run_packages(run: _BuildRun) -> None:
     edit) with worktree isolation available. Anywhere else the packages run one
     after another on the parent thread so every write hits the normal Y/n gate.
 
-    Concurrency note: the sub-agent LAYER has no joinable job handle — an async
-    spawn returns a job id and its answer is only delivered to the parent's turn
-    loop as a [Runtime note]. So the orchestrator joins its own threads instead
-    of the sub-agent registry: each thread runs the shared synchronous sub-loop
-    (which the async worker also runs) with isolation on, so the observable
-    contract — one agent per package, landing in its own checkout — is the
-    same."""
+    Concurrency (0.157.0): the sub-agent layer's joinable handle does the
+    thread management — one `spawn_agent_job(announce=False)` per package, all
+    started from this thread, then joined. The workers are the layer's own quiet
+    daemon threads and every job is in the async ledger, so the packages show up
+    in `/tabs`/`list_async_agents` and the layer's
+    NX_SUBAGENT_MAX_CONCURRENT semaphore caps the fan-out: the packages past the
+    cap park as `queued` and start as earlier ones finish (an accepted behavior
+    change — the old hand-rolled threads all ran at once)."""
     pkgs = run.packages
     if run.parallel and run.use_worktrees and len(pkgs) > 1:
         _step(run, f"phase 2: {len(pkgs)} packages in parallel (worktrees)")
@@ -540,14 +592,21 @@ def _run_packages(run: _BuildRun) -> None:
         if not pkgs:
             _note(run, "phase 2: no package could get a worktree — nothing ran")
             return
-        threads = [threading.Thread(target=_package_agent, args=(run, pkg, True),
-                                    name=f"nx-build-{pkg.name}", daemon=True)
-                   for pkg in pkgs]
-        run.threads = threads
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        # N joinable jobs, announce=False: /build joins them itself and writes
+        # each answer into the run dir, so the layer must not also stage a
+        # [Runtime note] the parent would read as new work.
+        run.jobs = []
+        for pkg in pkgs:
+            try:
+                run.jobs.append((pkg, _start_package_job(run, pkg)))
+            except Exception as e:  # noqa: BLE001 — one spawn must not kill the run
+                pkg.status = "failed"
+                pkg.note = f"{type(e).__name__}: {e}"
+        # Read the handles in start order, blocking until each job's answer is
+        # final (announce=False means this join is the ONLY consumer of it).
+        # `_join_package_threads` is the bounded variant, for the abort path.
+        for pkg, job in run.jobs:
+            _collect_package(run, pkg, job.join())
     else:
         why = "not yolo" if not run.parallel else "no worktree isolation"
         _step(run, f"phase 2: {len(pkgs)} packages sequentially ({why})")
@@ -725,12 +784,19 @@ def _phase_critique(run: _BuildRun) -> list[str]:
         return []
     if run.critique_rounds >= _MAX_CRITIQUE_ROUNDS:
         return []
-    from ._subagent import critique
     paths = " ".join(p for pkg in run.packages for p in pkg.paths)
     run.critique_rounds += 1
     _step(run, f"critique round {run.critique_rounds} "
                "(focus = the acceptance criteria)")
-    text = critique(_critique_focus(run), paths=paths or None, async_=False)
+    # The full answer via the joinable path, NOT `critique(async_=False)`: the
+    # synchronous spawn applies the head+path contract (_lean_result), so its
+    # tool-result string is a 600-char HEAD — and _parse_findings reads findings
+    # off the text, so every finding past the head was silently dropped. The job
+    # handle's join() returns the reviewer's complete answer (0.157.0 fix).
+    # max_turns=0 mirrors `critique()`: the tier owns the reviewer's budget
+    # through the standard spawn floors (there is no separate knob for it).
+    text = _run_agent(run, _critique_instruction(run, paths), tier="critique",
+                      scope=None, worktree=None, max_turns=0)
     run.critique_texts.append(text)
     _write_critique(run, text)
     if isinstance(text, str) and text.startswith("ERROR"):
@@ -739,6 +805,45 @@ def _phase_critique(run: _BuildRun) -> list[str]:
     findings = _parse_findings(text)
     _step(run, f"  critique: {len(findings)} finding(s) at or above the floor")
     return findings
+
+
+_CRITIQUE_ROOT_NOTE = (
+    "\nReads MUST stay inside the project root {root} — never read ~/.nx/agents, "
+    "other per-project stores under ~/.nx, or any other project's directories: "
+    "they belong to unrelated repos and their contents will mislead your "
+    "review.\n")
+
+
+def _critique_instruction(run: _BuildRun, paths: str) -> str:
+    """The reviewer's instruction — the same text `critique()` composes
+    (`[CRITIQUE MODE]`, the severity floor, the focus, the read scope, the
+    adversarial framing). `/build` cannot use the `critique` tool body itself:
+    that body returns through `spawn_agent`, and the synchronous spawn applies
+    the head+path contract (`_lean_result`), so the string it returns is a
+    600-char HEAD of the review — `_parse_findings` then saw only the head and
+    dropped every finding past it (the 0.157.0 bug fix). The instruction is
+    therefore rebuilt here, verbatim in shape, and handed to a joinable job so
+    the parse sees the reviewer's COMPLETE answer. `tests/test_build.py` pins it
+    against `critique()`'s own text so the two cannot drift."""
+    root = str(getattr(st, "PROJECT_ROOT", None) or os.getcwd())
+    from ._subagent_tiers import _critique_severity
+    floor = _critique_severity(None)   # the same default the `critique` tool uses
+    named = [p for p in paths.split()] if paths else []
+    scope_line = (
+        "\nRead scope (inspect these paths and their immediate call sites; a "
+        "finding elsewhere is out of scope): " + ", ".join(named) + "\n"
+        if named else "")
+    return (
+        "[CRITIQUE MODE]\nReview the work named below and report findings only. "
+        "You cannot modify anything. Severity floor: " + floor +
+        " — a finding below it is not reported (if nothing clears it, say "
+        "exactly 'No findings above the floor.' and name what you checked).\n\n"
+        "FOCUS: " + _critique_focus(run) + "\n" + scope_line +
+        _CRITIQUE_ROOT_NOTE.format(root=root) +
+        "\nJudge the work adversarially against the focus: broken edge cases, "
+        "missing guards, wrong assumptions, races, resource leaks — and the "
+        "simpler formulation the work walked past. Each finding names a "
+        "file:line.")
 
 
 def _write_critique(run: _BuildRun, text: str) -> None:
@@ -1098,16 +1203,19 @@ def _cleanup_aborted(run: _BuildRun, gate_passed: bool) -> None:
 
 
 def _join_package_threads(run: _BuildRun, timeout: float = 20.0) -> None:
-    """Wait (briefly) for live package workers before an abort moves HEAD. A
-    worker that outlives the wait is left running — it is a daemon thread and
-    its package's work stays in its own worktree, never in the shared tree."""
-    for t in getattr(run, "threads", []):
-        if not t.is_alive():
-            continue
-        t.join(timeout=timeout)
-        if t.is_alive():
-            _note(run, f"  worker {t.name} is still running; its work stays in "
-                       "its worktree")
+    """Wait (briefly, per package) for live package jobs before an abort moves
+    HEAD. A job that outlives the wait is left running — it is a daemon worker
+    and its package's work stays in its own worktree, never in the shared tree —
+    and the run note names it. A job that finished during the wait still gets
+    its answer + report file collected."""
+    for pkg, job in getattr(run, "jobs", []):
+        if not job.done():
+            job.join(timeout=timeout)
+        if job.done():
+            _collect_package(run, pkg, job.join(timeout=0))
+        else:
+            _note(run, f"  package {pkg.name} is still running; its work stays "
+                       "in its worktree")
 
 
 def _discard_run_dir(run: _BuildRun) -> None:

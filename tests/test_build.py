@@ -4,7 +4,9 @@
 Offline: the sub-agent layer is stubbed the way the existing sub-agent tests
 fake the model (monkeypatch `nx._subagent._run_sync_agent_body`), git is a real
 tmp repo, and the main-model side call of the phase-4 inline fix is a stub
-object. The contract this file pins:
+object. The fan-out and critique pins go one level UP the stack, at
+`nx._subagent.spawn_agent_job` — the joinable handle `/build` drives (0.157.0).
+The contract this file pins:
 
 1. USER-TRIGGERED ONLY — `/build` is a slash command with no tool schema, so
    the always-on floor in tests/test_initial_context.py must not move.
@@ -23,7 +25,6 @@ import json
 import os
 import subprocess
 import sys
-import threading  # noqa: F401  (the fake-thread test patches B.threading)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
@@ -142,6 +143,52 @@ def _stub_agents(monkeypatch, calls, spec=SPEC, on_package=None):
 
 def _confirm(monkeypatch, answer):
     monkeypatch.setattr(nx, "_confirm", lambda *a, **k: answer, raising=False)
+
+
+class _FakeJob:
+    """A stand-in for nx._subagent.AgentJob. A real handle needs a worker thread
+    and a model, so the fan-out/join tests pin the SEQUENCE of joins instead:
+    `join_timeouts` records every bounded/unbounded call, `joined` whether the
+    handle was waited on at all, and `finished=False` models a package that
+    outlives the abort wait."""
+
+    def __init__(self, job_id="job", answer="done", finished=True):
+        self.job_id = job_id
+        self._answer = answer
+        self.finished = finished
+        self.join_timeouts = []
+        self.joined = False
+
+    def done(self):
+        return self.finished
+
+    def join(self, timeout=None):
+        self.joined = True
+        self.join_timeouts.append(timeout)
+        if timeout is None or self.finished:
+            self.finished = True
+            return self._answer
+        return None
+
+
+def _solo_job(monkeypatch, text):
+    """Patch spawn_agent_job to hand out one handle whose join() returns `text`
+    (the reviewer's full answer) and to record the spawn kwargs."""
+    seen = []
+
+    class _Job:
+        def join(self, timeout=None):
+            return text
+
+    def fake(instruction, max_turns, tier="read", scope=None, *,
+             worktree=None, announce=True):
+        seen.append({"tier": tier, "announce": announce, "scope": scope,
+                     "worktree": worktree, "max_turns": max_turns,
+                     "instruction": instruction})
+        return _Job()
+
+    monkeypatch.setattr("nx._subagent.spawn_agent_job", fake)
+    return seen
 
 
 def _no_side_model(monkeypatch):
@@ -501,25 +548,67 @@ def test_fix_failure_stops_without_a_re_critique(tmp_path, monkeypatch):
 def test_phase_critique_caps_at_one_re_critique(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     _sandbox(tmp_path, repo, monkeypatch)
-    monkeypatch.setattr(nx, "NX_SUBAGENTS", True, raising=False)
     run = B._BuildRun(str(repo), "issue", False, False, False)
     run.spec = SPEC
-    seen = []
-
-    def fake_critique(focus, paths=None, async_=False):
-        seen.append(focus)
-        return "major — `nx/mod.py:1` — still broken"
-
-    monkeypatch.setattr("nx._subagent.critique", fake_critique)
+    seen = _solo_job(monkeypatch, "major — `nx/mod.py:1` — still broken")
     monkeypatch.setattr(B, "_inline_fix", lambda run_, f: True)
     remaining = B._phase_fix(run, B._phase_critique(run))
     assert run.critique_rounds == 2          # phase 3 + exactly one re-critique
     assert len(seen) == 2
-    assert "acceptance criteria" in seen[0]  # focus = the spec's criteria
+    # the reviewer runs as a joinable, UNANNOUNCED job on the critique tier: the
+    # pipeline joins it itself and must not leave a [Runtime note] behind
+    assert all(s["tier"] == "critique" and s["announce"] is False for s in seen)
+    assert "acceptance criteria" in seen[0]["instruction"]  # focus = the criteria
+    assert "[CRITIQUE MODE]" in seen[0]["instruction"]
+    assert "Severity floor: major" in seen[0]["instruction"]
     assert remaining == ["major — `nx/mod.py:1` — still broken"]
     # a third round is refused
     assert B._phase_critique(run) == []
     assert len(seen) == 2
+
+
+def test_critique_findings_past_the_lean_head_are_parsed(tmp_path, monkeypatch):
+    """The bug this pins (0.157.0): `critique(async_=False)` returns
+    _lean_result's 600-char HEAD, so a finding past the head never reached
+    _parse_findings. The job handle's join() returns the reviewer's COMPLETE
+    answer, so the late finding is seen — and the run dir keeps the full text."""
+    repo = _repo(tmp_path)
+    _sandbox(tmp_path, repo, monkeypatch)
+    run = B._BuildRun(str(repo), "issue", False, False, False)
+    run.spec = SPEC
+    head_finding = "major — `nx/mod.py:1` — the helper is never called"
+    late_finding = "critical — `nx/_turn.py:42` — the loop never exits"
+    full = (head_finding + "\n" + ("padding context line\n" * 40) +
+            late_finding + "\n")
+    assert late_finding not in full[:600]    # beyond any lean head
+    _solo_job(monkeypatch, full)
+    findings = B._phase_critique(run)
+    assert findings == [head_finding, late_finding]
+    assert run.critique_texts[-1] == full
+    with open(os.path.join(run.run_dir, "critique-1.md"), encoding="utf-8") as f:
+        assert late_finding in f.read()
+
+
+def test_build_critique_instruction_matches_the_critique_tool(
+        tmp_path, monkeypatch):
+    """`/build` rebuilds the reviewer instruction instead of calling the
+    `critique` tool (whose answer comes back through _lean_result's head), so
+    this pins the rebuilt text against the tool's own composition — the mode
+    line, the severity floor, the focus and the read scope must not drift."""
+    import nx._subagent as S
+
+    repo = _repo(tmp_path)
+    _sandbox(tmp_path, repo, monkeypatch)
+    run = B._BuildRun(str(repo), "issue", False, False, False)
+    run.spec = SPEC
+    run.branch = "nx/build-x"
+    paths = "nx/mod.py README.md"
+    seen = {}
+    monkeypatch.setattr(S, "spawn_agent",
+                        lambda instruction, **kw:
+                        seen.setdefault("i", instruction) or "x")
+    S.critique(B._critique_focus(run), paths=paths)
+    assert seen["i"] == B._critique_instruction(run, paths)
 
 
 def test_critique_is_skipped_without_subagents(tmp_path, monkeypatch):
@@ -553,38 +642,62 @@ def test_merge_package_commits_a_shared_tree_edit(tmp_path, monkeypatch):
     assert "x = 99" in _git_ok(repo, "show", "HEAD:nx/mod.py")
 
 
-def test_run_packages_spawns_threads_only_when_parallel(tmp_path, monkeypatch):
+def test_run_packages_fans_out_jobs_only_when_parallel(tmp_path, monkeypatch):
+    """Sequential packages still run on the parent thread; parallel mode starts
+    ONE joinable job per package and joins every one of them. The hand-rolled
+    threads are gone (0.157.0): the handles come from the sub-agent layer, so
+    the abort path can bound its wait and /tabs can see the packages."""
     repo = _repo(tmp_path)
-    home = _sandbox(tmp_path, repo, monkeypatch)
+    _sandbox(tmp_path, repo, monkeypatch)
     monkeypatch.setattr(B, "_package_agent", lambda run_, pkg, quiet: None)
     monkeypatch.setattr(B, "_merge_packages", lambda run_: None)
 
     def boom(*a, **k):
-        raise AssertionError("no threads in sequential mode")
+        raise AssertionError("no sub-agent jobs in sequential mode")
 
-    monkeypatch.setattr(B.threading, "Thread", boom)
+    monkeypatch.setattr(B, "_start_package_job", boom)
     seq = B._BuildRun(str(repo), "issue", False, False, True)
     seq.packages = [_pkg("a"), _pkg("b")]
-    B._run_packages(seq)  # parallel=False → no threads
+    B._run_packages(seq)  # parallel=False: sequential, no jobs at all
+    assert seq.jobs == []
 
-    started = []
+    spawned = []
 
-    class FakeThread:
-        def __init__(self, target=None, args=(), **kw):
-            self._t, self._a = target, args
+    def fake_start(run_, pkg):
+        job = _FakeJob(f"job-{pkg.name}")
+        spawned.append(job)
+        return job
 
-        def start(self):
-            started.append(1)
-            self._t(*self._a)
-
-        def join(self):
-            pass
-
-    monkeypatch.setattr(B.threading, "Thread", FakeThread)
+    monkeypatch.setattr(B, "_start_package_job", fake_start)
     par = B._BuildRun(str(repo), "issue", False, True, True)
     par.packages = [_pkg("a"), _pkg("b")]
     B._run_packages(par)
-    assert len(started) == 2
+    assert len(spawned) == 2
+    assert [p.name for p, _ in par.jobs] == ["a", "b"]
+    assert all(j.joined for j in spawned)          # every handle was joined
+    assert all(p.answer == "done" for p in par.packages)
+
+
+def test_join_package_threads_is_bounded_and_collects_finishers(
+        tmp_path, monkeypatch):
+    """The abort path: each handle gets a BOUNDED join, a job that outlived the
+    wait is named in the notes (its work stays in its worktree), and a job that
+    finished during the wait still gets its answer + report file collected."""
+    repo = _repo(tmp_path)
+    _sandbox(tmp_path, repo, monkeypatch)
+    run = B._BuildRun(str(repo), "issue", False, True, True)
+    run.run_dir = str(tmp_path / "run")
+    fast, slow = _pkg("fast"), _pkg("slow")
+    jf = _FakeJob("fast", answer="implemented")
+    js = _FakeJob("slow", finished=False)
+    run.jobs = [(fast, jf), (slow, js)]
+    B._join_package_threads(run, timeout=0.01)
+    assert jf.join_timeouts == [0]           # already done: read, do not wait
+    assert fast.answer == "implemented"
+    assert os.path.exists(os.path.join(run.run_dir, "packages", "fast.md"))
+    assert js.join_timeouts == [0.01]        # bounded, never unbounded
+    assert slow.answer == "" and slow.status == "pending"
+    assert any("slow is still running" in n for n in run.notes)
 
 
 # --- spec parsing ------------------------------------------------------------
