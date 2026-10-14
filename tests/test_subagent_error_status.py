@@ -199,7 +199,9 @@ def test_reasoning_stall_give_up_logs_event_when_quiet(nx_fresh, monkeypatch):
     monkeypatch.setattr(nx.st, "REASONING_ONLY_RETRY_LIMIT", 1)
     messages = [{"role": "user", "content": "q"}]
     status = _turn._handle_loop_cut(messages, False, 1, 0, 0, None, 5, [], 0)
-    assert status == nx.TURN_DONE
+    # 0.154.6: rescue exhaustion with nothing usable produced is the honest
+    # TURN_GAVE_UP (was TURN_DONE, which headless callers scored as a pass).
+    assert status == nx.TURN_GAVE_UP
     assert events, "give-up must be logged even on a quiet thread"
     direction, payload = events[-1]
     assert direction == "turn"
@@ -219,7 +221,9 @@ def test_repeat_collapse_give_up_logs_event_when_quiet(nx_fresh, monkeypatch):
     messages = [{"role": "user", "content": "q"}]
     status = _handle_loop_cut(messages, False, 0, LEAKED_TOKEN_RUN_LIMIT, 0,
                               None, 5, [], 0)
-    assert status == nx_fresh.TURN_DONE
+    # 0.154.6: collapse give-up discards the degenerated output — honest
+    # TURN_GAVE_UP, not TURN_DONE.
+    assert status == nx_fresh.TURN_GAVE_UP
     give_ups = [e for e in events if e[1].get("kind") == "give_up"]
     assert give_ups, "collapse give-up must be logged even when quiet"
     assert give_ups[-1][1]["failure"] == "special-token collapse"

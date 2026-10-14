@@ -155,7 +155,9 @@ def test_malformed_tool_call_gives_up_cleanly_after_one_retry(capsys):
 
     status = m._handle_text_tool_calls(messages, text, malformed_call_count=1)
 
-    assert status == m.TURN_DONE
+    # 0.154.6: the invalid call was discarded and nothing ran — honest
+    # TURN_GAVE_UP (was TURN_DONE, which headless callers scored as a pass).
+    assert status == m.TURN_GAVE_UP
     assert "correction retry also failed" in capsys.readouterr().out
     assert messages[-1]["role"] == "assistant"
     assert "Discarded an invalid tool call" in messages[-1]["content"]

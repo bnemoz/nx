@@ -210,7 +210,12 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
                 print(f"{C.ERROR}  ✗ malformed tool call after "
                       f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
                 print(f"{DIM}    {detail}{RESET}")
-            return TURN_DONE
+            # 0.154.6: ladder exhausted with the tool call discarded — nothing
+            # usable was produced, so this must not score "done" headless
+            # (same rule as the malformed-stream ladder in _turn.py).
+            from ._turn import _gave_up  # lazy: _turn imports this module
+            return _gave_up(f"malformed tool call after {malformed_stream_cut_count} "
+                            f"recoveries: {detail}"[:300])
         if not quiet:
             print(f"{C.WARNING}  ✂ MALFORMED TOOL CALL — {detail}; "
                   f"discarded partial tool args and retrying cleanly "
@@ -369,7 +374,12 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
             messages.append({"role": "assistant", "content":
                 "[Runtime: Discarded an invalid tool call after a failed correction retry. "
                 "The requested tool action was not run.]"})
-            return TURN_DONE
+            # 0.154.6: the invalid output was discarded and nothing ran — the
+            # turn produced nothing usable. TURN_DONE here scored a truncated
+            # run as a clean pass for every headless caller.
+            from ._turn import _gave_up  # lazy: _turn imports this module
+            return _gave_up(f"text-protocol tool call rejected after correction "
+                            f"retry: {errors[0]}"[:300])
         return None
     messages.append({"role": "assistant", "content": text})
     # All-read-only multi-call turns and 2+ spawn_agent fan-outs dispatch

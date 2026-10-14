@@ -76,6 +76,7 @@ from ._turn_status import (  # noqa: F401 (re-exports)
     TURN_DONE, TURN_TOOL, TURN_STREAM_CUT, TURN_FORCE_FINAL, TURN_STALL,
     TURN_EMPTY, TURN_ESC, TURN_REDIRECT, TURN_MALFORMED_CALL, TURN_API_ERROR,
     TURN_CONTEXT_OVERRUN, TURN_LENGTH_CUT, TURN_TIMED_OUT, TURN_TIMED_OUT_RETRY,
+    TURN_GAVE_UP,
     TRUNCATION_MARKER,
 )
 from ._turn_toolcalls import (  # noqa: F401 (re-exports)
@@ -151,6 +152,27 @@ def _maybe_arm_native_escalation() -> None:
                   f"(tool_choice=auto){RESET}")
 
 
+# 0.154.6 honest-status latch: the transport/protocol cause of the most recent
+# TURN_GAVE_UP give-up. Every exhausted-ladder return below sets it so
+# _run_model_turn_loop() can name the cause in the {"status": "error"} summary
+# it hands headless callers (nx run / nx eval / sub-agents) — the P3-2 lineage's
+# TURN_TIMED_OUT error string, generalized to the non-timeout cuts.
+_LAST_GIVE_UP_CAUSE: str = ""
+
+
+def _gave_up(cause: str) -> str:
+    """Record the give-up cause and return the honest TURN_GAVE_UP status.
+
+    Used at every exhausted-recovery-ladder return that produced NOTHING
+    usable: before 0.154.6 these returned TURN_DONE, so headless callers scored
+    a truncated, never-completed task as a clean pass (the same dishonesty
+    P3-2 fixed for mid-stream timeouts).
+    """
+    global _LAST_GIVE_UP_CAUSE
+    _LAST_GIVE_UP_CAUSE = cause
+    return TURN_GAVE_UP
+
+
 def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop_cut_count: int,
                      leaked_token_run: int, repeat_chunk_run: int, reasoning_only_start: Optional[float],
                      reasoning_only_chars: int, reasoning_parts: list[str],
@@ -194,7 +216,15 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                 with write_lock():
                     cprint(f"{C.ERROR}  ✗ {collapse_type} after "
                           f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
-            return TURN_DONE
+            # 0.154.6: the ladder is exhausted and the degenerated output was
+            # discarded, so this turn produced NOTHING usable. Returning
+            # TURN_DONE here scored it "done" headless. REPL behavior is
+            # unchanged (the turn ends, the prompt returns); headless callers
+            # now map the honest status to an error, exactly like
+            # TURN_TIMED_OUT.
+            return _gave_up(f"{collapse_type} after {malformed_stream_cut_count} "
+                            f"recoveries: the model's output degenerated and was "
+                            f"discarded before the task completed")
         if not quiet:
             with write_lock():
                 cprint(f"{C.WARNING}  ✂ {collapse_type.upper()} — discarding degenerated "
@@ -297,7 +327,18 @@ def _handle_loop_cut(messages: list[Message], forced_final: bool, reasoning_loop
                        "attempts": cut_count,
                        "retry_limit": retry_limit,
                        "failsafes_disabled": retry_limit == 0})
-        return TURN_DONE
+        if retry_limit == 0:
+            # Failsafes deliberately disabled (benchmark mode): the user opted
+            # out of the rescue ladder, so "the model thought and stopped" is
+            # the configured ending, not a harness failure. Left as TURN_DONE.
+            return TURN_DONE
+        # 0.154.6: genuine rescue exhaustion — the model produced reasoning
+        # only, every stall nudge was spent, and no answer or tool call was
+        # ever emitted. Nothing usable was produced, so this must not score
+        # "done" headless (same dishonesty as the malformed-stream ladder).
+        return _gave_up(f"reasoning-only stall: gave up after {cut_count} stall "
+                        f"attempt{'s' if cut_count != 1 else ''} ("
+                        f"{loop_detail}) with no answer or tool call")
     if reasoning_only_start and REASONING_ONLY_TIME_LIMIT > 0 and \
             reasoning_secs >= REASONING_ONLY_TIME_LIMIT:
         cut_msg = (f"{reasoning_secs:.0f}s of reasoning with no "
@@ -682,7 +723,14 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                     cprint(f"{C.ERROR}  ✗ malformed stream from model/API after "
                           f"{malformed_stream_cut_count} recoveries — waiting for user input{RESET}")
                     cprint(f"{DIM}    {type(stream_error).__name__}: {stream_error}{RESET}")
-            return TURN_DONE
+            # 0.154.6 (the pinned bug): a mid-stream cut that is NOT an
+            # httpx.TimeoutException (connection abort mid-chunked-body, SSE
+            # error frame then drop) lands in this malformed-stream ladder. On
+            # exhaustion the old TURN_DONE made a truncated run a clean pass for
+            # every headless caller — the REPL was only semi-benign. Return the
+            # honest status the P3-2 lineage returns for timeouts; the REPL just
+            # ends the turn (user takes over), headless maps it to an error.
+            return _gave_up(f"{type(stream_error).__name__}: {stream_error}"[:300])
         if not quiet:
             with write_lock():
                 cprint(f"{C.WARNING}  ✂ MALFORMED STREAM — discarded partial output/tool args; "
@@ -1219,6 +1267,21 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
                     "error": "stream timeout: the server stopped delivering chunks "
                              f"after {timed_out_retries} step retries",
                     "turns": steps + 1}
+        if status == TURN_GAVE_UP:
+            # 0.154.6: the honest non-timeout counterpart of TURN_TIMED_OUT. A
+            # mid-stream cut that is not an httpx timeout (connection abort mid
+            # chunked-body, SSE error frame then drop), a special-token/
+            # repetition collapse, or a reasoning-only stall — every recovery
+            # ladder exhausted with nothing usable produced. One loop, one
+            # vocabulary, no headless branch: the REPL caller simply ends the
+            # turn and returns to the prompt (unchanged visible behavior), while
+            # headless callers score this an error (exit 4) exactly as they
+            # already do TURN_TIMED_OUT.
+            return {"status": "error",
+                    "error": ("stream cut: the response ended before the task "
+                              "completed and recovery was exhausted ("
+                              f"{_LAST_GIVE_UP_CAUSE or 'cause unknown'})"),
+                    "turns": steps + 1}
         if status == TURN_LENGTH_CUT:
             # The response budget (NX_MAX_TOKENS, or a server-side cap) ran out
             # mid-answer. model_turn() appended nothing; it handed the partial
@@ -1349,6 +1412,15 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             return {"status": "error",
                     "error": ("stream timeout: the server stopped delivering "
                               "chunks during the forced-final answer turn"),
+                    "turns": steps + 1}
+        if final_status == TURN_GAVE_UP:
+            # 0.154.6: same honesty rule for the forced-final rescue turn — it
+            # was cut or degenerated without producing an answer, so it is not a
+            # "cap" (which headless maps to a partial-but-real result).
+            return {"status": "error",
+                    "error": ("stream cut: the forced-final answer turn ended "
+                              "before completing and recovery was exhausted ("
+                              f"{_LAST_GIVE_UP_CAUSE or 'cause unknown'})"),
                     "turns": steps + 1}
         if final_status == TURN_DONE:
             return {"status": "cap", "turns": steps + 1}

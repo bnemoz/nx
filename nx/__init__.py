@@ -1017,6 +1017,7 @@ from ._turn import (
     _LoggingStream, TURN_DONE, TURN_TOOL, TURN_STREAM_CUT,
     TURN_FORCE_FINAL, TURN_STALL, TURN_EMPTY, TURN_ESC, TURN_MALFORMED_CALL,
     TURN_API_ERROR, TURN_LENGTH_CUT, TURN_TIMED_OUT, TURN_TIMED_OUT_RETRY,
+    TURN_GAVE_UP,
     CONTINUATION_NUDGE, TRUNCATION_MARKER,
     _ctx_field,
     _ensure_ctx_probe, _print_stats_footer, _handle_forced_final_tool_call,

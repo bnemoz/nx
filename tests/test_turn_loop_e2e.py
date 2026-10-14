@@ -41,11 +41,9 @@ os.environ.setdefault("NX_SKIP_STARTUP_PROBES", "1")
 for _k in ("NX_BASE_URL", "NX_MODEL", "NX_API_KEY", "NX_SOURCES", "NX_ACTIVE"):
     os.environ.pop(_k, None)
 
-import pytest  # noqa: E402
-
 import nx as m  # noqa: E402
 from nx import _state as st  # noqa: E402
-from nx._turn_status import TURN_DONE  # noqa: E402
+from nx._turn_status import TURN_DONE, TURN_GAVE_UP  # noqa: E402
 
 INSTRUCTION = ("e2e-turn-loop: run `echo ok > e2e_marker.txt` with run_bash, "
                "then confirm the marker file exists.")
@@ -359,17 +357,13 @@ def _assert_honest_cut(summary, messages, start_idx):
                     f"cut stream appended a tool call to the history: {tc}")
 
 
-# BUG (open): a mid-stream connection abort is NOT an httpx timeout, so it
-# never reaches the P3-2 TURN_TIMED_OUT path; it falls into model_turn()'s
-# malformed-stream ladder and, once that ladder is exhausted, model_turn()
-# returns TURN_DONE ("waiting for user input", nx/_turn.py ~line 685) and the
-# loop reports status "done" — exactly the dishonest-done this file exists to
-# catch. Marked xfail(strict=True) per the honest-result rule: when nx/ fixes
-# the ladder to return an error status, this test XPASSes and pytest flags
-# the marker for removal. Note the history is NOT poisoned (no half-parsed
-# tool call survives — the discard is honest; only the STATUS is wrong).
-@pytest.mark.xfail(strict=True, reason="mid-stream connection abort reports status done "
-                   "(malformed-stream ladder exhaustion, nx/_turn.py TURN_DONE path)")
+# Pinned invariant (honest-result rule): a mid-stream connection abort is NOT
+# an httpx timeout, so it never reaches the P3-2 TURN_TIMED_OUT path — it falls
+# into model_turn()'s malformed-stream ladder, and once that ladder is exhausted
+# the turn must NOT be reported as a completed one. Since 0.154.6 the ladder
+# exhaustion returns the honest TURN_GAVE_UP and the loop reports status "error"
+# naming the transport cause, so this test asserts directly (no xfail). The
+# history is also NOT poisoned: no half-parsed tool call survives the cut.
 def test_e2e_midstream_aborted_connection_honest_error(tmp_path, monkeypatch):
     # A valid stream start — the tool-call header delta + a PARTIAL args
     # fragment — then the connection dies WITHOUT [DONE]. If the loop
@@ -393,15 +387,63 @@ def test_e2e_midstream_aborted_connection_honest_error(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 4. REPL-side half of the principle: a finished turn is reported by the same
+#    TURN_* vocabulary in BOTH modes, never by a headless-only branch.
+# ---------------------------------------------------------------------------
+
+def test_repl_side_exhausted_ladder_is_not_a_done_turn(tmp_path, monkeypatch):
+    """ONE loop, ONE vocabulary: the honest status is produced by model_turn()
+    itself, so the REPL caller only has to end the turn and return to the
+    prompt (user takes over). The bug was that this gave-up state was reported
+    as TURN_DONE — indistinguishable from a completed task — and the REPL only
+    looked benign by accident.
+
+    Exhausts the malformed-stream ladder (same cut script as scenario 2) and
+    pins the vocabulary the REPL consumes:
+      • model_turn() returns TURN_GAVE_UP, NOT TURN_DONE;
+      • the turn loop reports a non-"done" summary (a REPL caller ends the
+        turn either way — no new user-visible state);
+      • the recorded cause names the transport failure, not silence.
+    """
+    from nx._turn import _LAST_GIVE_UP_CAUSE
+    frames = [
+        _sse(_chunk({"tool_calls": [{"index": 0, "id": "call_cut_0",
+                                     "type": "function",
+                                     "function": {"name": "run_bash",
+                                                  "arguments": "{\"comm"}}]})),
+        _sse(_chunk({"tool_calls": [{"index": 0, "function":
+                                     {"arguments": "and\": \"echo hal"}}]})),
+    ]
+    server = _StubServer([{"frames": frames, "cut_after": len(frames)}])
+    server.start()
+    try:
+        _stub_env(server, tmp_path, monkeypatch)
+        # (a) the vocabulary model_turn() itself returns on the give-up call —
+        # the retry budget is already spent (malformed_stream_cut_count at the
+        # limit), which is exactly the loop's last attempt.
+        limit = max(0, st.MALFORMED_STREAM_RETRY_LIMIT)
+        messages = m._initial_messages() + [{"role": "user", "content": INSTRUCTION}]
+        status = m.model_turn(messages, 0, limit)
+        assert status != TURN_DONE, (
+            "an exhausted-ladder give-up is not a completed turn — the REPL "
+            f"would return to the prompt believing the task finished: {status!r}")
+        assert status == TURN_GAVE_UP, status
+        assert _LAST_GIVE_UP_CAUSE, "the give-up cause must be recorded for the summary"
+        # (b) the same driver path the other scenarios use: the summary the
+        # REPL loop consumes is not "done" either.
+        summary, _msgs = _drive_turn()
+        assert summary["status"] != TURN_DONE, summary
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
 # 3. mid-stream HTTP error frame -> honest error, never done
 # ---------------------------------------------------------------------------
 
-# Same open bug as scenario 2: the error frame + stream drop exhausts the
-# malformed-stream ladder and lands on the TURN_DONE "waiting for user
-# input" path — status "done" for a cut stream. xfail(strict=True) until
-# nx/ surfaces it as an error.
-@pytest.mark.xfail(strict=True, reason="mid-stream error frame reports status done "
-                   "(malformed-stream ladder exhaustion, nx/_turn.py TURN_DONE path)")
+# Same pinned invariant as scenario 2: the error frame + stream drop exhausts
+# the malformed-stream ladder, and since 0.154.6 that exhaustion returns the
+# honest TURN_GAVE_UP (loop -> status "error"), never a done turn.
 def test_e2e_midstream_http_error_frame(tmp_path, monkeypatch):
     # After valid deltas the stub emits an SSE error frame and drops the
     # stream without [DONE] — the shape nx/_stream_errors.py classifies as a

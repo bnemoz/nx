@@ -464,7 +464,7 @@ wheels = [
 
 [[package]]
 name = "nx"
-version = "0.154.4"
+version = "0.154.6"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

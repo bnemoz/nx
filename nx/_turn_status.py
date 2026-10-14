@@ -22,6 +22,14 @@ TURN_API_ERROR = "api_error"  # request hard-failed before any chunk (endpoint d
 TURN_CONTEXT_OVERRUN = "context_overrun"  # 400: prompt exceeded the context window — recoverable via one compress+retry
 TURN_LENGTH_CUT = "length_cut"  # finish_reason=length: the model's response budget ran out mid-stream — auto-continue it
 TURN_TIMED_OUT = "timed_out"  # mid-stream timeout after the step-retry ladder was exhausted — a real failure, scored as one
+# 0.154.6: a NON-timeout mid-stream cut (transport abort, SSE error frame,
+# degenerated special-token/repetition collapse, reasoning-only stall) whose
+# recovery ladder is exhausted with nothing usable produced. Distinct from
+# TURN_STREAM_CUT, which is RETRYABLE (the loop re-opens the request on it) —
+# reusing it here would spin forever. The loop maps this to summary status
+# "error" exactly like TURN_TIMED_OUT: headless callers (nx run, nx eval,
+# sub-agents) must never score a truncated, never-completed task as "done".
+TURN_GAVE_UP = "gave_up"
 TURN_TIMED_OUT_RETRY = "timed_out_retry"  # mid-stream timeout with ladder left — the loop backs off and re-opens the same request
 TURN_STEER = "steer"  # 0.105.0: the user typed a steering note mid-turn — inject it and keep the turn alive
 TRUNCATION_MARKER = "\n\n[Truncated by token limit before completion.]"
