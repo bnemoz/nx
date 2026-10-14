@@ -867,34 +867,23 @@ def _inline_fix(run: _BuildRun, finding: str) -> bool:
 def _ask_main_model(run: _BuildRun, finding: str) -> dict | None:
     """One no-tools side call to the session's active model, returning the full
     new content of the single file the finding names. Mirrors the shape of
-    `_risk`'s classifier call: never the turn loop, never the user."""
+    `_risk`'s classifier call: never the turn loop, never the user. The call
+    machinery is the shared nx/_sidecall.py helper (0.156.3); this keeps the
+    /build-specific payload and the failure mapping (None + a run note).
+    loose_json: this model answers prose-wrapped, so the helper brace-slices
+    to the outermost {...} before parsing."""
     if st.client is None or st.MODEL is None:
         return None
     from ._prompts import BUILD_FIX_SYSTEM
-    payload = [{"role": "system", "content": BUILD_FIX_SYSTEM},
-               {"role": "user", "content":
-                f"FINDING:\n{finding}\n\nSPEC CONTEXT:\n{run.spec[:2000]}"}]
-    try:
-        resp = st.client.chat.completions.create(
-            model=st.MODEL, messages=payload, stream=False, timeout=120,
-            **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
-    except Exception:  # noqa: BLE001 — a failed side call is a finding, not a crash
-        _note(run, "  inline fix: the model call failed")
+    from ._sidecall import side_call_json
+    obj, _raw = side_call_json(
+        BUILD_FIX_SYSTEM,
+        f"FINDING:\n{finding}\n\nSPEC CONTEXT:\n{run.spec[:2000]}",
+        timeout=120, purpose="build_fix", loose_json=True)
+    if obj is None:
+        _note(run, "  inline fix: the model call failed or did not answer JSON")
         return None
-    try:
-        from ._metrics import _record_api_call
-        text = (resp.choices[0].message.content or "").strip()
-        _record_api_call(resp, fallback_chars=len(text))
-    except Exception:  # noqa: BLE001 — a failed reply is just no fix
-        return None
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        obj = json.loads(text[start:end + 1])
-    except ValueError:
-        return None
-    return obj if isinstance(obj, dict) else None
+    return obj
 
 
 # --------------------------------------------------------------------------

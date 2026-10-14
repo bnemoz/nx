@@ -263,7 +263,6 @@ def _consult_advisor(**args: Any) -> str:
     compact decision+guidance string; on timeout/malformed/exhausted budget
     returns an ERROR string telling the executor to take the conservative
     option and log a deviation (its own failure mode, not a hard stop)."""
-    import json as _json
     import time as _time
     ctx = _subagent_ctx()
     if ctx is None:
@@ -288,43 +287,31 @@ def _consult_advisor(**args: Any) -> str:
         opts = "\n".join(f"- {o}" for o in options if str(o).strip())
     user = (f"Question: {question}\n\nOptions:\n{opts or '(none given)'}\n\n"
             f"Context: {digest or '(none given)'}")
-    payload = [{"role": "system", "content": ADVISOR_SYSTEM},
-               {"role": "user", "content": user}]
     deadline = _time.monotonic() + _consult_timeout()
-    from ._openai_client import APIConnectionError
+    # The raw call + metrics recording live in the shared helper; this
+    # function keeps the budget spend above, the deadline below, and the
+    # two-round-trip ladder shape: an unusable reply (unparseable, or valid
+    # JSON naming no decision) re-asks once — same ladder philosophy as
+    # _risk, but cheaper: an advisor fallback is a logged deviation, not a
+    # gate. conn_retries is the seconds left before the deadline at the old
+    # ~1s cadence, so a flapping connection retries until the deadline.
+    from ._sidecall import side_call_json
     last_err = ""
-    # One parse retry — same ladder philosophy as _risk._assess_risk, but
-    # cheaper: an advisor fallback is a logged deviation, not a gate.
     for _attempt in range(2):
-        resp = None
-        while _time.monotonic() < deadline:
-            try:
-                resp = st.client.chat.completions.create(
-                    model=st.MODEL, messages=payload, stream=False,
-                    timeout=max(1, int(deadline - _time.monotonic())),
-                    **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
-            except APIConnectionError:
-                _time.sleep(1)
-            # A reply that only arrives after the deadline is a timeout too —
-            # discard it and fall back rather than acting on stale guidance.
-            if resp is not None and _time.monotonic() >= deadline:
-                resp = None
-            if resp is not None:
-                break
-        if resp is None:
+        if _time.monotonic() >= deadline:
+            break
+        obj, raw = side_call_json(
+            ADVISOR_SYSTEM, user,
+            timeout=max(1, int(deadline - _time.monotonic())),
+            purpose="advisor_consult",
+            conn_retries=max(0, int(deadline - _time.monotonic())),
+            conn_retry_seconds=1.0)
+        # A reply that only arrives after the deadline is a timeout too —
+        # discard it and fall back rather than acting on stale guidance.
+        if _time.monotonic() >= deadline:
             return ("ERROR: advisor did not answer in time — take the "
                     "conservative option and log it under '## Deviations'")
-        text = (resp.choices[0].message.content or "").strip()
-        try:
-            from ._metrics import _record_api_call
-            _record_api_call(resp,
-                             fallback_chars=len(text),
-                             fallback_prompt_chars=lambda: sum(
-                                 len(str(m.get("content") or "")) for m in payload))
-        except Exception:
-            pass
-        try:
-            obj = _json.loads(text)
+        if obj is not None:
             decision = str(obj.get("decision") or "").strip()
             guidance = str(obj.get("guidance") or "").strip()
             stop = bool(obj.get("stop"))
@@ -337,8 +324,8 @@ def _consult_advisor(**args: Any) -> str:
                             "in implementation-notes.md and report back to the parent")
                 return out
             last_err = "advisor reply missing decision"
-        except (_json.JSONDecodeError, AttributeError, TypeError):
-            last_err = f"unparseable advisor reply: {text[:200]}"
+        else:
+            last_err = f"unparseable advisor reply: {(raw or '(no output)')[:200]}"
     return (f"ERROR: advisor reply unusable ({last_err}) — take the "
             "conservative option and log it under '## Deviations'")
 

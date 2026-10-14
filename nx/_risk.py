@@ -15,10 +15,10 @@ import re
 import shlex
 import shutil
 import subprocess
-import time
 from typing import Any
 
-from ._openai_client import APIConnectionError
+# re-bound seam: the classifier call moved to nx/_sidecall.py (0.156.3) but
+# tests patch THIS module's _log_event binding — _assess_risk passes it in.
 from ._logging import _log_event
 from ._prompts import RISK_SYSTEM  # the risk-classifier prompt lives in the prompt registry
 from . import _state as st
@@ -334,73 +334,47 @@ def _risk_user_message(action: str) -> str:
     return json.dumps(msg, sort_keys=True)
 
 
+# Appended to the payload between parse attempts when the classifier answers
+# in prose — the sharp follow-up that usually forces a parseable reply.
+_RISK_RETRY_PROMPT = (
+    "Respond with ONLY a single JSON object containing \"level\" and \"reason\" fields. "
+    "No preamble, no explanation, no markdown. Example:\n"
+    '{"level": "medium", "reason": "edits a file in the project"}'
+)
+
+
 def _assess_risk(action: str) -> tuple[str, str]:
     """Return (level, reason). level is one of LEVEL_ORDER; reason is a short
     string. On any failure (server down, bad JSON, unknown level) returns
-    ("high", "<error>") so the caller falls through to the prompt path."""
+    ("high", "<error>") so the caller falls through to the prompt path.
+
+    0.156.3: the call/payload/metrics/parse-retry mechanics live in the
+    shared nx/_sidecall.py helper; this function keeps everything
+    risk-specific: the connection-retry ladder knobs, the regex level-word
+    fallback over raw text (the classifier often answers in prose), and the
+    conservative high default."""
     if st.client is None or st.MODEL is None:
         return ("high", "no active source; defaulting to high")
-    payload = [
-        {"role": "system", "content": RISK_SYSTEM},
-        {"role": "user", "content": _risk_user_message(action)},
-    ]
-    max_conn = max(0, st.RISK_CONNECTION_RETRIES) + 1
-    max_parse = 3
-    conn_attempts_used = 0
-    text = ""
-    try:
-        for parse_attempt in range(max_parse):
-            resp = None
-            while conn_attempts_used < max_conn:
-                try:
-                    _log_event("req", {"model": st.MODEL, "messages": payload,
-                                       "stream": False, "_purpose": "risk",
-                                       "_attempt": conn_attempts_used + 1,
-                                       "_parse_attempt": parse_attempt + 1})
-                    resp = st.client.chat.completions.create(
-                        model=st.MODEL, messages=payload, stream=False, timeout=15,
-                        **(st.ACTIVE.extra_request_kwargs() if st.ACTIVE else {}))
-                    break
-                except APIConnectionError:
-                    conn_attempts_used += 1
-                    if conn_attempts_used >= max_conn:
-                        return ("high", f"server unreachable after {max_conn} attempts; defaulting to high")
-                    time.sleep(max(0, st.RISK_CONNECTION_RETRY_SECONDS))
-            if resp is None:
-                return ("high", "no response; defaulting to high")
-            try:
-                _log_event("resp", {"_purpose": "risk", "data": resp.model_dump()})
-            except Exception:
-                pass
-            text = (resp.choices[0].message.content or "").strip()
-            # 2.5: side-calls are real usage. The risk classifier runs up to
-            # three parse retries per approval, every one on the user's bill —
-            # record it into the same totals /cost prints.
-            from ._metrics import _record_api_call
-            _record_api_call(
-                resp,
-                fallback_chars=len(text),
-                fallback_prompt_chars=lambda: sum(len(str(m.get("content") or "")) for m in payload),
-            )
-            level, reason = None, ""
-            try:
-                obj = json.loads(text)
-                level = (obj.get("level") or "").strip().lower()
-                reason = (obj.get("reason") or "").strip()
-            except (json.JSONDecodeError, AttributeError, TypeError):
-                if m := re.search(r'\b(low|medium|high)\b', text, re.IGNORECASE):
-                    level = m.group(1).lower()
-                reason = text[:120]
-            if level in LEVEL_ORDER:
-                return (level, reason or level)
-            # Unparseable — add a sharp follow-up instruction and retry
-            if parse_attempt < max_parse - 1:
-                payload.append({"role": "assistant", "content": text or "(no output)"})
-                payload.append({"role": "user", "content": (
-                    "Respond with ONLY a single JSON object containing \"level\" and \"reason\" fields. "
-                    "No preamble, no explanation, no markdown. Example:\n"
-                    '{"level": "medium", "reason": "edits a file in the project"}'
-                )})
-        return ("high", f"unparseable risk response after {max_parse} attempts: {text[:80]!r}")
-    except Exception as e:
-        return ("high", f"risk call failed: {type(e).__name__}")
+    from ._sidecall import side_call_json
+    obj, raw = side_call_json(
+        RISK_SYSTEM, _risk_user_message(action), timeout=15,
+        parse_attempts=3, retry_prompt=_RISK_RETRY_PROMPT, purpose="risk",
+        conn_retries=st.RISK_CONNECTION_RETRIES,
+        conn_retry_seconds=max(0.0, float(st.RISK_CONNECTION_RETRY_SECONDS)),
+        log_event=_log_event)
+    level, reason = None, ""
+    if obj is not None:
+        level = str(obj.get("level") or "").strip().lower()
+        reason = str(obj.get("reason") or "").strip()
+    elif raw:
+        # Never parsed as JSON — a bare level word in prose is still
+        # actionable. (Skipped when JSON parsed but named no known level:
+        # matching inside a stray word like "the highest risk" would be
+        # guessing, and guessing low is the failure mode this gate exists
+        # to prevent.)
+        if m := re.search(r'\b(low|medium|high)\b', raw, re.IGNORECASE):
+            level = m.group(1).lower()
+        reason = raw[:120]
+    if level in LEVEL_ORDER:
+        return (level, reason or level)
+    return ("high", f"unparseable risk response after 3 attempts: {raw[:80]!r}")

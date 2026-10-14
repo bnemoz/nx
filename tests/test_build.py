@@ -634,3 +634,84 @@ def test_keyboard_interrupt_aborts_cleanly(tmp_path, monkeypatch):
     root = B._build_root(str(repo))
     runs = [d for d in os.listdir(root) if d.startswith("build-")]
     assert runs and os.path.exists(os.path.join(root, runs[0], "ABORTED.md"))
+
+
+# --- _ask_main_model via the shared side call (0.156.3) ----------------------
+
+class _SideResp:
+    def __init__(self, text):
+        import types as _t
+        self.choices = [_t.SimpleNamespace(
+            message=_t.SimpleNamespace(content=text))]
+
+    def model_dump(self):
+        return {}
+
+
+class _SideClient:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    class _Chat:
+        def __init__(self, outer):
+            self._outer = outer
+
+        class _Completions:
+            def __init__(self, outer):
+                self._outer = outer
+
+            def create(self, **kw):
+                self._outer.calls.append(dict(kw))
+                item = self._outer.replies.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return _SideResp(item)
+
+        @property
+        def completions(self):
+            return self._Completions(self._outer)
+
+    @property
+    def chat(self):
+        return self._Chat(self)
+
+
+def _ask(monkeypatch, replies):
+    monkeypatch.setattr(st, "ACTIVE", None, raising=False)
+    monkeypatch.setattr(st, "MODEL", "test-model", raising=False)
+    c = _SideClient(replies)
+    monkeypatch.setattr(st, "client", c, raising=False)
+    run = B._BuildRun("/nonexistent", "issue", False, False, False)
+    run.spec = "SPEC BODY"
+    return c, run
+
+
+def test_ask_main_model_accepts_prose_wrapped_json(monkeypatch):
+    # brace-slice tolerance is load-bearing: the fix model answers in prose
+    c, run = _ask(monkeypatch, ['Sure:\n{"path": "nx/mod.py", "content": "x = 2"}\nDone!'])
+    obj = B._ask_main_model(run, "a finding")
+    assert obj == {"path": "nx/mod.py", "content": "x = 2"}
+    call = c.calls[0]
+    assert call["stream"] is False
+    assert call["timeout"] == 120
+    assert "a finding" in call["messages"][1]["content"]
+    assert "SPEC BODY" in call["messages"][1]["content"]
+
+
+def test_ask_main_model_failure_is_none_with_note(monkeypatch):
+    c, run = _ask(monkeypatch, [RuntimeError("boom")])
+    assert B._ask_main_model(run, "a finding") is None
+    assert any("inline fix" in n for n in run.notes)
+
+
+def test_ask_main_model_non_json_is_none(monkeypatch):
+    _ask(monkeypatch, ["I cannot help with that."])
+    run = B._BuildRun("/nonexistent", "issue", False, False, False)
+    assert B._ask_main_model(run, "a finding") is None
+
+
+def test_ask_main_model_no_source_is_none(monkeypatch):
+    monkeypatch.setattr(st, "client", None, raising=False)
+    run = B._BuildRun("/nonexistent", "issue", False, False, False)
+    assert B._ask_main_model(run, "a finding") is None
