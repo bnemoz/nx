@@ -571,10 +571,9 @@ class MemoryView(View):
         target, view = note["name"], self
 
         def _act() -> None:
-            from ._render import commit_line
-            for line in memory_delete(target, scope="project").split("\n"):
-                commit_line(line)
+            result = memory_delete(target, scope="project", confirm=False)
+            view.notice = result.split("\n")[0]
             view.refresh()
 
         self.pending_action = _act
-        return "run"
+        return "run_stay"

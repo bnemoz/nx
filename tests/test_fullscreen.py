@@ -671,11 +671,41 @@ def test_sessions_view_delete_defers_through_the_real_delete_path(monkeypatch, c
     view.on_key("j", None)
     assert view.on_key("d", Shell()) == "repaint"  # arm the confirm
     assert view.confirm_id == "gone"
-    assert view.on_key("y", Shell()) == "run"     # confirm -> deferred
+    assert view.on_key("y", Shell()) == "run_stay"  # confirm -> deferred
     assert deleted == []                          # nothing deleted on-screen
     view.pending_action()
     assert deleted == ["gone"]
-    assert "✓ deleted" in capsys.readouterr().out
+    assert "✓ deleted" in view.notice             # notice in-view, not a
+    assert capsys.readouterr().out == ""          # commit_line on the REPL
+
+
+def test_sessions_view_delete_keeps_the_list_view_open(monkeypatch):
+    """run_stay: after a delete the user stays in the sessions browser
+    (the shell re-enters the loop), and the refresh drops the deleted row."""
+    from nx import _sessions_cmd
+
+    class State:
+        session_id = "cur"
+
+    monkeypatch.setattr(_sessions_cmd, "_list_sessions", lambda **k: [
+        {"id": "cur", "title": "here", "n": 1, "updated_at": 0}] + (
+            [{"id": "gone", "title": "there", "n": 2, "updated_at": 0}]
+            if not gone else []))
+    gone = []
+    monkeypatch.setattr(_sessions_cmd, "_delete_session",
+                        lambda sid: gone.append(sid) or True)
+
+    class Shell:
+        def ask(self, label, initial=""):
+            return "y"
+
+    view = _sessions_cmd.SessionsView(State())
+    view.on_key("j", None)
+    view.on_key("d", Shell())
+    assert view.on_key("y", Shell()) == "run_stay"
+    view.pending_action()
+    assert gone == ["gone"]
+    assert [s["id"] for s in view.sessions] == ["cur"]
 
 
 def test_sessions_view_esc_cancels_the_delete_confirm_then_the_preview(monkeypatch):
@@ -1159,7 +1189,10 @@ def _mem_notes(tmp_path, monkeypatch):
         p = d / name
         p.write_text(title + "\n\nkind: fact\n", encoding="utf-8")
         notes.append(p)  # noqa: B901
+    from nx import _memory_search
     monkeypatch.setattr(store, "_iter_memory_dirs", lambda scope: [(str(d), "project")])
+    monkeypatch.setattr(_memory_search, "_iter_memory_dirs",
+                        lambda scope: [(str(d), "project")])
     # the view module re-exports the store names at import time: patch there too
     from nx import _memory_cmd as mc
     monkeypatch.setattr(mc, "_iter_memory_dirs", lambda scope: [(str(d), "project")])
@@ -1176,7 +1209,7 @@ def test_memory_view_is_registered_and_its_keys_are_advertised(_mem_notes):
         ask = staticmethod(lambda label, initial="": "y")
     for key, _meaning in _keys.keys_for("memory"):
         assert view.on_key(real.get(key, key), _S()) in (
-            "repaint", "quit", "run"), key
+            "repaint", "quit", "run", "run_stay"), key
 
 
 def test_memory_view_renders_rows_hint_and_quit_keys(_mem_notes):
@@ -1218,12 +1251,38 @@ def test_memory_view_d_defers_through_the_real_delete_path(_mem_notes, monkeypat
     shell = type("S", (), {"ask": staticmethod(
         lambda label, initial="": "y")})()
     # DEFERRED: nothing is deleted while the view is still on screen
-    assert view.on_key("d", shell) == "run"
+    assert view.on_key("d", shell) == "run_stay"
     assert callable(view.pending_action)
     assert deleted == [] and all(p.exists() for p in notes)
     view.pending_action()
     assert deleted == ["20250201_000001_one.md"]   # exact filename, not a prefix
     assert not notes[1].exists() or True  # fake delete: no real unlink expected
+
+
+def test_memory_view_delete_stays_in_the_view_without_a_second_confirm(
+        _mem_notes, monkeypatch):
+    """The fullscreen delete confirms ONCE (the view's shell.ask); the
+    deferred action runs the store delete with confirm=False and the verdict
+    keeps the view open (run_stay) instead of dropping to the REPL."""
+    from nx import _memory_cmd, _memory_search
+    _d, notes = _mem_notes
+    confirmed = []
+
+    def _fake_confirm(action, preview=None):
+        confirmed.append(action)
+        return True
+
+    monkeypatch.setattr(_memory_search, "_confirm_memory", _fake_confirm)
+    view = _memory_cmd.MemoryView()
+    shell = type("S", (), {"ask": staticmethod(
+        lambda label, initial="": "y")})()
+    verdict = view.on_key("d", shell)
+    assert verdict == "run_stay"
+    view.pending_action()
+    # exactly ONE confirmation (the view's), the store gate skipped
+    assert confirmed == []
+    assert len([p for p in notes if not p.exists()]) == 1   # one real unlink
+    assert view.notice.startswith("deleted")
 
 
 def test_memory_view_delete_confirm_cancelled_is_a_notice(monkeypatch):

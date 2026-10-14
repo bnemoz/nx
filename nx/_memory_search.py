@@ -219,7 +219,8 @@ def memory_search(query: str, scope: str = "project", **_: Any) -> str:
     return "\n".join(out)
 
 
-def memory_delete(target: str, scope: str = "project", **_: Any) -> str:
+def memory_delete(target: str, scope: str = "project", confirm: bool = True,
+                  **_: Any) -> str:
     """Delete one saved memory note by exact title, filename, or unique title
     prefix. An ambiguous or unknown target returns candidate titles instead of
     deleting. Goes through the approval gate like memory_write; on success it
@@ -265,7 +266,7 @@ def memory_delete(target: str, scope: str = "project", **_: Any) -> str:
         size = os.path.getsize(path)
     except OSError:
         size = 0
-    if not _confirm_memory(
+    if confirm and not _confirm_memory(
             f"delete memory {path} ({size} bytes)",
             preview=_memory_confirm_preview(chosen.title, _read_note_preview(path))):
         return "DENIED by user"

@@ -781,7 +781,8 @@ class SessionsView(_fullscreen.View):
         return lines[:height]
 
     def on_key(self, key: str, shell) -> str:
-        self.notice = ""
+        if key != "y" or self.confirm_id is None:
+            self.notice = ""
         if key == "j/k":
             # `_keys` advertises the pair as ONE hint label ("j/k move"); the
             # label is not a key, and the two real keys are handled below.
@@ -845,14 +846,13 @@ class SessionsView(_fullscreen.View):
             return "repaint"
 
         def _act() -> None:
-            from ._render import commit_line
             ok = _delete_session(sid)
-            commit_line(f"  {'✓ deleted' if ok else '✗ could not delete'} "
-                        f"session {sid}")
+            self.notice = (f"✓ deleted session {sid[:12]}" if ok
+                           else f"✗ could not delete session {sid[:12]}")
             self.refresh()
 
         self.pending_action = _act
-        return "run"
+        return "run_stay"
 
     def _resume(self) -> str:
         if not self.sessions:

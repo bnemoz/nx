@@ -298,7 +298,11 @@ class View:
     terminal (the shell does), never mutates state, and never handles keys the
     shell reserves (`?` overlay, Esc/quitter). A view that needs a mutation
     returns "run" from `on_key` after setting `pending_action` to a zero-arg
-    callable; the shell leaves the alternate screen and then runs it.
+    callable; the shell leaves the alternate screen and then runs it. A
+    mutation that should keep the view open returns "run_stay" instead: the
+    action still runs only after the alternate screen is left (a gate's y/n
+    prompt never paints into it), but the shell re-enters the loop with the
+    same view afterwards (e.g. a delete that stays in the list).
     """
 
     #: `_keys.py` surface name — the key list both the hint line and the `?`
@@ -318,8 +322,10 @@ class View:
         raise NotImplementedError
 
     def on_key(self, key: str, shell: "Shell") -> str:
-        """Handle one key: return "repaint", "quit", or "run" (then the shell
-        runs `pending_action` after leaving the alternate screen)."""
+        """Handle one key: return "repaint" (stay in the loop), "run_stay"
+        (run `pending_action`, then resume the loop in this view), "quit", or
+        "run" (then the shell runs `pending_action` after leaving the
+        alternate screen and exits the loop)."""
         return "repaint"
 
     def take_action(self) -> Optional[Callable[[], None]]:
@@ -509,6 +515,24 @@ def run_view(view: View, *, fd: Optional[int] = None, out=None,
                     if verdict == "run":
                         action = view.take_action()
                         break
+                    if verdict == "run_stay":
+                        # Mutate after leaving the alternate screen, then
+                        # re-enter the loop with the same view (delete that
+                        # stays in the list). No deferred action escapes.
+                        act = view.take_action()
+                        prev = []
+                        if act is not None:
+                            # Leave + re-enter the alternate screen around the
+                            # mutation so any commit/print lands on the normal
+                            # screen (same contract as a "run" action).
+                            out.write(ALT_EXIT)
+                            out.flush()
+                            try:
+                                act()
+                            finally:
+                                out.write(ALT_ENTER)
+                                out.flush()
+                        continue
     finally:
         if own_notifier and notifier is not None:
             notifier.close()
