@@ -139,6 +139,11 @@ def _run_job(nx_fresh, monkeypatch, final_text="Edited nx/x.py.\nEXIT_STATE: DON
                               _run_async_agent)
     monkeypatch.setattr(nx_fresh, "_run_model_turn_loop",
                         _fake_loop(nx_fresh, final_text))
+    # The fake loop never touches the tree, so the 0.108 outcome check would
+    # downgrade "done" to "partial" whenever PROJECT_ROOT happens to be a
+    # clean git repo (it failed open on a dirty tree or a non-repo before).
+    # Pin the outcome so the test owns the state it is asserting on.
+    monkeypatch.setattr("nx._subagent._agent_made_edits", lambda *_: True)
     jid = _new_job_id()
     with _ASYNC_LOCK:
         _ASYNC_AGENTS[jid] = {"instruction": "task", "status": "running",
