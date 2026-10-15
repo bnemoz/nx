@@ -165,7 +165,7 @@ def test_render_status_shows_the_auto_continue_chain_line(monkeypatch):
     try:
         text = cc.render_status()
         line = next(l for l in text.splitlines() if "auto-continue" in l)
-        assert "armed" in line and "wake 3/25" in line and "plan 3 pending" in line
+        assert "armed" in line and "wake 3/25" in line and "plan 2 pending" in line
         assert "held" not in line, "no guard tripped -> no held: part"
         # streak at the cap: the guard that parked the chain is named
         m.st._WAKE_STREAK = 25

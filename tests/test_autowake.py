@@ -665,23 +665,28 @@ def test_hold_notice_staged_on_streak_cap_trip():
 def test_hold_notice_is_idempotent_per_reason_and_streak():
     """The poller hits the same tripped guard every 2s tick — restaging the
     identical note each tick would refill the slot after every delivery and
-    spam the transcript. One (reason, streak) pair stages exactly once."""
+    spam the transcript. One (guard identity, streak) pair stages exactly
+    once — the key must not embed the formatted reason text (a wording change
+    would silently stop deduplicating)."""
     _clear_hold()
     m.st._WAKE_ARMED = True
     limit = _autowake._wake_streak_limit()
     m.st._WAKE_STREAK = limit
     try:
-        assert _autowake._stage_hold_notice("wake streak 25/25") is True
-        assert _autowake._stage_hold_notice("wake streak 25/25") is False
+        assert _autowake._stage_hold_notice("wake streak 25/25",
+                                            _autowake._HOLD_STREAK_CAP) is True
+        assert _autowake._stage_hold_notice("wake streak 25/25 again",
+                                            _autowake._HOLD_STREAK_CAP) is False
         # poll ticks: wake_due() re-trips the guard, the note stays single
         for _ in range(5):
             assert _autowake.wake_due() is False
-        assert _autowake._HOLD_STAGED == (f"wake streak {limit}/{limit}", limit)
-        # a different reason does get through (Phase C/D trip their own guard)
-        assert _autowake._stage_hold_notice("chain budget spent") is True
+        assert _autowake._HOLD_STAGED == (_autowake._HOLD_STREAK_CAP, limit)
+        # a different guard does get through (Phase C/D trip their own guard)
+        assert _autowake._stage_hold_notice("chain budget spent", "budget") is True
         # and once the streak resets, the same trip may explain itself again
         _autowake._HOLD_STAGED = None
-        assert _autowake._stage_hold_notice("wake streak 25/25") is True
+        assert _autowake._stage_hold_notice("wake streak 25/25",
+                                            _autowake._HOLD_STREAK_CAP) is True
     finally:
         m.st._WAKE_STREAK = 0
         _clear_hold()
@@ -715,7 +720,8 @@ def test_hold_notice_flushes_exactly_once():
     [Runtime note], slot cleared, and a second flush says nothing."""
     _clear_hold()
     try:
-        assert _autowake._stage_hold_notice("wake streak 25/25") is True
+        assert _autowake._stage_hold_notice("wake streak 25/25",
+                                            _autowake._HOLD_STREAK_CAP) is True
         msgs: list[dict] = []
         m._flush_pending_background_notice(msgs)
         assert len(msgs) == 1, msgs

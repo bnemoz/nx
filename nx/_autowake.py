@@ -104,14 +104,15 @@ CAMPAIGN_WAKE_INSTRUCTION = (
 _HOLD_STAGED: Optional[tuple[str, int]] = None
 
 
-def _stage_hold_notice(reason: str) -> bool:
+def _stage_hold_notice(reason: str, guard: str) -> bool:
     """Stage the one-line note that explains auto-continuation has parked
     (0.160.0, AUTOWAKE_SPEC Phase B). Called ONLY from a guard trip inside
     wake_due() — never from the poller's own hot path.
 
-    Idempotent per (reason, streak value): while one guard keeps tripping on
-    every poll tick the note stages exactly once, and it rides the normal flush
-    into the next prompt as a [Runtime note]. Returns True when newly staged.
+    Idempotent per (guard identity, streak value): while one guard keeps
+    tripping on every poll tick the note stages exactly once, and it rides the
+    normal flush into the next prompt as a [Runtime note]. Returns True when
+    newly staged.
 
     The slot is in _NON_WAKE_NOTICE_SLOTS, so staging it can never itself
     satisfy _any_pending_notice() — the anti-loop for a note that exists
@@ -120,7 +121,7 @@ def _stage_hold_notice(reason: str) -> bool:
     from . import _notices
     from ._runtime_notes import RUNTIME_NOTE_PREFIX
     streak = int(getattr(st, "_WAKE_STREAK", 0) or 0)
-    key = (reason, streak)
+    key = (guard, streak)
     if _HOLD_STAGED == key:
         return False
     _HOLD_STAGED = key
@@ -128,6 +129,12 @@ def _stage_hold_notice(reason: str) -> bool:
                   f"{RUNTIME_NOTE_PREFIX}auto-continuation stopped: {reason} "
                   f"\u2014 type to continue]")
     return True
+
+
+# Guard identities for the hold-notice idempotency key. The key must not
+# embed the formatted reason text: a wording change would silently stop
+# deduplicating (review finding, 0.160.0).
+_HOLD_STREAK_CAP = "streak_cap"
 
 
 def _release_hold_key(streak: int, limit: int) -> None:
@@ -309,6 +316,11 @@ def wake_due() -> bool:
     also calls this) would find it again every 2s. A sweep that comes back
     empty therefore means "nothing left to say" — no wake."""
     if not _wake_enabled() or not getattr(st, "_WAKE_ARMED", False):
+        # Also forget a stale hold key: if wakes were disabled mid-chain and
+        # the session re-arms later with a restored streak, the old key must
+        # not suppress a fresh explanation (review finding, 0.160.0).
+        global _HOLD_STAGED
+        _HOLD_STAGED = None
         return False
     # Chain guard (0.121.0): every other guard here is a LIVENESS guard (it
     # stops wake-loops with nothing to say); a wake turn that legitimately
@@ -322,7 +334,7 @@ def wake_due() -> bool:
         # The trip is no longer silent (0.160.0): say once WHY the chain
         # parked. The note rides the next real prompt and can never itself
         # wake (_NON_WAKE_NOTICE_SLOTS).
-        _stage_hold_notice(f"wake streak {_streak}/{_limit}")
+        _stage_hold_notice(f"wake streak {_streak}/{_limit}", _HOLD_STREAK_CAP)
         return False
     _release_hold_key(_streak, _limit)
     if st._WAKE_DUE:

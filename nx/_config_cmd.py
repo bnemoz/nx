@@ -314,7 +314,7 @@ def render_status() -> str:
     _streak = int(getattr(st, "_WAKE_STREAK", 0) or 0)
     _limit = _wake_streak_limit()
     _pending = sum(1 for t in (getattr(st, "_TODOS", None) or [])
-                   if t.get("status") != "done")
+                   if t.get("status") == "pending")
     _held = f"{sep}held: streak" if _streak >= _limit else ""
     lines.append(f"{DIM}  auto-continue:{RESET} "
                  f"{'armed' if _awake else 'off'}"
