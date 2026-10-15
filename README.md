@@ -216,8 +216,9 @@ legacy per-session JSON files into the store by hand (idempotent; the files are
 kept as a backup). `nx sessions --prune` reconciles the store by hand: drops
 search rows whose transcript row vanished, collects unreferenced image payloads
 immediately (no age grace), and enforces the `NX_IMAGES_QUOTA_MB` cap — one
-line per action. `nx sessions --reindex` rebuilds the full-text body index to the
-current body schema (0.158.22) and exits — the manual form of a backfill that
+line per action. `nx sessions --reindex` (or bare `nx --reindex`) rebuilds the
+full-text body index to the current body schema (0.158.22) and exits — the
+manual form of a backfill that
 otherwise rides the amortized sweep. Needed once after the 0.158.19 change that
 stopped indexing nx's own injected blocks: stores indexed before it can still
 surface a stale `[Saved memories — …]` line through `recall_lessons`, and a session

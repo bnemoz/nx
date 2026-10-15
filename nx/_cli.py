@@ -21,7 +21,8 @@ from . import _state as st
 from ._turn import _ensure_ctx_probe, _run_model_turn_loop
 from . import _PROMPT_FILE, _PROMPT_TEXT, _JSON_OUTPUT, _initial_messages
 from ._repl import _repl
-from ._sessions_cmd import _cli_sessions, _cli_prune_sessions, _cli_tokens
+from ._sessions_cmd import (_cli_reindex_sessions, _cli_sessions,
+                            _cli_prune_sessions, _cli_tokens)
 from ._sessions_cmd import _cli_migrate_sessions
 from ._repl_state import _fresh_metrics
 from ._text_fallback import TOOL_PROTOCOL_TAG_RE, parse_text_calls_with_errors
@@ -44,7 +45,9 @@ Commands:
                  page; -p/-n also work). "nx sessions --prune" (or bare
                  `nx prune`) runs the store's GC by hand: reconcile vanished
                  rows, collect unreferenced image payloads, enforce
-                 NX_IMAGES_QUOTA_MB.
+                 NX_IMAGES_QUOTA_MB. "nx sessions --reindex" (or bare
+                 `nx --reindex`) rebuilds the search index to the current body
+                 schema and exits; idempotent.
   config         View/check the env layer: list [filter] / get NAME /
                  set NAME VALUE / path / doctor. Never touches the network,
                  so it works against a dead endpoint.
@@ -440,6 +443,12 @@ def main() -> None:
     if _cli_migrate_sessions(sys.argv[1:]):
         return
     if _cli_prune_sessions(sys.argv[1:]):
+        return
+    # `nx --reindex` / `nx sessions --reindex` — rebuild the FTS body index to
+    # the current body schema and exit (0.158.23). Same placement rule as
+    # --prune above: the flag must not reach _cli_sessions as a search query.
+    # The handler's own guard accepts the bare and `sessions`-prefixed forms.
+    if _cli_reindex_sessions(sys.argv[1:]):
         return
     # `nx sessions [query]` — discover + exit, no REPL. Checked first so
     # it short-circuits before the banner / network source resolution that the

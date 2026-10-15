@@ -484,6 +484,32 @@ def test_reindex_cli_does_the_whole_job_in_one_call(capsys):
     assert "nothing to reindex" in capsys.readouterr().out
 
 
+def test_bare_reindex_flag_routes_through_main(monkeypatch):
+    """`nx --reindex` reaches the handler via main() instead of falling
+    through to the REPL — the placement trap --prune documents (a later verb
+    could swallow the flag as a query). Handler faked; the assertion is about
+    routing order, not the backfill (pinned end-to-end by the two tests
+    above)."""
+    import sys
+
+    from nx import _cli
+    calls = {}
+
+    def fake(args):
+        calls["args"] = list(args)
+        return True
+    monkeypatch.setattr(_cli, "_cli_reindex_sessions", fake)
+    monkeypatch.setattr(_cli, "_repl",
+                        lambda *a, **k: pytest.fail("REPL launched: the "
+                                                   "--reindex flag fell "
+                                                   "through routing"))
+    monkeypatch.setattr(_cli, "_load_env_file", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(sys, "argv", ["nx", "--reindex"])
+    _cli.main()  # returns (does not raise): the handler returned True
+    assert calls.get("args") == ["--reindex"]
+
+
 def test_reindex_leaves_a_current_store_alone():
     _clear()
     sid = "20250101-120000-fb00d"
