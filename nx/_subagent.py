@@ -1554,6 +1554,16 @@ def spawn_agent(instruction: str, max_turns: Any = None, async_: Any = None,
         return ("ERROR: tier must be one of read/write/implement/advisor/critique "
                 "(or omit it — the default is read; NX_SUBAGENT_WRITE=1 only "
                 "permits an explicit write/implement/advisor tier)")
+    if t == "read" and tier is None and extra:
+        # 0.159.1: a mis-nested tier (e.g. {"params": {"tier": "write"}}) never
+        # reaches _normalize_tier — the named param stays None and the spawn
+        # silently ran as read-only (seen live). A read spawn that carries
+        # unknown keys is almost always exactly that: surface them instead of
+        # discarding, so the model retries with the tier at the top level.
+        return ("ERROR: unknown argument(s) " + ", ".join(sorted(extra)) +
+                " — if you meant to set the agent's tier, `tier` is a TOP-LEVEL "
+                "argument (tier=\"write\"), not nested inside another object; "
+                "retry with tier at the top level")
     # The default is a FLOOR, not just the omitted-value fallback (see the note
     # above SUBAGENT_TOOL): models routinely carry their own turn-budget notion
     # and pass a small max_turns for a broad sweep, then the agent dies mid-
