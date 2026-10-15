@@ -439,6 +439,12 @@ def nx_state_reset_body() -> None:
         st._WAKE_DUE = False
         st._WAKE_ARMED = False
         st._WAKE_STREAK = 0
+        # 0.162.0 (AUTOWAKE_SPEC Phase D): the chain cost accumulators are
+        # wake residue too — a leftover _WAKE_CHAIN_SPEND would trip the
+        # budget guard in an unrelated later test, and a stale _WAKE_CHAIN_BASE
+        # miscounts the first delta of the next chain.
+        st._WAKE_CHAIN_SPEND = 0
+        st._WAKE_CHAIN_BASE = 0
         # 0.161.0 (AUTOWAKE_SPEC Phase C): the plan-stall trigger's residue.
         # A leftover armed clock (_WAKE_STALL_AT) plus _campaign_pending()
         # state would make wake_due() True in a later test once the grace

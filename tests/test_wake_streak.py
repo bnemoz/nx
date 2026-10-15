@@ -34,10 +34,13 @@ def setup_function(_function):
     m.st._WAKE_PREFILL = ""
     m.st._TURN_ACTIVE = False
     m.st._WAKE_STREAK = 0
+    m.st._WAKE_CHAIN_SPEND = 0
+    m.st._WAKE_CHAIN_BASE = 0
     m.st._SPAWNED_WRITE_TIER = False
     m.st._TODOS = []
     os.environ["NX_WAKE_PROMPT"] = "1"
     os.environ.pop("NX_WAKE_STREAK_LIMIT", None)
+    os.environ.pop("NX_WAKE_CHAIN_TOKEN_BUDGET", None)
     _poller = getattr(_autowake, "_POLLER", None)
     if _poller is not None:
         try:
@@ -253,6 +256,135 @@ def test_spawn_agent_refused_write_tier_does_not_mark_the_flag(monkeypatch):
     out = m._subagent.spawn_agent("test", tier="write")
     assert "requires NX_SUBAGENT_WRITE=1" in out
     assert m.st._SPAWNED_WRITE_TIER is False
+
+
+# ---------------------------------------------------------------------------
+# 8. chain cost bound (0.162.0, AUTOWAKE_SPEC Phase D): the streak cap counts
+#    WAKES while cost per wake varies ~100x; NX_WAKE_CHAIN_TOKEN_BUDGET counts
+#    context tokens instead. Default 0 = off; negatives clamp to 0 (off).
+# ---------------------------------------------------------------------------
+
+_HOLD_SLOT = "_PENDING_WAKE_HOLD_NOTICE"
+
+
+def _chain_notice_staged():
+    from nx import _notices
+    return _notices.get(_HOLD_SLOT) or getattr(m.st, _HOLD_SLOT, None)
+
+
+def _clear_chain_hold():
+    from nx import _notices
+    _notices.set_(_HOLD_SLOT, None)
+    m.st._PENDING_WAKE_HOLD_NOTICE = None
+    _autowake._HOLD_STAGED = None
+
+
+def test_chain_budget_default_and_clamp():
+    # 0 = the documented default (off); a negative clamps to off, it cannot
+    # arm the guard by accident.
+    assert _autowake._wake_chain_budget() == 0
+    os.environ["NX_WAKE_CHAIN_TOKEN_BUDGET"] = "150000"
+    assert _autowake._wake_chain_budget() == 150000
+    os.environ["NX_WAKE_CHAIN_TOKEN_BUDGET"] = "-5"
+    assert _autowake._wake_chain_budget() == 0
+
+
+def test_budget_zero_never_trips():
+    # The no-behavior-change contract for existing users: an enormous spend
+    # with the budget unset (0) must not stop a productive chain.
+    m.st._WAKE_ARMED = True
+    m.st._WAKE_CHAIN_SPEND = 10 ** 12
+    m.st._PENDING_SUBAGENT_NOTICE = "[Runtime note: finished.]"
+    try:
+        assert _autowake.wake_due() is True
+    finally:
+        m.st._PENDING_SUBAGENT_NOTICE = None
+
+
+def test_budget_guard_trips_with_hold_notice_exactly_once():
+    _clear_chain_hold()
+    os.environ["NX_WAKE_CHAIN_TOKEN_BUDGET"] = "50000"
+    m.st._WAKE_ARMED = True
+    m.st._WAKE_CHAIN_SPEND = 50000  # exactly at budget -> trips (>=)
+    m.st._PENDING_SUBAGENT_NOTICE = "[Runtime note: finished.]"
+    try:
+        assert _autowake.wake_due() is False
+        note = _chain_notice_staged()
+        assert note is not None
+        assert "chain budget spent (50000/50000 tokens)" in note
+        # poll ticks re-trip the same guard every 2s; the (guard, streak) key
+        # stages the explanation exactly once (Phase B idempotency).
+        for _ in range(5):
+            assert _autowake.wake_due() is False
+        assert _autowake._HOLD_STAGED == (_autowake._HOLD_BUDGET, 0)
+        assert _chain_notice_staged() == note
+    finally:
+        m.st._PENDING_SUBAGENT_NOTICE = None
+
+
+def test_budget_below_trip_point_still_wakes():
+    os.environ["NX_WAKE_CHAIN_TOKEN_BUDGET"] = "50000"
+    m.st._WAKE_ARMED = True
+    m.st._WAKE_CHAIN_SPEND = 49999
+    m.st._PENDING_SUBAGENT_NOTICE = "[Runtime note: finished.]"
+    try:
+        assert _autowake.wake_due() is True
+    finally:
+        m.st._PENDING_SUBAGENT_NOTICE = None
+
+
+def test_typed_input_reset_reopens_a_budget_parked_chain():
+    # The contract the REPL's typed-input lines implement: the streak AND
+    # both chain accumulators reset together (_autowake.reset_chain_cost),
+    # and the trip key releases so a later chain explains itself again.
+    _clear_chain_hold()
+    os.environ["NX_WAKE_CHAIN_TOKEN_BUDGET"] = "50000"
+    m.st._WAKE_ARMED = True
+    m.st._WAKE_CHAIN_SPEND = 60000
+    m.st._PENDING_SUBAGENT_NOTICE = "[Runtime note: finished.]"
+    try:
+        assert _autowake.wake_due() is False
+        _autowake.reset_chain_cost()  # what the typed path calls
+        assert m.st._WAKE_CHAIN_SPEND == 0 and m.st._WAKE_CHAIN_BASE == 0
+        assert _autowake.wake_due() is True, "typed turn restarts the chain"
+        assert _autowake._HOLD_STAGED is None, "trip key released with the chain"
+    finally:
+        m.st._PENDING_SUBAGENT_NOTICE = None
+
+
+def test_note_chain_spend_adds_only_this_turns_delta():
+    # Wake start snapshots the baseline; the post-turn finally adds the delta
+    # once and RE-snapshots, so a multi-step turn's growth (already embedded
+    # in the final prompt-token reading) is attributed exactly once, and the
+    # next turn in the chain adds only its own growth.
+    m.st._WAKE_CHAIN_BASE = 10000
+    m.st._LAST_PROMPT_TOKENS = 14000
+    _autowake.note_chain_spend()
+    assert m.st._WAKE_CHAIN_SPEND == 4000
+    assert m.st._WAKE_CHAIN_BASE == 14000
+    m.st._LAST_PROMPT_TOKENS = 15000  # next wake turn of the chain
+    _autowake.note_chain_spend()
+    assert m.st._WAKE_CHAIN_SPEND == 5000
+
+
+def test_note_chain_spend_ignores_unknown_usage_and_shrink():
+    # No usage reported -> nothing to attribute. A context fold SHRINKS the
+    # reading -> max(0, delta) keeps it from paying spend back. A base of 0
+    # (the typed-input reset) never books the absolute reading.
+    m.st._WAKE_CHAIN_BASE = 0
+    m.st._LAST_PROMPT_TOKENS = 0
+    _autowake.note_chain_spend()
+    assert m.st._WAKE_CHAIN_SPEND == 0
+    m.st._WAKE_CHAIN_BASE = 10000
+    m.st._LAST_PROMPT_TOKENS = 8000
+    _autowake.note_chain_spend()
+    assert m.st._WAKE_CHAIN_SPEND == 0
+    assert m.st._WAKE_CHAIN_BASE == 8000
+    m.st._WAKE_CHAIN_BASE = 0
+    m.st._LAST_PROMPT_TOKENS = 12000
+    _autowake.note_chain_spend()
+    assert m.st._WAKE_CHAIN_SPEND == 0
+    assert m.st._WAKE_CHAIN_BASE == 12000
 
 
 if __name__ == "__main__":

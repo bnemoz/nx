@@ -457,6 +457,9 @@ def _repl() -> None:
             # interrupted.
             st._WAKE_STREAK = 0
             _m._autowake.clear_stall_state()
+            # Phase D (0.162.0): the chain's cost bound belongs to the chain
+            # just interrupted — the spend accumulator resets with the streak.
+            _m._autowake.reset_chain_cost()
         if wake:
             st._WAKE_DUE = False
             # The flag is advisory: a poller that decided mid-turn (its
@@ -468,6 +471,14 @@ def _repl() -> None:
             if not _m._autowake.wake_due(_stall_decision := {}):
                 continue
             st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
+            # Phase D (0.162.0): chain cost baseline — snapshot the live
+            # context reading (st._LAST_PROMPT_TOKENS, captured per step by
+            # _turn.py's _capture_last_prompt_tokens) so the post-turn
+            # finally attributes exactly this wake turn's growth to
+            # st._WAKE_CHAIN_SPEND, which wake_due() checks against
+            # NX_WAKE_CHAIN_TOKEN_BUDGET. getattr-default 0: a provider that
+            # reports no usage leaves the bound inert instead of miscounting.
+            st._WAKE_CHAIN_BASE = int(getattr(st, "_LAST_PROMPT_TOKENS", 0) or 0)
             # Phase C (0.161.0): a STALL wake stamps the plan revision it woke
             # for, at the same seam where the streak increments. That single
             # int is the trigger's terminator (at most one stall wake per plan
@@ -582,6 +593,12 @@ def _repl() -> None:
                 _m._autowake.note_turn_end(
                     isinstance(_turn_summary, dict)
                     and _turn_summary.get("status") == "done")
+            except Exception:
+                pass
+            # Phase D (0.162.0): the chain cost seam — same reason the stall
+            # clock lives here: this is where the turn's real end is known.
+            try:
+                _m._autowake.note_chain_spend()
             except Exception:
                 pass
             # EVENTSURFACE_SPEC guardrail, termination: the /tabs live region

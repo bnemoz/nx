@@ -317,8 +317,13 @@ def render_status() -> str:
                    if t.get("status") == "pending")
     # Phase C (0.161.0) adds the second park reason: a stall wake the model
     # answered with a deliberate stop parks the trigger until the next typed
-    # message, which is worth showing next to the cap.
+    # message, which is worth showing next to the cap. Phase D (0.162.0) adds
+    # the third: the chain spent its context-token budget (`held: budget`).
+    from ._autowake import _wake_chain_budget
+    _budget = _wake_chain_budget()
+    _spend = int(getattr(st, "_WAKE_CHAIN_SPEND", 0) or 0)
     _parked = (["streak"] if _streak >= _limit else []) \
+        + (["budget"] if _budget > 0 and _spend >= _budget else []) \
         + (["stall"] if getattr(st, "_WAKE_STALL_HOLD", False) else [])
     _held = f"{sep}held: {'+'.join(_parked)}" if _parked else ""
     lines.append(f"{DIM}  auto-continue:{RESET} "

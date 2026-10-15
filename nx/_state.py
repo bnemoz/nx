@@ -295,6 +295,18 @@ _WAKE_STALL_HOLD: bool = False
 # consumed by wake_instruction() to pick STALL_WAKE_INSTRUCTION.
 _WAKE_STALL_PENDING: bool = False
 
+# --- chain cost bound (0.162.0, AUTOWAKE_SPEC Phase D) ------------------------
+# The streak cap counts WAKES; cost per wake varies ~100x. _WAKE_CHAIN_SPEND
+# accumulates the context-token growth of every wake turn in the current
+# unattended chain (deltas of st._LAST_PROMPT_TOKENS, captured per step by
+# _turn.py's _capture_last_prompt_tokens); _WAKE_CHAIN_BASE is the reading
+# snapshotted at wake start and re-snapshotted after each turn-end delta, so
+# every turn in the chain adds only its own growth. wake_due() trips
+# NX_WAKE_CHAIN_TOKEN_BUDGET (default 0 = off) against the spend; both reset
+# with the streak on typed input.
+_WAKE_CHAIN_SPEND: int = 0
+_WAKE_CHAIN_BASE: int = 0
+
 # True for the whole duration of one _run_model_turn_loop() call in the
 # interactive parent. wake_due() refuses to fire mid-turn: a notice that
 # stages while a turn runs is flushed by that turn's own tool-loop machinery.

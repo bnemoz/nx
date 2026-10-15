@@ -28,6 +28,9 @@ def test_wake_residue_is_swept():
     st._WAKE_STALL_REVISION = 99
     st._WAKE_STALL_HOLD = True
     st._WAKE_STALL_PENDING = True
+    # 0.162.0 (Phase D): the chain cost accumulators are hand-listed here too.
+    st._WAKE_CHAIN_SPEND = 999999
+    st._WAKE_CHAIN_BASE = 4242
     nx_state_reset_body()
     assert st._WAKE_DUE is False
     assert st._WAKE_ARMED is False
@@ -36,6 +39,8 @@ def test_wake_residue_is_swept():
     assert st._WAKE_STALL_REVISION == -1
     assert st._WAKE_STALL_HOLD is False
     assert st._WAKE_STALL_PENDING is False
+    assert st._WAKE_CHAIN_SPEND == 0
+    assert st._WAKE_CHAIN_BASE == 0
 
 
 def test_metrics_tls_is_cleared():

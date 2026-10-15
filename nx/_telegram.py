@@ -782,6 +782,9 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
             from . import _autowake
             _autowake.note_turn_end(
                 isinstance(summary, dict) and summary.get("status") == "done")
+            # Phase D mirror (0.162.0): the chain cost seam, beside the stall
+            # one (AUTOWAKE_SPEC §3 keeps the mirror behaviorally identical).
+            _autowake.note_chain_spend()
         except Exception:
             pass
 
@@ -955,6 +958,9 @@ def _maybe_wake_turn(api: Callable, allowed: set) -> None:
             st._TURN_ACTIVE = True
             try:
                 st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1
+                # Phase D mirror (0.162.0): chain cost baseline at the same
+                # seam the REPL snapshots it (see nx/_repl.py).
+                st._WAKE_CHAIN_BASE = int(getattr(st, "_LAST_PROMPT_TOKENS", 0) or 0)
                 # Phase C mirror: a stall wake stamps the plan revision it woke
                 # for, exactly as the REPL does (_repl.py, next to the streak
                 # increment) — that int is the trigger's terminator and the
@@ -1050,6 +1056,10 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
         try:
             from . import _autowake
             _autowake.clear_stall_state()
+            # Phase D mirror (0.162.0): an inbound message is the gateway's
+            # typed-input path — the chain cost accumulators reset with it,
+            # exactly as the REPL's typed path does.
+            _autowake.reset_chain_cost()
         except Exception:
             pass
         _run_turn(_api, chat_id, instruction, _CONVERSATION)

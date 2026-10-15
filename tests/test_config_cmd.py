@@ -155,7 +155,8 @@ def test_render_status_shows_the_auto_continue_chain_line(monkeypatch):
     the pending todo count, and `held:` when a guard parked the chain. The
     line must never mutate the state it reads."""
     monkeypatch.setenv("NX_WAKE_STREAK_LIMIT", "25")
-    saved = (m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS)
+    saved = (m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS,
+             getattr(m.st, "_WAKE_CHAIN_SPEND", 0))
     m.st._WAKE_ARMED = True
     m.st._WAKE_STREAK = 3
     m.st._TODOS = [{"content": "a", "status": "done"},
@@ -171,14 +172,32 @@ def test_render_status_shows_the_auto_continue_chain_line(monkeypatch):
         m.st._WAKE_STREAK = 25
         line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
         assert "wake 25/25" in line and "held: streak" in line
+        # Phase D (0.162.0): the chain budget names itself the same way, and
+        # the facet joins every tripped guard ("streak+budget").
+        monkeypatch.setenv("NX_WAKE_CHAIN_TOKEN_BUDGET", "50000")
+        m.st._WAKE_STREAK = 3
+        m.st._WAKE_CHAIN_SPEND = 50000
+        line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
+        assert "held: budget" in line and "held: streak" not in line
+        m.st._WAKE_STREAK = 25
+        line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
+        assert "held: streak+budget" in line
+        # budget 0 (default) with a huge spend stays unheld — the knob is off
+        monkeypatch.setenv("NX_WAKE_CHAIN_TOKEN_BUDGET", "0")
+        m.st._WAKE_STREAK = 0
+        m.st._WAKE_CHAIN_SPEND = 10 ** 12
+        line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
+        assert "held" not in line
         # unarmed session says so, and the hold part follows the cap, not the
         # armed flag (a streak at the cap is the hold even before /status)
         m.st._WAKE_ARMED = False
         m.st._WAKE_STREAK = 0
+        m.st._WAKE_CHAIN_SPEND = 0
         line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
         assert "off" in line and "held" not in line and "wake 0/25" in line
     finally:
-        m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS = saved
+        (m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS,
+         m.st._WAKE_CHAIN_SPEND) = saved
 
 
 def test_render_status_with_active_source(monkeypatch):

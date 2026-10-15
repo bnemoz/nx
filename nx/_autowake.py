@@ -154,6 +154,9 @@ def _stage_hold_notice(reason: str, guard: str) -> bool:
 # embed the formatted reason text: a wording change would silently stop
 # deduplicating (review finding, 0.160.0).
 _HOLD_STREAK_CAP = "streak_cap"
+# 0.162.0 (Phase D): the chain cost bound's trip parks with the same
+# one-shot explanation; the key must name the guard, never the reason text.
+_HOLD_BUDGET = "budget"
 
 
 def _release_hold_key(streak: int, limit: int) -> None:
@@ -172,6 +175,16 @@ def _wake_streak_limit() -> int:
     guard can't be configured off by accident (NX_WAKE_PROMPT=0 remains the
     off switch for wakes entirely)."""
     return max(1, _env_int("NX_WAKE_STREAK_LIMIT", 25))
+
+
+def _wake_chain_budget() -> int:
+    """NX_WAKE_CHAIN_TOKEN_BUDGET (0.162.0, AUTOWAKE_SPEC Phase D): the total
+    context-token growth one unattended wake chain may spend before wake_due()
+    parks it. The streak cap counts WAKES while cost per wake varies ~100x;
+    this is the cost brake that lets the cap stop being the only brake (§3).
+    **Default 0 = off** — no behavior change for existing users — and
+    negatives clamp to 0 (off), so a stray minus sign cannot arm it."""
+    return max(0, _env_int("NX_WAKE_CHAIN_TOKEN_BUDGET", 0))
 
 
 def _campaign_pending() -> bool:
@@ -267,6 +280,42 @@ def clear_stall_state() -> None:
     st._WAKE_STALL_AT = 0.0
     st._WAKE_STALL_HOLD = False
     st._WAKE_STALL_PENDING = False
+
+
+def reset_chain_cost() -> None:
+    """The user took the wheel (0.162.0, Phase D): the cost bound counts ONE
+    unattended chain, so its accumulators reset with the streak — called from
+    the REPL's typed-input path and the Telegram inbound path, next to
+    clear_stall_state()."""
+    st._WAKE_CHAIN_SPEND = 0
+    st._WAKE_CHAIN_BASE = 0
+
+
+def note_chain_spend() -> None:
+    """The Phase D post-turn cost seam (0.162.0): called from the REPL's
+    post-turn `finally` and the Telegram turn wrapper, beside note_turn_end().
+
+    Attributes exactly THIS turn's context growth to the chain spend: the
+    delta of st._LAST_PROMPT_TOKENS (captured per step by _turn.py's
+    _capture_last_prompt_tokens — the same reading the autocompress loop
+    reasons over, so no new estimator; nx/_tokens.py stays unused) against
+    the baseline snapshotted at wake start, then re-snapshotted so the next
+    turn in the chain adds only its own delta. A typed turn adds nothing:
+    its input-time reset leaves the baseline 0, and base <= 0 books no delta.
+
+    Why the turn-END delta and not a per-step hook: the final prompt-token
+    reading of a multi-step wake turn already embeds every step's growth
+    (the history is append-only between folds), so one subtraction at turn
+    end attributes the whole turn's growth exactly once. max(0, ...) keeps a
+    context fold — which SHRINKS the reading — from paying spend back."""
+    cur = int(getattr(st, "_LAST_PROMPT_TOKENS", 0) or 0)
+    if cur <= 0:
+        return  # provider reported no usage: nothing to attribute
+    base = int(getattr(st, "_WAKE_CHAIN_BASE", 0) or 0)
+    if base > 0:
+        st._WAKE_CHAIN_SPEND = (int(getattr(st, "_WAKE_CHAIN_SPEND", 0) or 0)
+                                + max(0, cur - base))
+    st._WAKE_CHAIN_BASE = cur
 
 
 def note_turn_end(turn_done: bool) -> None:
@@ -493,6 +542,18 @@ def wake_due(due_out: dict | None = None) -> bool:
         # parked. The note rides the next real prompt and can never itself
         # wake (_NON_WAKE_NOTICE_SLOTS).
         _stage_hold_notice(f"wake streak {_streak}/{_limit}", _HOLD_STREAK_CAP)
+        return False
+    # Chain cost bound (0.162.0, AUTOWAKE_SPEC Phase D): the cap counts wakes
+    # while cost per wake varies ~100x, so an expensive chain parks on spent
+    # context tokens even under the cap. Same trip shape as its sibling:
+    # park, explain once through the hold notice (guard identity "budget"),
+    # wait for a typed turn to reset the accumulators. Budget 0 (default)
+    # short-circuits, so the guard is inert until the knob is armed.
+    _budget = _wake_chain_budget()
+    _spend = int(getattr(st, "_WAKE_CHAIN_SPEND", 0) or 0)
+    if _budget > 0 and _spend >= _budget:
+        _stage_hold_notice(f"chain budget spent ({_spend}/{_budget} tokens)",
+                           _HOLD_BUDGET)
         return False
     _release_hold_key(_streak, _limit)
     if st._WAKE_DUE:
