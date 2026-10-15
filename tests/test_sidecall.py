@@ -1,6 +1,6 @@
 """nx/_sidecall.py (0.156.3): the shared one-shot JSON side call. Pins the
 (helper contract, no network): (dict, raw) on success, None-on-every-failure
-with raw still set, metrics recorded with BOTH chars//4 fallbacks, the
+with raw still set, metrics recorded with BOTH _tokens fallbacks, the
 retry_prompt payload append firing only between parse attempts, the shared
 connection-retry ladder, and loose_json brace-slicing."""
 import json
@@ -133,10 +133,11 @@ def test_metrics_recorded_with_both_fallbacks(source, monkeypatch):
     obj, raw = _sidecall.side_call_json("SYS", "USER")
     assert obj == {"a": 1}
     assert source.api_calls == 1
-    # usage=None -> chars//4 estimates on BOTH axes (the prompt-char fallback
+    # usage=None -> nx/_tokens estimates on BOTH axes (the prompt-char fallback
     # is the one /build's own call used to miss)
-    expected_in = max(1, (len("SYS") + len("USER")) // 4)
-    expected_out = max(1, len('{"a": 1}') // 4)
+    from nx import _tokens as _tk
+    expected_in = max(1, _tk.estimate_tokens_from_chars(len("SYS") + len("USER")))
+    expected_out = max(1, _tk.estimate_tokens_from_chars(len('{"a": 1}')))
     assert source.estimated_calls == 1
     assert source.input_tokens == expected_in
     assert source.output_tokens == expected_out

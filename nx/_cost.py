@@ -77,7 +77,7 @@ def print_cost_report(metrics: Any) -> None:
     est_note = ""
     if getattr(metrics, "estimated_calls", 0):
         est_note = (f" · {metrics.estimated_calls} call(s) estimated "
-                    f"(server sent no usage — chars//4, marked ~ below)")
+                    f"(server sent no usage — estimator fallback, marked ~ below)")
     print(f"{DIM}  session usage: {metrics.api_calls} model calls · "
           f"in {_abbr(total_in)} (cache {_abbr(metrics.cache_read_tokens)}) · "
           f"out {_abbr(total_out)} (reasoning {_abbr(metrics.reasoning_tokens)})"

@@ -53,7 +53,9 @@ def _msgs(n=12, big_every=3):
 def test_token_report_shape_and_role_subtotals(nx_fresh):
     from nx._ctxreport import _messages_token_report, _estimate_tokens
     assert _estimate_tokens("") == 0
-    assert _estimate_tokens("a" * 400) == 100
+    from nx import _tokens as _tk
+    # estimator-aware: exact via tiktoken when installed, else ceil(n/3.5)
+    assert _estimate_tokens("a" * 400) == _tk.estimate_tokens("a" * 400)
     msgs = _msgs()
     rep = _messages_token_report(msgs)
     assert rep["total_exact"] is None or isinstance(rep["total_exact"], int)
@@ -79,7 +81,8 @@ def test_total_includes_per_turn_tools_overhead(nx_fresh):
     rep = _messages_token_report(msgs)
     tools = _active_tools()
     assert tools, "no active tool schemas — overhead would be vacuously 0"
-    expected = max(1, len(_json.dumps(tools)) // 4)
+    from nx import _tokens as _tk
+    expected = _tk.estimate_tokens(_json.dumps(tools))
     assert rep["overhead_est"] == expected
     assert rep["total_est"] == expected + sum(r[2] for r in rep["rows"])
     # by_role stays messages-only: the overhead has no message row

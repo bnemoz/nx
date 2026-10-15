@@ -21,7 +21,7 @@ Economics (port of economics.ts, same formulas and defaults):
   windowReserveTokens = 16384
   firstCompactionRequestScale = 2, subsequentCompactionMargin = 1.5
   memoTokens = 1000 (estimate of the summary turn's own cost)
-  text tokens = ceil(bytes / 4)
+  text tokens = the shared estimator in nx/_tokens.py (was ceil(bytes/4))
 
 State (st.* module globals, conftest-rewound):
   _OCC_PLAN              the todo list as last recorded [{text,status}]
@@ -37,6 +37,8 @@ State (st.* module globals, conftest-rewound):
 from __future__ import annotations
 
 from typing import Any
+
+from . import _tokens as tokens
 
 from ._env import _env_int, _env_float
 
@@ -114,7 +116,13 @@ def record_boundary(completed_count: int, remaining_boundaries: int) -> None:
 
 
 def _estimate_tokens(text: str) -> int:
-    return -(-len(text.encode("utf-8", "replace")) // 4)
+    """Tokens in `text` via nx/_tokens.estimate_tokens.
+
+    Used to be a UTF-8-BYTES/4 ceil, which made the compaction gate disagree
+    with every other nx estimator (chars-based) and overcount multibyte
+    payloads by up to 4x; the estimator is now char-based, which fixes that
+    bytes/chars inconsistency."""
+    return tokens.estimate_tokens(text)
 
 
 def _context_window() -> int | None:

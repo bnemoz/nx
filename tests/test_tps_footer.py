@@ -313,10 +313,11 @@ def test_footer_llama_timings_zero_tps_safe(nx_fresh, capsys):
 
 
 def test_footer_char_fallback_uses_window(nx_fresh, capsys):
-    # no usage, no timings: 4 chars/token estimate over the decode window
+    # no usage, no timings: shared nx/_tokens estimate over the decode window
     out = _footer_out(nx_fresh, capsys, None, None, 1600, 0.1, 6.0, "x" * 1600, {},
                       parser=_ParserStub(4.0, True))
-    assert " 100.0 tok/s" in out  # 1600 chars ≈ 400 tok / 4.0s, not / 5.9 wall
+    from nx import _tokens as _tk
+    assert f" {_tk.estimate_tokens_from_chars(1600) / 4.0:.1f} tok/s" in out  # est tok / 4.0s, not / 5.9 wall
 
 
 if __name__ == "__main__":

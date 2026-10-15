@@ -98,7 +98,9 @@ def test_estimate_flagged_in_delta(nx_fresh):
     from nx._metrics import _normalize_usage
     d = _normalize_usage(None, None, fallback_chars=400, fallback_prompt_chars=800)
     assert d["estimated"] == 1
-    assert d["output_tokens"] == 100 and d["input_tokens"] == 200
+    from nx import _tokens as _tk
+    assert d["output_tokens"] == _tk.estimate_tokens_from_chars(400)
+    assert d["input_tokens"] == _tk.estimate_tokens_from_chars(800)
 
 
 def test_measured_not_flagged(nx_fresh):

@@ -27,6 +27,7 @@ from collections.abc import Callable
 from typing import Any, TypedDict
 
 from . import _state as st
+from . import _tokens as tokens
 
 
 class _AsyncPusher:
@@ -102,7 +103,7 @@ class UsageDelta(TypedDict):
     output_tokens: int
     cache_read_tokens: int
     reasoning_tokens: int
-    estimated: int  # 1 = chars//4 fallback (no server usage), 0 = measured
+    estimated: int  # 1 = nx/_tokens fallback estimate (no server usage), 0 = measured
 
 
 def _normalize_usage(
@@ -161,14 +162,18 @@ def _normalize_usage(
             "estimated": 0,
         }
     if not usage:
-        # Fallback: estimate from client-side character count (~4 chars/token).
-        # Flagged `estimated: 1` so accounting (and /cost) can show the
-        # provenance instead of billing an estimate as a measured number.
+        # Fallback: estimate from client-side character counts via the shared
+        # estimator (nx/_tokens.py: exact tiktoken when installed, else
+        # chars/3.5). Flagged `estimated: 1` so accounting (and /cost) can
+        # show the provenance instead of billing an estimate as a measured
+        # number.
         fallback_chars = _resolve(fallback_chars)
         fallback_prompt_chars = _resolve(fallback_prompt_chars)
         if fallback_chars > 0 or fallback_prompt_chars > 0:
-            estimated_out = max(1, fallback_chars // 4) if fallback_chars > 0 else 0
-            estimated_in = max(1, fallback_prompt_chars // 4) if fallback_prompt_chars > 0 else 0
+            estimated_out = (max(1, tokens.estimate_tokens_from_chars(fallback_chars))
+                             if fallback_chars > 0 else 0)
+            estimated_in = (max(1, tokens.estimate_tokens_from_chars(fallback_prompt_chars))
+                            if fallback_prompt_chars > 0 else 0)
             return {
                 "input_tokens": estimated_in,
                 "output_tokens": estimated_out,
@@ -234,7 +239,8 @@ def _record_api_call(
     fallback_prompt_chars: int | Callable[[], int] = 0,
 ) -> None:
     """_record_usage for a non-streaming response object: takes the usage off
-    `resp` (falling back to the chars//4 estimate, flagged `estimated`, when
+    `resp` (falling back to the shared-estimator estimate, flagged
+    `estimated`, when
     the server sent none). Exists so auxiliary model calls — the risk
     classifier, the capability/thinking probes, a ctx-window probe that a
     clamping server actually executes — land in the same totals /cost prints
@@ -283,7 +289,7 @@ class _Metrics:
         self.reasoning_tokens = 0
         self.api_calls = 0
         # Provenance (2.5): how many of those api_calls were ESTIMATED by the
-        # chars//4 fallback instead of measured from a server usage object.
+        # nx/_tokens fallback instead of measured from a server usage object.
         # /cost prints the split so an estimate never masquerades as a bill.
         self.estimated_calls = 0
         self.estimated_input_tokens = 0

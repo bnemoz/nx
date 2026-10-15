@@ -166,10 +166,12 @@ class _WindowSrc:
 
 def test_clamp_caps_to_window_minus_prompt_minus_margin(monkeypatch):
     m.st.ACTIVE = _WindowSrc(8000)
-    msgs = [{"role": "user", "content": "x" * 8000}]  # ~2000 tok est
+    msgs = [{"role": "user", "content": "x" * 8000}]  # nx/_tokens est
     monkeypatch.setattr(m.st, "TOKENIZE_PREFLIGHT", 0)
+    from nx import _tokens as _tk
+    est = _tk.estimate_tokens_from_chars(8000)
     clamped = cp._clamp_max_tokens(msgs, 16000)
-    assert clamped == 8000 - 2000 - m.st.TOKENS_MARGIN, clamped
+    assert clamped == 8000 - est - m.st.TOKENS_MARGIN, clamped
 
 
 def test_clamp_floor_keeps_request_well_formed(monkeypatch):
@@ -231,8 +233,9 @@ def test_open_stream_applies_the_clamp(monkeypatch):
 
     m.st.client = _Client()
     msgs = [{"role": "user", "content": "x" * 8000}]
+    from nx import _tokens as _tk
     m.open_stream(msgs)
-    assert captured["max_tokens"] == 8000 - 2000 - m.st.TOKENS_MARGIN
+    assert captured["max_tokens"] == 8000 - _tk.estimate_tokens_from_chars(8000) - m.st.TOKENS_MARGIN
 
 
 # --- helpers ------------------------------------------------------------------------

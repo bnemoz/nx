@@ -41,10 +41,10 @@ from __future__ import annotations
 import hashlib
 import os
 
+from . import _tokens as tokens
 from ._env import _env_int
 
 PLACEHOLDER_EXCERPT_BYTES = 1024
-CHARS_PER_TOKEN = 4
 
 RECALL_MAX_BYTES = 16384
 RECALL_MAX_LINES = 400
@@ -80,7 +80,9 @@ def _full_sends() -> int:
 
 
 def estimate_tokens(text: str) -> int:
-    return -(-len(text) // CHARS_PER_TOKEN)
+    """Delegates to the shared estimator in nx/_tokens.py (name kept
+    re-exported for existing callers)."""
+    return tokens.estimate_tokens(text)
 
 
 def content_hash(text: str) -> str:

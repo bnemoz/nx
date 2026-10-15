@@ -2,9 +2,10 @@
 
 Two pieces:
 
-1. `_estimate_tokens` / `_messages_token_report` — a char-based estimator
-   (chars/4, the standard heuristic; within ~15% for code-heavy English) with
-   a per-role breakdown. Used by /ctx to show where the context actually goes.
+1. `_estimate_tokens` / `_messages_token_report` — per-message estimates via
+   the shared estimator in `nx/_tokens.py` (exact tiktoken/cl100k_base when
+   installed, else chars/3.5) with a per-role breakdown. Used by /ctx to show
+   where the context actually goes.
    When the active source's /tokenize endpoint works, /ctx uses it for the
    total (exact); per-message numbers stay estimated (tokenizing each message
    separately would round-trip the server N times).
@@ -13,8 +14,9 @@ Two pieces:
    tool schemas sent on every model call (`tools=`) live outside the message
    list, so without this /ctx's total quietly misses them and undercounts
    the real per-turn floor. Counted the same way `nx --tokens` counts its
-   floor: JSON-serialized schemas, chars/4. Rendered as a footer line, not a
-   message row (they aren't messages — pinning a tool schema makes no sense).
+   floor: JSON-serialized schemas, same estimator. Rendered as a footer line,
+   not a message row (they aren't messages — pinning a tool schema makes no
+   sense).
 
 3. Pinned turns — `_ctx_pin(index_range)` marks message indexes that
    compress() must keep verbatim (pinned turns move into the kept tail even
@@ -33,38 +35,24 @@ from __future__ import annotations
 from typing import Any
 
 from . import _state as st
+from . import _tokens as tokens
 from ._fullscreen import View
-
-CHARS_PER_TOKEN = 4
 
 
 def _estimate_tokens(text: str) -> int:
-    """char/4 estimate — the standard rough heuristic; good enough to rank
-    messages by size, which is what /ctx exists for."""
-    if not text:
-        return 0
-    if isinstance(text, list):  # content-parts form
-        text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-    return max(1, len(str(text)) // CHARS_PER_TOKEN)
+    """Thin wrapper over nx._tokens.estimate_tokens (kept as the patchable
+    module attribute /ctx's callers know)."""
+    return tokens.estimate_tokens(text)
 
 
 def _message_content_text(msg: dict[str, Any]) -> str:
-    c = msg.get("content")
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        return "".join(p.get("text", "") for p in c if isinstance(p, dict))
-    return ""
+    """The message's plain text (used for previews as well as token math)."""
+    return tokens.message_content_text(msg)
 
 
 def _message_tokens(msg: dict[str, Any]) -> int:
     """Estimated tokens for one message, including native tool_calls args."""
-    n = _estimate_tokens(_message_content_text(msg))
-    tcs = msg.get("tool_calls") or []
-    for tc in tcs:
-        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-        n += _estimate_tokens(str(fn.get("name") or "")) + _estimate_tokens(str(fn.get("arguments") or ""))
-    return n
+    return tokens.estimate_message_tokens(msg)
 
 
 def _tokenize_total(messages: list[dict[str, Any]]) -> int | None:
@@ -118,8 +106,8 @@ def _turn_overhead_est() -> int:
     """Estimated tokens of the per-turn `tools=` payload — the function schemas
     the server renders into every prompt but which never appear in the message
     list, so a messages-only sum undercounts the real context floor. Estimated
-    chars/4 over the JSON serialization, exactly how `nx --tokens` counts its
-    TOOLS line. Never raises: /ctx is a UX nicety, not a correctness path."""
+    with the shared estimator over the JSON serialization, exactly how
+    `nx --tokens` counts its TOOLS line. Never raises: /ctx is a UX nicety, not a correctness path."""
     try:
         from ._dispatch import _active_tools
         import json as _json

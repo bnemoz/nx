@@ -373,13 +373,13 @@ def test_token_target_grows_the_kept_tail(nx_env, monkeypatch):
     nx, tmp = nx_env
     _mk(nx)
     from nx import _compress as cp
-    monkeypatch.setattr(nx._state, "COMPRESS_KEEP_TOKENS", 400)  # ~5 turns of 400-char bodies
+    monkeypatch.setattr(nx._state, "COMPRESS_KEEP_TOKENS", 400)  # ~4 turns of 400-char bodies (ceil(390/3.5)=112 tok each)
     msgs = [{"role": "system", "content": nx.SYSTEM}] + [
         {"role": "user" if j % 2 == 0 else "assistant",
          "content": f"turn {j // 2} " + "w" * 380}
         for j in range(30)]
     r = cp.compress(msgs, auto=False)
-    assert r is not None and r[0] >= 5, r
+    assert r is not None and r[0] >= 4, r
     # a body entirely inside the target → nothing to fold
     small = [{"role": "system", "content": nx.SYSTEM}] + [
         {"role": "user", "content": f"t{j}"} for j in range(6)]

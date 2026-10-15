@@ -15,6 +15,7 @@ from typing import Any, Optional
 from ._ansi import DIM, RESET, C
 from ._layout import REASONING_DIVIDER_CELLS
 from ._metrics import _abbr
+from . import _tokens as tokens
 from ._render import BOX_BL, BOX_H, commit_line as _commit_line, kv_line
 from . import _state as st
 
@@ -414,7 +415,9 @@ def _render_footer(usage: Any, timings: Optional[dict], streamed_chars: int,
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
         _footer_row(parts, tally)
     elif streamed_chars > 0:
-        gen_n = max(1, streamed_chars // 4)
+        # Shared estimator (nx/_tokens.py) on the step's accumulated char
+        # count — the footer keeps a running int, not the string itself.
+        gen_n = max(1, tokens.estimate_tokens_from_chars(streamed_chars))
         window, trusted = (parser.gen_window(elapsed) if parser is not None
                            else (max(0.0, (elapsed - t_first) if t_first else elapsed), False))
         parts = [f"≈{C.STATUS_BAR}{_abbr(gen_n)}{RESET}{DIM} tok",
