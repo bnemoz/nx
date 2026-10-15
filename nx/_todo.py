@@ -93,10 +93,16 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
     _persist(cleaned)
     # Online Context Compact (0.67.0): a todo_write that newly completes >= 1
     # item is a plan-step boundary — the OCC module decides at the next
-    # settled turn whether the economics justify a native fold.
+    # settled turn whether the economics justify a native fold. 0.159.3 (A′):
+    # the boundary result is actually recorded now — inspect_todo_write's
+    # return feeds record_boundary, which is the ONLY writer of
+    # _OCC_PENDING_BOUNDARY; without this the whole NX_OCC turn-end seam was
+    # wired at both ends and dead in the middle.
     try:
-        from ._occompact import inspect_todo_write
-        inspect_todo_write(cleaned)
+        from ._occompact import inspect_todo_write, record_boundary
+        boundary = inspect_todo_write(cleaned)
+        if boundary is not None:
+            record_boundary(boundary[0], boundary[1])
     except Exception:  # noqa: BLE001 — never break the todo tool
         pass
     return render_todos(cleaned)

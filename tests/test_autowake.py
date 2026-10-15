@@ -63,6 +63,13 @@ def setup_function(_function):
     m.st._WAKE_PREFILL = ""
     m.st._TURN_ACTIVE = False
     os.environ["NX_WAKE_PROMPT"] = "1"
+    # 0.159.3: notice slots are now DERIVED, so residue in any of them leaks
+    # into wake_due(); drain the whole derived set per test.
+    from nx import _notices
+    for _slot in _autowake._pending_notice_slots():
+        if _slot != "_PENDING_BACKGROUND_NOTICE":
+            _notices.set_(_slot, None)
+        setattr(m.st, _slot, None)
     # Fake job fixtures point log_path here; the wake sweep (0.37.4) skips a
     # dead job whose log is gone, so the fixtures' logs must exist.
     # Paths live in a per-process tempdir — fixed /tmp names race across
@@ -86,6 +93,59 @@ def _make_fixture_log(path):
             f.write("fixture\n[exit 0]\n")
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 0. notice-slot derivation (0.159.3, AUTOWAKE_SPEC Phase A)
+# ---------------------------------------------------------------------------
+from nx._autowake import _any_pending_notice, _pending_notice_slots
+
+
+def test_notice_slots_fully_derived():
+    """The wake tuple must be derived, not hand-listed: every _PENDING_* slot
+    reachable from _NOTICE_DEFAULTS, the st module attrs, or the plain
+    BACKGROUND global is wake-worthy unless explicitly in
+    _NON_WAKE_NOTICE_SLOTS. Converts a silent omission (a new notice type
+    that never wakes the REPL) into a failure."""
+    import nx._state as st
+    expected = (set(st._NOTICE_DEFAULTS)
+                | {s for s in dir(st) if s.startswith("_PENDING_")}
+                | {"_PENDING_BACKGROUND_NOTICE"}) \
+        - set(_autowake._NON_WAKE_NOTICE_SLOTS) - {"_BG_SCAN_DONE", "_BG_NOTICE_SEEN"}
+    assert set(_pending_notice_slots()) == expected
+    # the historical hand-listed members all survive the derivation
+    for s in ("_PENDING_BG_COMPLETION_NOTICE", "_PENDING_SUBAGENT_NOTICE",
+              "_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
+              "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
+              "_PENDING_BACKGROUND_NOTICE"):
+        assert s in _pending_notice_slots(), s
+    # non-notice dict keys are excluded
+    assert "_BG_SCAN_DONE" not in _pending_notice_slots()
+    assert "_BG_NOTICE_SEEN" not in _pending_notice_slots()
+
+
+def test_non_wake_slot_excluded_from_predicate():
+    """A slot in _NON_WAKE_NOTICE_SLOTS must not satisfy _any_pending_notice()
+    - the Phase B hold-notice anti-loop depends on the exclusion living in
+    the predicate (which also feeds the post-turn flag raise and the Telegram
+    mirror), not at one call site."""
+    import nx._state as st
+    from nx import _notices
+    probe = "_PENDING_TEST_NONWAKE"
+    old = _autowake._NON_WAKE_NOTICE_SLOTS
+    try:
+        _notices.set_(probe, "staged text")
+        setattr(st, probe, "staged text")  # dir(st) oracle picks it up
+        assert probe in _pending_notice_slots()
+        assert _any_pending_notice() is True
+        _autowake._NON_WAKE_NOTICE_SLOTS = frozenset(old | {probe})
+        assert probe not in _pending_notice_slots()
+        assert _any_pending_notice() is False
+    finally:
+        _autowake._NON_WAKE_NOTICE_SLOTS = old
+        _notices.set_(probe, None)
+        if hasattr(st, probe):
+            delattr(st, probe)
 
 
 # ---------------------------------------------------------------------------

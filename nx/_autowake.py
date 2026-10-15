@@ -148,11 +148,31 @@ def arm_wake() -> None:
 
 # --- what counts as "a wake is due" ------------------------------------------
 
+# Slots staged as a [Runtime note] but which must never themselves cause a
+# wake. Each entry needs a one-line reason: these notes ride the next REAL
+# prompt; waking for them would either loop (the note re-stages itself) or
+# nag with nothing actionable.
+_NON_WAKE_NOTICE_SLOTS: frozenset[str] = frozenset({
+    # placeholder: Phase B adds _PENDING_WAKE_HOLD_NOTICE here — a hold notice
+    # must not satisfy _any_pending_notice() (that would wake forever).
+})
+
+
 def _pending_notice_slots() -> tuple[str, ...]:
-    return ("_PENDING_BACKGROUND_NOTICE", "_PENDING_BG_COMPLETION_NOTICE",
-            "_PENDING_SUBAGENT_NOTICE", "_PENDING_MULTI_EDIT_NOTICE",
-            "_PENDING_VERIFY_NOTICE", "_PENDING_DELEGATION_NOTICE",
-            "_PENDING_YOLO_ASYNC_NOTICE")
+    """Every runtime-note slot that can wake the REPL, derived not hand-listed
+    (0.159.3): _NOTICE_DEFAULTS keys plus every _PENDING_* attr on st (the
+    same dir() oracle nx_state_reset_body uses) plus _PENDING_BACKGROUND_NOTICE,
+    which has no _state attr — it is a plain module global staged by run_tool
+    (dispatch) and read below. _NON_WAKE_NOTICE_SLOTS names slots that must
+    deliberately NOT wake (each with its reason); a notice type added to
+    _NOTICE_DEFAULTS now wakes the REPL without a code change here."""
+    slots = (set(st._NOTICE_DEFAULTS)
+             | {s for s in dir(st) if s.startswith("_PENDING_")}
+             | {"_PENDING_BACKGROUND_NOTICE"})
+    # _BG_SCAN_DONE / _BG_NOTICE_SEEN ride _NOTICE_DEFAULTS but are not
+    # notices (scan latches), so they never wake.
+    return tuple(sorted(slots - _NON_WAKE_NOTICE_SLOTS
+                        - {"_BG_SCAN_DONE", "_BG_NOTICE_SEEN"}))
 
 
 def _any_pending_notice() -> bool:
@@ -160,7 +180,10 @@ def _any_pending_notice() -> bool:
     nx._notices (swarm P2) are read through it; _PENDING_BACKGROUND_NOTICE
     (staged inline by run_bash on the caller's own thread) stays a plain
     module global. getattr-default, not bare st.X: a conftest rewind can drop
-    names from _state's dict."""
+    names from _state's dict. _NON_WAKE_NOTICE_SLOTS are excluded in this
+    predicate, not at one call site: this function also feeds the REPL
+    post-turn flag raise and the Telegram mirror, so a caller-side exclusion
+    would leak (Phase B's hold-notice anti-loop depends on it)."""
     from . import _notices
     for s in _pending_notice_slots():
         if s == "_PENDING_BACKGROUND_NOTICE":

@@ -1170,6 +1170,15 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
                 # (the historical seam) lands — see
                 # test_batch_run.test_verify_and_bg_scan_gated_off_for_batch.
                 _launch_verify_if_settled()
+                # NX_OCC turn-end seam (A′, 0.159.3): a settled parent turn
+                # that carried a todo boundary may fold. Gated off for
+                # sub-agents/batch by the same condition as the verify launch
+                # (they share the "only the parent loop decides" rule).
+                try:
+                    from ._occompact import maybe_compact_after_boundary
+                    maybe_compact_after_boundary(messages)
+                except Exception:  # noqa: BLE001 — never break turn end
+                    pass
             return {"status": "done", "turns": steps + 1}
         if status == TURN_ESC:
             return {"status": "esc", "turns": steps + 1}  # user pressed Esc at an approval → drop to chat input
