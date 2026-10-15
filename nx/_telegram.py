@@ -773,6 +773,17 @@ def _run_turn(api: Callable, chat_id: int, instruction: str,
         _st._PROGRESS_SINK = prev_sink
         _ASYNC_QUIET_SLOTS.quiet = False
         _repair_conversation(messages)
+        # Phase C mirror (0.161.0, AUTOWAKE_SPEC §3: Phases C/D are mirrored
+        # here for consistency and get NO Telegram-only behavior): the same
+        # shared post-turn seam the REPL's finally calls. `summary` is {} until
+        # the loop returns, so a failed turn reads as "not done" and clears the
+        # stall clock rather than arming it on a broken turn.
+        try:
+            from . import _autowake
+            _autowake.note_turn_end(
+                isinstance(summary, dict) and summary.get("status") == "done")
+        except Exception:
+            pass
 
     # The final answer is the last non-empty assistant text, skipping any
     # trailing tool-call message (an empty assistant tail must not hide a
@@ -944,6 +955,13 @@ def _maybe_wake_turn(api: Callable, allowed: set) -> None:
             st._TURN_ACTIVE = True
             try:
                 st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1
+                # Phase C mirror: a stall wake stamps the plan revision it woke
+                # for, exactly as the REPL does (_repl.py, next to the streak
+                # increment) — that int is the trigger's terminator and the
+                # baseline note_turn_end() compares against.
+                if getattr(st, "_WAKE_STALL_PENDING", False):
+                    from ._todo import _plan_revision
+                    st._WAKE_STALL_REVISION = _plan_revision()
                 _run_bg_completion_scan()
                 _flush_pending_background_notice(_CONVERSATION)
                 wake = _autowake.wake_instruction()
@@ -1015,6 +1033,16 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
     # the queue can get from one chat.
     with _TURN_LOCK:
         _LAST_TURN_AT[chat_id] = now
+        # Phase C mirror: a real inbound message is the gateway's typed-input
+        # path, so it clears the stall clock / deliberate-stop hold the same way
+        # the REPL's does (AUTOWAKE_SPEC §3 keeps the mirror behaviorally
+        # identical; the streak reset itself predates Phase C and is left
+        # exactly as it was).
+        try:
+            from . import _autowake
+            _autowake.clear_stall_state()
+        except Exception:
+            pass
         _run_turn(_api, chat_id, instruction, _CONVERSATION)
 
 

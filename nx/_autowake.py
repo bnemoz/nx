@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Optional
 
 from ._env import _env_float, _env_int
@@ -92,6 +93,24 @@ CAMPAIGN_WAKE_INSTRUCTION = (
     "needs the user — when the todo list is complete, when a phase fails in "
     "a way another agent cannot fix, or when you are within 3 wakes of the "
     "limit. A typed user message resets the streak.]"
+)
+
+# The plan-stall wake instruction (0.161.0, AUTOWAKE_SPEC Phase C). A campaign
+# can stop with NOTHING in flight (an agent FAILED and its note was already
+# delivered; the model flipped a todo to in_progress and answered in prose), in
+# which case every existing guard correctly concludes "nothing to say" and the
+# plan never resumes. This trigger fires on the deliberate ABSENCE of evidence,
+# so per §2 it must carry information (the open items, by text) and the
+# deliberate-stop escape hatch verbatim: the worst case for a deliberate stop is
+# one wasted turn per plan revision, which is the accepted cost.
+STALL_WAKE_INSTRUCTION = (
+    "[Auto-continuation: your plan stalled \u2014 the last turn ended with "
+    "items still open and no background work in flight:\n{items}\n"
+    "Act on the first open item now: do it yourself, or update todo_write and "
+    "spawn the next phase as a BACKGROUND write/implement-tier agent, then end "
+    "your turn to let it run. nx cannot tell a stall from a deliberate stop: if "
+    "you stopped because you need the user, or because the plan is complete, "
+    "say so in one line and take no action.]"
 )
 
 
@@ -167,12 +186,137 @@ def _campaign_pending() -> bool:
     return bool(getattr(st, "_SPAWNED_WRITE_TIER", False))
 
 
+def _stall_grace_seconds() -> float:
+    """NX_WAKE_STALL_GRACE_SECONDS (0.161.0, Phase C): how long a campaign must
+    sit with a pending plan and nothing in flight before the stall trigger
+    fires — the grace is the user returning to the keyboard, which the
+    trigger must not race. Default 20.0 via _env_float, floored at 0; **0
+    disables the stall wake entirely** (the off switch for this trigger;
+    NX_WAKE_PROMPT=0 stays the global one)."""
+    return max(0.0, _env_float("NX_WAKE_STALL_GRACE_SECONDS", 20.0))
+
+
+def _pending_todo_lines() -> str:
+    """The open plan items as '- <text>' lines, for the stall instruction.
+    'text' is todo_write's own key; 'content' is accepted so a hand-shaped
+    list still names its items."""
+    lines = []
+    for item in getattr(st, "_TODOS", None) or []:
+        if item.get("status") == "done":
+            continue
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if text:
+            lines.append(f"- {text}")
+    return "\n".join(lines) if lines else "- (no item text recorded)"
+
+
+def _work_in_flight() -> bool:
+    """True while this session still has background work that will speak for
+    itself: an async sub-agent running OR queued, or a live bg-bash job owned
+    by this process. The stall clock must never be armed on top of such work —
+    its completion is a real wake, and a clock armed over it is a phantom wake
+    waiting for the grace to lapse. Conservative on failure: unknown counts as
+    in flight."""
+    try:
+        from ._subagent import _ASYNC_QUEUED, _async_running
+        if _async_running() or list(_ASYNC_QUEUED):
+            return True
+    except Exception:
+        return True
+    try:
+        from ._bash_jobs import list_bg_jobs
+        mine = os.getpid()
+        for job in list_bg_jobs():
+            if job.get("alive") and job.get("owner_pid") == mine:
+                return True
+    except Exception:
+        return True
+    return False
+
+
+def _stall_due() -> bool:
+    """The Phase C trigger's own guards; all must hold:
+
+    * grace > 0 (0 = the documented off switch, which short-circuits here);
+    * the stall clock is armed and older than the grace period;
+    * not st._WAKE_STALL_HOLD (a deliberate stop stays parked);
+    * the plan revision differs from the one stamped when the last stall wake
+      fired — **at most one stall wake per plan revision**. This is the
+      terminator that replaces 'a new cap' (§2): a wake that changes nothing
+      leaves the revision where it was, so the next evaluation is False and the
+      trigger is dead until the user types."""
+    grace = _stall_grace_seconds()
+    if grace <= 0.0:
+        return False
+    at = float(getattr(st, "_WAKE_STALL_AT", 0.0) or 0.0)
+    if at <= 0.0 or time.monotonic() - at < grace:
+        return False
+    if getattr(st, "_WAKE_STALL_HOLD", False):
+        return False
+    from ._todo import _plan_revision
+    return _plan_revision() != int(getattr(st, "_WAKE_STALL_REVISION", -1))
+
+
+def clear_stall_state() -> None:
+    """The user took the wheel: forget the stall clock, the deliberate-stop
+    hold and the one-shot marker (0.161.0, Phase C; called from the REPL's
+    typed-input path next to st._WAKE_STREAK = 0, and from the Telegram
+    gateway's inbound-message path). The hold is cleared HERE and nowhere else:
+    a deliberate stop stays parked until a human speaks, which is what makes
+    the trigger self-terminating instead of nagging once per grace period."""
+    st._WAKE_STALL_AT = 0.0
+    st._WAKE_STALL_HOLD = False
+    st._WAKE_STALL_PENDING = False
+
+
+def note_turn_end(turn_done: bool) -> None:
+    """The Phase C post-turn seam: the REPL's post-turn `finally` and the
+    Telegram turn wrapper (the mirror — same shared helpers, no
+    Telegram-only behavior). Two jobs, both cheap, both where the facts are
+    known:
+
+    1. (Re)arm or clear the stall clock: armed iff the turn ended `done` AND a
+       campaign is pending AND no bg job / async agent is in flight; else 0.0.
+    2. Trip _WAKE_STALL_HOLD when a stall wake just changed nothing: the clock
+       was armed coming INTO this turn (so the turn that ran was the stall
+       wake, whose plan revision the consumer stamped at wake time), the plan
+       revision still equals that stamp (the model edited no todo) and nothing
+       new is in flight. That is a deliberate stop expressed in prose rather
+       than in the plan — park the trigger rather than wake again in 20s.
+
+    The hold check runs BEFORE the clock is recomputed, and clears
+    _WAKE_STALL_PENDING either way (the marker describes a wake that has now
+    been delivered). A parked trigger also leaves the clock DISARMED: armed
+    means "eligible", so nothing here depends on _stall_due()'s hold check
+    being the only thing that stops a wake."""
+    from ._todo import _plan_revision
+    armed_coming_in = float(getattr(st, "_WAKE_STALL_AT", 0.0) or 0.0) > 0.0
+    in_flight = _work_in_flight()
+    if (armed_coming_in and not getattr(st, "_WAKE_STALL_HOLD", False)
+            and not in_flight
+            and _plan_revision() == int(getattr(st, "_WAKE_STALL_REVISION", -1))):
+        st._WAKE_STALL_HOLD = True
+    st._WAKE_STALL_PENDING = False
+    if (turn_done and _campaign_pending() and not in_flight
+            and not getattr(st, "_WAKE_STALL_HOLD", False)):
+        st._WAKE_STALL_AT = time.monotonic()
+    else:
+        st._WAKE_STALL_AT = 0.0
+
+
 def wake_instruction() -> str:
-    """The synthetic user message for THIS wake turn: the campaign variant
-    when a plan is mid-flight, the plain one otherwise. The streak is
+    """The synthetic user message for THIS wake turn: the stall variant when
+    the wake came from the plan-stall branch, the campaign variant when a plan
+    is mid-flight, the plain one otherwise. The streak is
     incremented by the REPL before this is called, so n is this wake's
     1-based index; stamping both n and m lets the model see its own runway
     without counting turns itself."""
+    if getattr(st, "_WAKE_STALL_PENDING", False):
+        # One-shot, consumed here: a later wake that did NOT come from the
+        # stall branch must never inherit the stall wording (wake_due()
+        # re-decides the marker on every evaluation).
+        st._WAKE_STALL_PENDING = False
+        return STALL_WAKE_INSTRUCTION.format(items=_pending_todo_lines())
     if _campaign_pending():
         return CAMPAIGN_WAKE_INSTRUCTION.format(
             n=max(1, getattr(st, "_WAKE_STREAK", 1)),
@@ -315,6 +459,11 @@ def wake_due() -> bool:
     turn ends text-only, nothing marks the job seen, and the poller (which
     also calls this) would find it again every 2s. A sweep that comes back
     empty therefore means "nothing left to say" — no wake."""
+    # Phase C: the one-shot "this wake came from the stall branch" marker is
+    # decided here, per evaluation, so the instruction the consumer picks
+    # matches the branch that actually returned True (wake_instruction()
+    # consumes it; note_turn_end() clears it at turn end).
+    st._WAKE_STALL_PENDING = False
     if not _wake_enabled() or not getattr(st, "_WAKE_ARMED", False):
         # Also forget a stale hold key: if wakes were disabled mid-chain and
         # the session re-arms later with a restored streak, the old key must
@@ -372,17 +521,43 @@ def wake_due() -> bool:
         # exist without a map. Skip the expensive sweep and report on the async
         # agents directly. A scan that found no map files genuinely means
         # "nothing left to say" — no wake.
-        return bool(_finished_unstaged_subagents())
-    try:
-        from ._dispatch import _run_bg_completion_scan
-        _run_bg_completion_scan(jobs=jobs)
-    except Exception:
-        pass
-    if _any_pending_notice():
+        if _finished_unstaged_subagents():
+            return True
+        # A scan that found no map files genuinely means nothing FINISHED is
+        # left to say — which is exactly the state the Phase C stall trigger
+        # exists for, so it falls through to that last resort instead of
+        # returning False here.
+    else:
+        try:
+            from ._dispatch import _run_bg_completion_scan
+            _run_bg_completion_scan(jobs=jobs)
+        except Exception:
+            pass
+        if _any_pending_notice():
+            return True
+        # Anything left here is finished-but-unstaged work the sweep could not
+        # announce (e.g. a sub-agent record with no answer) — still
+        # wake-worthy, and it wins over the stall branch by position.
+        if (_finished_unstaged_subagents()
+                or _finished_unseen_bg_jobs(jobs=jobs)):
+            return True
+    # Phase C (0.161.0) LAST RESORT, deliberately placed after every existing
+    # "nothing to say" conclusion above and behind the streak-cap early-return
+    # at the top of this function: a campaign with a pending plan whose last
+    # done turn armed the stall clock, with no work in flight left to wait for.
+    # Self-terminating by construction — see _stall_due()'s revision
+    # terminator and the deliberate-stop hold.
+    # The explicit _work_in_flight() test is load-bearing, not belt-and-braces:
+    # every guard above is about FINISHED work, so wake_due() never grew a
+    # live-job guard (a running agent announces itself later), yet a live
+    # bg-bash job lets execution reach this point — the map exists and the
+    # sweep reports nothing. Without this check the trigger would fire 20s into
+    # a 10-minute build, which is exactly the phantom wake §2 forbids.
+    if (_campaign_pending() and _stall_due()
+            and not _work_in_flight()):
+        st._WAKE_STALL_PENDING = True
         return True
-    # Anything left here is finished-but-unstaged work the sweep could not
-    # announce (e.g. a sub-agent record with no answer) — still wake-worthy.
-    return bool(_finished_unstaged_subagents() or _finished_unseen_bg_jobs(jobs=jobs))
+    return False
 
 
 # --- the poller ---------------------------------------------------------------

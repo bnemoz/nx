@@ -14,6 +14,7 @@ on-screen tool-output box and the `/todo` slash command.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 
 from typing import Any
@@ -82,6 +83,31 @@ def render_todos_display(todos: list[dict[str, str]] | None = None) -> str:
     return "\n".join(lines)
 
 
+def _plan_revision(todos: list[dict[str, Any]] | None = None) -> int:
+    """A stable revision id for the plan: a hash of the ordered (text, status)
+    pairs (0.161.0, AUTOWAKE_SPEC Phase C).
+
+    The plan-stall wake fires AT MOST ONCE per revision, so this value must be
+    stable (same plan -> same int, across processes and runs: hence blake2b,
+    never Python's per-process-salted `hash()`), and it must move whenever the
+    plan changes in any way the model could act on. `todo_write` is the ONLY
+    writer of st._TODOS (it replaces the list wholesale), so the value is
+    computed there and stashed on `st._PLAN_REVISION`: the wake poller then
+    compares an int every 2s instead of re-hashing the list.
+
+    An empty/absent plan hashes to a fixed value too (not -1), so the initial
+    `st._WAKE_STALL_REVISION = -1` never spuriously matches a real plan, and a
+    plan appearing from nothing still counts as a change."""
+    todos = st._TODOS if todos is None else todos
+    h = hashlib.blake2b(digest_size=8)
+    for item in todos or []:
+        h.update(str(item.get("text", "")).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(str(item.get("status", "pending")).encode("utf-8"))
+        h.update(b"\x01")
+    return int.from_bytes(h.digest(), "big")
+
+
 def todo_write(todos: list[dict[str, Any]]) -> str:
     cleaned = []
     for item in todos:
@@ -90,6 +116,10 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
             status = "pending"
         cleaned.append({"text": str(item.get("text", "")), "status": status})
     st._TODOS = cleaned
+    # Phase C (0.161.0): stash the plan revision where the wake poller can read
+    # an int instead of hashing the list every tick. Computed here because this
+    # function is the plan's only writer.
+    st._PLAN_REVISION = _plan_revision(cleaned)  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
     _persist(cleaned)
     # Online Context Compact (0.67.0): a todo_write that newly completes >= 1
     # item is a plan-step boundary — the OCC module decides at the next

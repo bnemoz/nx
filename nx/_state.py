@@ -278,6 +278,26 @@ _WAKE_STREAK = 0
 # instruction.
 _SPAWNED_WRITE_TIER: bool = False
 
+# --- plan-stall wake (0.161.0, AUTOWAKE_SPEC Phase C) -------------------------
+# A campaign can stall with nothing in flight (an agent FAILED and its note was
+# already delivered, the model marked a todo in_progress and answered in text):
+# every existing wake guard then correctly concludes "nothing to say", forever.
+# The stall trigger fires once per plan revision after a grace period, and
+# self-terminates by construction — the revision terminator plus the hold below.
+# Clock = monotonic time the last done turn left a campaign with no work in
+# flight (0.0 = not armed). _WAKE_STALL_REVISION is the plan revision stamped
+# when a stall wake fires: at most ONE stall wake per revision. _WAKE_STALL_HOLD
+# parks the trigger when such a wake changed nothing (deliberate stop).
+_WAKE_STALL_AT: float = 0.0
+_WAKE_STALL_REVISION: int = -1
+_WAKE_STALL_HOLD: bool = False
+# One-shot: set by wake_due() when the branch that fired was the stall branch,
+# consumed by wake_instruction() to pick STALL_WAKE_INSTRUCTION.
+_WAKE_STALL_PENDING: bool = False
+# The plan revision todo_write stashed (a stable hash of its (text, status)
+# pairs) — the poller compares this int instead of re-hashing every tick.
+_PLAN_REVISION: int = -1
+
 # True for the whole duration of one _run_model_turn_loop() call in the
 # interactive parent. wake_due() refuses to fire mid-turn: a notice that
 # stages while a turn runs is flushed by that turn's own tool-loop machinery.

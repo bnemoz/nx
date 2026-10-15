@@ -451,8 +451,12 @@ def _repl() -> None:
         user = "" if wake else user.strip()
         if not wake:
             # A typed turn is the user taking the wheel — the unattended
-            # chain restarts from 0 (0.121.0).
+            # chain restarts from 0 (0.121.0), and with it the Phase C
+            # plan-stall trigger (0.161.0): stall clock, deliberate-stop hold
+            # and the one-shot stall marker belong to the chain just
+            # interrupted.
             st._WAKE_STREAK = 0
+            _m._autowake.clear_stall_state()
         if wake:
             st._WAKE_DUE = False
             # The flag is advisory: a poller that decided mid-turn (its
@@ -464,8 +468,21 @@ def _repl() -> None:
             if not _m._autowake.wake_due():
                 continue
             st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
+            # Phase C (0.161.0): a STALL wake stamps the plan revision it woke
+            # for, at the same seam where the streak increments. That single
+            # int is the trigger's terminator (at most one stall wake per plan
+            # revision) AND the baseline the post-turn finally compares
+            # against to decide whether the wake changed anything
+            # (-> _WAKE_STALL_HOLD).
+            _stall_wake = bool(getattr(st, "_WAKE_STALL_PENDING", False))
+            if _stall_wake:
+                from ._todo import _plan_revision
+                st._WAKE_STALL_REVISION = _plan_revision()  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
             user = _m._autowake.wake_instruction()
-            print(f"{DIM}  ▸ background job finished — auto-continuing{RESET}")
+            print(f"{DIM}  "
+                  + ("▸ plan stalled — auto-continuing" if _stall_wake
+                     else "▸ background job finished — auto-continuing")
+                  + f"{RESET}")
         if not user and not wake:
             continue
         cmd = user.split(None, 1)[0]
@@ -487,6 +504,7 @@ def _repl() -> None:
         print()  # breathing room before the spinner/text starts
         state.messages.append({"role": "user", "content": user if wake
                                else expand_at_mentions(user)})  # str or parts (@image)
+        _turn_summary: dict = {}
         try:
             st._TURN_ACTIVE = True
             # 0.127.1: the /panel rail's live region is a mid-turn construct
@@ -515,7 +533,7 @@ def _repl() -> None:
                 # may end as plain text (no tool call), and the notes otherwise
                 # only flush on the first tool call of a turn.
                 _m._flush_pending_background_notice(state.messages)
-            _run_model_turn_loop(
+            _turn_summary = _run_model_turn_loop(
                 state.messages,
                 on_step=lambda meta=None: _save_current(state, meta, update_index=False),
             )
@@ -553,6 +571,17 @@ def _repl() -> None:
             # undelivered work.
             if not wake and _m._autowake._any_pending_notice():
                 st._WAKE_DUE = True
+            # Phase C (0.161.0): the stall-clock seam. Armed when a turn ended
+            # `done` leaving a campaign with nothing in flight (the state that
+            # used to be silent forever), and the place where a stall wake that
+            # changed nothing trips _WAKE_STALL_HOLD. See
+            # _autowake.note_turn_end for the contract.
+            try:
+                _m._autowake.note_turn_end(
+                    isinstance(_turn_summary, dict)
+                    and _turn_summary.get("status") == "done")
+            except Exception:
+                pass
             # EVENTSURFACE_SPEC guardrail, termination: the /tabs live region
             # closes at turn end (its own driver — the watcher tick — parks
             # with the turn).

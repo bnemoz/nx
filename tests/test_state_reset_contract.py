@@ -20,10 +20,24 @@ def test_wake_residue_is_swept():
     st._WAKE_DUE = True
     st._WAKE_ARMED = True
     st._WAKE_STREAK = 7
+    # 0.161.0 (Phase C): the wake-state section of the reset body is hand-
+    # listed, so the plan-stall slots are pinned here too — they are dir(st)
+    # _WAKE_* names but NOT _PENDING_* ones, so the derived notice oracle
+    # below cannot see them.
+    st._WAKE_STALL_AT = 1234.5
+    st._WAKE_STALL_REVISION = 99
+    st._WAKE_STALL_HOLD = True
+    st._WAKE_STALL_PENDING = True
+    st._PLAN_REVISION = 77
     nx_state_reset_body()
     assert st._WAKE_DUE is False
     assert st._WAKE_ARMED is False
     assert st._WAKE_STREAK == 0
+    assert st._WAKE_STALL_AT == 0.0
+    assert st._WAKE_STALL_REVISION == -1
+    assert st._WAKE_STALL_HOLD is False
+    assert st._WAKE_STALL_PENDING is False
+    assert st._PLAN_REVISION == -1
 
 
 def test_metrics_tls_is_cleared():

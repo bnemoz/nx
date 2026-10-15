@@ -315,7 +315,12 @@ def render_status() -> str:
     _limit = _wake_streak_limit()
     _pending = sum(1 for t in (getattr(st, "_TODOS", None) or [])
                    if t.get("status") == "pending")
-    _held = f"{sep}held: streak" if _streak >= _limit else ""
+    # Phase C (0.161.0) adds the second park reason: a stall wake the model
+    # answered with a deliberate stop parks the trigger until the next typed
+    # message, which is worth showing next to the cap.
+    _parked = (["streak"] if _streak >= _limit else []) \
+        + (["stall"] if getattr(st, "_WAKE_STALL_HOLD", False) else [])
+    _held = f"{sep}held: {'+'.join(_parked)}" if _parked else ""
     lines.append(f"{DIM}  auto-continue:{RESET} "
                  f"{'armed' if _awake else 'off'}"
                  f"{sep}wake {_streak}/{_limit}{sep}plan {_pending} pending{_held}")
