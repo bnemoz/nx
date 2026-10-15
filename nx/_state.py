@@ -521,6 +521,11 @@ _NOTICE_DEFAULTS: dict[str, Any] = {
     "_BG_NOTICE_SEEN": None,
     "_PENDING_VERIFY_NOTICE": None,
     "_PENDING_YOLO_ASYNC_NOTICE": None,
+    # 0.160.0 (AUTOWAKE_SPEC Phase B): staged by _autowake._stage_hold_notice
+    # when a chain guard parks auto-continuation. Rides the normal flush to the
+    # next prompt but must never itself wake the REPL (it is in
+    # _autowake._NON_WAKE_NOTICE_SLOTS).
+    "_PENDING_WAKE_HOLD_NOTICE": None,
 }
 
 # --- post-edit verification (NX_VERIFY_CMD) ------------------------------------

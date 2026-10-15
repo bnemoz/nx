@@ -422,6 +422,13 @@ def nx_state_reset_body() -> None:
             except Exception:
                 pass
         aw._POLLER = None
+        # 0.160.0: the hold notice's idempotency key (the last
+        # (reason, streak) pair it staged for) is a plain module global, so
+        # the notice-slot sweep below cannot reach it. Left set, a later test
+        # that trips the same guard at the same streak would find its hold
+        # notice suppressed and assert False on a staged note.
+        if hasattr(aw, "_HOLD_STAGED"):
+            aw._HOLD_STAGED = None
     # Wake residue: the poller is stopped above, but the flags it (or a
     # mid-flight test) set on st survive it. Reset each to its import-time
     # initial value (nx/_state.py:189-196): _WAKE_DUE/_WAKE_ARMED start False,

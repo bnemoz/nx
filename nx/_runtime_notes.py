@@ -108,7 +108,8 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     # streak notice is staged by run_tool(); NX_VERIFY_CMD's outcome by
     # _dispatch._scan_background_completions.
     for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
-                  "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE"):
+                  "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
+                  "_PENDING_WAKE_HOLD_NOTICE"):
         _text = _notices.get(_slot)
         if _text:
             messages.append({"role": "user", "content": _text})
@@ -129,7 +130,10 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
 # agent ends with a banner + "Nothing needs doing").
 _MODULE_NOTE_SLOTS = ("_PENDING_BG_COMPLETION_NOTICE", "_PENDING_SUBAGENT_NOTICE",
                       "_PENDING_VERIFY_NOTICE", "_PENDING_MULTI_EDIT_NOTICE",
-                      "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE")
+                      "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
+                      # 0.160.0: staged framelessly (poller thread / idle REPL),
+                      # so the module-store drain is its normal delivery path.
+                      "_PENDING_WAKE_HOLD_NOTICE")
 
 
 def _flush_module_store_notes(messages: list[dict[str, Any]],

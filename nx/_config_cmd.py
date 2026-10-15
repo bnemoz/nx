@@ -303,4 +303,20 @@ def render_status() -> str:
     lines.append(f"{DIM}  fence{RESET}     {fence}{sep}writable: "
                  f"{', '.join(roots) or '-'}")
     lines.append(f"{DIM}  approval{RESET}  {_m._approval_display()}")
+    # Auto-continuation posture (0.160.0, AUTOWAKE_SPEC Phase B): whether the
+    # wake mechanism is armed, how far the unattended chain has run against its
+    # cap, and what the plan still has pending. Read-only reads of st fields the
+    # REPL/poller already own — nothing here arms, disarms or resets anything,
+    # and `held:` names the guard that parked the chain (Phase B trips on the
+    # streak cap; budget/plan holds land in later phases).
+    from ._autowake import _wake_streak_limit
+    _awake = bool(getattr(st, "_WAKE_ARMED", False))
+    _streak = int(getattr(st, "_WAKE_STREAK", 0) or 0)
+    _limit = _wake_streak_limit()
+    _pending = sum(1 for t in (getattr(st, "_TODOS", None) or [])
+                   if t.get("status") != "done")
+    _held = f"{sep}held: streak" if _streak >= _limit else ""
+    lines.append(f"{DIM}  auto-continue:{RESET} "
+                 f"{'armed' if _awake else 'off'}"
+                 f"{sep}wake {_streak}/{_limit}{sep}plan {_pending} pending{_held}")
     return "\n".join(lines)

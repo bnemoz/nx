@@ -149,6 +149,38 @@ def test_render_status_snapshot(monkeypatch):
         m.st.SOURCES, m.st.SOURCE_ORDER, m.st.ACTIVE, m.st.MODEL = saved
 
 
+def test_render_status_shows_the_auto_continue_chain_line(monkeypatch):
+    """0.160.0 (AUTOWAKE_SPEC Phase B): /status carries one read-only line for
+    the auto-continuation posture — armed/off, the wake streak against its cap,
+    the pending todo count, and `held:` when a guard parked the chain. The
+    line must never mutate the state it reads."""
+    monkeypatch.setenv("NX_WAKE_STREAK_LIMIT", "25")
+    saved = (m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS)
+    m.st._WAKE_ARMED = True
+    m.st._WAKE_STREAK = 3
+    m.st._TODOS = [{"content": "a", "status": "done"},
+                   {"content": "b", "status": "in_progress"},
+                   {"content": "c", "status": "pending"},
+                   {"content": "d", "status": "pending"}]
+    try:
+        text = cc.render_status()
+        line = next(l for l in text.splitlines() if "auto-continue" in l)
+        assert "armed" in line and "wake 3/25" in line and "plan 3 pending" in line
+        assert "held" not in line, "no guard tripped -> no held: part"
+        # streak at the cap: the guard that parked the chain is named
+        m.st._WAKE_STREAK = 25
+        line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
+        assert "wake 25/25" in line and "held: streak" in line
+        # unarmed session says so, and the hold part follows the cap, not the
+        # armed flag (a streak at the cap is the hold even before /status)
+        m.st._WAKE_ARMED = False
+        m.st._WAKE_STREAK = 0
+        line = next(l for l in cc.render_status().splitlines() if "auto-continue" in l)
+        assert "off" in line and "held" not in line and "wake 0/25" in line
+    finally:
+        m.st._WAKE_ARMED, m.st._WAKE_STREAK, m.st._TODOS = saved
+
+
 def test_render_status_with_active_source(monkeypatch):
     monkeypatch.setenv("NX_FLOOR_BUDGET", "5200")
     saved = (m.st.SOURCES, m.st.SOURCE_ORDER, m.st.ACTIVE, m.st.MODEL)

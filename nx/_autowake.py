@@ -95,6 +95,51 @@ CAMPAIGN_WAKE_INSTRUCTION = (
 )
 
 
+# The last (reason, streak) pair a hold notice was staged for — the
+# idempotency key that keeps the 2s poller (which calls wake_due() every tick,
+# and gets the tripped guard every one of those times) from restaging the same
+# explanation forever. Cleared when the streak drops back under the cap (a
+# typed turn reset it: the chain restarted, so a later trip must speak again)
+# and by nx_state_reset between tests.
+_HOLD_STAGED: Optional[tuple[str, int]] = None
+
+
+def _stage_hold_notice(reason: str) -> bool:
+    """Stage the one-line note that explains auto-continuation has parked
+    (0.160.0, AUTOWAKE_SPEC Phase B). Called ONLY from a guard trip inside
+    wake_due() — never from the poller's own hot path.
+
+    Idempotent per (reason, streak value): while one guard keeps tripping on
+    every poll tick the note stages exactly once, and it rides the normal flush
+    into the next prompt as a [Runtime note]. Returns True when newly staged.
+
+    The slot is in _NON_WAKE_NOTICE_SLOTS, so staging it can never itself
+    satisfy _any_pending_notice() — the anti-loop for a note that exists
+    precisely because waking is forbidden."""
+    global _HOLD_STAGED
+    from . import _notices
+    from ._runtime_notes import RUNTIME_NOTE_PREFIX
+    streak = int(getattr(st, "_WAKE_STREAK", 0) or 0)
+    key = (reason, streak)
+    if _HOLD_STAGED == key:
+        return False
+    _HOLD_STAGED = key
+    _notices.set_("_PENDING_WAKE_HOLD_NOTICE",
+                  f"{RUNTIME_NOTE_PREFIX}auto-continuation stopped: {reason} "
+                  f"\u2014 type to continue]")
+    return True
+
+
+def _release_hold_key(streak: int, limit: int) -> None:
+    """Forget the hold-notice key once the streak is back under the cap (the
+    user took the wheel), so a later chain that trips a guard explains itself
+    again. A helper rather than an assignment in wake_due() so the module
+    global keeps exactly the two owners it needs."""
+    global _HOLD_STAGED
+    if _HOLD_STAGED is not None and streak < limit:
+        _HOLD_STAGED = None
+
+
 def _wake_streak_limit() -> int:
     """Cap on consecutive unattended wake turns (user typed nothing since the
     chain started). NX_WAKE_STREAK_LIMIT, default 25; clamped to >= 1 so the
@@ -153,8 +198,10 @@ def arm_wake() -> None:
 # prompt; waking for them would either loop (the note re-stages itself) or
 # nag with nothing actionable.
 _NON_WAKE_NOTICE_SLOTS: frozenset[str] = frozenset({
-    # placeholder: Phase B adds _PENDING_WAKE_HOLD_NOTICE here — a hold notice
-    # must not satisfy _any_pending_notice() (that would wake forever).
+    # 0.160.0 (Phase B): the hold notice tells the user WHY the chain parked.
+    # Waking for it would loop forever — it is staged exactly when a guard has
+    # already concluded "do not wake", and the wake it caused would re-trip it.
+    "_PENDING_WAKE_HOLD_NOTICE",
 })
 
 
@@ -269,8 +316,15 @@ def wake_due() -> bool:
     # productive-by-construction and never trips them. When nobody is at the
     # keyboard that chain is unbounded — cap consecutive unattended wakes.
     # Any user-typed turn resets the streak in _repl.py.
-    if getattr(st, "_WAKE_STREAK", 0) >= _wake_streak_limit():
+    _limit = _wake_streak_limit()
+    _streak = int(getattr(st, "_WAKE_STREAK", 0) or 0)
+    if _streak >= _limit:
+        # The trip is no longer silent (0.160.0): say once WHY the chain
+        # parked. The note rides the next real prompt and can never itself
+        # wake (_NON_WAKE_NOTICE_SLOTS).
+        _stage_hold_notice(f"wake streak {_streak}/{_limit}")
         return False
+    _release_hold_key(_streak, _limit)
     if st._WAKE_DUE:
         return True
     if getattr(st, "_TURN_ACTIVE", False):

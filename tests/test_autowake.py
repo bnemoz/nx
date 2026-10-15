@@ -66,6 +66,11 @@ def setup_function(_function):
     # 0.159.3: notice slots are now DERIVED, so residue in any of them leaks
     # into wake_due(); drain the whole derived set per test.
     from nx import _notices
+    # 0.160.0: the hold slot is deliberately NOT in _pending_notice_slots()
+    # (it must never wake), so drain it by name plus the stager's key.
+    _notices.set_("_PENDING_WAKE_HOLD_NOTICE", None)
+    m.st._PENDING_WAKE_HOLD_NOTICE = None
+    _autowake._HOLD_STAGED = None
     for _slot in _autowake._pending_notice_slots():
         if _slot != "_PENDING_BACKGROUND_NOTICE":
             _notices.set_(_slot, None)
@@ -615,3 +620,119 @@ def test_arm_wake_noop_when_disabled():
         assert m.st._WAKE_ARMED is False
     finally:
         os.environ["NX_WAKE_PROMPT"] = "1"
+
+
+# ---------------------------------------------------------------------------
+# 6. the hold notice (0.160.0, AUTOWAKE_SPEC Phase B): a guard trip explains
+#    itself once, and never wakes anything
+# ---------------------------------------------------------------------------
+_HOLD_SLOT = "_PENDING_WAKE_HOLD_NOTICE"
+
+
+def _hold_note():
+    from nx import _notices
+    return _notices.get(_HOLD_SLOT) or getattr(m.st, _HOLD_SLOT, None)
+
+
+def _clear_hold():
+    from nx import _notices
+    _notices.set_(_HOLD_SLOT, None)
+    m.st._PENDING_WAKE_HOLD_NOTICE = None
+    _autowake._HOLD_STAGED = None
+
+
+def test_hold_notice_staged_on_streak_cap_trip():
+    """The streak-cap trip used to return False in total silence; now it
+    stages a one-line explanation that rides the next prompt as a
+    [Runtime note]."""
+    from nx._runtime_notes import RUNTIME_NOTE_PREFIX
+    _clear_hold()
+    m.st._WAKE_ARMED = True
+    limit = _autowake._wake_streak_limit()
+    m.st._WAKE_STREAK = limit
+    try:
+        assert _autowake.wake_due() is False
+        note = _hold_note()
+        assert note and note.startswith(RUNTIME_NOTE_PREFIX), note
+        assert "auto-continuation stopped" in note, note
+        assert f"wake streak {limit}/{limit}" in note, note
+        assert "type to continue" in note, note
+    finally:
+        m.st._WAKE_STREAK = 0
+        _clear_hold()
+
+
+def test_hold_notice_is_idempotent_per_reason_and_streak():
+    """The poller hits the same tripped guard every 2s tick — restaging the
+    identical note each tick would refill the slot after every delivery and
+    spam the transcript. One (reason, streak) pair stages exactly once."""
+    _clear_hold()
+    m.st._WAKE_ARMED = True
+    limit = _autowake._wake_streak_limit()
+    m.st._WAKE_STREAK = limit
+    try:
+        assert _autowake._stage_hold_notice("wake streak 25/25") is True
+        assert _autowake._stage_hold_notice("wake streak 25/25") is False
+        # poll ticks: wake_due() re-trips the guard, the note stays single
+        for _ in range(5):
+            assert _autowake.wake_due() is False
+        assert _autowake._HOLD_STAGED == (f"wake streak {limit}/{limit}", limit)
+        # a different reason does get through (Phase C/D trip their own guard)
+        assert _autowake._stage_hold_notice("chain budget spent") is True
+        # and once the streak resets, the same trip may explain itself again
+        _autowake._HOLD_STAGED = None
+        assert _autowake._stage_hold_notice("wake streak 25/25") is True
+    finally:
+        m.st._WAKE_STREAK = 0
+        _clear_hold()
+
+
+def test_hold_notice_alone_never_satisfies_any_pending_notice():
+    """THE Phase B anti-loop regression test. The hold notice is delivered as
+    a [Runtime note], so a predicate that reads notice slots would see it,
+    wake a turn, hit the same guard, re-stage it, and wake forever. The
+    exclusion must be in _any_pending_notice() itself — that function also
+    feeds the REPL post-turn flag raise and the Telegram mirror."""
+    from nx import _notices
+    _clear_hold()
+    m.st._WAKE_ARMED = True
+    try:
+        for setter in (lambda v: _notices.set_(_HOLD_SLOT, v),
+                       lambda v: setattr(m.st, _HOLD_SLOT, v)):
+            setter("[Runtime note: auto-continuation stopped: wake streak "
+                   "25/25 \u2014 type to continue]")
+            assert _HOLD_SLOT not in _pending_notice_slots()
+            assert _any_pending_notice() is False, \
+                "the hold notice must never satisfy the wake predicate"
+            assert _autowake.wake_due() is False
+            setter(None)
+    finally:
+        _clear_hold()
+
+
+def test_hold_notice_flushes_exactly_once():
+    """Delivery rides the existing flush: appended once as a user-role
+    [Runtime note], slot cleared, and a second flush says nothing."""
+    _clear_hold()
+    try:
+        assert _autowake._stage_hold_notice("wake streak 25/25") is True
+        msgs: list[dict] = []
+        m._flush_pending_background_notice(msgs)
+        assert len(msgs) == 1, msgs
+        assert msgs[0]["role"] == "user"
+        assert "auto-continuation stopped" in msgs[0]["content"]
+        assert _hold_note() is None
+        m._flush_pending_background_notice(msgs)
+        assert len(msgs) == 1, "the note must be delivered exactly once"
+    finally:
+        _clear_hold()
+
+
+def test_staged_notice_slots_include_the_hold_slot():
+    """Reset-contract companion: the new slot is a routed _NOTICE_DEFAULTS key
+    (so nx_state_reset drains it by construction) and is flushed framelessly
+    (the poller stages it outside any turn loop)."""
+    import nx._state as st
+    from nx._runtime_notes import _MODULE_NOTE_SLOTS
+    assert _HOLD_SLOT in st._NOTICE_DEFAULTS
+    assert _HOLD_SLOT in _MODULE_NOTE_SLOTS
