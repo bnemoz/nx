@@ -314,6 +314,30 @@ def _run_cli(home, argv, monkeypatch, capsys):
     return code, cap.out, cap.err
 
 
+def test_first_sweep_is_due_whatever_the_clock(monkeypatch):
+    """A never-swept kind is DUE on its very first call, whatever the interval.
+
+    Regression (0.158.21): `_sweep_due` seeded "never swept" with a 0.0 stamp
+    while `now` is `time.monotonic()` — boot-relative. On a box whose uptime was
+    shorter than the interval, `now - 0.0 < interval` read the ABSENT stamp as
+    "swept a moment ago", so the first sweep was suppressed and, because a
+    suppressed call does not stamp, so was every later one until uptime passed
+    the interval. The 86400 s artifact GC therefore never ran at all on any host
+    rebooted inside a day (the three red hook tests above failed only on such a
+    host), while the 300 s gates escaped it by luck of the clock. Driven with a
+    faked low `monotonic` so the collision is jailbroken on a high-uptime box
+    too — the reason this shipped is that it only bit on fresh boots."""
+    monkeypatch.setattr(sfs, "_SWEEP_LAST", {})
+    with monkeypatch.context() as mp:
+        mp.setattr(sfs.time, "monotonic", lambda: 1.0)  # a box up 1 second
+        assert sfs._sweep_due("gc-probe", 86400) is True, \
+            "the first sweep of a kind must never be gated"
+        assert sfs._sweep_due("gc-probe", 86400) is False, \
+            "the second call is inside the interval"
+    sfs._SWEEP_LAST["gc-probe"] = time.monotonic() - 86401.0
+    assert sfs._sweep_due("gc-probe", 86400) is True, "interval elapsed"
+
+
 def test_cli_gc_default_is_dry_run(home, monkeypatch, capsys):
     old = _aged(home / "agents" / "proj-x" / "job1.md", 90)
     hist = _aged(home / "input_history.json", 90)

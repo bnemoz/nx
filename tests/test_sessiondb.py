@@ -275,6 +275,235 @@ def test_refresh_fts_skips_injected_blocks_but_keeps_stored_transcript():
     assert db.load_session(sid)["messages"] == msgs
 
 
+# --- FTS body-schema version backfill (0.158.22) ------------------------------
+# Stores indexed before the 0.158.19 satellite exclusion must stop recalling
+# "[Saved memories …]"-shaped harness text once the amortized pass (or
+# `nx sessions --reindex`) ran. Pins: PRAGMA user_version drives detection
+# (0/older → rebuild; current → a bare version check); stale bodies are
+# RE-DERIVED through the save path's own builder and satisfy the same
+# index-only-exclusion invariants; the pass is batched and advances; the
+# marker is written only once the stale-body probe completes empty; the pass
+# is idempotent; `--reindex` finishes the whole job in one call.
+
+# A pre-0.158.19 satellite body: exactly what the old _body_of wrote for a
+# prefix-note message — "[user] " + the raw content, indexed whole.
+STALE_SAT_BODY = ("[user] [Saved memories — use memory_search to read any:]"
+                  " [project] stalelessonzephyr a stale lesson title")
+FB_REAL_BODY = "[user] a real user line about quokkatitleflange"
+FB_SYS_BODY = "[system] sys"  # system messages are ordinary index content
+
+
+def _seed_pre_filter_store(sid, n_real=2):
+    """A store as a pre-0.158.19 nx would have left it: the transcript is
+    current, but the fts_msgs/msgs_fts rows were hand-built WITHOUT the
+    satellite exclusion (the satellite row first, exactly like the bug)."""
+    msgs = [_msg("system", "sys"),
+            _msg("user", "[Saved memories — use memory_search to read any:]\n"
+                         "[project] stalelessonzephyr a stale lesson title"),
+            _msg("user", "a real user line about quokkatitleflange")]
+    for i in range(n_real):
+        msgs.append(_msg("assistant", f"ack {i} quokkatitleflange"))
+    db.store_session(sid, msgs, {"title": f"t-{sid[-4:]}"})
+    conn = sqlite3.connect(db._store_path())
+    with conn:
+        conn.execute("DELETE FROM msgs_fts WHERE rowid IN"
+                     " (SELECT rowid FROM fts_msgs WHERE sid = ?)", (sid,))
+        conn.execute("DELETE FROM fts_msgs WHERE sid = ?", (sid,))
+        conn.execute("INSERT INTO fts_meta(sid, title, description, mtime)"
+                     " VALUES (?,?,?,?)", (sid, "t", "d", 1.0))
+        # the meta postings too: an external-content index DELETE of a
+        # rowid with no docsize entry raises "malformed", and a real
+        # pre-0.158.19 store always had the pair written together
+        conn.execute("INSERT INTO meta_fts(rowid, title, description)"
+                     " SELECT rowid, title, description FROM fts_meta"
+                     " WHERE sid = ?", (sid,))
+        rows = [FB_SYS_BODY, STALE_SAT_BODY, FB_REAL_BODY] + [
+            f"[assistant] ack {i} quokkatitleflange" for i in range(n_real)]
+        for seq, body in enumerate(rows):
+            cur = conn.execute(
+                "INSERT INTO fts_msgs(sid, seq, role, body, mtime)"
+                " VALUES (?,?,?,?,?)",
+                (sid, seq, body.split("]")[0][1:], body, 1.0))
+            if body:
+                conn.execute(
+                    "INSERT INTO msgs_fts(rowid, body) VALUES (?,?)",
+                    (cur.lastrowid, body))
+    conn.close()
+    return msgs
+
+
+def test_marker_absent_triggers_rebuild_and_lessons_stops_recalling():
+    _clear()
+    sid = "20250101-120000-fb001"
+    _seed_pre_filter_store(sid)
+    conn = sqlite3.connect(db._store_path())
+    assert db._fts_body_version(conn) == 0
+    conn.close()
+    # BEFORE: the stale satellite line is recallable as a "past lesson".
+    from nx import _lessons
+    hits = _lessons.search_lessons("stalelessonzephyr")
+    assert [h["id"] for h in hits] == [sid], hits
+    # The amortized pass runs the whole (small) job and stamps the marker.
+    assert db.fts_body_backfill_batch(batch=10) == 1
+    conn = sqlite3.connect(db._store_path())
+    assert db._fts_body_version(conn) == db.FTS_BODY_SCHEMA_VERSION
+    bodies = [r[0] for r in conn.execute(
+        "SELECT body FROM fts_msgs WHERE sid = ? ORDER BY seq", (sid,))]
+    conn.close()
+    # AFTER: satellite text is gone from the index; the real line survives.
+    assert "stalelessonzephyr" not in "\n".join(bodies), bodies
+    assert _lessons.search_lessons("stalelessonzephyr") == []
+    hits = _lessons.search_lessons("quokkatitleflange")
+    assert [h["id"] for h in hits] == [sid], hits
+
+
+def test_backfill_preserves_index_only_exclusion_invariants():
+    """A backfilled store satisfies exactly what a fresh indexed save
+    writes: one row per stored message, gapless seq, '' body for the
+    satellite row, no msgs_fts postings for empty bodies."""
+    _clear()
+    sid = "20250101-120000-fb002"
+    msgs = _seed_pre_filter_store(sid, n_real=2)
+    assert db.fts_body_backfill_batch(batch=10) == 1
+    conn = sqlite3.connect(db._store_path())
+    rows = conn.execute(
+        "SELECT seq, body FROM fts_msgs WHERE sid = ? ORDER BY seq",
+        (sid,)).fetchall()
+    assert [s for s, _ in rows] == list(range(len(msgs))), rows
+    bodies = [b for _, b in rows]
+    assert bodies[0] == FB_SYS_BODY, bodies  # system: ordinary content
+    assert bodies[1] == "", bodies  # satellite: '' row, seq preserved
+    assert FB_REAL_BODY in bodies, bodies
+    max_seq, cnt = conn.execute(
+        "SELECT COALESCE(MAX(seq),-1), COUNT(*) FROM fts_msgs"
+        " WHERE sid = ?", (sid,)).fetchone()
+    assert max_seq == cnt - 1  # the gapless invariant the append path reads
+    # Postings must carry no satellite tokens: MATCH is the consumer's view
+    # (a plain rowid query on external-content FTS just reads fts_msgs).
+    hit = conn.execute("SELECT COUNT(*) FROM msgs_fts WHERE msgs_fts MATCH ?",
+                       ("stalelessonzephyr",)).fetchone()[0]
+    assert hit == 0
+    conn.close()
+    # The stored transcript is untouched (index-only exclusion).
+    assert db.load_session(sid)["messages"] == msgs
+
+
+def test_batched_progress_advances_and_marker_lands_only_when_done():
+    _clear()
+    for i in range(3):
+        _seed_pre_filter_store(f"20250101-12000{i}-fb00i", n_real=0)
+    conn = sqlite3.connect(db._store_path())
+    # one session per call: progress, no marker while the probe window still
+    # names another stale session; the last named session is rebuilt AND the
+    # marker lands in the same call (the probe proved nothing else remains).
+    assert db._fts_body_backfill_conn(conn, 1) == 1
+    assert db._fts_body_version(conn) == 0
+    assert db._fts_body_backfill_conn(conn, 1) == 1
+    assert db._fts_body_version(conn) == 0
+    assert db._fts_body_backfill_conn(conn, 1) == 1
+    assert db._fts_body_version(conn) == db.FTS_BODY_SCHEMA_VERSION
+    assert db._fts_body_backfill_conn(conn, 1) == 0
+    conn.close()
+
+
+def test_backfill_idempotent_second_run_rewrites_nothing():
+    _clear()
+    sid = "20250101-120000-fb003"
+    _seed_pre_filter_store(sid)
+    assert db.fts_body_backfill_batch(batch=10) == 1
+    conn = sqlite3.connect(db._store_path())
+    before = conn.execute(
+        "SELECT seq, body, mtime FROM fts_msgs WHERE sid = ? ORDER BY seq",
+        (sid,)).fetchall()
+    conn.close()
+    # further passes (every entry point) are no-ops…
+    assert db.fts_body_backfill_batch(batch=10) == 0
+    assert db.prune_stale() == 0
+    assert db.fts_body_reindex_all() == {
+        "sessions_reindexed": 0, "version": db.FTS_BODY_SCHEMA_VERSION}
+    conn = sqlite3.connect(db._store_path())
+    after = conn.execute(
+        "SELECT seq, body, mtime FROM fts_msgs WHERE sid = ? ORDER BY seq",
+        (sid,)).fetchall()
+    conn.close()
+    # …that touch no row: identical mtime proves nothing was rewritten.
+    assert after == before
+
+
+def test_current_version_pays_only_the_version_check(monkeypatch):
+    _clear()
+    sid = "20250101-120000-fb004"
+    db.store_session(sid, [_msg("user", "plain body")], {"title": "p"})
+    db.refresh_fts(sid, [_msg("user", "plain body")], title="p")
+    conn = sqlite3.connect(db._store_path())
+    db._fts_body_version_set(conn, db.FTS_BODY_SCHEMA_VERSION)
+    conn.commit()
+    conn.close()
+    calls = {"n": 0}
+    real = db._stale_body_sids
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(db, "_stale_body_sids", counting)
+    assert db.fts_body_backfill_batch(batch=10) == 0
+    assert db.prune_stale() == 0
+    assert calls["n"] == 0, "a current store must not pay the probe scan"
+
+
+def test_empty_store_gets_marked_and_later_saves_stay_current():
+    """No transcripts + version 0 → the probe answers "clean", the marker
+    lands, and the next save indexes current (no endless re-check)."""
+    _clear()
+    assert db.fts_body_backfill_batch(batch=10) == 0
+    conn = sqlite3.connect(db._store_path())
+    assert db._fts_body_version(conn) == db.FTS_BODY_SCHEMA_VERSION
+    conn.close()
+    sid = "20250101-120000-fb005"
+    db.store_session(sid, [_msg("user", "first indexed save")], {"title": "n"})
+    db.refresh_fts(sid, [_msg("user", "first indexed save")], title="n")
+    assert db.fts_body_backfill_batch(batch=10) == 0
+
+
+def test_reindex_cli_does_the_whole_job_in_one_call(capsys):
+    _clear()
+    for i in range(4):
+        _seed_pre_filter_store(f"20250101-12000{i}-fb00c", n_real=0)
+    from nx import _sessions_cmd
+    # the listing entry routes `nx sessions --reindex` to the handler before
+    # the flag can be swallowed as a search query
+    assert _sessions_cmd._cli_sessions(["sessions", "--reindex"]) is True
+    out = capsys.readouterr().out
+    assert "reindexed 4 session(s)" in out, out
+    conn = sqlite3.connect(db._store_path())
+    assert db._fts_body_version(conn) == db.FTS_BODY_SCHEMA_VERSION
+    assert db._stale_body_sids(conn, 100)[0] == []
+    conn.close()
+    assert _sessions_cmd._cli_reindex_sessions(["--reindex"]) is True
+    assert "nothing to reindex" in capsys.readouterr().out
+
+
+def test_reindex_leaves_a_current_store_alone():
+    _clear()
+    sid = "20250101-120000-fb00d"
+    db.store_session(sid, [_msg("user", "clean save body")], {"title": "c"})
+    db.refresh_fts(sid, [_msg("user", "clean save body")], title="c")
+    conn = sqlite3.connect(db._store_path())
+    before = conn.execute(
+        "SELECT mtime FROM fts_msgs WHERE sid = ?", (sid,)).fetchone()
+    conn.close()
+    # a store whose index is already built by the current builder, but whose
+    # marker was never stamped: one clean probe → marker, no rewrites.
+    assert db.fts_body_reindex_all()["sessions_reindexed"] == 0
+    conn = sqlite3.connect(db._store_path())
+    after = conn.execute(
+        "SELECT mtime FROM fts_msgs WHERE sid = ?", (sid,)).fetchone()
+    assert db._fts_body_version(conn) == db.FTS_BODY_SCHEMA_VERSION
+    conn.close()
+    assert after == before  # rows untouched
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

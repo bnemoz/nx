@@ -44,6 +44,31 @@ from ._private import open_private, private_dir
 
 STORE_FILENAME = "sessions.sqlite"
 
+# FTS body-schema version, stamped on the sessions DB via PRAGMA
+# user_version (standard SQLite versioning; no schema table, survives every
+# process). 0/older means the per-message index predates the newest body
+# rule, so its rows must be re-derived before recall_lessons can trust them:
+#   v1 = the 0.158.19 satellite-block exclusion (nx/_prefix.is_satellite_
+#        message applied in refresh_fts's _body_of): stores indexed before
+#        it still hold "[Saved memories …]"-shaped harness text in the
+#        index, which recall_lessons surfaced as a "past lesson".
+# A bump here is the ONLY way to signal a body-rule change to existing
+# stores; the amortized backfill (_fts_body_backfill_conn) rebuilds from the
+# event log via refresh_fts until the marker is written.
+FTS_BODY_SCHEMA_VERSION = 1
+
+# Sessions rebuilt per amortized backfill invocation. Measured on a copy of
+# a real store (985 sessions, 271k indexed rows, 220 MB of bodies, 984/985
+# carrying stale satellite rows): the stale-body probe scans the whole body
+# column in ~0.1-0.4 s and a rebuild costs ~125 ms/session (~2 min
+# whole-store). 8 keeps one gated invocation (it rides prune_stale, at most
+# once per sweep interval) around ~1.1 s — comparable to the prune sweep it
+# shares the gate with — while the total amortized cost stays the whole-
+# store rebuild either way. A deliberate constant, not an env knob: the
+# knob belongs in README with the other tunables (env-parity gate), and the
+# escape hatch users actually need is `nx sessions --reindex`.
+FTS_BACKFILL_BATCH_DEFAULT = 8
+
 
 def _sessions_dir() -> str:
     # Local import: _sessions_fs is the store's primary *caller* and reads
@@ -1073,7 +1098,8 @@ def store_session(
 
 def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                 title: str | None = None, description: str | None = None,
-                conn: Optional[sqlite3.Connection] = None) -> None:
+                conn: Optional[sqlite3.Connection] = None,
+                force_rebuild: bool = False) -> None:
     """Sync one session's per-message FTS index (0.115.0).
 
     State-driven, mirroring the events fast path: the indexed row set is
@@ -1133,6 +1159,12 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                 rebuild = True
                 if cnt == 0:
                     pass  # fresh index: full insert is the append
+                elif force_rebuild:
+                    # The version backfill: the rows exist but were built by
+                    # an OLDER _body_of, so the tail-match fast path would
+                    # (correctly, for its own purposes) prove the index
+                    # "current" and append nothing. Force the whole rebuild.
+                    pass
                 elif max_seq != cnt - 1:
                     pass  # gap/corruption: reindex
                 elif max_seq >= n_msgs:
@@ -1224,6 +1256,214 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
     finally:
         if own:
             conn.close()
+
+
+# --- FTS body-schema version backfill (0.158.22) ------------------------------
+# A store indexed before 0.158.19 still carries satellite-block bodies in
+# fts_msgs/msgs_fts; `PRAGMA user_version` says so (see
+# FTS_BODY_SCHEMA_VERSION). Detection is self-completing, so it needs no
+# process gate of its own: each invocation probes for one bounded batch of
+# still-stale bodies, rebuilds them, and the marker is written by the
+# invocation whose probe comes back empty — after that, every later call is
+# a single PRAGMA read. Rebuilds go through refresh_fts(force_rebuild=True)
+# over the SAME messages the save path reads (the event-log loader), so the
+# backfilled rows satisfy exactly the invariants a fresh indexed save writes
+# (gapless seq, empty body per satellite row, msgs_fts postings only for
+# non-empty bodies).
+
+def _fts_body_version(conn: sqlite3.Connection) -> int:
+    """The DB's body-schema version (0 on a store that never stamped one).
+    An unreadable marker counts as current: a PRAGMA read does not fail on
+    any readable DB, and assuming 0 there would re-backfill forever."""
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    except sqlite3.Error:
+        return FTS_BODY_SCHEMA_VERSION
+
+
+def _fts_body_version_set(conn: sqlite3.Connection, version: int) -> None:
+    # PRAGMA values cannot be bound; version is our own int constant.
+    conn.execute(f"PRAGMA user_version = {int(version)}")
+    conn.commit()  # no-op unless a transaction is open; must survive close
+
+
+def _satellite_body_like_patterns() -> list[str]:
+    """LIKE patterns matching an OLD (pre-v1) satellite body: exactly the
+    shape _body_of used to write for a satellite message — `[user] ` plus a
+    satellite marker, anchored at the start (no leading `%`) so the index's
+    seq/role columns are irrelevant and the probe stays a prefix match.
+
+    A satellite message is by construction role=user with str content whose
+    lstrip() opens with a marker, so a stale body can only differ from the
+    pattern by whitespace between `] ` and the marker; a message whose
+    content is indented that way is vanishingly rare, and the residual cost
+    of missing one is the same stale row that exists today (no regression)."""
+    from ._prefix import PREFIX_MARKERS, SATELLITE_MARKERS
+    from ._runtime_notes import RUNTIME_NOTE_PREFIX
+    pats: list[str] = []
+    for marker in (RUNTIME_NOTE_PREFIX, *SATELLITE_MARKERS, *PREFIX_MARKERS):
+        lit = "[user] " + marker
+        for ch in ("\\", "%", "_", "["):
+            lit = lit.replace(ch, "\\" + ch)
+        pats.append(lit + "%")
+    return pats
+
+
+def _stale_body_sids(conn: sqlite3.Connection,
+                     limit: int) -> tuple[list[str], bool, bool]:
+    """(up to `limit` sids with a still-stale satellite body, probe_ok,
+    maybe_more).
+
+    probe_ok False means the probe itself failed (a locked store, not a
+    clean one): the caller must NOT stamp the version on its silence. A
+    missing fts_msgs table probes clean and ok — no index is no stale index
+    (the next indexed save builds it current).
+
+    maybe_more True means the fetch window was consumed to its edge, so
+    stale rows may live beyond it; False means every stale row was seen and
+    only the returned sids remain (the caller may finish the pass — and
+    stamp the marker — in the same call).
+
+    Deliberately no DISTINCT: DISTINCT before LIMIT forces the full scan
+    even when the first rows already answer the question (stale satellites
+    sit at the head of every session's rows, a handful per sid at most).
+    Dedup happens in Python on the tiny fetched set instead."""
+    pats = _satellite_body_like_patterns()
+    where = " OR ".join(["body LIKE ? ESCAPE '\\'"] * len(pats))
+    window = max(limit, 1) * 6
+    try:
+        rows = conn.execute(
+            f"SELECT sid FROM fts_msgs WHERE {where} LIMIT ?",
+            (*pats, window)).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return [], True, False
+        return [], False, True
+    out: list[str] = []
+    seen: set[str] = set()
+    truncated = False
+    for (sid,) in rows:
+        if sid in seen:
+            continue
+        if len(out) >= limit:
+            truncated = True
+            break
+        seen.add(sid)
+        out.append(sid)
+    return out, True, truncated or len(rows) >= window
+
+
+def _fts_backfill_one_conn(conn: sqlite3.Connection, sid: str) -> None:
+    """Re-derive one session's index rows from its stored messages through
+    the save path's own authority (refresh_fts/_body_of), reading the
+    transcript through the ONE loader resume/save use (load_session — the
+    same call _sessions_search._refresh_index makes; never a second parser,
+    never a patch of fts_msgs.body).
+
+    Index rows of a session whose transcript row is gone are dropped (the
+    same reconciliation prune_stale does) so a dead sid can never pin the
+    probe and wedge the --reindex loop."""
+    if conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?",
+            (sid,)).fetchone() is None:
+        _fts_delete_conn(conn, sid)
+        return
+    data = load_session(sid)
+    if not data:
+        # Unreadable transcript: the index rows can only be wrong, and the
+        # index is derived state (a missing row is rebuilt by the next
+        # indexed save / _refresh_index pass). Dropping them also keeps the
+        # probe from pinning this sid forever (which would wedge --reindex).
+        _fts_delete_conn(conn, sid)
+        return
+    try:
+        desc = conn.execute(
+            "SELECT description FROM fts_meta WHERE sid = ?",
+            (sid,)).fetchone()
+    except sqlite3.OperationalError:
+        desc = None
+    refresh_fts(sid, data.get("messages") or [], title=data.get("title"),
+                description=(desc[0] if desc else None), conn=conn,
+                force_rebuild=True)
+
+
+def _fts_body_backfill_conn(conn: sqlite3.Connection, batch: int) -> int:
+    """One bounded backfill step on the caller's connection. Returns the
+    number of sessions rebuilt this call; stamps
+    FTS_BODY_SCHEMA_VERSION once the stale-body probe can no longer name
+    another stale session (so an interrupted pass resumes exactly where it
+    stopped, a small store finishes in ONE call, and a store at the current
+    version pays one PRAGMA read).
+
+    The marker is written only when the probe PROVED completeness: either it
+    came back empty, or its fetch window was not fully consumed and every
+    sid it named rebuilt without error."""
+    if _fts_body_version(conn) >= FTS_BODY_SCHEMA_VERSION:
+        return 0
+    sids, probe_ok, maybe_more = _stale_body_sids(conn, batch)
+    if not sids:
+        if probe_ok and not maybe_more:
+            _fts_body_version_set(conn, FTS_BODY_SCHEMA_VERSION)
+        return 0
+    failed = 0
+    for sid in sids:
+        try:
+            _fts_backfill_one_conn(conn, sid)
+        except sqlite3.Error:
+            failed += 1  # one bad session must not strand the whole batch
+            try:
+                # last resort: the rows cannot be trusted either way, and
+                # the index is derived — the next indexed save rebuilds
+                _fts_delete_conn(conn, sid)
+            except sqlite3.Error:
+                pass
+    conn.commit()
+    if not maybe_more and failed == 0:
+        _fts_body_version_set(conn, FTS_BODY_SCHEMA_VERSION)
+    return len(sids)
+
+
+def fts_body_backfill_batch(batch: Optional[int] = None) -> int:
+    """The amortized entry point (save-path hook): rebuild at most `batch`
+    sessions whose index predates FTS_BODY_SCHEMA_VERSION. Never raises;
+    0 means nothing was rebuilt (current or degraded)."""
+    if batch is None:
+        batch = FTS_BACKFILL_BATCH_DEFAULT
+    if batch <= 0:
+        return 0
+    try:
+        conn = _open()
+        if conn is None:
+            return 0
+        try:
+            return _fts_body_backfill_conn(conn, batch)
+        finally:
+            conn.close()
+    except Exception:
+        return 0  # a maintenance pass must never raise into a save path
+
+
+def fts_body_reindex_all(batch: int = 100) -> dict[str, int]:
+    """The synchronous whole-store rebuild behind `nx sessions --reindex`:
+    the same batched pass, looped to completion in one call (the batch
+    bound is memory-boundedness here, not latency). Returns
+    {sessions_reindexed, version}."""
+    total = 0
+    conn = _open()
+    if conn is None:
+        return {"sessions_reindexed": 0, "version": 0}
+    try:
+        while True:
+            n = _fts_body_backfill_conn(conn, max(1, batch))
+            total += n
+            if n == 0:
+                break
+    except sqlite3.Error:
+        pass
+    finally:
+        version = _fts_body_version(conn)
+        conn.close()
+    return {"sessions_reindexed": total, "version": version}
 
 
 def _fts_delete_conn(conn: sqlite3.Connection, session_id: str) -> None:
@@ -1443,12 +1683,25 @@ def prune_stale() -> int:
         have = {r[0] for r in conn.execute("SELECT session_id FROM sessions")}
         doomed = [sid for sid in set(fts_ids) | set(msg_ids)
                   if sid not in have]
-        if not doomed:
-            return 0
-        with conn:
-            for sid in doomed:
-                _fts_delete_conn(conn, sid)
-        return len(doomed)
+        n_pruned = 0
+        if doomed:
+            with conn:
+                for sid in doomed:
+                    _fts_delete_conn(conn, sid)
+            n_pruned = len(doomed)
+        # FTS body-schema backfill (0.158.22): ride this function's two
+        # callers — the save path's once-per-NX_SESSION_SWEEP_INTERVAL
+        # "prune" gate (nx/_sessions_fs) and `nx sessions --prune` — so the
+        # stale-window probe never runs more often than the sweep interval,
+        # and a store already at the current version pays one PRAGMA read.
+        # Own bounded batch, and THE SAME CONNECTION (the P11 contract: one
+        # connect per prune_stale call); never raises (the pass is self-
+        # completing — the marker makes later calls a PRAGMA read).
+        try:
+            _fts_body_backfill_conn(conn, FTS_BACKFILL_BATCH_DEFAULT)
+        except Exception:
+            pass
+        return n_pruned
     except sqlite3.Error:
         return 0
     finally:

@@ -152,21 +152,37 @@ _DIFF_FILE = re.compile(r"^\+\+\+ b/(.+)$")
 
 # Redaction/secret tests can only be tested with token-shaped fixtures, and the
 # guard would otherwise refuse the very commit that adds them (0.158.20 hit
-# exactly this). Exemption requires an explicit `nx-allow-secret` marker on an
-# added line in that file AND a test-shaped path, so it cannot exempt
-# application code. A marker is greppable and appears in the reviewed diff, so a
-# smuggled real secret stays visible and attributable — the honest trade, rather
-# than a blanket tests/ exemption that a model could trip by "testing".
+# exactly this). Exemption requires ALL of:
+#   1. an explicit `nx-allow-secret` marker on the SAME added line as the
+#      secret-shaped match (a per-line waiver, not a file-wide one);
+#   2. a test-shaped path (so it cannot exempt application code);
+#   3. the file already existing in the HEAD tree — a file created by this same
+#      commit cannot grant itself a waiver, which closes the self-granting hole
+#      where a model authored tests/new_file.py with a marker + a real
+#      credential in one commit.
+# Condition 3 is what stops the exemption from being self-granting; conditions
+# 1 and 2 keep it auditable (a marker is greppable and appears in the reviewed
+# diff next to the line it waives).
 _SECRET_ALLOW_MARKER = "nx-allow-secret"
 _TEST_PATH = re.compile(r"(?:^|/)tests/|^test_|(?:^|/)test_[^/]+\.py$")
 
 
-def _scan_staged_diff(staged: str) -> str | None:
+def _scan_staged_diff(staged: str,
+                      head_paths: set[str] | None = None) -> tuple[str, str] | None:
     """First secret-shaped string introduced by this diff, or None.
 
-    Per-file, added lines only; a test-path file carrying the allow marker on an
-    added line is skipped (see `_SECRET_ALLOW_MARKER`)."""
+    Per-file, added lines only. Returns ``(path, matched_text)`` so the refusal
+    can name the offending file without printing the whole secret (the caller
+    shows only the first 8 chars, enough to identify the format, not to
+    reconstruct a real credential).
+
+    The `nx-allow-secret` exemption (see `_SECRET_ALLOW_MARKER`) needs the
+    marker on the SAME added line as the match, a test-shaped path, AND the
+    file to already exist in the HEAD tree (`head_paths` — computed once per
+    commit by the caller; None or empty means nothing is exempt, the
+    conservative default)."""
     from ._bash_jobs import _contains_secret
+    known = head_paths or set()
     chunks: dict[str, list[str]] = {}
     cur = ""
     for line in (staged or "").splitlines():
@@ -179,11 +195,16 @@ def _scan_staged_diff(staged: str) -> str | None:
             chunks.setdefault(cur, []).append(line)
     for path, added in chunks.items():
         body = "\n".join(added)
-        if _TEST_PATH.search(path) and _SECRET_ALLOW_MARKER in body:
-            continue
+        if path in known and _TEST_PATH.search(path):
+            # Per-line waiver: each added line carrying a marker waives only
+            # itself. Scan only the marker-less added lines.
+            body = "\n".join(ln for ln in added
+                             if _SECRET_ALLOW_MARKER not in ln)
+            if not body:
+                continue
         hit = _contains_secret(body, env_dumps=False)
         if hit:
-            return hit
+            return (path, hit)
     return None
 
 
@@ -201,11 +222,27 @@ def _git_commit_with_index(repo: str, file_list: list[str], message: str,
         return ("[git_commit] nothing staged — every path in `files` was already "
                 "committed, unchanged, or ignored; nothing was committed")
     staged = staged or ""
-    hit = _scan_staged_diff(staged)
+    # One git call per commit (not per file): paths present in the HEAD tree.
+    # Only files already existing at HEAD can carry an `nx-allow-secret`
+    # waiver, so a test file created by this very commit cannot self-grant.
+    # Uses the HEAD tree, not the index, so a staged-but-untracked file does
+    # not qualify.
+    head_paths: set[str] = set()
+    if head:
+        ls_out, ls_err = _git(repo, ["ls-tree", "-r", "--name-only", head],
+                              timeout)
+        if not ls_err and ls_out:
+            head_paths = set(ls_out.splitlines())
+    hit = _scan_staged_diff(staged, head_paths)
     if hit:
-        return (f"REFUSED: the staged diff contains a secret-shaped string "
-                f"({hit}…) — remove the secret and commit again. Nothing was "
-                "committed and nothing was staged in the shared index.")
+        hpath, htext = hit
+        return (f"REFUSED: the staged diff adds a secret-shaped string in "
+                f"{hpath} ({htext[:8]}…) — nothing was committed and nothing "
+                "was staged in the shared index. Honest options: move the "
+                "fixture into an existing test file that already carries a "
+                "per-line `# nx-allow-secret` marker on the fixture line (the "
+                "marker waives only that line, and only in files that already "
+                "exist at HEAD), or use a non-token-shaped synthetic value.")
     short = message.strip().splitlines()[0][:120]
     preview = _preview(staged, short, repo)
     action = f"git commit: {short}"

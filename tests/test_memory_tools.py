@@ -842,30 +842,30 @@ def test_write_memory_file_derived_provenance_round_trips_through_archive():
 # sha, and a legitimate `[REDACTED:` string) are the ones a "helpful" extra hex
 # rule would break.
 
-# (expected label, the literal secret)
-# nx-allow-secret: synthetic fixtures for the redactor, not credentials. The
-# commit guard honours this marker only on a test-shaped path (nx/_gitcommit.py).
-# These literals must stay literal and real-shaped — the test's whole point is
-# that each pattern matches the format a real key has.
+# Every token line below carries a trailing `# nx-allow-secret`: the commit
+# guard honours the marker ONLY on that same added line, ONLY in a file that
+# already exists at HEAD, and ONLY on a test-shaped path (nx/_gitcommit.py).
+# The literals stay literal and real-shaped -- the test's point is that each
+# pattern matches the format a real key has.
 SECRET_CASES = [
-    ("anthropic_key", "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"),
-    ("openai_key", "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"),
-    ("openai_key", "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"),
+    ("anthropic_key", "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"),  # nx-allow-secret
+    ("openai_key", "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"),  # nx-allow-secret
+    ("openai_key", "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"),  # nx-allow-secret
     ("stripe_key", "sk_live_abcdefghijklmnop1234567890"),
     ("stripe_key", "pk_live_abcdefghijklmnop1234567890"),
-    ("github_token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
-    ("github_token", "gho_abcdefghijklmnopqrstuvwxyz0123456789"),
+    ("github_token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),  # nx-allow-secret
+    ("github_token", "gho_abcdefghijklmnopqrstuvwxyz0123456789"),  # nx-allow-secret
     ("github_token", "github_pat_11ABCDEFG0abcdefghijklmn_9xYzabcdefghijklmnop"),
-    ("aws_key", "AKIAIOSFODNN7EXAMPLE1"),
-    ("slack_token", "xoxb-1234567890-abcdefghij"),
+    ("aws_key", "AKIAIOSFODNN7EXAMPLE1"),  # nx-allow-secret
+    ("slack_token", "xoxb-1234567890-abcdefghij"),  # nx-allow-secret
     ("google_key", "AIzaSyabcdefghijklmnopqrstuvwxyz0123456"),
     ("jwt", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
             ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
     ("db_url_password", "postgres://app:S3cr3tPw@db.internal:5432/prod"),
     ("private_key_block",
-     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n"
+     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n"  # nx-allow-secret
      "-----END OPENSSH PRIVATE KEY-----"),
-    ("private_key_marker", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA"),
+    ("private_key_marker", "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA"),  # nx-allow-secret
 ]
 
 

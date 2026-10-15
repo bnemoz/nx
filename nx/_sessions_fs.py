@@ -440,8 +440,18 @@ def _sweep_due(kind: str, interval_s: int | None = None) -> bool:
         return True  # 0/negative = legacy every-save behavior
     now = time.monotonic()
     with _SWEEP_LOCK:
-        last = _SWEEP_LAST.get(kind, 0.0)
-        if now - last < interval:
+        # "Never swept" is the ABSENT key, not a 0.0 stamp. time.monotonic() is
+        # boot-relative, so a 0.0 default collides with the clock: on a box up
+        # for less than `interval` (a fresh container, or any machine rebooted
+        # inside the last day for the 86400 s artifact GC) `now - 0.0 < interval`
+        # read the missing stamp as "swept a moment ago" and suppressed the
+        # process's FIRST sweep -- and, since a suppressed call does not stamp
+        # the table, every later one too until uptime passed the interval. The
+        # coarser the interval the wider the hole: the phase-1 artifact GC
+        # (86400 s) silently never ran at all on a sub-day-uptime box, which is
+        # what the hook tests in tests/test_gc.py were red about.
+        last = _SWEEP_LAST.get(kind)
+        if last is not None and now - last < interval:
             return False
         _SWEEP_LAST[kind] = now
         return True

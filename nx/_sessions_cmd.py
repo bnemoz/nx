@@ -177,6 +177,7 @@ def _session_next_hint(command: str, page: int, limit: int, query: str | None = 
 _SESSIONS_USAGE = """\
 usage: nx sessions [query] [--page N] [--limit N]
        nx sessions --prune [--reclaim]
+       nx sessions --reindex
 
 List saved sessions and exit. With a query: substring-filters (case-
 insensitive) across title, description, preview and id.
@@ -200,6 +201,14 @@ insensitive) across title, description, preview and id.
                        stale full-transcript session blobs whose events
                        already hold the text, then VACUUM. Takes an exclusive
                        lock on the store for the duration.
+
+  nx sessions --reindex
+                       rebuild the per-message search index NOW instead of
+                       amortized: re-derive every session's indexed bodies
+                       from its stored messages (the same builder an indexed
+                       save uses) until the store carries the current FTS
+                       body-schema version. One-line summary. Idempotent — a
+                       store already at the current version does nothing.
 
 Resume with: nx --resume <n|short-id|title>
 """
@@ -227,6 +236,14 @@ def _cli_sessions(args: list[str]) -> bool:
     if any(a in ("-h", "--help") for a in args):
         print(_SESSIONS_USAGE, end="")
         return True
+    # `nx sessions --reindex` reaches its handler from HERE rather than from
+    # the _cli.py verb chain (same ordering reason as --prune: the listing
+    # path would otherwise swallow the flag as a query and print "no
+    # sessions matching '--reindex'"). Verb position only, exactly like the
+    # `nx sessions prune` spelling — a two-word query merely CONTAINING the
+    # word still searches.
+    if len(args) >= 2 and args[1] in ("--reindex", "reindex"):
+        return _cli_reindex_sessions(args)
     query, page, limit, warnings = _session_list_page_options(args[1:])
     offset = (page - 1) * limit
     fetched = _list_sessions(limit=limit + 1, offset=offset, query=query)
@@ -312,6 +329,25 @@ def _cli_prune_sessions(args: list[str]) -> bool:
             print("  dropped the dead pre-0.115 sessions_fts/fts_body index")
         print(f"  reclaimed {rc['blobs_emptied']} stale transcript blob(s)"
               f" and vacuumed the session store")
+    return True
+
+
+def _cli_reindex_sessions(args: list[str]) -> bool:
+    """`nx sessions --reindex` — run the FTS body-schema backfill to
+    completion by hand and exit (the manual escape hatch over the save
+    path's bounded, amortized pass). One-line summary; idempotent.
+    Returns True if it handled the invocation (caller exits)."""
+    if args[:2] not in (["--reindex"], ["reindex"], ["sessions", "--reindex"],
+                        ["sessions", "reindex"]):
+        return False
+    from ._sessiondb import fts_body_reindex_all
+    rc = fts_body_reindex_all()
+    if rc["sessions_reindexed"]:
+        print(f"  reindexed {rc['sessions_reindexed']} session(s)"
+              f" into body-schema v{rc['version']}")
+    else:
+        print("  nothing to reindex: the search index already carries the"
+              f" current body schema (v{rc['version']})")
     return True
 
 

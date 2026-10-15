@@ -216,7 +216,15 @@ legacy per-session JSON files into the store by hand (idempotent; the files are
 kept as a backup). `nx sessions --prune` reconciles the store by hand: drops
 search rows whose transcript row vanished, collects unreferenced image payloads
 immediately (no age grace), and enforces the `NX_IMAGES_QUOTA_MB` cap — one
-line per action.
+line per action. `nx sessions --reindex` rebuilds the full-text body index to the
+current body schema (0.158.22) and exits — the manual form of a backfill that
+otherwise rides the amortized sweep. Needed once after the 0.158.19 change that
+stopped indexing nx's own injected blocks: stores indexed before it can still
+surface a stale `[Saved memories — …]` line through `recall_lessons`, and a session
+only self-repairs when it is next saved. Idempotent; on the author's store it is
+985 sessions / 271k indexed rows / ~2 minutes, so run it once rather than on a
+hunch. Detection is self-completing (`PRAGMA user_version` plus a probe for the old
+row shape), so an already-current store pays one version read.
 
 `nx gc` is the artifact sweep's shell subcommand (rules in `nx/_gc.py`, over
 the same durable side-effect files: `~/.nx/agents/**`, `~/.nx/undo/**`,
@@ -1213,9 +1221,15 @@ the diff they were shown. Denial leaves the changes staged (review with
 legitimately committed token-shaped string — a redaction test's own fixture —
 made every later edit to that file uncommittable, blocking a change while being
 unable to undo what it objected to. Only an explicit `nx-allow-secret` marker on
-an added line exempts a file, and only on a test-shaped path, so application code
-can never buy its way past the guard; the marker is greppable and visible in the
-diff a human reviews. Plan mode gates it, it joins
+the SAME added line as the token-shaped match exempts that line — never the
+file, and never application code — and only when the file already exists in the
+HEAD tree, so a test file created by the same commit cannot grant itself a
+waiver and smuggle a real credential in (0.158.22). A test path without the
+marker, a marker on a different line, or a brand-new test file are all still
+refused; the refusal names the offending path and the honest options (move the
+fixture into an existing test file that already carries a per-line marker, or
+use a non-token-shaped synthetic value). The marker is greppable and visible in
+the diff a human reviews, next to the line it waives. Plan mode gates it, it joins
 the sub-agent write tier, and the "git commit: <subject>" action carries a
 local medium risk verdict — the model cannot reach `git commit` unreviewed
 anymore. A HEAD-moved preflight (0.108.0) re-checks `git rev-parse HEAD`
