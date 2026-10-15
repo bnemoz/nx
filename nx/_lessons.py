@@ -57,6 +57,14 @@ def search_lessons(query: str, limit: int | None = None,
                    scope: str = "all") -> list[dict[str, Any]]:
     """BM25-ranked full-text search over every saved session transcript.
 
+    This is the **programmatic entry point**: it returns structured hits —
+    `{id, title, cwd, mtime, snippet, score}` per session, in best-first list
+    order — and `recall_lessons` below is its string formatter. Callers that
+    need to *combine* this arm with another (memory_search's reciprocal-rank
+    fusion) read list position as the rank and never touch `score`: FTS5's
+    bm25() magnitudes are meaningless outside this arm (see
+    `_memory_search.RRF_K`).
+
     Query syntax is FTS5 MATCH (AND by default, OR/quotes/NEAR supported);
     a query FTS5 rejects returns [] rather than raising. `limit=None` (the
     default) applies the NX_LESSONS_LIMIT cap (0 = unbounded); one connection
@@ -85,7 +93,8 @@ def search_lessons(query: str, limit: int | None = None,
             "SELECT fts_msgs.sid,"
             " COALESCE((SELECT title FROM fts_meta WHERE sid ="
             "          fts_msgs.sid), sessions.title),"
-            " sessions.cwd, fts_msgs.body, bm25(msgs_fts) AS rank "
+            " sessions.cwd, sessions.updated_at, fts_msgs.body,"
+            " bm25(msgs_fts) AS rank "
             "FROM msgs_fts JOIN fts_msgs"
             " ON fts_msgs.rowid = msgs_fts.rowid "
             "JOIN sessions ON sessions.session_id = fts_msgs.sid "
@@ -106,7 +115,7 @@ def search_lessons(query: str, limit: int | None = None,
                 root = None
     out = []
     seen: set[str] = set()
-    for sid, title, cwd, body, rank in rows:
+    for sid, title, cwd, mtime, body, rank in rows:
         if sid in seen:
             continue  # a session's best-ranked message only
         seen.add(sid)
@@ -115,7 +124,12 @@ def search_lessons(query: str, limit: int | None = None,
         out.append({
             "id": sid,
             "title": title or "",
+            "cwd": str(cwd or ""),
+            "mtime": float(mtime or 0.0),
             "snippet": _snippet(body or ""),
+            # FTS5's own bm25() value, kept for the display line below. It is
+            # arm-internal: negative-is-better, magnitude scales with corpus
+            # size — never compare it against another retriever's score.
             "score": round(float(rank), 3),
         })
     return out

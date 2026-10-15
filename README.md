@@ -409,7 +409,7 @@ so an explicit `nx gc` always evaluates every rule. Exit codes: 0 = done,
 | `NX_TOKENIZE_PREFLIGHT` | `1` (default) sizes the prompt for that clamp with the server's exact `/tokenize` endpoint on local sources (never a remote round-trip); `0` uses the chars/4 estimate only |
 | `NX_FLOOR_BUDGET` | per-turn token-floor budget enforced by the test suite (default 6000, recorded with its justification ledger in `tests/test_initial_context.py`): a new tool or fatter schema fails CI until trimmed or the budget is consciously re-derived — for CI experiments only, not for shipping past the floor |
 | `NX_TEMPERATURE` / `NX_TOP_P` | default sampling params for normal (non-recovery) completions: `NX_TEMPERATURE=0` gives deterministic/greedy output (local evals); `NX_TOP_P` only matters when temperature > 0. A negative value (the default) omits the field so the server uses its own default. A per-source `NX_SOURCE_<NAME>_EXTRA_BODY` temperature/top_p wins over these; recovery retries use `NX_RECOVERY_TEMPERATURE`/`NX_RECOVERY_TOP_P` instead |
-| `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them |
+| `NX_MEMORY_SEARCH_LIMIT` | max `memory_search` results per call (default 8; `0` unbounded) — an over-cap response says how many were cut instead of hiding them. When a call passes `include_sessions`, this is the budget for the *fused* list (notes + past sessions), so one block has one cap |
 | `NX_MEMORY_FTS` | `1` (default) keeps a trigram FTS5 index per memories dir (`.memindex.sqlite`, a self-healing cache reconciled by mtime on every search) so `memory_search` answers from the index instead of reading every note; `0` always runs the plain substring scan. The index only widens recall a little (whitespace folding between query characters) and never changes ranking or the result cap; a sqlite build without FTS5 falls back silently |
 | `NX_LESSONS_LIMIT` | max `recall_lessons` results per call (default `5`; `0` unbounded) — the BM25 cross-session recall over past session transcripts shares memory_search's bounded-results contract |
 | `NX_MEMORY_OPTIMIZE_BATCH` | notes reviewed per librarian call by `/memory optimize` (default `0` = one pass over the whole bounded store; set a number to split it for a tiny-context model — split reviews carry the previous batch's unactioned titles so straddling near-duplicates still meet) |
@@ -1333,6 +1333,25 @@ them under "User preferences (always apply)" — newest first, up to 4 —
 regardless of how many newer untagged notes exist, so your durable
 preferences reach the model every session even in a busy store. Ordinary
 titles ride the plain newest-first list as before.
+
+### Provenance and the self-ingestion guard (0.158.19)
+
+nx injects its own text into the transcript as ordinary user-role messages — the
+saved-memories index note, the orientation/delegation notes, `[Runtime note: …]`,
+plan-mode and cancel notices. Role alone can't identify them, so `_prefix.is_satellite_message`
+is the one shared predicate (an explicit marker list, never "starts with `[`", so a
+genuine `[bug] …` user message still counts). Every distiller and every full-text
+body builder applies it: `/memory save`'s transcript no longer feeds the model its
+own injected memory titles back as raw material, and the session index behind
+`recall_lessons` no longer surfaces `[Saved memories — …]` as a "past lesson". The
+*stored* transcript is left byte-faithful — exclusion is index-only, because resume,
+undo and compress read the real message list.
+
+Notes distilled from nx's own memory output carry a `_derived:` footer field (set by
+`/memory save` when the model flags a recycled learning, and by `/memory optimize`
+merges and `/memory reflect` writes, which are memory-derived by construction). It
+is provenance only: derived notes stay fully searchable and stay in the session-start
+note.
 
 ### `/memory optimize`
 

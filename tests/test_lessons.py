@@ -166,6 +166,46 @@ def test_lessons_never_serve_a_store_only_body():
     assert _lessons.search_lessons("otter sliding")  # backfilled on the call
 
 
+# --- the structured-hit entry point (0.158.x, memory_search fusion) -----------
+
+def test_search_lessons_returns_structured_hits_in_rank_order():
+    """`search_lessons` is the programmatic arm: structured dicts in best-first
+    list order, `recall_lessons` is only its formatter. memory_search's fused
+    mode reads list position as the rank, so list order IS the contract."""
+    _clear()
+    _seed("20260101-120000-lsm1", "the quokka escaped")
+    _seed("20260101-120000-lsm2",
+          "quokka quokka quokka habitat study quokka feeding habits")
+    hits = _lessons.search_lessons("quokka")
+    assert [h["id"] for h in hits] == ["20260101-120000-lsm2",
+                                       "20260101-120000-lsm1"]
+    for h in hits:
+        # the fields the fusion path needs (identity, display, snippet) — plus
+        # the arm-internal bm25 value the display line prints
+        assert set(h) == {"id", "title", "cwd", "mtime", "snippet", "score"}
+        assert isinstance(h["mtime"], float)
+        assert isinstance(h["cwd"], str)
+
+
+def test_formatter_output_is_the_structured_hits_rendered():
+    """Byte-level pin: recall_lessons' block is exactly the hit list rendered,
+    so the refactor that exposed the list cannot have shifted the string."""
+    _clear()
+    _seed("20260101-120000-lsm3", "capybara thermoregulation notes",
+          title="capybaras")
+    hits = _lessons.search_lessons("capybara thermoregulation")
+    out = _lessons.recall_lessons("capybara thermoregulation")
+    h = hits[0]
+    expect = [
+        "past sessions matching 'capybara thermoregulation' (best first):",
+        f"· {h['id'][:12]}  {h['title']}  (bm25 {h['score']})",
+        f"    {h['snippet']}",
+        ("read one with read_file on its store mirror, or resume it "
+         "with /resume <short-id>"),
+    ]
+    assert out == "\n".join(expect)
+
+
 # --- registry posture ---------------------------------------------------------
 
 def test_lessons_is_read_only_in_every_registry():

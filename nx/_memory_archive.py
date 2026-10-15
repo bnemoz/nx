@@ -17,8 +17,8 @@ import os
 
 from ._ansi import C, DIM, RESET
 from ._memory_store import (
-    _MEMORY_FOOTER_RE, _confirm_memory, _iter_memory_dirs, _read_memory_title,
-    _write_memory_file,
+    _MEMORY_FOOTER_RE, _confirm_memory, _iter_memory_dirs, _note_derived,
+    _read_memory_title, _write_memory_file,
 )
 
 
@@ -134,8 +134,13 @@ def _cmd_memory_archived(target: str) -> None:
         print(f"{C.ERROR}  ✗ couldn't read {path}: {e}{RESET}")
         return
     # Strip the archived note's own footer — the writer appends a fresh one.
+    # (The regex anchors on `_scope:` and DOTALLs to EOF, so a `_derived:` field
+    # riding that line is stripped with it: the restore can never produce a
+    # doubled footer.) Provenance is CARRIED ACROSS, not dropped: a derived note
+    # comes back derived, so the pair stays identifiable after an archive.
+    derived = _note_derived(content) or None
     body = _MEMORY_FOOTER_RE.sub("", content).rstrip()
-    written = _write_memory_file(title, body, label, gate=False)
+    written = _write_memory_file(title, body, label, gate=False, derived=derived)
     if written is None:
         return
     try:

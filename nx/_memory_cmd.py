@@ -16,6 +16,7 @@ Names moved to the sibling modules are re-exported below so existing
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any
 
@@ -32,7 +33,8 @@ from ._memory_store import (  # noqa: F401 (re-exports)
     MEMORY_KINDS, _MEMORY_FOOTER_RE, _annotate_drift, _confirm_memory,
     _drift_challenge, _drift_demote, _drift_freshness, _drift_line, _drift_root,
     _first_title, _iter_memory_dirs, _iter_notes, _memories_dir,
-    _memory_confirm_preview, _memory_dirs_for, _note_kind, _parse_drift,
+    _memory_confirm_preview, _memory_dirs_for, _note_derived, _note_kind,
+    _parse_drift,
     _project_memories_dir, _publish_memory, _read_memory_file,
     _read_memory_title, _read_note_preview, _slugify, _stamp_note_now,
     _write_memory_file,
@@ -143,20 +145,70 @@ def _cmd_memory_handler(user: str, state: Any) -> None:
 
 _MEMORY_TRANSCRIPT_CHARS = 48000  # hard cap on the /memory save distillation input
 
+# Provenance round-trip for `/memory save`. The distiller is told to end a note
+# whose content was RECYCLED from memory the transcript already showed (the
+# [Saved memories] titles, a note body pasted in as tool output) with this
+# marker; the marker is popped out of the body here and handed to
+# _write_memory_file as `derived=` so it lands in the footer as
+# `_derived: memory` — a re-distilled note is then distinguishable from a
+# first-hand one, and `/memory optimize` won't treat the pair as independent
+# sources. Kept short: this prompt only runs on an explicit `/memory save`.
+_DERIVED_MARKER_LINE_RE = re.compile(r"(?m)^[ \t]*_derived:[ \t]*memory[ \t]*$")
+_FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```[a-zA-Z0-9_-]*[ \t]*$")
+
+
+def _extract_derived_marker(body: str) -> tuple[str, str | None]:
+    """Pop the distiller's `_derived: memory` marker out of a note body.
+
+    Returns (body_without_marker, "memory" | None). The marker is the model's
+    own provenance statement, so it must never survive into the stored body: a
+    note body is prose, and `_derived:` there would be re-parsed as a footer
+    field by `_note_derived`. Tolerates the model fending it (a content-free
+    ``` block left behind is dropped)."""
+    if not _DERIVED_MARKER_LINE_RE.search(body):
+        return body, None
+    body = _DERIVED_MARKER_LINE_RE.sub("", body)
+    lines = body.splitlines()
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        # An empty fence block left by a fenced marker (a fence line, nothing but
+        # whitespace, then the closing fence) is noise, not content.
+        if _FENCE_LINE_RE.match(lines[i]):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and _FENCE_LINE_RE.match(lines[j]):
+                i = j + 1
+                continue
+        kept.append(lines[i])
+        i += 1
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(), "memory"
+
 
 def _render_transcript_for_memory(messages: list[dict[str, Any]]) -> str:
     """Render session messages into a compact text transcript for the model.
 
-    Skips the system prompt, truncates long tool outputs, and shows tool calls.
-    The whole transcript is also capped (_MEMORY_TRANSCRIPT_CHARS): a long
-    session's tail is dropped, and the cut is announced in-band so the
-    distillation knows it saw a truncated session.
+    Skips the system prompt and nx's own injected satellite blocks (see
+    nx._prefix.is_satellite_message), truncates long tool outputs, and shows
+    tool calls. The whole transcript is also capped
+    (_MEMORY_TRANSCRIPT_CHARS): a long session's tail is dropped, and the cut
+    is announced in-band so the distillation knows it saw a truncated session.
     """
+    from ._prefix import is_satellite_message
     out = []
     total = 0
     truncated = False
     for m in messages:
         if m.get("role") == "system":
+            continue
+        # nx's own injected blocks (the [Saved memories] index note, the
+        # orientation/delegation notes, [Runtime note: …] nudges, …) are NOT
+        # session material: they are the harness's own prior memory output.
+        # Feeding them back to the distiller is the self-ingestion loop this
+        # filter closes — a re-distilled note would otherwise restate the note
+        # it was distilled from, byte-indistinguishably from a first-hand one.
+        if is_satellite_message(m):
             continue
         if total >= _MEMORY_TRANSCRIPT_CHARS:
             truncated = True
@@ -203,7 +255,12 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
         "Write this as a concise, knowledge-rich markdown note that another developer "
         "(or yourself weeks from now) can read and immediately understand. "
         "Use backticks for code, paths, and commands. "
-        "Start with a `# Title` line that captures the topic.\n\n"
+        "Start with a `# Title` line that captures the topic.\n"
+        "The transcript may show memory titles or note bodies nx already saved "
+        "(a [Saved memories] list, a memory_search result). Those are PRIOR ART, "
+        "not fresh findings: never restate them as your own learnings, and if a "
+        "note you write does recycle them, end it with a line `_derived: memory` "
+        "(the harness moves that marker into the note's footer).\n\n"
         f"---\n{transcript}\n---"
     )
     try:
@@ -238,9 +295,12 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
     title = _first_title(body, "")
     if not title:
         title = body.split("\n")[0][:80].strip() or "untitled"
+    # Provenance: the distiller flags a note recycled from memory the transcript
+    # already showed (see _extract_derived_marker / the prompt's PRIOR ART line).
+    body, derived = _extract_derived_marker(body)
 
     try:
-        written = _write_memory_file(title, body, "project")
+        written = _write_memory_file(title, body, "project", derived=derived)
     except OSError as e:
         print(f"{C.ERROR}  ✗ couldn't write memory: {e}{RESET}")
         return

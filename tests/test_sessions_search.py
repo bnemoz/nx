@@ -83,6 +83,55 @@ def test_search_degrades_on_bad_fts_syntax(nx_fresh):
     assert search_sessions("") == []
 
 
+def test_session_body_skips_satellite_blocks_but_keeps_bracketed_user_text(nx_fresh):
+    """Index-only exclusion: nx's own injected blocks must not be searchable
+    session content, while a genuine user line that merely starts with `[` is.
+    The STORED message list is untouched."""
+    nx, tmp = nx_fresh
+    from nx._sessions_search import _session_body
+    data = {"messages": [
+        {"role": "system", "content": "sys prompt"},
+        {"role": "user", "content": "[Saved memories — use memory_search to read any:]\n[project] stale title zeppelinmarker"},
+        {"role": "user", "content": "[Runtime note: a command you ran just backgrounded quokka]"},
+        {"role": "user", "content": "[Orientation note:]\nWorking directory: /tmp"},
+        {"role": "user", "content": "[bug] the parser drops kiltermarker args"},
+        {"role": "assistant", "content": "ack"},
+    ]}
+    body = _session_body(data)
+    assert "zeppelinmarker" not in body, body
+    assert "quokka" not in body, body
+    assert "Saved memories" not in body, body
+    assert "Orientation note" not in body, body
+    assert "kiltermarker" in body, body
+    assert "sys prompt" in body, body  # only the SYSTEM message shape was ever skipped
+    assert data["messages"][1]["content"].startswith("[Saved memories")  # unchanged
+
+
+def test_search_does_not_surface_injected_blocks_as_session_content(nx_fresh):
+    nx, tmp = nx_fresh
+    from nx import _sessiondb as db
+    from nx._sessions_search import search_sessions
+    sid = "sess-satellite"
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "[Saved memories — use memory_search to read any:]\n[project] quokkatile lesson"},
+        {"role": "user", "content": "a real observation about quokkatileflange"},
+        {"role": "assistant", "content": "understood"},
+    ]
+    nx._write_session(sid, msgs, meta={"id": sid, "title": "sat",
+                                       "created_at": 1, "updated_at": 1,
+                                       "cwd": os.getcwd()})
+    # Both terms live in the same session: the real one is searchable...
+    hits = search_sessions("quokkatileflange")
+    assert [h["id"] for h in hits] == [sid], hits
+    # ...
+    # ...the injected one is not, though the stored transcript still holds it.
+    assert search_sessions("quokkatile") == []
+    assert search_sessions("quokkatileflange")[0]["id"] == sid
+    stored = db.load_session(sid)
+    assert stored["messages"] == msgs, "stored transcript must be byte-identical"
+
+
 def test_export_markdown_shape(nx_fresh):
     nx, tmp = nx_fresh
     from nx._sessions_search import export_markdown

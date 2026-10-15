@@ -1166,12 +1166,17 @@ def _maybe_refresh_description(session_id: str, messages: list[dict[str, Any]]) 
         return None
     if st.client is None or st.MODEL is None:
         return None
-    # Count user turns (exclude synthetic runtime-note-only turns).
+    from ._prefix import is_satellite_message
+    # Count user turns (exclude synthetic runtime-note/satellite-only turns).
+    # Was a blunt `not content.lstrip().startswith("[")`, which also dropped
+    # GENUINE user turns that open with a bracketed tag or path (`[bug] …`) and
+    # kept any injected block that didn't (0.158.x); it now uses the shared
+    # predicate, the same one the distiller and the FTS body builders use.
     user_turns = sum(
         1 for m in messages
         if m.get("role") == "user"
         and isinstance(m.get("content"), str)
-        and not m["content"].lstrip().startswith("[")
+        and not is_satellite_message(m)
     )
     # 0.103.4: reads the store WITHOUT the flush-before-read gate that
     # `_load_session` applies. This runs after every turn (right after the
@@ -1215,6 +1220,7 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
     import nx as _m
     if not _DESC_REFRESH_LOCK.acquire(blocking=False):
         return None  # a refresh is already in flight — don't stack them
+    from ._prefix import is_satellite_message
     try:
         # Build a compact transcript for the summarizer — truncate tool outputs
         # and skip the system prompt to keep the call cheap.
@@ -1222,6 +1228,14 @@ def _run_desc_refresh(session_id: str, messages: list[dict[str, Any]],
             out: list[str] = []
             for m in msgs:
                 if m.get("role") == "system":
+                    continue
+                # nx's own injected blocks are not session content: the
+                # description is FTS-indexed (meta_fts) and shown in
+                # /sessions, so leaving them in summarizes the harness's own
+                # `[Saved memories …]` / `[Runtime note: …]` text instead of
+                # the work. Skipped before the cap counts it, so the `cap`
+                # message slots are spent on real turns.
+                if is_satellite_message(m):
                     continue
                 c = _flatten_message_text(m, per_msg=per_msg)
                 out.append(f"[{m.get('role', '?')}] {c}")

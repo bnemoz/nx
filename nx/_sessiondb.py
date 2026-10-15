@@ -1097,8 +1097,27 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
     try:
         from ._sessions_io import _flatten_message_text
 
+        from ._prefix import is_satellite_message
+
         def _body_of(m: Any) -> str:
-            if not isinstance(m, dict):
+            # INDEX-ONLY exclusion: nx's own injected blocks (the [Saved
+            # memories] index note, the orientation/delegation notes, [Runtime
+            # note: …] nudges) are not session content — indexing them makes
+            # the harness's prior memory output retrievable as if it were
+            # first-hand (recall_lessons surfaced "[Saved memories — use
+            # memory_search…]" as a past lesson). The STORED message list is
+            # deliberately left untouched: it is the faithful record that
+            # resume / undo / compress read.
+            #
+            # The row is still INSERTED for such a message, with an empty body:
+            # the index gets no tokens from it, while `seq` keeps its
+            # one-row-per-message meaning. Omitting the row instead would hole
+            # the sequence, and the rebuild/append test below
+            # (`max_seq != cnt - 1`) reads a hole as corruption — with the
+            # prefix block present in every session, that would turn every
+            # indexed save into a full-transcript reindex, exactly what the
+            # incremental append path exists to avoid.
+            if not isinstance(m, dict) or is_satellite_message(m):
                 return ""
             txt = _flatten_message_text(m)
             return f"[{m.get('role', '?')}] {txt}" if txt else ""
@@ -1147,8 +1166,7 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                              str(m.get("role", "?"))
                              if isinstance(m, dict) else "?",
                              _body_of(m), now)
-                            for i, m in enumerate(messages or [])
-                            if _body_of(m)]
+                            for i, m in enumerate(messages or [])]
                     conn.executemany(
                         "INSERT INTO fts_msgs(sid, seq, role, body, mtime)"
                         " VALUES (?,?,?,?,?)", rows)
@@ -1157,7 +1175,8 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                     try:
                         conn.execute(
                             "INSERT INTO msgs_fts(rowid, body)"
-                            " SELECT rowid, body FROM fts_msgs WHERE sid = ?",
+                            " SELECT rowid, body FROM fts_msgs"
+                            " WHERE sid = ? AND body <> ''",
                             (session_id,))
                     except sqlite3.OperationalError:
                         pass  # no FTS5 here
@@ -1165,15 +1184,16 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                     conn.executemany(
                         "INSERT INTO fts_msgs(sid, seq, role, body, mtime)"
                         " VALUES (?,?,?,?,?)",
-                        [(session_id, i, str(m.get("role", "?")),
+                        [(session_id, i, str(m.get("role", "?"))
+                          if isinstance(m, dict) else "?",
                           _body_of(m), now)
                          for i, m in enumerate(messages or [])
-                         if i > max_seq and _body_of(m)])
+                         if i > max_seq])
                     try:
                         conn.execute(
                             "INSERT INTO msgs_fts(rowid, body)"
                             " SELECT rowid, body FROM fts_msgs"
-                            " WHERE sid = ? AND seq > ?",
+                            " WHERE sid = ? AND seq > ? AND body <> ''",
                             (session_id, max_seq))
                     except sqlite3.OperationalError:
                         pass  # no FTS5 here

@@ -789,7 +789,11 @@ def _apply_plan(plan: _Plan, known: dict[str, _OptNote],
             return
         title = _first_title(text, prop_title) or prop_title
         try:
-            written = _write_memory_file(title, text, _group_scope(group))
+            # A merged note is distilled from nx's own notes, not from direct
+            # observation — stamp provenance so a consolidated belief is never
+            # mistaken for a first-hand one (see _write_memory_file).
+            written = _write_memory_file(title, text, _group_scope(group),
+                                         derived="memory")
         except OSError as e:
             print(f"{C.ERROR}  ✗ couldn't write merged note: {e}{RESET}")
             return

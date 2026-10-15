@@ -335,7 +335,11 @@ def _cmd_memory_reflect(arg: str = "") -> None:
             return f"  ✗ {kind} ({scope}): model returned nothing"
         title = _first_title(body, "") or kind
         try:
-            written = _write_memory_file(title, body, scope, gate=False, kind=kind)
+            # `/memory reflect` generalizes over digests of EXISTING notes
+            # (_write_body_prompt's sources are _RefNote digests), so its output
+            # is memory-derived by construction — stamp the provenance.
+            written = _write_memory_file(title, body, scope, gate=False,
+                                         kind=kind, derived="memory")
         except OSError as e:
             return f"  ✗ {kind} ({scope}): {type(e).__name__}: {e}"
         if written is None:

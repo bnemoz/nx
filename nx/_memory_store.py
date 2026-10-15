@@ -10,7 +10,7 @@ builds on. Two storage scopes:
 
 Every write goes through `_write_memory_file`: one filename convention
 (`<timestamp>_<slug>.md`, `-2`/`-3`... on a same-second same-title collision),
-one footer convention (`_scope:`/`_saved:`/`_kind:`, plus the drift stamp
+one footer convention (`_scope:`/`_saved:`/`_kind:`/`_derived:`, plus the drift stamp
 `_drift:` documented at the bottom of this module), atomic tmp+rename,
 private 0600 permissions (memories are distilled from sessions and may contain
 paths/commands/credentials; same posture as session files). Publication is
@@ -156,6 +156,14 @@ def _note_kind(content: str) -> str:
     return m.group(1) if m else ""
 
 
+def _note_derived(content: str) -> str:
+    """The `_derived:` provenance value of a note's footer, or '' when the note
+    is first-hand (or predates the field). Tolerates hand-edited notes the same
+    way _note_kind does."""
+    m = re.search(r"(?:^|\s)_derived:\s*(\S+)", content)
+    return m.group(1) if m else ""
+
+
 def _publish_memory(path: str, content: str) -> bool:
     """Publish one memory note 0600 and atomically, WITHOUT clobbering: the
     final step is a claim (os.link fails with FileExistsError when another
@@ -268,13 +276,23 @@ def _backfill_persist(path: str, content: str, stamped: tuple) -> str:
 
 
 def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
-                       kind: str = "") -> tuple[str, str] | None:
+                       kind: str = "", derived: str | None = None
+                       ) -> tuple[str, str] | None:
     """The single memory writer: shared by the memory_write tool and
     `/memory save` so both produce identical files. Returns (path, scope), or
     None when gate=True and the user denied the confirmation.
 
     kind: optional note kind tag (see MEMORY_KINDS) stored in the footer as
     `_kind:`; an empty string keeps the footer kind-free (old format).
+
+    derived: optional PROVENANCE tag — set only when this note was distilled
+    from nx's OWN memory output (the `[Saved memories]` titles / note bodies in
+    a transcript, or an `/memory optimize` merge of existing notes) rather than
+    from direct first-hand observation. Written as `_derived: <value>` on the
+    `_scope:` footer line; None (the default) leaves every existing call site's
+    bytes unchanged, so a pre-`_derived` footer round-trips identically.
+    Provenance is RECORDED, never enforced: a derived note stays visible to
+    search and to the session-start note.
 
     Resolves project→global fallback (no project root), avoids a doubled H1
     when the body already starts with its own title, makedirs 0700, and never
@@ -317,6 +335,8 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
     footer = f"_scope: {scope}  _saved: {stamp}"
     if kind:
         footer += f"  _kind: {kind}"
+    if derived:
+        footer += f"  _derived: {derived}"
     # Drift stamp: which commit this note is verified against, plus the repo
     # paths its body mentions ('' outside a git repo — no stamp, not a lie).
     drift = _drift_line(body, _drift_root())

@@ -48,11 +48,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _session_body(data: dict[str, Any]) -> str:
-    """The searchable text of a session: every message, flattened."""
+    """The searchable text of a session: every message, flattened.
+
+    nx's own injected satellite blocks are skipped (index-only exclusion, same
+    rule as _sessiondb._body_of): the stored message list keeps them, the
+    index does not, so a session search can never surface the harness's own
+    `[Saved memories …]` / `[Runtime note: …]` text as session content."""
+    from ._prefix import is_satellite_message
     from ._sessions_io import _flatten_message_text
     parts = []
     for m in data.get("messages") or []:
-        if not isinstance(m, dict):
+        if not isinstance(m, dict) or is_satellite_message(m):
             continue
         role = m.get("role", "?")
         txt = _flatten_message_text(m)

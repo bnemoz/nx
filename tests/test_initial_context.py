@@ -155,6 +155,12 @@ import nx as m  # noqa: E402
 # 5360→6000 at the user's direction: a deliberate one-shot widening to give
 # future prompt/schema growth room without a ledger bump every time (the
 # guard still fails loudly once 6000 is crossed).
+# 0.158.x: memory_search gains one optional `include_sessions` boolean (opt-in
+# reciprocal-rank fusion of the note arm with recall_lessons' session arm — one
+# property on a schema already on the floor, chosen over a new tool schema,
+# which would have cost hundreds of tokens for every session). Measured floor
+# (chars/3.5, this test's method, NX_SUBAGENTS/NX_VISION off): 5167 -> 5223, a
+# +56 tok delta. BUDGET_TOKENS stays 6000 — headroom absorbs it.
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 6000)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 

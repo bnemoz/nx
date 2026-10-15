@@ -145,6 +145,11 @@ session store's FTS index. Its touch points when editing it: the schema in
 read-only cache tuple, `PLAN_READONLY_TOOLS` (nx/_plan.py), and
 `_READ_ONLY_TOOL_NAMES` (nx/_subagent_tiers.py). It has no `_TOOL_GATES`
 entry (always-on, like memory_search) and is capped by `NX_LESSONS_LIMIT`.
+`search_lessons` is the list-returning entry point (its order *is* the rank, and
+`score` is arm-internal); `recall_lessons` is its formatter, and
+`memory_search(include_sessions=True)` fuses the two arms by reciprocal rank
+(`RRF_K` in `nx/_memory_search.py`) — adding a third arm means returning ranked
+hits from it, not a formatted string, and never trusting scores across arms.
 
 Four opt-in mechanisms ported from the SoL-Pi (pi harness) extension, each a
 focused module with an env gate (fusion default ON since 0.67.1; the other

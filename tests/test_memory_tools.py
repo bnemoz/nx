@@ -656,6 +656,182 @@ def test_iter_memory_dirs_skips_project_dir_that_is_the_global_dir():
         m.st.PROJECT_ROOT = old
 
 
+# --- self-ingestion filter + `_derived:` provenance (0.158.19) ----------------
+
+def test_is_satellite_message_covers_every_injected_block_not_bracketed_user_text():
+    """The shared predicate: every marker nx injects must be recognised, and a
+    genuine user message that merely OPENS with a bracket must not be — the bug
+    in the old `startswith("[")` heuristic."""
+    from nx._prefix import SATELLITE_MARKERS, is_satellite_message as sat
+    nl = chr(10)
+    injected = [
+        "[Project instructions from AGENTS.md:]" + nl + "RULE",  # nx/_agents.py:42
+        "[Saved memories — use memory_search to read any:]" + nl + "[project] t",  # _memory_note.py:31
+        "[Saved memories: the store is now empty — the earlier list is stale;]",  # _memory_note.py:36
+        "[Orientation note:]" + nl + "Working directory: /x",  # _orientation.py:51
+        "[Delegation note:]" + nl + "spawn agents",           # _delegation_note.py:108
+        "[Runtime note: a command you ran just backgrounded]",  # _runtime_notes.py:24
+        "[Steering note: the user typed this while your turn was running]",  # _surfaces.py:125
+        "[Plan mode active — goal: g" + nl + "Plan file: p]",  # _plan.py:369
+        "[User pressed Esc at a tool approval prompt and returned to chat]",  # _turn.py:771
+        "[User hard-cancelled this turn (double Esc / Ctrl+C).]",  # _turn.py:781
+        "[User interrupted your previous response with Esc.]",   # _turn.py:771
+    ]
+    for text in injected:
+        assert sat({"role": "user", "content": text}), text
+    for text in ["[bug] the parser drops the second arg", "[1/3] step one",
+                 "plain user text", "[not a marker]"]:
+        assert not sat({"role": "user", "content": text}), text
+    # role and shape guards
+    assert not sat({"role": "assistant", "content": "[Saved memories"})
+    assert not sat({"role": "user", "content": [{"type": "text"}]})
+    assert not sat("not a dict")
+    assert len(SATELLITE_MARKERS) == 6
+
+
+def test_render_transcript_for_memory_drops_satellite_blocks_keeps_bracketed_user():
+    """The /memory save transcript must not carry nx's own injected blocks back
+    into the distiller (the self-ingestion loop), while a GENUINE user turn that
+    merely opens with a bracket survives — the old `startswith("[")` bluntness
+    dropped exactly those."""
+    msgs = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "[Saved memories — use memory_search to read any:]\n[project] A stale title"},
+        {"role": "user", "content": "[Orientation note:]\nWorking directory: /x"},
+        {"role": "user", "content": "[Delegation note:]\nspawn agents"},
+        {"role": "user", "content": "[Project instructions from AGENTS.md:]\nRULE"},
+        {"role": "user", "content": "[Runtime note: a command you ran just backgrounded]"},
+        {"role": "user", "content": "[Steering note: the user typed this while your turn was running]"},
+        {"role": "user", "content": "[bug] the parser drops the second arg"},
+        {"role": "assistant", "content": "looking into it"},
+    ]
+    out = _memory_cmd._render_transcript_for_memory(msgs)
+    assert "[bug] the parser drops the second arg" in out, out
+    assert "[user] [bug] the parser drops the second arg" in out, out
+    assert "Saved memories" not in out, out
+    assert "Orientation note" not in out, out
+    assert "Delegation note" not in out, out
+    assert "Project instructions" not in out, out
+    assert "Runtime note" not in out, out
+    assert "Steering note" not in out, out
+    assert "SYSTEM" not in out, out
+
+
+def test_extract_derived_marker_pops_the_line_and_strips_a_leftover_fence():
+    body = "# T\n\nlearned\n\n```\n_derived: memory\n```\n"
+    cleaned, derived = _memory_cmd._extract_derived_marker(body)
+    assert derived == "memory"
+    assert "_derived" not in cleaned
+    assert "```" not in cleaned, cleaned
+    assert cleaned.endswith("learned"), cleaned
+    # A first-hand note is untouched, byte for byte.
+    plain = "# T\n\nfirst-hand body"
+    assert _memory_cmd._extract_derived_marker(plain) == (plain, None)
+
+
+class _DerivedSaveMsg:
+    content = ("# Recycled Title\n\nRestated prior art about this project."
+               "\n\n_derived: memory")
+
+
+class _DerivedSaveResp:
+    choices = [type("C", (), {"message": _DerivedSaveMsg()})()]
+    usage = None
+
+    def model_dump(self):
+        return {}
+
+
+class _DerivedSaveClient:
+    class _Chat:
+        class completions:  # noqa: N801 (mirrors the other fakes here)
+            @staticmethod
+            def create(**kwargs):
+                return _DerivedSaveResp()
+
+    chat = _Chat()
+    base_url = "http://localhost:9999/v1"
+
+
+def test_memory_save_stamps_derived_and_keeps_the_marker_out_of_the_body():
+    """The distiller's `_derived: memory` marker is provenance, not prose: it
+    must land in the footer and never in the body."""
+    root = tempfile.mkdtemp(prefix="nx-save-derived-")
+    old = m.st.PROJECT_ROOT
+    old_client, old_model, old_active = m.st.client, m.st.MODEL, m.st.ACTIVE
+    old_metrics = m.st._METRICS
+    m.st.PROJECT_ROOT = root
+    m.st.client = _DerivedSaveClient()
+    m.st.MODEL = "test-model"
+    m.st.ACTIVE = None
+    m.st._METRICS = None
+    try:
+        _memory_cmd._cmd_memory_save([{"role": "user", "content": "learned"}])
+        pdir = os.path.join(root, ".nx", "memories")
+        files = [f for f in os.listdir(pdir) if f.endswith(".md")]
+        assert len(files) == 1, files
+        with open(os.path.join(pdir, files[0]), encoding="utf-8") as f:
+            content = f.read()
+        assert "_derived: memory" in content, content
+        # Exactly one footer line, and the marker is NOT in the body.
+        assert content.count("_derived:") == 1, content
+        body = content.split("\n---\n", 1)[0]
+        assert "_derived" not in body, body
+        assert _memory_cmd._note_derived(content) == "memory"
+    finally:
+        m.st.PROJECT_ROOT = old
+        m.st.client, m.st.MODEL, m.st.ACTIVE = old_client, old_model, old_active
+        m.st._METRICS = old_metrics
+
+
+def test_write_memory_file_derived_provenance_round_trips_through_archive():
+    """archive -> restore of a derived note yields EXACTLY ONE footer, still
+    derived; a pre-`_derived` note restores with an unchanged (derived-free)
+    footer, so existing footer parsing is unaffected."""
+    root = tempfile.mkdtemp(prefix="nx-derived-arch-")
+    old_root, old_home = m.st.PROJECT_ROOT, m.st.SESSION_HOME
+    m.st.PROJECT_ROOT = root
+    m.st.SESSION_HOME = os.path.join(root, "home")
+    try:
+        derived = _memory_cmd._write_memory_file(
+            "Derived note", "body of the derived note", "project", derived="memory")
+        plain = _memory_cmd._write_memory_file(
+            "Plain note", "body of the plain note", "project")
+        assert derived is not None and plain is not None
+        dpath = derived[0]
+        with open(dpath, encoding="utf-8") as f:
+            dcontent = f.read()
+        assert dcontent.count("_derived: memory") == 1, dcontent
+        assert "_derived" not in dcontent.split("\n---\n", 1)[0]
+        with open(plain[0], encoding="utf-8") as f:
+            pcontent = f.read()
+        assert "_derived" not in pcontent, pcontent  # untouched default path
+
+        # Both note files are already moved down into the run dir by helper;
+        # only the restore side is exercised here.
+        _archive_all_notes(os.path.join(root, ".nx", "memories"), "run")
+        _memory_cmd._cmd_memory_archived("Derived note")
+        _memory_cmd._cmd_memory_archived("Plain note")
+        restored = [f for f in os.listdir(os.path.join(root, ".nx", "memories"))
+                    if f.endswith(".md")]
+        assert len(restored) == 2, restored
+        texts = {}
+        for f in restored:
+            with open(os.path.join(root, ".nx", "memories", f), encoding="utf-8") as fh:
+                texts[f] = fh.read()
+        dtext = [t for t in texts.values() if t.startswith("# Derived note")]
+        ptext = [t for t in texts.values() if t.startswith("# Plain note")]
+        assert len(dtext) == 1 and len(ptext) == 1
+        assert dtext[0].count("---") == 1, dtext[0]        # no doubled footer
+        assert dtext[0].count("_derived: memory") == 1, dtext[0]
+        assert _memory_cmd._note_derived(dtext[0]) == "memory"
+        assert ptext[0].count("---") == 1, ptext[0]
+        assert "_derived" not in ptext[0], ptext[0]
+        assert "body of the derived note" in dtext[0]
+    finally:
+        m.st.PROJECT_ROOT, m.st.SESSION_HOME = old_root, old_home
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))

@@ -227,6 +227,54 @@ def test_refresh_fts_rebuild_drops_old_postings():
     assert n == 1 and orphan == 0
 
 
+def test_refresh_fts_skips_injected_blocks_but_keeps_stored_transcript():
+    """`msgs_fts` (the recall_lessons body) must not index nx's own injected
+    blocks: a [Saved memories …] line used to be the FIRST line of an indexed
+    row, i.e. the snippet recall_lessons surfaced as a 'past lesson'. Index-only
+    exclusion — the stored message list stays byte-identical."""
+    _clear()
+    sid = "20250101-120000-sat01"
+    msgs = [
+        _msg("system", "sys"),
+        _msg("user", "[Saved memories — use memory_search to read any:]\n"
+                     "[project] quokkatitle a lesson title"),
+        _msg("user", "[Runtime note: a command you ran just backgrounded zephyrnote]"),
+        _msg("user", "a real user line about quokkatitleflange"),
+        _msg("assistant", "ack"),
+    ]
+    db.store_session(sid, msgs, {"title": "sat"})
+    db.refresh_fts(sid, msgs, title="sat")
+    conn = sqlite3.connect(db._store_path())
+    try:
+        bodies = [r[0] for r in conn.execute(
+            "SELECT body FROM fts_msgs WHERE sid = ? ORDER BY seq", (sid,))]
+        # one row per message, an excluded block stored as ''
+        assert len(bodies) == len(msgs), bodies
+        assert bodies[1] == "" and bodies[2] == "", bodies
+        joined = "\n".join(bodies)
+        assert "Saved memories" not in joined, joined
+        assert "quokkatitle a lesson title" not in joined, joined
+        assert "zephyrnote" not in joined, joined
+        # The real user line in the same session still hits.
+        hit = conn.execute("SELECT COUNT(*) FROM msgs_fts WHERE msgs_fts MATCH ?",
+                           ("quokkatitleflange",)).fetchone()[0]
+        assert hit == 1, bodies
+        miss = conn.execute("SELECT COUNT(*) FROM msgs_fts WHERE msgs_fts MATCH ?",
+                            ("quokkatitle",)).fetchone()[0]
+        assert miss == 0, bodies
+        # Appending a turn after the excluded rows stays INCREMENTAL: the empty
+        # body is what keeps `seq` gapless (max_seq == cnt - 1), so this is the
+        # regression guard against a full reindex on every indexed save.
+        grew = msgs + [_msg("user", "a second real quokkatitleflange turn")]
+        db.refresh_fts(sid, grew, title="sat")
+        seqs = [r[0] for r in conn.execute(
+            "SELECT seq FROM fts_msgs WHERE sid = ? ORDER BY seq", (sid,))]
+        assert len(seqs) == len(grew), seqs
+    finally:
+        conn.close()
+    assert db.load_session(sid)["messages"] == msgs
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

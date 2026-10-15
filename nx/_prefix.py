@@ -89,6 +89,72 @@ def is_prefix_note(msg: Any) -> bool:
     return isinstance(content, str) and content.lstrip().startswith(PREFIX_MARKERS)
 
 
+# Every OTHER `[...]`-bracketed block nx injects into the transcript as an
+# ordinary user-role message — i.e. text that is the HARNESS talking, not the
+# user or the model. The injected-block census, each marker with its producer:
+#   [Runtime note:            nx/_runtime_notes.py:24 RUNTIME_NOTE_PREFIX — the
+#                             one-time injection contract (recovery nudges,
+#                             backgrounded-job guidance, async sub-agent
+#                             answers, verify results). Also the wrap-up /
+#                             reasoning-stall / malformed-call notes built in
+#                             nx/_turn.py:392,417 and nx/_turn_toolcalls.py:363.
+#   [Steering note:           nx/_surfaces.py:125 STEER_WRAP (mid-turn user
+#                             redirect) and the write-churn nudges in
+#                             nx/_subagent.py:1375/1384.
+#   [Plan mode active         nx/_plan.py:369 block, appended at nx/_plan.py:380.
+#   [User pressed Esc         nx/_turn.py:771 and nx/_turn_toolcalls.py:312.
+#   [User hard-cancelled      nx/_turn.py:781 and nx/_turn_toolcalls.py:323.
+#   [User interrupted         nx/_turn.py:781 (Esc mid-stream).
+# The prefix notes above (PREFIX_MARKERS) cover the AGENTS.md note
+# (nx/_agents.py:42), the memory index note (nx/_memory_note.py:31/135-140,
+# including the MEMORY_NOTE_CLEARED variant at :36-38), the orientation note
+# (nx/_orientation.py:51) and the delegation note (nx/_delegation_note.py:108).
+#
+# Deliberately an explicit marker list, NOT "starts with `[`": a genuine user
+# message may well open with a bracketed path or tag (`[bug] the parser…`),
+# and that blunt heuristic has exactly that bug at nx/_sessions_fs.py:1170-1175
+# (user-turn counting via `not content.lstrip().startswith("[")`). Keep this
+# list in sync with its producers the way PREFIX_MARKERS is.
+SATELLITE_MARKERS = (
+    "[Runtime note: ",
+    "[Steering note:",
+    "[Plan mode active",
+    "[User pressed Esc",
+    "[User hard-cancelled",
+    "[User interrupted",
+)
+
+
+def is_satellite_message(msg: Any) -> bool:
+    """True when *msg* is one of nx's own injected (satellite) blocks rather
+    than a real user or model message.
+
+    The one shared predicate for "this text is the harness talking", used by
+    every distiller and every FTS body builder: injected blocks are ordinary
+    user-role messages, so role alone cannot identify them (nx/_prefix.py:36-38).
+    Consumers EXCLUDE such blocks from what they index or summarize, never from
+    the stored transcript itself — the stored message list stays a faithful
+    record (resume / undo / compress read it, _compress/_resume rely on the
+    prefix block being present).
+
+    Covers PREFIX_MARKERS (via is_prefix_note) plus every other bracketed block
+    in SATELLITE_MARKERS. A genuine user message that merely begins with `[` is
+    NOT matched unless it opens with one of these exact markers.
+    """
+    if is_prefix_note(msg):
+        return True
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return False
+    # Imported lazily: this module sits on a very early import path (_turn
+    # imports _prefix), so it must not drag the note machinery in at module
+    # scope. Same discipline as prefix_notes() below.
+    from ._runtime_notes import RUNTIME_NOTE_PREFIX
+    return content.lstrip().startswith((RUNTIME_NOTE_PREFIX, *SATELLITE_MARKERS))
+
+
 def prefix_notes() -> list[dict[str, Any]]:
     """The canonical, ordered prefix block: AGENTS.md, the memory index, the
     orientation note, the delegation note — each included only when its producer
