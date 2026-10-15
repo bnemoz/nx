@@ -417,7 +417,7 @@ so an explicit `nx gc` always evaluates every rule. Exit codes: 0 = done,
 | `NX_MEMORY_OPTIMIZE_MAX_TOKENS` | completion budget for each `/memory optimize` model call (default 36K; `0` = don't send `max_tokens`, server default applies) — sized so reasoning models don't spend a small server cap on thinking and return no answer; an answer that *was* cut off (`finish_reason=length`) is retried once at 3× this budget |
 | `NX_MEMORY_OPTIMIZE_TIMEOUT` | per-call timeout in seconds for each `/memory optimize` model call (default 300; `0` = no client-side cap) — a non-streaming reasoning call can legitimately think for minutes before its first byte |
 | `NX_MEMORY_OPTIMIZE_MERGE_WORKERS` | merge round-trips `/memory optimize` runs at once (default `0` = one per merge group, capped at 4; `1` = serial) — the groups are independent calls, so concurrency makes the run's wall clock its slowest merge rather than the sum of them |
-| `NX_MEMORY_ARCHIVE_KEEP_RUNS` | archived run dirs kept per memories dir by `/memory optimize` (default `0` = keep every run). The archive is the safety net that makes a bad librarian plan reversible (`/memory archived` restores one), so the default never prunes it; set a number on a long-lived store to bound the disk retired notes occupy. The prune is region-bounded — it can never delete the run it is part of — and reclaims the FTS index's dead pages at the same time |
+| `NX_MEMORY_ARCHIVE_KEEP_RUNS` | archived run dirs kept per memories dir by `/memory optimize` (default `0` = keep every run). The archive is the safety net that makes a bad librarian plan reversible (`/memory archived` restores one), so the default never prunes it; set a number on a long-lived store to bound the disk retired notes occupy. The same count bounds `.md` files left FLAT at the archive root by a writer bug (newest `k` survive; `/memory archived` lists them under `unbatched`, and a root holding more than 8 reports itself on every run). The prune is region-bounded — it can never delete a run or file this run (or a concurrent one) wrote — and reclaims the FTS index's dead pages at the same time |
 | `NX_MEMORY_REFLECT_MAX_NOTES` | most notes one `/memory reflect` pass indexes (newest first; default 120; `0` = all) |
 | `NX_MEMORY_REFLECT_WORKERS` | write round-trips `/memory reflect` runs at once (default 2, capped at 8) |
 | `NX_MEMORY_REFLECT_TIMEOUT` | per-call timeout in seconds for `/memory reflect` model calls (default 600) |
@@ -828,6 +828,17 @@ memory subsystem end to end:
   run (free pages above 25% of the file), and `NX_MEMORY_ARCHIVE_KEEP_RUNS`
   bounds the archived runs — region-bounded, so a prune can never delete the run
   it is part of (default `0` = keep all).
+- **The GC seam was blind to the worst bloat class** (0.158.18). A churned
+  index keeps its dead pages inside FTS5's own `memories_fts_data` segment
+  b-trees, not in the freelist, so the 25%-free-pages gate never fired on the
+  one case it existed for (measured: 29 MB index, 7194 data rows behind 16 live
+  notes, freelist 5.5%; a plain VACUUM reclaimed nothing). `compact()` now folds
+  the segment index *before* measuring and gates on the post-fold numbers, plus
+  a bytes-per-live-doc predicate for pages that stay dead rather than free; and
+  `reconcile()` folds when `memories_fts_data` passes 8x the doc count (healthy
+  stores measured 1.6-4.5x, the bloated one 450x), so the pile-up never grows
+  unbounded again. An emptied store now unlinks its index instead of leaving an
+  orphan.
 - **The session-start note read every body.** The title-only scanner path reads
   only each note's head for the title, so the session-start index and
   `memory_delete`'s resolver no longer read the whole store (roughly half the

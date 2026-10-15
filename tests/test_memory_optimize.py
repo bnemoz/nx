@@ -27,7 +27,7 @@ os.environ["NX_ENV_FILE"] = "/dev/null"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import nx as m  # noqa: E402
-from nx import _memory_cmd, _memory_optimize as opt  # noqa: E402
+from nx import _memory_archive, _memory_cmd, _memory_optimize as opt  # noqa: E402
 from nx._openai_client import APIError as _APIError  # noqa: E402
 from nx._openai_client import APIConnectionError as _APIConn  # noqa: E402
 
@@ -1186,6 +1186,217 @@ def test_merge_worker_crash_does_not_kill_the_run():
     # The crashed group's two sources are untouched; the healthy group's
     # merged note landed (3 .md files = 2 unarchived sources + 1 merged note).
     assert len(after) == 3, after
+
+
+# --- archive-root strays ------------------------------------------------------
+#
+# The archive layout is `archive/<run>/<note>.md`; a `.md` file parked directly
+# at the archive ROOT is a writer bug (one such bug left 7557 notes / 31 MB in
+# ~/.nx). Nothing could see those files: the scanner and the FTS reconcile list
+# `.md` files non-recursively (by design, that is what hides the archive from
+# search) and retention only walked run dirs. These tests pin the three fixes —
+# retention reclaims them, `/memory archived` lists and restores them, and a
+# future bug of the same shape is loud instead of silent.
+
+def _pdir(root):
+    return os.path.join(root, ".nx", "memories")
+
+
+def _stray(d, name, mtime, title=None):
+    """One flat file at the archive ROOT (the orphan layout), aged to `mtime`
+    so retention sees it as old. Not a `.md` name = a non-note stray."""
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, name)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(f"# {title or os.path.splitext(name)[0]}\n\nstray body\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_prune_archive_reclaims_flat_strays_under_the_same_knob(tmp_path):
+    """KEEP_RUNS bounds flat archive-root strays too: newest `keep` by mtime
+    survive, the older ones are deleted. Run dirs and non-`.md` strays keep
+    their old rules."""
+    import time as _t
+    d = str(tmp_path)
+    arc = os.path.join(d, "archive")
+    for i in range(4):
+        _stray(arc, f"2024010{i}-000000_retro-{i}.md", 1_100_000_000 + i)
+    _stray(arc, "20240104-000000_retro-4.md", 1_100_000_004)
+    _stray(arc, "uv.pid", 1_100_000_000)          # not a .md: never touched
+    for run in ("20230101-000000", "20260101-000000"):
+        os.makedirs(os.path.join(arc, run))
+        os.utime(os.path.join(arc, run), (1_100_000_000, 1_100_000_000))
+
+    pruned = opt.prune_archive(d, 2, _t.time() - 1)   # nothing written this run
+
+    assert pruned == 3, pruned                     # 5 strays, keep 2
+    left = sorted(os.listdir(arc))
+    assert sorted(n for n in left if n.endswith(".md")) == [
+        "20240103-000000_retro-3.md", "20240104-000000_retro-4.md"], left
+    assert "uv.pid" in left, left                  # unknown files are left alone
+    assert "20230101-000000" in left and "20260101-000000" in left, left
+    # Only `.md` *files* at the root are ever candidates.
+    assert all(p.endswith(".md") for p in opt._flat_stray_files(d))
+
+
+def test_prune_archive_default_zero_keeps_every_stray(tmp_path):
+    """The default (NX_MEMORY_ARCHIVE_KEEP_RUNS=0) still deletes nothing."""
+    d = str(tmp_path)
+    arc = os.path.join(d, "archive")
+    names = [f"2024010{i}-000000_retro-{i}.md" for i in range(3)]
+    for i, n in enumerate(names):
+        _stray(arc, n, 1_100_000_000 + i)
+    os.makedirs(os.path.join(arc, "20230101-000000"))
+
+    assert opt.prune_archive(d, 0, 0.0) == 0
+    assert sorted(os.listdir(arc)) == sorted(names + ["20230101-000000"]), os.listdir(arc)
+
+
+def test_prune_archive_never_touches_a_stray_from_this_run(tmp_path):
+    """REGION-BOUNDED like the run-dir rule: a flat file whose mtime is at or
+    after the run's start (this run, or a concurrent one) is never deleted."""
+    import time as _t
+    d = str(tmp_path)
+    arc = os.path.join(d, "archive")
+    now = _t.time()
+    region_start = now - 1
+    _stray(arc, "20240101-000000_old-a.md", 1_100_000_000)
+    _stray(arc, "20240102-000000_old-b.md", 1_100_000_001)
+    fresh = _stray(arc, "20240103-000000_fresh.md", now)
+
+    assert opt.prune_archive(d, 1, region_start) == 2   # the two old ones
+    assert os.path.exists(fresh), "a stray written this run must survive"
+
+    # Guard proper: identical mtimes put a protected file in the pruned tail, so
+    # count says "delete two" and region_start says "touch none".
+    d2 = tempfile.mkdtemp(prefix="nx-opt-stray2-")
+    arc2 = os.path.join(d2, "archive")
+    for n in ("a.md", "b.md", "c.md"):
+        _stray(arc2, n, now)
+    assert opt.prune_archive(d2, 1, region_start) == 0
+    assert sorted(os.listdir(arc2)) == ["a.md", "b.md", "c.md"], os.listdir(arc2)
+
+
+def test_iter_archive_notes_lists_flat_strays_and_restores_one():
+    """A flat archive-root note is a real note: `/memory archived` lists it as
+    an unbatched pseudo-run and restores it through the one writer."""
+    root = tempfile.mkdtemp(prefix="nx-opt-arch-")
+    m.st.PROJECT_ROOT = root
+    d = _pdir(root)
+    arc = os.path.join(d, "archive")
+    run = os.path.join(arc, "20260101-000000")
+    os.makedirs(run)
+    with open(os.path.join(run, "20251231-000000_batched.md"), "w", encoding="utf-8") as f:
+        f.write("# Batched Topic\n\nold body\n")
+    _stray(arc, "20240101-000000_root-stray.md", 1_100_000_000,
+           title="Root Stray Topic")
+    _stray(arc, "uv.pid", 1_100_000_000)          # non-.md: never listed
+
+    entries = _memory_archive._iter_archive_notes(d)
+    by_title = {t: (r, n, p) for r, n, _mt, t, p in entries}
+    assert set(by_title) == {"Batched Topic", "Root Stray Topic"}, by_title
+    assert by_title["Batched Topic"][0] == "20260101-000000"
+    assert by_title["Root Stray Topic"][0] == _memory_archive._UNBATCHED_RUN
+    assert entries[0][0] == "20260101-000000", entries   # run dirs first, stable
+
+    with _printed as lines:
+        _memory_cmd._cmd_memory_archived("")
+    listing = "\n".join(lines)
+    assert "Root Stray Topic" in listing, lines
+    assert _memory_archive._UNBATCHED_RUN in listing, lines
+
+    with _printed as lines:
+        _memory_cmd._cmd_memory_archived("Root Stray Topic")
+    assert "restored" in "\n".join(lines), lines
+    live = [x for x in _memory_cmd._iter_notes(d) if x[3] == "Root Stray Topic"]
+    assert len(live) == 1, live
+    assert live[0][4].count("_scope:") == 1          # fresh footer, not doubled
+    assert not os.path.exists(os.path.join(arc, "20240101-000000_root-stray.md"))
+
+
+def test_flat_stray_warning_fires_past_the_threshold(monkeypatch, tmp_path):
+    """The detector is loud past `_FLAT_STRAY_WARN` (count + dir, in the log)
+    and silent at or below it — and never moves or deletes anything itself."""
+    root = str(tmp_path)
+    monkeypatch.setattr(m.st, "PROJECT_ROOT", root, raising=False)
+    arc = os.path.join(_pdir(root), "archive")
+    monkeypatch.setattr(opt, "_FLAT_STRAY_WARN", 2)
+    logged = []
+    monkeypatch.setattr(opt, "_log_event",
+                        lambda direction, payload: logged.append((direction, payload)))
+    d = _pdir(root)
+    for i in range(2):
+        _stray(arc, f"2024010{i}-000000_retro-{i}.md", 1_100_000_000 + i)
+
+    with _printed as lines:
+        opt._warn_flat_strays(d)
+    assert "sit flat" not in "\n".join(lines), lines   # at the threshold: quiet
+    assert logged == []
+
+    _stray(arc, "20240102-000000_retro-2.md", 1_100_000_002)
+    with _printed as lines:
+        opt._warn_flat_strays(d)
+    out = "\n".join(lines)
+    assert "3 notes sit flat in" in out, lines
+    assert arc in out, lines
+    assert "NX_MEMORY_ARCHIVE_KEEP_RUNS" in out, lines
+    assert len(logged) == 1 and logged[0][0] == "error", logged
+    assert logged[0][1]["count"] == 3, logged
+    assert logged[0][1]["dir"] == arc, logged
+    assert len(os.listdir(arc)) == 3, os.listdir(arc)
+
+
+def test_optimize_warns_about_strays_even_with_nothing_to_optimize(monkeypatch, tmp_path):
+    """The detector rides the command path, not the plan: a store too small to
+    optimize (the shape a silently leaking archive produces) still reports the
+    flat pile — and still deletes nothing at the default keep=0."""
+    root = str(tmp_path)
+    monkeypatch.setattr(m.st, "PROJECT_ROOT", root, raising=False)
+    _note("Only note", "only body", scope="project", root=root)
+    arc = os.path.join(_pdir(root), "archive")
+    monkeypatch.setattr(opt, "_FLAT_STRAY_WARN", 1)
+    _stray(arc, "20240101-000000_retro-0.md", 1_100_000_000)
+    _stray(arc, "20240102-000000_retro-1.md", 1_100_000_001)
+    _install_client(_FakeOptClient("OK", "unused"))
+
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    out = "\n".join(lines)
+    assert "nothing to optimize" in out, out          # the short-circuit ran
+    assert "2 notes sit flat in" in out, out
+    assert len(os.listdir(arc)) == 2, os.listdir(arc)  # default: deletes nothing
+
+
+def test_optimize_reports_flat_strays_reclaimed_by_the_prune():
+    """The command run reports what the prune reclaimed, strays included."""
+    root = tempfile.mkdtemp(prefix="nx-opt-strayrun-")
+    pdir = _pdir(root)
+    p1 = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")], root)
+    names = sorted(os.path.basename(p) for p in p1)
+    arc = os.path.join(pdir, "archive")
+    strays = [f"2024010{i}-000000_retro-{i}.md" for i in range(3)]
+    for i, n in enumerate(strays):
+        _stray(arc, n, 1_100_000_000 + i)
+    old_runs = ["20230101-000000", "20230102-000000"]
+    for r in old_runs:
+        os.makedirs(os.path.join(arc, r))
+        os.utime(os.path.join(arc, r), (1_100_000_000, 1_100_000_000))
+    _env("NX_MEMORY_ARCHIVE_KEEP_RUNS", 1)
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    _install_client(_FakeOptClient(
+        f"MERGE {names[0]} + {names[1]} => Combined\n", "# Combined\n\nmerged\n"))
+
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    out = "\n".join(lines)
+    # keep=1: the 2 old run dirs go (this run's own dir is region-protected) and
+    # the 2 oldest strays go — 4 entries, reported in one message.
+    assert "4 older archive entries pruned" in out, out
+    left = sorted(os.listdir(arc))
+    assert strays[2] in left, left                     # the newest stray is kept
+    assert not any(s in left for s in strays[:2]), left
+    assert not any(r in left for r in old_runs), left
 
 
 def test_merge_workers_env_reader():

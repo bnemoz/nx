@@ -28,7 +28,9 @@ the caller already has.
 `compact()` is the one GC seam: the index is a pure cache, so when the store
 shrinks (an optimize run archived notes) the orphaned pages are reclaimed
 instead of bloating the file forever. It runs opportunistically rather than on
-every reconcile, because a VACUUM rewrites the whole file.
+every reconcile, because a VACUUM rewrites the whole file. It folds FTS5's
+segment index BEFORE measuring, because the pre-fold freelist misses the
+segment-bloat class entirely (see `_COMPACT_FREE_RATIO`).
 """
 from __future__ import annotations
 
@@ -213,10 +215,42 @@ def _index_note(conn: sqlite3.Connection, d: str, name: str, mtime: float) -> No
         (name, title, content, mtime))
 
 
+def _drop_stale_index(d: str) -> None:
+    """A store with zero live notes has no need of a pure cache: unlink the
+    index (and its -wal/-shm/-journal siblings) so an emptied store does not
+    leave a multi-MB orphan behind. Conservative: only when the memories dir
+    exists, the disk listing genuinely has no .md notes, and the file is not
+    a symlink pointing out of the dir. Best effort — a failure just means the
+    file is dropped on a later reconcile."""
+    db = _db_path(d)
+    if os.path.islink(db):
+        return
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        p = db + suffix
+        try:
+            if os.path.islink(p):
+                continue
+            os.remove(p)
+        except OSError:
+            pass
+
+
 def reconcile(conn: sqlite3.Connection, d: str) -> None:
     """Make the index mirror the dir: re-index new/changed notes, drop rows
     whose note is gone. One transaction; a failing reconcile leaves the old
     rows in place (their mtime check simply repeats next search)."""
+    if not _list_notes_on_disk(d):
+        # Zero live notes: the index is an orphan cache. Clear its rows (so a
+        # locked-fs platform that cannot unlink an open file still stops
+        # serving ghosts) and unlink the file itself.
+        try:
+            with conn:
+                conn.execute("DELETE FROM memories_fts")
+        except sqlite3.Error:
+            pass
+        if os.path.exists(_db_path(d)):
+            _drop_stale_index(d)
+        return
     rows = conn.execute("SELECT name, mtime FROM memories_fts").fetchall()
     indexed = {}
     for name, mtime in rows:
@@ -232,6 +266,7 @@ def reconcile(conn: sqlite3.Connection, d: str) -> None:
             _index_note(conn, d, name, mtime)
         for name in indexed:
             conn.execute("DELETE FROM memories_fts WHERE name = ?", (name,))
+    _maybe_fold(conn)
 
 
 # --- query -----------------------------------------------------------------------
@@ -295,6 +330,51 @@ def search_dir(d: str, query: str) -> Optional[list[tuple[str, float, str, str]]
 # never shrinks the file on its own.
 _COMPACT_FREE_RATIO = 0.25
 
+# The pre-fold freelist is the WRONG signal for the worst bloat class: when a
+# session writes thousands of notes and they are later deleted, reconcile
+# churns FTS5 insert/delete without ever folding the segment b-trees. The
+# deleted docs' pages stay inside `memories_fts_data` (measured real store:
+# 29.08 MB file, 7194 data rows for 16 live docs, freelist only 392/7099 =
+# 0.055 — far under _COMPACT_FREE_RATIO, so the old gate never fired, and a
+# plain VACUUM reclaimed nothing). Folding first converts that bloat into
+# free pages (7194 -> 26 data rows, freelist 6688, then VACUUM -> 151 KB), so
+# compact() must fold BEFORE measuring and gate on the post-fold numbers.
+#
+# Second predicate: the file is grossly out of line with its content. Across
+# 14 real stores a healthy trigram index stays well under ~64 KiB per live
+# doc (16-doc bloat case: 1.87 MB/doc). Fire a VACUUM when the folded file
+# exceeds that per-doc budget, ignoring tiny absolute sizes so a healthy
+# small index never pays for a rewrite.
+_COMPACT_BYTES_PER_DOC = 64 * 1024
+_COMPACT_MIN_BYTES = 512 * 1024
+
+# Reconcile-side staleness probe (cheap COUNTs, runs per search): across 14
+# real stores `count(*) from memories_fts_data / count(*) from memories_fts`
+# was 1.6-4.5 when healthy (worst healthy store 7.5) vs 450 when bloated.
+# Fold when the ratio exceeds 8x (clear margin over the 7.5 healthy worst)
+# AND the data row count clears an absolute floor, so a 2-doc store with 15
+# pending data rows never triggers a fold on the hot path.
+_FOLD_RATIO = 8.0
+_FOLD_MIN_DATA_ROWS = 64
+
+
+def _maybe_fold(conn: sqlite3.Connection) -> None:
+    """Best-effort segment fold when the data-rows/doc ratio says the segment
+    index has piled up. Two COUNT queries per search; a fold failure can never
+    fail the search that triggered it."""
+    try:
+        docs = int(conn.execute("SELECT count(*) FROM memories_fts").fetchone()[0] or 0)
+        data_rows = int(conn.execute(
+            "SELECT count(*) FROM memories_fts_data").fetchone()[0] or 0)
+        if data_rows < _FOLD_MIN_DATA_ROWS:
+            return
+        if data_rows <= _FOLD_RATIO * max(docs, 1):
+            return
+        _freq_fold(conn)
+        conn.commit()
+    except sqlite3.Error:
+        pass
+
 
 def _freq_fold(conn: sqlite3.Connection) -> None:
     """Merge FTS5's pending b-tree leaves into the segment index (the
@@ -315,10 +395,15 @@ def _freq_fold(conn: sqlite3.Connection) -> None:
 def compact(d: str, *, force: bool = False) -> bool:
     """Reclaim this dir's index after the store shrank. Returns True when a
     VACUUM ran. `force=True` (opt-in `nx memories --compact`) skips the
-    threshold check; the default only fires when free pages exceed
-    _COMPACT_FREE_RATIO of the file, so an ordinary reconcile never pays for
-    a full rewrite. Uses a DELETE journal for the duration (VACUUM cannot run
-    inside a WAL transaction; the journal mode reverts to WAL after)."""
+    threshold checks; the default folds FTS5's segment index FIRST (that fold
+    is what turns reconcile churn into free pages) and then VACUUMs only when
+    the post-fold numbers say there is something real to reclaim, so an
+    ordinary reconcile never pays for a full rewrite. The pre-fold freelist is
+    not consulted at all: a churn-bloated index shows almost no free pages
+    before the fold (see _COMPACT_FREE_RATIO's comment), so gating on it would
+    keep the seam blind to exactly the bloat class it exists to reclaim.
+    Uses a DELETE journal for the duration (VACUUM cannot run inside a WAL
+    transaction; the journal mode reverts to WAL after)."""
     if not _fts_supported() or not enabled():
         return False
     # Never CREATE an index just to compact it: a dir that has no index has no
@@ -329,13 +414,27 @@ def compact(d: str, *, force: bool = False) -> bool:
     if conn is None:
         return False
     try:
+        _freq_fold(conn)
+        conn.commit()
         page_count = int(conn.execute("PRAGMA page_count").fetchone()[0] or 0)
         free = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
         if not force:
-            if page_count <= 0 or free < 1 or free < _COMPACT_FREE_RATIO * page_count:
+            # Gate on post-fold numbers. Either free pages genuinely outweigh
+            # the file (the original shrink case), or the file is grossly out
+            # of line with its content (bytes per live doc far above the sane
+            # floor the folded b-trees need) — the latter catches the churn
+            # bloat where even a fold leaves pages dead rather than free.
+            size = page_count * int(
+                conn.execute("PRAGMA page_size").fetchone()[0] or 0)
+            docs = int(conn.execute(
+                "SELECT count(*) FROM memories_fts").fetchone()[0] or 0)
+            too_big_per_doc = (
+                size >= _COMPACT_MIN_BYTES and docs > 0
+                and size > _COMPACT_BYTES_PER_DOC * docs)
+            if page_count <= 0 or (
+                free < _COMPACT_FREE_RATIO * page_count and not too_big_per_doc
+            ):
                 return False
-        _freq_fold(conn)
-        conn.commit()
         conn.execute("PRAGMA journal_mode=DELETE")
         try:
             conn.execute("VACUUM")

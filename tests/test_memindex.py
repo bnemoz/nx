@@ -451,6 +451,152 @@ def test_optimize_max_notes_reviews_oldest_tail():
         "20260101-000003_n2.md", "20260101-000004_n3.md"], seen_names
 
 
+def _build_bloated_index(d):
+    """Churn thousands of rows through reconcile so the FTS segment index
+    piles up without a fold (the real-store bloat shape)."""
+    for i in range(400):
+        _note(d, "20260101-%06d_churn.md" % i,
+              "# Churn %d\n\n" % i + "churn filler body words %d\n" % i * 40)
+        if not HAVE_FTS:
+            return None
+        conn = _memindex._open(d)
+        assert conn is not None
+        try:
+            _memindex.reconcile(conn, d)
+        finally:
+            conn.close()
+    # delete everything again (the note bodies vanish; index keeps segments)
+    for i in range(400):
+        try:
+            os.remove(os.path.join(d, "20260101-%06d_churn.md" % i))
+        except OSError:
+            pass
+    conn = _memindex._open(d)
+    assert conn is not None
+    try:
+        _memindex.reconcile(conn, d)
+        data_rows = conn.execute(
+            "SELECT count(*) FROM memories_fts_data").fetchone()[0]
+        size = os.path.getsize(os.path.join(d, _memindex.INDEX_FILENAME))
+    finally:
+        conn.close()
+    return data_rows, size
+
+
+def test_compact_folds_segments_then_decides():
+    """The GC seam must see segment bloat: fold BEFORE measuring, then gate on
+    the post-fold freelist / bytes-per-doc. Pre-fix, the pre-fold freelist on
+    a churn-bloated index sits far under _COMPACT_FREE_RATIO and the gate
+    returned False — this test fails on the old ordering."""
+    d = _proj_dir()
+    # leave a couple of live notes so the store is not empty
+    _note(d, "20260101-999999_live.md", "# Live\n\nlive note body marker\n")
+    built = _build_bloated_index(d)
+    if not HAVE_FTS or built is None:
+        return
+    db = os.path.join(d, _memindex.INDEX_FILENAME)
+    data_rows_pre, size_pre = built
+    assert size_pre >= 64 * 1024, (size_pre,)  # bloat actually happened
+    # pre-fix the gate would NOT fire: fold here to compute the post-fold
+    # freelist ratio the fixed gate now sees
+    conn = _memindex._open(d)
+    assert conn is not None
+    try:
+        _memindex._freq_fold(conn)
+        conn.commit()
+        pc = int(conn.execute("PRAGMA page_count").fetchone()[0] or 0)
+        fl = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+    finally:
+        conn.close()
+    assert fl >= _memindex._COMPACT_FREE_RATIO * pc or (
+        os.path.getsize(db) > _memindex._COMPACT_BYTES_PER_DOC * 1), (
+        fl, pc, "expected reclaimable space post-fold")
+    assert _memindex.compact(d) is True, "unforced compact must VACUUM now"
+    size_post = os.path.getsize(db)
+    assert size_post < size_pre / 4, (size_pre, size_post)
+    conn = _memindex._open(d)
+    try:
+        dr = conn.execute(
+            "SELECT count(*) FROM memories_fts_data").fetchone()[0]
+    finally:
+        conn.close()
+    # the fold inside compact() collapsed the segment index; after a VACUUM
+    # the data table is at its floor (a handful of b-tree rows), not the
+    # churned pile-up the file had before
+    assert dr <= 32, (data_rows_pre, dr)
+    # results unchanged, and the freshly compacted index is left alone
+    rows = _memindex.search_dir(d, "live note body marker")
+    assert rows and rows[0][0].endswith("live.md")
+    assert _memindex.compact(d) is False
+
+
+def test_reconcile_fold_probe_keeps_ratio_healthy():
+    """After churn cycles the data-rows/doc ratio stays under the fold
+    threshold (the probe folds), and search answers are unchanged by a fold."""
+    d = _proj_dir()
+    _note(d, "20260101-999999_steady.md", "# Steady\n\nsteady marker body\n")
+    if not HAVE_FTS:
+        return
+    built = _build_bloated_index(d)
+    if built is None:
+        return
+    conn = _memindex._open(d)
+    assert conn is not None
+    try:
+        _memindex.reconcile(conn, d)
+        docs = conn.execute("SELECT count(*) FROM memories_fts").fetchone()[0]
+        dr = conn.execute(
+            "SELECT count(*) FROM memories_fts_data").fetchone()[0]
+    finally:
+        conn.close()
+    assert docs == 1, docs
+    assert dr < _memindex._FOLD_RATIO * docs, (dr, docs)
+    # search results are stable across a fold
+    before = _memindex.search_dir(d, "steady marker body")
+    conn = _memindex._open(d)
+    try:
+        _memindex._maybe_fold(conn)
+    finally:
+        conn.close()
+    after = _memindex.search_dir(d, "steady marker body")
+    assert [r[0] for r in (before or [])] == [r[0] for r in (after or [])]
+    assert after and after[0][0].endswith("steady.md")
+
+
+def test_emptied_store_unlinks_index_nonempty_keeps_it():
+    """Zero live notes -> the stale index file (and -wal/-shm) is dropped; a
+    non-empty store's index survives."""
+    d = _proj_dir()
+    _note(d, "20260101-000001_a.md", "# A\n\nsome body\n")
+    if not HAVE_FTS:
+        return
+    assert _memindex.search_dir(d, "some body")
+    db = os.path.join(d, _memindex.INDEX_FILENAME)
+    wal = db + "-wal"
+    open(wal, "wb").close()  # simulate a sibling
+    # empty the store
+    os.remove(os.path.join(d, "20260101-000001_a.md"))
+    conn = _memindex._open(d)
+    assert conn is not None
+    try:
+        _memindex.reconcile(conn, d)
+    finally:
+        conn.close()
+    assert not os.path.exists(db), os.listdir(d)
+    assert not os.path.exists(wal), os.listdir(d)
+    # a search rebuilds it (pure cache)
+    _note(d, "20260101-000002_b.md", "# B\n\nrebuilt body\n")
+    rows = _memindex.search_dir(d, "rebuilt body")
+    assert rows and rows[0][0].endswith("b.md")
+    # non-empty store: index survives reconcile
+    conn = _memindex._open(d)
+    try:
+        _memindex.reconcile(conn, d)
+    finally:
+        conn.close()
+    assert os.path.exists(db)
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

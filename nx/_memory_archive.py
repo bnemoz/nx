@@ -5,7 +5,12 @@ Split out of `_memory_cmd.py` (which keeps the `/memory` slash-command
 dispatch). Archived notes are exactly what `/memory optimize` moved into
 `<dir>/archive/<run>/`, so this is the read side of the reversible-by-`mv`
 promise the archive makes; restoring goes through the same one writer
-(`_write_memory_file`) and drops the archived original."""
+(`_write_memory_file`) and drops the archived original.
+
+Notes sitting FLAT at the archive root (no run dir — a writer bug, not the
+layout the store produces) are surfaced too, under the `_UNBATCHED_RUN`
+pseudo-run, so they stay listable and restorable until retention ages them
+out; see `_memory_optimize.prune_archive`, which bounds them."""
 from __future__ import annotations
 
 import os
@@ -17,26 +22,38 @@ from ._memory_store import (
 )
 
 
+# The pseudo-run label for notes sitting at the archive ROOT with no run dir
+# (see _iter_archive_notes): they are real, restorable notes, just unbatched —
+# the label says so instead of inventing a stamp they never had.
+_UNBATCHED_RUN = "unbatched"
+
+
 def _iter_archive_notes(d: str) -> list[tuple[str, str, float, str, str]]:
-    """Every archived note under `<d>/archive/<run>/` as the same shape the live
+    """Every archived note under `<d>/archive/` as the same shape the live
     scanner yields, (run, name, mtime, title, path). Archived notes are exactly
-    what `/memory optimize` moved there, so this is the read side of the
-    reversible-by-`mv` promise the archive makes. Newest run first."""
+    what `/memory optimize` moved to `<d>/archive/<run>/`, so this is the read
+    side of the reversible-by-`mv` promise the archive makes. Newest run first.
+
+    Flat files at the archive ROOT (no run subdir — a writer bug) are reported
+    too, under the `_UNBATCHED_RUN` pseudo-run and after every run dir, so they
+    stay visible to `/memory archived` and can still be restored before
+    retention removes them. Only `.md` files are ever reported, never a dir and
+    never a non-`.md` stray."""
     out: list[tuple[str, str, float, str, str]] = []
     archive = os.path.join(d, "archive")
     try:
-        runs = sorted(os.listdir(archive), reverse=True)
+        names = sorted(os.listdir(archive), reverse=True)
     except OSError:
         return out
-    for run in runs:
+    for run in names:
         run_dir = os.path.join(archive, run)
         if not os.path.isdir(run_dir):
             continue
         try:
-            names = sorted(os.listdir(run_dir), reverse=True)
+            inner = sorted(os.listdir(run_dir), reverse=True)
         except OSError:
             continue
-        for name in names:
+        for name in inner:
             if not name.endswith(".md"):
                 continue
             path = os.path.join(run_dir, name)
@@ -48,6 +65,20 @@ def _iter_archive_notes(d: str) -> list[tuple[str, str, float, str, str]]:
             except OSError:
                 mtime = 0.0
             out.append((run, name, mtime, head[0], path))
+    for name in sorted(names, reverse=True):
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(archive, name)
+        if not os.path.isfile(path):
+            continue
+        head = _read_memory_title(path, name)
+        if head is None:
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        out.append((_UNBATCHED_RUN, name, mtime, head[0], path))
     return out
 
 

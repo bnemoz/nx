@@ -40,7 +40,11 @@ Flow, bounded at every step:
    Retention is opt-in (`NX_MEMORY_ARCHIVE_KEEP_RUNS`, default 0 = keep every
    run) and region-bounded, so a prune can never delete the run it is part of —
    and the FTS index's dead pages are reclaimed at the same time
-   (`_memindex.compact`).
+   (`_memindex.compact`). The same knob also bounds the orphan class: `.md`
+   files left FLAT at the archive root by a writer bug (invisible to the
+   scanner, so nothing else could ever reclaim them) age out under the same
+   count-and-region rule, and a root holding more than `_FLAT_STRAY_WARN` of
+   them is reported on every run.
 5. The live transcript's memory note is refreshed by APPENDING a fresh note at
    the tail, never rewriting one in place, so the prompt-prefix cache survives
    (`_refresh_memory_note`, PERF.md PF-12).
@@ -85,6 +89,13 @@ OPTIMIZE_DEFAULT_MAX_NOTES = 240
 # default never prunes it; a store on a long-lived repo sets this to bound the
 # retired notes' disk (see _archive_keep_runs / prune_archive).
 OPTIMIZE_DEFAULT_KEEP_RUNS = 0
+
+# Flat `.md` files tolerated at an archive ROOT before `/memory optimize` logs
+# a warning naming the count and the dir. The layout is `archive/<run>/`; a
+# writer bug once parked 7557 notes flat there (31 MB), invisible to search, to
+# restore and to retention, so this detector exists to make the next one loud.
+# Not a tunable: nothing is deleted or moved on the strength of it.
+_FLAT_STRAY_WARN = 8
 
 # Per-note digest size in the index (the librarian judges on titles + gist;
 # it sees full bodies only for the groups it is asked to merge).
@@ -588,13 +599,22 @@ def _archive(note: _OptNote, stamp: str) -> str | None:
 
 def prune_archive(memories_dir: str, keep: int, region_start: float) -> int:
     """Retention for `<memories_dir>/archive/`: keep the newest `keep` run
-    dirs, delete older ones. Returns how many run dirs were removed. `keep <= 0`
-    keeps everything (the archive is never pruned implicitly).
+    dirs, delete older ones. Returns how many archive entries were removed.
+    `keep <= 0` keeps everything (the archive is never pruned implicitly).
 
-    The prune is REGION-BOUNDED, not count-only: any run dir whose mtime is at
-    or after `region_start` (this run's start) is skipped, so a prune can never
-    delete the run it is part of — nor a concurrent run's freshly written
-    archive, which touched its dir after that run's own start.
+    The same knob also bounds FLAT strays — `.md` files sitting directly at the
+    archive root instead of under a run dir (a writer bug, not a layout the
+    store ever produces): the newest `keep` of them by mtime are kept and the
+    rest deleted, so the bound is per kind and the archive root can never grow
+    without bound again. Directories and non-`.md` entries (a stray `uv.pid`
+    and friends) are never touched by that rule, and the rule never recurses
+    below the archive root — a run dir's contents are only ever removed whole,
+    by the run-dir rule above.
+
+    The prune is REGION-BOUNDED, not count-only: any run dir (or flat file)
+    whose mtime is at or after `region_start` (this run's start) is skipped, so
+    a prune can never delete the run it is part of — nor a concurrent run's
+    freshly written archive, which touched its path after that run's own start.
     """
     if keep <= 0:
         return 0
@@ -615,7 +635,65 @@ def prune_archive(memories_dir: str, keep: int, region_start: float) -> int:
             pruned += 1
         except OSError:
             continue
+    # Flat strays: newest `keep` by mtime survive, the rest age out under the
+    # same region_start guard (their mtime is their only write evidence).
+    strays: list[tuple[float, str]] = []
+    for path in _flat_stray_files(memories_dir):
+        try:
+            strays.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    strays.sort(reverse=True)      # (mtime, path), newest first, deterministic
+    for mtime, path in strays[keep:]:
+        if mtime >= region_start:
+            continue  # this run (or a concurrent one) — never touched
+        try:
+            os.unlink(path)
+            pruned += 1
+        except OSError:
+            continue
     return pruned
+
+
+def _flat_stray_files(memories_dir: str) -> list[str]:
+    """The archive root's flat `.md` files (absolute paths) — notes sitting
+    directly in `<memories_dir>/archive/` instead of `archive/<run>/`. The store
+    only ever writes the run-dir layout, so these come from a writer bug; they
+    are invisible to the scanner and the FTS reconcile (both list `.md` files
+    non-recursively). Unreadable dirs read as empty, and nothing but a `.md`
+    *file* is ever reported or removed (dirs and `uv.pid`-style strays stay)."""
+    archive = os.path.join(memories_dir, "archive")
+    try:
+        names = os.listdir(archive)
+    except OSError:
+        return []
+    out: list[str] = []
+    for name in names:
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(archive, name)
+        if os.path.isfile(path):
+            out.append(path)
+    return out
+
+
+def _warn_flat_strays(memories_dir: str) -> None:
+    """Log (and report) an archive root holding more than `_FLAT_STRAY_WARN`
+    flat `.md` files. Purely a detector for the orphan class: a writer bug that
+    parks notes at the archive root used to leak disk invisibly, so a future one
+    announces itself on the next `/memory optimize` run and the prune path can
+    reclaim what it left. Nothing is moved or deleted here."""
+    strays = _flat_stray_files(memories_dir)
+    if len(strays) <= _FLAT_STRAY_WARN:
+        return
+    archive = os.path.dirname(strays[0])
+    _log_event("error", {"where": "memory_archive",
+                         "error": f"{len(strays)} flat .md files at the archive root "
+                                  f"(expected archive/<run>/): {archive}",
+                         "dir": archive, "count": len(strays)})
+    print(f"{C.WARNING}  ⚠ {len(strays)} notes sit flat in {archive} "
+          f"(layout is archive/<run>/) — invisible to memory search; set "
+          f"NX_MEMORY_ARCHIVE_KEEP_RUNS to prune them{RESET}")
 
 
 def _rmtree_private(path: str) -> None:
@@ -767,16 +845,18 @@ def _apply_plan(plan: _Plan, known: dict[str, _OptNote],
 
 
 def prune_archives(region_start: float) -> int:
-    """Apply NX_MEMORY_ARCHIVE_KEEP_RUNS across every memories dir. A no-op
+    """Apply NX_MEMORY_ARCHIVE_KEEP_RUNS across every memories dir (run dirs and
+    flat archive-root strays alike — see prune_archive). Deletes nothing
     (returns 0) at the default of 0. `region_start` is the run's start time, so
-    the prune can never touch an archive dir this run (or a concurrent run)
-    just wrote."""
+    the prune can never touch an archive path this run (or a concurrent run)
+    just wrote. The orphan *detector* (`_warn_flat_strays`) is not called here:
+    it belongs on the command path, so a run that applies no plan still reports
+    the mess."""
     keep = _archive_keep_runs()
-    if keep <= 0:
-        return 0
     pruned = 0
     for d, _label in _iter_memory_dirs("project"):
-        pruned += prune_archive(d, keep, region_start)
+        if keep > 0:
+            pruned += prune_archive(d, keep, region_start)
     return pruned
 
 
@@ -822,6 +902,13 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     """
     dry, focus = _parse_opts(arg)
     region_start = time.time()
+    # Orphan detector: an archive ROOT accumulating flat `.md` files is a writer
+    # bug, not a layout — say so on every run, including the ones that find
+    # nothing to optimize (that is the case a silently leaking store produces).
+    # Read-only: nothing is moved or deleted here, and reclaiming them stays the
+    # job of the retention prune below.
+    for _d, _label in _iter_memory_dirs("project"):
+        _warn_flat_strays(_d)
     notes = _collect_notes("project")
     total_before = len(notes)
     if total_before < 2:
@@ -902,8 +989,8 @@ def _cmd_memory_optimize(messages: list[dict[str, Any]] | None = None,
     print(f"{DIM}  ✓ {before} → {after} memories "
           f"({merged} merged note{'s' if merged != 1 else ''}, {archived} archived){RESET}")
     if pruned:
-        print(f"{DIM}    {pruned} older archive run{'s' if pruned != 1 else ''} pruned "
-              f"(NX_MEMORY_ARCHIVE_KEEP_RUNS={_archive_keep_runs()}){RESET}")
+        print(f"{DIM}    {pruned} older archive entr{'y' if pruned == 1 else 'ies'} "
+              f"pruned (NX_MEMORY_ARCHIVE_KEEP_RUNS={_archive_keep_runs()}){RESET}")
     if archive_dir:
         print(f"{DIM}    originals kept in {archive_dir}{RESET}")
     if merged or archived:
