@@ -92,8 +92,10 @@ def _plan_revision(todos: list[dict[str, Any]] | None = None) -> int:
     never Python's per-process-salted `hash()`), and it must move whenever the
     plan changes in any way the model could act on. `todo_write` is the ONLY
     writer of st._TODOS (it replaces the list wholesale), so the value is
-    computed there and stashed on `st._PLAN_REVISION`: the wake poller then
-    compares an int every 2s instead of re-hashing the list.
+    computed on demand by the callers (nx/_autowake's _stall_due and
+    note_turn_end) — hashing the live list is desync-proof by construction
+    (the resume path writes st._TODOS outside todo_write) and cheap (a list
+    of small dicts, evaluated twice per 2s poll tick).
 
     An empty/absent plan hashes to a fixed value too (not -1), so the initial
     `st._WAKE_STALL_REVISION = -1` never spuriously matches a real plan, and a
@@ -116,10 +118,6 @@ def todo_write(todos: list[dict[str, Any]]) -> str:
             status = "pending"
         cleaned.append({"text": str(item.get("text", "")), "status": status})
     st._TODOS = cleaned
-    # Phase C (0.161.0): stash the plan revision where the wake poller can read
-    # an int instead of hashing the list every tick. Computed here because this
-    # function is the plan's only writer.
-    st._PLAN_REVISION = _plan_revision(cleaned)  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
     _persist(cleaned)
     # Online Context Compact (0.67.0): a todo_write that newly completes >= 1
     # item is a plan-step boundary — the OCC module decides at the next

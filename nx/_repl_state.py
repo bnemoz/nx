@@ -205,16 +205,7 @@ def _reload_metrics_totals(session_id: str) -> None:
     saved = _load_session(session_id) or {}
     if isinstance(saved.get("todos"), list) and saved["todos"]:
         st._TODOS = saved["todos"]
-        # Phase C (0.161.0): a resume writes st._TODOS outside todo_write (the
-        # normal single writer), so refresh the stashed plan revision here too —
-        # otherwise the stall trigger compares a resumed plan against the
-        # never-written sentinel on its first wake evaluation.
-        try:
-            from ._todo import _plan_revision
-            st._PLAN_REVISION = _plan_revision(saved["todos"])
-        except Exception:
-            pass
-    # (0.150.x) The persistent todo file is no longer a resume fallback:
+        # (0.150.x) The persistent todo file is no longer a resume fallback:
     # todos are session state — a session without recorded todos starts
     # with an empty list. The file (.nx/todo.md / NX_TODO_FILE) remains a
     # write-through export only.

@@ -443,9 +443,17 @@ def _finished_unseen_bg_jobs(jobs=None) -> list[str]:
         return []
 
 
-def wake_due() -> bool:
+def wake_due(due_out: dict | None = None) -> bool:
     """True when the REPL should start a turn by itself: a completion note is
     staged (or stageable) and no turn is currently running.
+
+    *due_out*: when given (a dict), receives {"stall": bool} describing THIS
+    call's own branch decision. The REPL's re-check passes it: the one-shot
+    _WAKE_STALL_PENDING marker is decided per evaluation, and a poller tick
+    interleaving between this call and the consumer's read could clobber the
+    marker (the poller resets it first thing, before the guards) — the model
+    would then get the plain wake instruction while the stall trigger stayed
+    unstamped and re-fired every grace period (review finding, 0.161.0).
 
     Conservative on every axis: not while a turn/sub-agent/batch loop owns the
     machinery, not while a sub-agent is still running (its own finish will
@@ -464,6 +472,7 @@ def wake_due() -> bool:
     # matches the branch that actually returned True (wake_instruction()
     # consumes it; note_turn_end() clears it at turn end).
     st._WAKE_STALL_PENDING = False
+    _branch_stall = False
     if not _wake_enabled() or not getattr(st, "_WAKE_ARMED", False):
         # Also forget a stale hold key: if wakes were disabled mid-chain and
         # the session re-arms later with a restored streak, the old key must
@@ -556,7 +565,10 @@ def wake_due() -> bool:
     if (_campaign_pending() and _stall_due()
             and not _work_in_flight()):
         st._WAKE_STALL_PENDING = True
+        _branch_stall = True
         return True
+    if due_out is not None:
+        due_out["stall"] = _branch_stall
     return False
 
 

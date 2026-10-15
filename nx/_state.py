@@ -294,9 +294,6 @@ _WAKE_STALL_HOLD: bool = False
 # One-shot: set by wake_due() when the branch that fired was the stall branch,
 # consumed by wake_instruction() to pick STALL_WAKE_INSTRUCTION.
 _WAKE_STALL_PENDING: bool = False
-# The plan revision todo_write stashed (a stable hash of its (text, status)
-# pairs) — the poller compares this int instead of re-hashing every tick.
-_PLAN_REVISION: int = -1
 
 # True for the whole duration of one _run_model_turn_loop() call in the
 # interactive parent. wake_due() refuses to fire mid-turn: a notice that

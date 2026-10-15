@@ -958,8 +958,17 @@ def _maybe_wake_turn(api: Callable, allowed: set) -> None:
                 # Phase C mirror: a stall wake stamps the plan revision it woke
                 # for, exactly as the REPL does (_repl.py, next to the streak
                 # increment) — that int is the trigger's terminator and the
-                # baseline note_turn_end() compares against.
-                if getattr(st, "_WAKE_STALL_PENDING", False):
+                # baseline note_turn_end() compares against. The branch
+                # decision comes from this call's out-param, not the shared
+                # marker (poller race, review fix 0.161.0). The outer try's
+                # finally releases _TURN_LOCK on every path, including this
+                # early return.
+                _stall_decision: dict = {}
+                if not _autowake.wake_due(_stall_decision):
+                    st._TURN_ACTIVE = False
+                    return
+                _stall_wake = bool(_stall_decision.get("stall"))
+                if _stall_wake:
                     from ._todo import _plan_revision
                     st._WAKE_STALL_REVISION = _plan_revision()
                 _run_bg_completion_scan()

@@ -443,15 +443,11 @@ def nx_state_reset_body() -> None:
         # A leftover armed clock (_WAKE_STALL_AT) plus _campaign_pending()
         # state would make wake_due() True in a later test once the grace
         # elapsed, and a stale _WAKE_STALL_REVISION / _HOLD / _PENDING changes
-        # which instruction the next wake picks. _PLAN_REVISION / _PLAN_TODOS
-        # are todo_write's stash (the poller's comparison baseline) — reset to
-        # the never-written sentinel so a fresh _plan_revision() always reads
-        # as a change.
+        # which instruction the next wake picks.
         st._WAKE_STALL_AT = 0.0
         st._WAKE_STALL_REVISION = -1
         st._WAKE_STALL_HOLD = False
         st._WAKE_STALL_PENDING = False
-        st._PLAN_REVISION = -1
         # Background-completion scan state: st._BG_NOTICE_SEEN is read as "pids
         # already announced" but None means "re-seed from the baseline", and
         # _BG_SCAN_DONE gates the sweep — neither is rewound by anything else.

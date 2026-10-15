@@ -465,7 +465,7 @@ def _repl() -> None:
             # spending a whole model turn on it — a stale sentinel is dropped
             # silently instead of printing the banner and answering "Nothing
             # pending" (0.109.5).
-            if not _m._autowake.wake_due():
+            if not _m._autowake.wake_due(_stall_decision := {}):
                 continue
             st._WAKE_STREAK = getattr(st, "_WAKE_STREAK", 0) + 1  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute
             # Phase C (0.161.0): a STALL wake stamps the plan revision it woke
@@ -473,8 +473,10 @@ def _repl() -> None:
             # int is the trigger's terminator (at most one stall wake per plan
             # revision) AND the baseline the post-turn finally compares
             # against to decide whether the wake changed anything
-            # (-> _WAKE_STALL_HOLD).
-            _stall_wake = bool(getattr(st, "_WAKE_STALL_PENDING", False))
+            # (-> _WAKE_STALL_HOLD). The branch decision comes from THIS
+            # call's out-param, not the shared marker: a poller tick in this
+            # window resets the marker before its own guards (review fix).
+            _stall_wake = bool(_stall_decision.get("stall"))
             if _stall_wake:
                 from ._todo import _plan_revision
                 st._WAKE_STALL_REVISION = _plan_revision()  # pyrefly: ignore[bad-assignment]  # dynamic st-module attribute

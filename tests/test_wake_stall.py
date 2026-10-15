@@ -63,10 +63,9 @@ def setup_function(_function):
 
 
 def _plan(todos):
-    """Set the plan of record AND refresh todo_write's stashed revision, which
-    is what the poller compares (todo_write is the only production writer)."""
+    """Set the plan of record. The stall trigger hashes the LIVE st._TODOS on
+    every evaluation (desync-proof by construction), so no stash to refresh."""
     st._TODOS = todos
-    st._PLAN_REVISION = _plan_revision(todos)
     return todos
 
 
