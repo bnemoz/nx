@@ -101,6 +101,14 @@ def _notes_dir(repo):
     return os.path.join(repo, ".nx", "memories")
 
 
+def _note_path(res):
+    """The file path a successful memory_write result reports."""
+    for ln in res.split("\n"):
+        if ln.startswith("file: "):
+            return os.path.abspath(ln[len("file: "):])
+    raise AssertionError(f"no file line in {res!r}")
+
+
 def _only_note(repo):
     d = _notes_dir(repo)
     names = [n for n in os.listdir(d) if n.endswith(".md")]
@@ -356,3 +364,60 @@ def test_fts_and_plain_scan_annotate_identically():
     assert with_fts[0][0][3].startswith("[stale"), with_fts
     assert with_fts[0][0][2] < with_fts[0][0][1]  # demoted
     assert _results() == with_fts
+
+
+# --- the redaction / drift-stamp trap (0.158.20) --------------------------------
+#
+# The write-time secret redaction runs on a note's TITLE and BODY only. It must
+# never be handed the footer: the `_drift:` stamp is
+# `<sha>|-|<paths>|-|<ISO>|<repo>|-`, so a scanner that matched "long hex string"
+# would shred the sha — and drift demotion plus the write-time staleness
+# challenge would break SILENTLY, because a mangled stamp simply parses as
+# "unknown" and every note then looks fresh.
+
+def test_redaction_leaves_the_drift_stamp_sha_intact_and_body_hex_survives():
+    repo = _mkrepo()
+    _in_repo(repo)
+    head = _git(repo, "rev-parse", "HEAD")
+    body_sha = "a3f5b7c9d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
+    res = _write("Bisect notes",
+                 f"The regression is at {body_sha}; also `git show a3f5b7c` "
+                 "touches src/app.py.")
+    assert res.startswith("saved "), res
+    path = _note_path(res)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    # 1. legitimate hex in the BODY is note content, not a credential
+    assert body_sha in content and "a3f5b7c" in content
+    assert "[REDACTED" not in content, content
+    # 2. the FOOTER stamp carries the real HEAD, whole and parseable
+    stamp = drift._parse_drift(content)
+    assert stamp is not None, content
+    assert stamp.sha == head, (stamp.sha, head)
+    assert stamp.paths == ("src/app.py",), stamp.paths
+    # 3. drift still ANSWERS against it (fresh, 0 behind) — the feature works
+    assert drift._drift_freshness(stamp) == (0, 0)
+    assert drift._annotate_drift(stamp).startswith("[fresh"), stamp.sha
+
+
+def test_redaction_does_not_break_the_stale_note_challenge():
+    """The same trap, at the challenge seam: a note retired by a newer one is
+    still detected as stale (so the challenge still fires) when its body is full
+    of hex the scanner could have eaten."""
+    repo = _mkrepo()
+    old = _commit(repo, "src/app.py", "def app():\n    return 2\n", "c2")
+    _commit(repo, "src/other.py", "x = 1\n", "c3")
+    _in_repo(repo)
+    d = _notes_dir(repo)
+    os.makedirs(d, exist_ok=True)
+    body_sha = "deadbeef" * 5
+    with open(os.path.join(d, "2025-01-01-000001_old.md"), "w",
+              encoding="utf-8") as f:
+        f.write("# Stale hex claim\n\nrepro at " + body_sha + " in `src/app.py`\n\n"
+                "---\n_scope: project  _saved: x  _drift: " + old +
+                "|src/app.py|2025-01-01T00:00:00|" + repo + "|-\n")
+    res = _write("Stale hex claim", "repro at " + body_sha + " fixed in app.py")
+    assert res.startswith("saved "), res          # redaction never blocks
+    assert "commits stale" in res, res            # and drift still sees the note
+    with open(_note_path(res), encoding="utf-8") as f:
+        assert body_sha in f.read()               # the new note's hex survived too

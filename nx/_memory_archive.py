@@ -18,7 +18,7 @@ import os
 from ._ansi import C, DIM, RESET
 from ._memory_store import (
     _MEMORY_FOOTER_RE, _confirm_memory, _iter_memory_dirs, _note_derived,
-    _read_memory_title, _write_memory_file,
+    _note_summary_of, _read_memory_title, _write_memory_file,
 )
 
 
@@ -134,13 +134,18 @@ def _cmd_memory_archived(target: str) -> None:
         print(f"{C.ERROR}  ✗ couldn't read {path}: {e}{RESET}")
         return
     # Strip the archived note's own footer — the writer appends a fresh one.
-    # (The regex anchors on `_scope:` and DOTALLs to EOF, so a `_derived:` field
-    # riding that line is stripped with it: the restore can never produce a
-    # doubled footer.) Provenance is CARRIED ACROSS, not dropped: a derived note
-    # comes back derived, so the pair stays identifiable after an archive.
+    # (The regex anchors on `_scope:` and DOTALLs to EOF, so every field riding
+    # that line — `_derived:`, `_summary_of:`, a supersession pair — is stripped
+    # with it: the restore can never produce a doubled footer, and cannot lose a
+    # carried field either.) Provenance is CARRIED ACROSS, not dropped: a derived
+    # note comes back derived, and a consolidated one still names its sources.
+    # A superseded note's retirement is NOT carried: restoring from the archive
+    # is an explicit act of bringing a note back, so it comes back live.
     derived = _note_derived(content) or None
+    summary_of = _note_summary_of(content) or None
     body = _MEMORY_FOOTER_RE.sub("", content).rstrip()
-    written = _write_memory_file(title, body, label, gate=False, derived=derived)
+    written = _write_memory_file(title, body, label, gate=False, derived=derived,
+                                 summary_of=summary_of)
     if written is None:
         return
     try:

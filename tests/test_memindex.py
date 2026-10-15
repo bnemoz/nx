@@ -597,6 +597,69 @@ def test_emptied_store_unlinks_index_nonempty_keeps_it():
     assert os.path.exists(db)
 
 
+# --- supersession filtering (0.158.20) -----------------------------------------
+#
+# `reconcile` builds its rows from a RAW disk listing, so it is the one place
+# that does not inherit `_iter_notes`' supersession filter for free. It mirrors
+# the exclusion (dropping the row, exactly as a vanished note's row is dropped),
+# which keeps a retired note out of `search_dir`'s candidates — those flow
+# straight into `_memory_scan`'s re-filter, which never re-reads the file.
+
+_SUPER_FOOT = "_scope: project  _saved: 2026-01-01 00:00:00"
+
+
+def test_reconcile_drops_the_row_of_a_superseded_note():
+    if not HAVE_FTS:
+        return
+    d = _proj_dir()
+    live = _note(d, "20260101-000002_live.md",
+                 "# Live note\n\nprosemark body here\n\n---\n" + _SUPER_FOOT + "\n")
+    retired = _note(d, "20260101-000001_old.md",
+                    "# Old note\n\nprosemark body here\n\n---\n" + _SUPER_FOOT +
+                    "  _superseded_by: 20260101-000002_live.md  "
+                    "_valid_until: 2026-01-02T00:00:00\n")
+    rows = _memindex.search_dir(d, "prosemark body")
+    assert rows is not None
+    names = [r[0] for r in rows]
+    assert os.path.basename(live) in names, names
+    assert os.path.basename(retired) not in names, names
+    # unsuperseding (clearing the pair) re-indexes it on the next search:
+    # the footer rewrite moves the mtime, which IS the cache-invalidation token.
+    with open(retired, encoding="utf-8") as f:
+        text = f.read()
+    _memindex_live = text.replace(
+        "  _superseded_by: 20260101-000002_live.md  "
+        "_valid_until: 2026-01-02T00:00:00", "")
+    import time as _t
+    with open(retired, "w", encoding="utf-8") as f:
+        f.write(_memindex_live)
+    os.utime(retired, (_t.time() + 5, _t.time() + 5))
+    rows = _memindex.search_dir(d, "prosemark body")
+    assert os.path.basename(retired) in [r[0] for r in rows], rows
+
+
+def test_search_and_plain_scan_agree_that_a_superseded_note_is_invisible():
+    """The accelerator and the fallback must answer identically — otherwise the
+    invariant would depend on whether FTS happened to be warm."""
+    if not HAVE_FTS:
+        return
+    d = _proj_dir()
+    _note(d, "20260101-000002_b.md", "# Both\n\nagree mark body\n\n---\n"
+          + _SUPER_FOOT + "\n")
+    _note(d, "20260101-000001_a.md", "# Both\n\nagree mark body\n\n---\n"
+          + _SUPER_FOOT + "  _superseded_by: 20260101-000002_b.md\n")
+    fts = sorted(r[0] for r in _memindex.search_dir(d, "agree mark body"))
+    plain = sorted(n[0] for n in _memory_cmd._iter_notes(d)
+                   if "agree mark body" in n[4])
+    assert fts == plain == ["20260101-000002_b.md"], (fts, plain)
+    os.environ["NX_MEMORY_FTS"] = "0"
+    try:
+        hits, _ov, total = _memory_cmd._memory_scan("agree mark body", "project", 0)
+        assert total == 1 and hits[0].name == "20260101-000002_b.md"
+    finally:
+        os.environ["NX_MEMORY_FTS"] = "1"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

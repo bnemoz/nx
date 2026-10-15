@@ -232,3 +232,40 @@ def test_reflect_no_signal_writes_nothing():
         _memory_reflect._reflect_chat = old_chat
         m.st.client, m.st.MODEL = old_client, old_model
     assert not os.path.isdir(os.path.join(_tmp, "memories"))
+
+
+def test_reflect_stamps_summary_of_with_the_notes_it_read():
+    """`/memory reflect` consolidates over named sources; the promoted note now
+    carries them in `_summary_of:`. Provenance only — the note stays visible and
+    ranked exactly as before."""
+    root = _fresh_root("nx-refsum-")
+    _write_memory("S1 uses uv", "project one prefers uv run", project_root=root)
+    _write_memory("S2 uses uv", "project two prefers uv run", project_root=root)
+    collected = _memory_reflect._collect_reflection(1000)
+    names = [n.name for n in collected]
+    assert len(names) >= 2, names
+    old_client, old_model = m.st.client, m.st.MODEL
+    m.st.client, m.st.MODEL = object(), "fake"
+    plan = "NOTE " + "\nNOTE ".join(names) + "\nWRITE global preference\n"
+
+    def fake_chat(prompt, purpose):
+        if purpose == "memory_reflect_plan":
+            return plan
+        return "# Summary habit\n\nThe user prefers `uv run` everywhere.\n"
+
+    old_chat = _memory_reflect._reflect_chat
+    _memory_reflect._reflect_chat = fake_chat
+    try:
+        _memory_reflect._cmd_memory_reflect("")
+    finally:
+        _memory_reflect._reflect_chat = old_chat
+        m.st.client, m.st.MODEL = old_client, old_model
+    notes = _memory_cmd._iter_notes(os.path.join(root, "memories"))
+    hit = [c for _n, _p, _m2, _t, c in notes if "Summary habit" in _t]
+    assert hit, notes
+    content = hit[0]
+    listed = _memory_cmd._note_summary_of(content).split(",")
+    assert listed and listed != [""], content
+    assert all(nm in names for nm in listed), (listed, names)
+    assert len(content.split("\n---\n")) == 2          # one footer
+    assert "_summary_of:" in content.split("\n---\n")[1].split("\n")[0]

@@ -1411,6 +1411,105 @@ def test_merge_workers_env_reader():
     assert opt._merge_workers(5) == opt._MERGE_WORKERS_CAP
 
 
+# --- `_summary_of:` provenance on merged notes (0.158.20) ----------------------
+#
+# `/memory optimize` merges and `/memory reflect` promotions consolidate named
+# source notes but used to discard WHICH ones. The footer now carries them —
+# provenance only, never a filter, and capped so one giant merge cannot produce
+# an unbounded footer line.
+
+def test_merge_stamps_summary_of_with_its_source_filenames():
+    root = tempfile.mkdtemp(prefix="nx-opt-sum-")
+    pdir = os.path.join(root, ".nx", "memories")
+    paths = _with_store([("Alpha note", "alpha body"), ("Beta note", "beta body")],
+                        root)
+    names = sorted(os.path.basename(p) for p in paths)
+
+    class _Completions:
+        @staticmethod
+        def create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt.startswith("Merge the memory notes"):
+                return _Resp("# Merged\n\ncombined body\n")
+            return _Resp(f"MERGE {names[0]} + {names[1]} => Merged\n")
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        base_url = "http://localhost:9999/v1"
+        chat = _Chat()
+
+    _install_client(_Client())
+    _env("NX_MEMORY_OPTIMIZE_BATCH", 0)
+    with _printed as lines:
+        opt._cmd_memory_optimize([{"role": "user", "content": "hi"}], "")
+    merged = [f for f in _md_files(pdir) if "merged" in f]
+    assert merged, (lines, _md_files(pdir))
+    with open(os.path.join(pdir, merged[0]), encoding="utf-8") as f:
+        content = f.read()
+    got = _memory_cmd._note_summary_of(content)
+    assert set(got.split(",")) == set(names), (got, names, content)
+    assert "_summary_of:" in content.split("\n---\n")[1].split("\n")[0]
+    # provenance rides the same footer line as `_derived:` and stays ONE footer
+    assert _memory_cmd._note_derived(content) == "memory"
+    assert len(content.split("\n---\n")) == 2
+    # visibility is untouched by provenance: the merged note is searchable
+    assert merged[0] in {n[0] for n in _memory_cmd._iter_notes(pdir)}
+
+
+def test_summary_of_field_is_capped_and_parses_back_symmetrically():
+    from nx import _memory_store as store
+    many = [f"202601{i:02d}-000000_n{i}.md" for i in range(20)]
+    field = store._summary_of_field(many)
+    assert field.startswith("_summary_of: ")
+    listed = field[len("_summary_of: "):].split(",")
+    assert len(listed) == store._SUMMARY_OF_MAX == 12, field
+    # parsed back out symmetrically with `_derived:` (one non-space token)
+    note = ("# X\n\nbody\n\n---\n_scope: project  _saved: x  " + field + "\n")
+    assert _memory_cmd._note_summary_of(note) == ",".join(listed)
+    # a string round-trips too (that is what the archive hands back)
+    assert store._summary_of_field(",".join(listed)) == field
+    assert store._summary_of_field([]) == ""
+    assert store._summary_of_field(["a.md", "a.md"]) == "_summary_of: a.md"
+
+
+def test_summary_of_survives_archive_restore_with_exactly_one_footer():
+    """The footer-strip regex must take the field with the rest of the footer,
+    and the restore must re-emit it once — never doubled, never lost."""
+    root = tempfile.mkdtemp(prefix="nx-sum-arch-")
+    pdir = os.path.join(root, ".nx", "memories")
+    old_root = m.st.PROJECT_ROOT
+    m.st.PROJECT_ROOT = root
+    try:
+        src_a = _memory_cmd._write_memory_file("Src one", "a body", "project")[0]
+        src_b = _memory_cmd._write_memory_file("Src two", "b body", "project")[0]
+        written = _memory_cmd._write_memory_file(
+            "Consolidated", "merged body", "project", derived="memory",
+            summary_of=[os.path.basename(src_a), os.path.basename(src_b)])
+        run = os.path.join(pdir, "archive", "20260101-000000")
+        os.makedirs(run, exist_ok=True)
+        dest = os.path.join(run, os.path.basename(written[0]))
+        os.replace(written[0], dest)
+        _memory_cmd._cmd_memory_archived("Consolidated")
+        restored = [f for f in _md_files(pdir)]
+        assert len(restored) == 3, restored          # 2 sources + 1 restore
+        text = ""
+        for f in restored:
+            with open(os.path.join(pdir, f), encoding="utf-8") as fh:
+                c = fh.read()
+            if c.startswith("# Consolidated"):
+                text = c
+        assert text, restored
+        assert text.count("_summary_of:") == 1, text
+        assert text.count("_scope:") == 1 and len(text.split("\n---\n")) == 2
+        assert set(_memory_cmd._note_summary_of(text).split(",")) == {
+            os.path.basename(src_a), os.path.basename(src_b)}
+        assert _memory_cmd._note_derived(text) == "memory"
+    finally:
+        m.st.PROJECT_ROOT = old_root
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))

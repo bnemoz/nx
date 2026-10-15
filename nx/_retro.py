@@ -195,6 +195,15 @@ def _confirm_retro(title: str, body: str) -> bool:
     return bool(_m._confirm(f"write memory (retro): {title}", preview=body))
 
 
+def _redaction_summary(labels: list) -> str:
+    """The retro summary's tail when the writer redacted something. One line,
+    labels only — never the matched text (this string reaches the terminal and
+    the session log)."""
+    if not labels:
+        return ""
+    return f" — {len(labels)} secret(s) redacted from the note(s)"
+
+
 def run_retro(session_id: str | None = None, interactive: bool = True) -> str:
     """Summarize the session's friction and persist one gotcha note per
     qualifying pattern (deduped against existing project notes). Returns a
@@ -225,6 +234,7 @@ def run_retro(session_id: str | None = None, interactive: bool = True) -> str:
 
     notes = _existing_project_notes()
     titles: list[str] = []
+    redactions: list[str] = []
     skipped = 0
     for p in patterns:
         if _already_noted(p, notes):
@@ -234,8 +244,12 @@ def run_retro(session_id: str | None = None, interactive: bool = True) -> str:
         body = _note_body(p, session_id)
         if interactive and not _confirm_retro(title, body):
             continue
+        # `redactions=` costs nothing and closes the one silent case: this path
+        # runs UNATTENDED at session exit, so a credential picked up from usage
+        # data would otherwise be redacted with nobody ever told.
         written = _write_memory_file(title, body, scope="project",
-                                     kind="gotcha", gate=False)
+                                     kind="gotcha", gate=False,
+                                     redactions=redactions)
         if written is not None:
             titles.append(title)
 
@@ -245,7 +259,8 @@ def run_retro(session_id: str | None = None, interactive: bool = True) -> str:
                     f"{skipped} already noted — nothing new written")
         return f"retro: {len(patterns)} friction patterns, 0 notes written"
     return (f"retro: {len(patterns)} friction patterns, "
-            f"{len(titles)} notes written: " + "; ".join(titles))
+            f"{len(titles)} notes written: " + "; ".join(titles)
+            + _redaction_summary(redactions))
 
 
 def retro_on_exit(session_id: str | None) -> None:

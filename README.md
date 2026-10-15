@@ -647,7 +647,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/context [all\|pin\|unpin\|clear]` | per-message context breakdown, full screen; p pins the selected turn against /compress |
 | `/cost` | session usage + per-source cost scoreboard |
 | `/status` | snapshot: source, model, caps, budgets, fence, approval |
-| `/memory [save\|remember\|delete\|list\|archived\|optimize\|reflect]` | manage persistent memory (bare /memory: full screen) |
+| `/memory [save\|remember\|delete\|list\|archived\|unsupersede\|optimize\|reflect]` | manage persistent memory (bare /memory: full screen) |
 | `/retro` | distill this session's friction (usage.jsonl) into gotcha memories |
 | `/todo` | show the model's current todo_write list, full screen; Ctrl+G |
 | `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |
@@ -1208,7 +1208,14 @@ approval `preview`, and scans that same text for secret-shaped strings
 patterns `run_bash`'s own guard uses) before any confirmation round-trip. A
 hit refuses the commit outright; nothing is committed until the user accepts
 the diff they were shown. Denial leaves the changes staged (review with
-`git_diff` staged=true) and commits nothing. Plan mode gates it, it joins
+`git_diff` staged=true) and commits nothing. The scan covers **added lines only**
+(0.158.21): context lines are already committed, so scanning them meant a
+legitimately committed token-shaped string — a redaction test's own fixture —
+made every later edit to that file uncommittable, blocking a change while being
+unable to undo what it objected to. Only an explicit `nx-allow-secret` marker on
+an added line exempts a file, and only on a test-shaped path, so application code
+can never buy its way past the guard; the marker is greppable and visible in the
+diff a human reviews. Plan mode gates it, it joins
 the sub-agent write tier, and the "git commit: <subject>" action carries a
 local medium risk verdict — the model cannot reach `git commit` unreviewed
 anymore. A HEAD-moved preflight (0.108.0) re-checks `git rev-parse HEAD`
@@ -1351,7 +1358,46 @@ Notes distilled from nx's own memory output carry a `_derived:` footer field (se
 `/memory save` when the model flags a recycled learning, and by `/memory optimize`
 merges and `/memory reflect` writes, which are memory-derived by construction). It
 is provenance only: derived notes stay fully searchable and stay in the session-start
-note.
+note. Consolidated notes — `/memory optimize` merges and `/memory reflect` writes —
+additionally carry `_summary_of:` naming the source notes they were folded from
+(capped at 12 names), so a merged belief keeps a machine-readable link to its
+evidence instead of a paragraph of prose.
+
+### Supersede, don't delete (0.158.21)
+
+`memory_write` takes an optional `supersedes: <title | filename | unique prefix>`. The
+old note keeps its file on disk but gains `_superseded_by:` + `_valid_until:` in its
+footer, and the new one records `_supersedes:` — so retiring a belief is reversible,
+the way the archive is, rather than the irreversible `memory_delete` the tool used to
+recommend. Resolution reuses `memory_delete`'s resolver, and an ambiguous or unknown
+target writes **nothing at all**: nx never supersedes by guess. A superseded note
+disappears from `memory_search`, from the session-start note, and from `/memory
+optimize`'s index (the filter lives in the one live scanner, `_iter_notes`, which the
+FTS index mirrors so index candidates can't leak past it). To undo one: `/memory
+unsupersede <target>`; `/memory list` shows retired notes, and `memory_delete` can
+still reach them — retired is hidden, not gone. Chained supersession (A→B, then B→C)
+redirects to the live tip rather than leaving a pointer at a retired note.
+
+### Secrets never reach a note (0.158.21)
+
+Notes are the one memory artifact that gets re-injected into *every* future session,
+so a credential that shows up in tool output and gets distilled into a note stops
+being a transcript detail and becomes a permanent part of the prompt — the
+session-start note lists notes, and preference-kind notes are injected every session.
+`/retro` writes notes automatically at session end and `/memory save` distills up to
+48K chars of transcript, both without a per-note approval, which is exactly how that
+would happen.
+
+So `_write_memory_file` — the single writer every note path goes through — runs a
+prefix-anchored secret scan over the title and body before the note is approved or
+written, and rewrites each match to `[REDACTED:<label>]` (`[REDACTED:anthropic_key]`,
+`…:github_token`, `…:jwt`, `…:db_url_password`, …). It **redacts rather than
+blocking**: a blocked auto-write silently loses the lesson, a redacted one keeps the
+lesson and drops the credential. The caller is told how many were redacted (never the
+matched text). Deliberately absent: any "long hex string" rule — the `_drift:` stamp
+begins with a commit sha, and a bare-hex pattern would shred it and silently break
+staleness demotion. Scope boundary, recorded in the docstring: this covers **notes**,
+not session transcripts — transcripts are still protected by file mode (0600) alone.
 
 ### `/memory optimize`
 

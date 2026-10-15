@@ -11,18 +11,20 @@ builds on. Two storage scopes:
 Every write goes through `_write_memory_file`: one filename convention
 (`<timestamp>_<slug>.md`, `-2`/`-3`... on a same-second same-title collision),
 one footer convention (`_scope:`/`_saved:`/`_kind:`/`_derived:`, plus the drift stamp
-`_drift:` documented at the bottom of this module), atomic tmp+rename,
-private 0600 permissions (memories are distilled from sessions and may contain
-paths/commands/credentials; same posture as session files). Publication is
-claim-based (`atomic_write_private_noreplace`): the filename is not picked by
-an exists-then-write check that two concurrent writers (the memory-merge
-workers) can both pass — the first to publish the bytes wins and the loser
-takes the next suffix.
+`_drift:`, the supersession pair `_supersedes:` / `_superseded_by:` +
+`_valid_until:`, and the consolidation list `_summary_of:` — all documented at
+the bottom of this module), secret redaction of the title+body, atomic
+tmp+rename, private 0600 permissions (memories are distilled from sessions and
+may contain paths/commands/credentials; same posture as session files).
+Publication is claim-based (`atomic_write_private_noreplace`): the filename is
+not picked by an exists-then-write check that two concurrent writers (the
+memory-merge workers) can both pass — the first to publish the bytes wins and
+the loser takes the next suffix.
 
 Every read goes through `_iter_notes` — the one scanner over a memories dir —
-so title extraction, mtime handling and unreadable-file tolerance live in
-exactly one loop. All writes go through nx/_private.py (0600/0700,
-umask-proof)."""
+so title extraction, mtime handling, supersession filtering and unreadable-file
+tolerance live in exactly one loop. All writes go through nx/_private.py
+(0600/0700, umask-proof)."""
 from __future__ import annotations
 
 import codecs
@@ -105,9 +107,14 @@ def _read_memory_file(path: str, name: str) -> tuple[str, str] | None:
 # a bounded head read, not the whole body: _load_memory_note reads every note in
 # both scopes at session start just for titles (a 56-note store is ~180 KB).
 _TITLE_HEAD_BYTES = 256
+# The window a titles-only scan probes at EOF to answer one footer question
+# ("is this note superseded?"). A footer line is one short line; 512 bytes
+# covers it with room for hand-added fields, and stays far under a body read.
+_NOTE_TAIL_BYTES = 512
 
 
-def _read_memory_title(path: str, name: str) -> tuple[str, str] | None:
+def _read_memory_title(path: str, name: str,
+                       tail: list | None = None) -> tuple[str, str] | None:
     """(title, head_text) for one note from a bounded head read, or None when
     the head is unreadable or not valid UTF-8 — the same skip a full read makes,
     so the scanner tolerates a broken note identically on both paths. The title
@@ -116,10 +123,22 @@ def _read_memory_title(path: str, name: str) -> tuple[str, str] | None:
     A note whose first bytes are valid but whose *body* later is not would pass
     here and be skipped by a full read; that is the one (rare) divergence, and
     it only widens which titles a title-only caller lists.
+
+    `tail` (0.158.20), when given, is a list a bounded TAIL read is appended to —
+    for a title-only caller that also needs one footer field (`_superseded_by:`)
+    without reading the body. Reading it from the SAME open is deliberate: the
+    session-start note scans every note in both scopes, and a second open per
+    note would double that cost for a field that lives in ~60 bytes at EOF.
     """
     try:
         with open(path, "rb") as f:
             head = f.read(_TITLE_HEAD_BYTES)
+            if tail is not None:
+                try:
+                    f.seek(-_NOTE_TAIL_BYTES, os.SEEK_END)
+                except OSError:
+                    f.seek(0)  # the note is shorter than the probe window
+                tail.append(f.read(_NOTE_TAIL_BYTES).decode("utf-8", "replace"))
     except OSError:
         return None
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -140,6 +159,140 @@ def _read_memory_title(path: str, name: str) -> tuple[str, str] | None:
 
 
 _MEMORY_FOOTER_RE = re.compile(r"\n---\n_scope:.*$", re.DOTALL)
+
+
+# --- secret redaction at the one writer ----------------------------------------
+#
+# nx's threat model (see nx/_private.py) protects `~/.nx` content with FILE MODES
+# (0600/0700) only — there is no content scanner. For notes that is not enough,
+# because a note is not inert storage: it is RE-INJECTED into every future
+# session. `retro_on_exit` writes notes automatically at session end (gate=False,
+# ON by default) and `/memory save` distils up to _MEMORY_TRANSCRIPT_CHARS of
+# tool output, so a credential that merely APPEARED in one tool result can be
+# distilled into a note, and from there into the session-start [Saved memories]
+# note (preference-kind notes are injected every session), into the FTS index
+# and into any backup. That promotes "one transcript contained a token" — which
+# 0600 covers — to "every prompt forever, in every project", which it does not.
+#
+# So the one writer REDACTS. Two properties are load-bearing:
+#   REDACT, never block. Dropping or failing an auto-write silently loses the
+#   lesson; replacing the secret with `[REDACTED:<label>]` keeps the lesson and
+#   kills the credential, and the label tells a human what was there and why it
+#   went. The matched text is never echoed back to a caller.
+#   ONE CHOKE POINT. It sits inside `_write_memory_file`, so `memory_write`,
+#   `/memory save`, `/retro`, `/memory optimize` merges and `/memory reflect`
+#   are all covered by one insertion point (archive restore re-enters through
+#   the same writer).
+#
+# SCOPE BOUNDARY (deliberate): NOTES ONLY. Session transcripts (`_sessiondb`,
+# `_sessions_fs`) are NOT scanned here — they are the raw record, and rewriting
+# them would break replay/audit; they stay protected by file modes.
+#
+# THE FOOTER IS NEVER SCANNED. The `_drift:` stamp is
+# `<sha>|-|<paths>|-|<ISO-time>|<repo-root>|-`, so ANY hex-shaped rule would
+# shred that sha and silently break drift demotion plus the write-time staleness
+# challenge. `_redact_secrets` is therefore called on the TITLE and BODY only;
+# the footer block is assembled after redaction and passes through untouched.
+# (A bare "long hex string" rule is deliberately ABSENT for the same reason:
+# commit shas are legitimate note content and must round-trip.)
+
+_REDACTION_MARK = "[REDACTED:%s]"
+
+# Labelled pattern set, applied IN ORDER. Prefix-anchored on purpose: a rule
+# keyed on "high entropy" shreds legitimate note content (shas, hashes, base64
+# diffs, UUIDs), while a real credential almost always carries a stable prefix.
+# Stdlib `re`, precompiled once at module scope.
+_SECRET_PATTERNS: tuple = (
+    # PEM / OpenSSH private key blocks (and the bare BEGIN marker, so a key
+    # truncated by the transcript cap still can't leak its first material lines).
+    ("private_key_block", re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+        r".*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----", re.DOTALL)),
+    ("private_key_marker", re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")),
+    # Anthropic (sk-ant-…) / OpenAI (sk-, sk-proj-…). Body chars are pure
+    # alphanumerics so prose like `task-tracking-…` cannot match: \b fails
+    # before the "sk" inside "task", and a hyphen ends the run.
+    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9]{16,}")),
+    ("openai_key", re.compile(r"\bsk-(?:proj-|api-)?[A-Za-z0-9]{16,}")),
+    # Stripe live/test publishable + secret keys.
+    ("stripe_key", re.compile(r"\b[sp][ak]_(?:live|test|ramp)_[A-Za-z0-9]{8,}")),
+    # GitHub personal/oauth/app/user/refresh/empirical + fine-grained PATs.
+    ("github_token", re.compile(
+        r"\bgh[pousrex]_[A-Za-z0-9]{16,}\b|\bgithub_pat_[A-Za-z0-9_]{16,}\b")),
+    # AWS access key ids (AKIA/ASIA + the 16-char body; `{16,}` so a key that
+    # runs long — or is followed by alnum padding — still gets caught).
+    ("aws_key", re.compile(r"\bA[K-S]IA[0-9A-Z]{16,}\b")),
+    # Slack bot/user/app/admin/server tokens.
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
+    # Google API keys.
+    ("google_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}")),
+    # JWTs: three base64url segments, header always `eyJ…`.
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}"
+                       r"\.(?:[A-Za-z0-9_\-]{4,}|)\b")),
+    # `Authorization: Bearer <token>` (the header name is optional; the long
+    # opaque run is what makes it a credential rather than prose).
+    ("bearer_token", re.compile(
+        r"(?i)(?:\bauthorization\s*:\s*)?Bearer\s+(?!\[REDACTED:)"
+        r"[A-Za-z0-9._~+/=\-]{16,}")),
+    # DB URLs with an embedded password: scheme://user:***@host. The `:`
+    # before the `@` is required, so `https://example.com/x` can't match.
+    ("db_url_password", re.compile(
+        r"\b[a-z][a-z0-9+.\-]{1,15}://[^\s:/@\\]*:(?!\[REDACTED:)"
+        r"[^\s/@\\]+@[^\s'\"<>)\]]+")),
+    # Generic `key = value` where the KEY names a secret. Group 1 (the key name)
+    # is preserved so the note still says WHICH variable held the credential.
+    # The `(?!\[REDACTED:)` guards are load-bearing: patterns apply IN ORDER, so
+    # a later generic rule would otherwise swallow an earlier rule's marker
+    # (`GITHUB_TOKEN=[REDACTED:github_token]` → `[REDACTED:secret_value]`),
+    # destroying the more specific label and double-counting the redaction.
+    ("secret_value", re.compile(
+        r"(?i)(\b[A-Za-z0-9_]*(?:secret|token|password|passwd|pwd|credential"
+        r"|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?(?:key|token))"
+        r"[A-Za-z0-9_]*\b\s*[:=]\s*)([\"']?)(?!\[REDACTED:)([^\"'\s,;]{6,})(\2)")),
+)
+
+
+def _redact_secrets(text: str, labels: list | None = None) -> str:
+    """Replace every secret-shaped span in `text` with `[REDACTED:<label>]`.
+
+    `labels` (optional, caller-owned) collects one label per replacement so a
+    caller can report "N secret(s) redacted" WITHOUT echoing the matched text.
+    Best-effort by contract: a pattern that raises is skipped, never propagated
+    — a redaction bug must not be able to fail a write. The footer block is
+    never passed through here (see the note above): only a note's title+body.
+    """
+    if not text:
+        return text
+    out = text
+
+    def _keep_key(m):
+        # secret_value: keep the key name and its quoting, replace the value.
+        return m.group(1) + m.group(2) + _REDACTION_MARK % "secret_value" + m.group(4)
+
+    for label, rx in _SECRET_PATTERNS:
+        try:
+            repl = _keep_key if label == "secret_value" else (_REDACTION_MARK % label)
+            out, n = rx.subn(repl, out)
+        except (re.error, RecursionError):
+            continue
+        if n and labels is not None:
+            labels.extend([label] * n)
+    return out
+
+
+def _redaction_note(labels: list) -> str:
+    """The caller-visible tail for a write that redacted something: a count plus
+    the DISTINCT labels in first-seen order. Never the matched text."""
+    if not labels:
+        return ""
+    seen: list = []
+    for lab in labels:
+        if lab not in seen:
+            seen.append(lab)
+    return ("\n%d secret(s) redacted (%s) — the lesson is kept, the credential "
+            "is not stored." % (len(labels), ", ".join(seen[:6])))
+
 
 # Note kinds (0.68.0): a lightweight tag in the footer so retrieval and
 # session-start injection can treat classes of knowledge differently (a
@@ -164,6 +317,194 @@ def _note_derived(content: str) -> str:
     return m.group(1) if m else ""
 
 
+# --- supersession and consolidation, as FOOTER DATA ------------------------------
+#
+# Supersession used to be a docstring plea (`memory_write`'s description told the
+# model to memory_delete the stale note). Deletion is irreversible and it throws
+# away the note that still explains WHY the old answer was wrong, so it is now
+# data: the retired note carries `_superseded_by: <new file>` + `_valid_until:
+# <ISO>`, the new note carries `_supersedes: <old file>`. Both ride the `_scope:`
+# footer line, exactly like `_derived:` does, so the footer-strip regex keeps
+# working and an archive→restore round-trip neither doubles nor loses a field.
+#
+# WHERE THE INVARIANT IS ENFORCED (one authoritative layer): `_iter_notes`, the
+# live scanner, drops superseded notes. Everything that must not see them —
+# `memory_search`'s plain-scan arm, `_scan_memory_entries` (the delete resolver),
+# the session-start [Saved memories] note, `/memory optimize`'s note index —
+# builds on that scanner, so they inherit the filter with no code of their own.
+# The one place that does NOT go through it is `nx._memindex.reconcile`, which
+# builds FTS rows from a raw disk listing; it mirrors the skip (see there) so a
+# superseded note's row is dropped on the next search instead of lingering.
+#
+# REVERSIBLE BY DESIGN, like the archive: the file always stays on disk, and
+# `/memory unsupersede <target>` clears the two fields. A filtered note a human
+# can only find by hand would be silent data-loss if supersession ever misfired,
+# so `/memory list` keeps showing them (marked) and the resolver used to retire
+# and to restore sees superseded notes too.
+#
+# `_summary_of:` (same line, same convention) is PROVENANCE ONLY — the source
+# filenames of a consolidated note. It changes no ranking, no filtering, no
+# visibility; it is parsed back out symmetrically with `_derived:`.
+
+_SUPERSEDED_BY_RE = re.compile(r"(?:^|\s)_superseded_by:\s*(\S+)")
+_SUPERSEDES_RE = re.compile(r"(?:^|\s)_supersedes:\s*(\S+)")
+_VALID_UNTIL_RE = re.compile(r"(?:^|\s)_valid_until:\s*(\S+)")
+_SUMMARY_OF_RE = re.compile(r"(?:^|\s)_summary_of:\s*(\S+)")
+# Chain walk cap for a `supersedes` target that is itself already retired
+# (A→B→C). Redirect to the terminal live note rather than build a chain; give up
+# (refuse) past this depth instead of recursing on a hand-edited cycle.
+_SUPERSESSION_MAX_HOPS = 8
+# Cap on `_summary_of:` names, matching _extract_drift_paths' cap-at-12
+# precedent: one giant merge must not produce an unbounded footer line.
+_SUMMARY_OF_MAX = 12
+
+
+def _note_superseded_by(content: str) -> str:
+    """The `_superseded_by:` filename of a note's footer, or '' when the note is
+    live. Tolerates hand-edited notes the way _note_kind does."""
+    m = _SUPERSEDED_BY_RE.search(content or "")
+    return m.group(1) if m else ""
+
+
+def _note_supersedes(content: str) -> str:
+    """The `_supersedes:` filename this note retired, or ''."""
+    m = _SUPERSEDES_RE.search(content or "")
+    return m.group(1) if m else ""
+
+
+def _note_summary_of(content: str) -> str:
+    """The comma-separated `_summary_of:` source list, or ''. Provenance only."""
+    m = _SUMMARY_OF_RE.search(content or "")
+    return m.group(1) if m else ""
+
+
+def _summary_of_field(names) -> str:
+    """The `_summary_of:` footer fragment for a consolidated note, capped at
+    _SUMMARY_OF_MAX names (deduped, order-preserving). '' when nothing to say.
+    Accepts a list of filenames or one comma-joined string (what the archive
+    reads back), so a round-trip cannot iterate a string character by character."""
+    if isinstance(names, str):
+        names = names.split(",")
+    seen: list = []
+    for n in names or ():
+        n = (n or "").strip()
+        if n and n not in seen:
+            seen.append(n)
+    if not seen:
+        return ""
+    return "_summary_of: " + ",".join(seen[:_SUMMARY_OF_MAX])
+
+
+def _clear_supersession(content: str) -> str:
+    """`content` with the `_superseded_by:` and `_valid_until:` fields removed
+    from its footer line — the unsupersede (restore-to-live) transform. A note
+    with no footer, or without the fields, comes back byte-identical."""
+    out = re.sub(r"[ \t]+_superseded_by:\s*\S+", "", content or "")
+    return re.sub(r"[ \t]+_valid_until:\s*\S+", "", out)
+
+
+def stamp_superseded(path: str, new_name: str) -> bool:
+    """Stamp the retired note at `path` with the footer pair that makes
+    supersession DATA instead of a docstring plea:
+
+        _superseded_by: <new note's filename>  _valid_until: <ISO time>
+
+    Both ride the `_scope:` footer line via `_append_footer_field` (the same
+    route `_derived:` and `_drift:` take), so `_MEMORY_FOOTER_RE` still strips a
+    whole footer and an archive→restore round-trip can neither double nor lose
+    a field. IDEMPOTENT by construction: any existing pair is removed first, so
+    re-superseding an already-retired note restamps it instead of stacking a
+    second copy. The file STAYS ON DISK — that is the reversible-by-design part.
+    An mtime bump is wanted here (not tolerated, as in `_backfill_persist`): the
+    footer change must reach the FTS row, and mtime is `_memindex.reconcile`'s
+    cache-invalidation token.
+
+    Returns False (writing nothing) when the note has no footer to stamp, or is
+    unreadable/unwritable — supersession is an optimisation on top of the write,
+    so a caller must never fail the new note over it."""
+    read = _read_memory_file(path, os.path.basename(path))
+    if read is None:
+        return False
+    _title, content = read
+    stamped = _append_footer_field(
+        _clear_supersession(content),
+        "_superseded_by: %s  _valid_until: %s" % (
+            new_name, time.strftime("%Y-%m-%dT%H:%M:%S")))
+    if not stamped or stamped == content:
+        return False  # footer-less note: inventing one is not done (see _append_footer_field)
+    try:
+        from ._private import atomic_write_private
+        atomic_write_private(path, stamped)
+    except OSError:
+        return False
+    return True
+
+
+def repoint_superseded(old_name: str, new_name: str) -> int:
+    """Re-point every note whose `_superseded_by:` names `old_name` at
+    `new_name` instead, over every memory dir. Returns how many were restamped.
+
+    Keeps the supersession graph FLAT: retiring a note that is itself already a
+    supersession target would otherwise create A→B→C, whose middle link is a
+    retired note nothing resolves forward from. Flat means "find the live tip"
+    is one lookup, and `/memory unsupersede` restores one pair, not a subtree.
+
+    Best effort and cheap: a titles-only scan (the field is in the footer, which
+    the tail probe reads) plus one rewrite per pointer we actually redirect."""
+    moved = 0
+    for d, _label in _iter_memory_dirs("project"):
+        for name, path, _mtime, _title, head in _iter_notes(
+                d, titles_only=True, include_superseded=True):
+            if name == old_name or name == new_name:
+                continue
+            if _superseded_in_head(head, _note_tail(path)) != old_name:
+                continue
+            if stamp_superseded(path, new_name):
+                moved += 1
+    return moved
+
+
+def resolve_note_target(target: str, scope: str,
+                        include_superseded: bool = True):
+    """(entry, candidates, entries) for `target` = an exact title, a filename
+    (with or without `.md`), or a UNIQUE title prefix, over the dirs `scope`
+    covers. `entry` is one (name, path, mtime, title, label) tuple when the
+    target resolved, else None and `candidates` holds what made it ambiguous
+    (or the recent notes, when it matched nothing).
+
+    THE resolver `memory_delete` uses (its own copy in `_memory_search.py` is
+    the same three-rule walk over `_scan_memory_entries`); supersession and
+    `/memory unsupersede` go through HERE instead of writing a fourth variant,
+    so "ambiguous ⇒ refuse and list" is one rule with one definition.
+
+    `include_superseded=True` by default: retiring and un-retiring both have to
+    be able to NAME a retired note (the default search view hides them), and
+    redirecting A→B→C needs to see that B is already retired.
+    """
+    entries = []
+    try:
+        for d, label in _iter_memory_dirs(scope):
+            for name, path, mtime, title, _c in _iter_notes(
+                    d, titles_only=True, include_superseded=include_superseded):
+                entries.append((name, path, mtime, title, label))
+    except Exception:
+        return None, [], []
+    if not entries:
+        return None, [], []
+    low = (target or "").strip().lower()
+    if not low:
+        return None, entries[:10], entries
+    exact = [e for e in entries
+             if e[0].lower() == low or e[0][:-3].lower() == low
+             or e[3].lower() == low]
+    if len(exact) == 1:
+        return exact[0], [], entries
+    cands = exact if exact else [e for e in entries if e[3].lower().startswith(low)]
+    if len(cands) == 1:
+        return cands[0], [], entries
+    return None, (cands if cands else entries[:10]), entries
+
+
 def _publish_memory(path: str, content: str) -> bool:
     """Publish one memory note 0600 and atomically, WITHOUT clobbering: the
     final step is a claim (os.link fails with FileExistsError when another
@@ -177,7 +518,8 @@ def _publish_memory(path: str, content: str) -> bool:
         return False
 
 
-def _iter_notes(d: str, *, titles_only: bool = False
+def _iter_notes(d: str, *, titles_only: bool = False,
+                include_superseded: bool = False
                 ) -> list[tuple[str, str, float, str, str]]:
     """The one scanner over a memories dir: every readable note as
     (name, path, mtime, title, content), sorted newest-name first (the
@@ -192,6 +534,16 @@ def _iter_notes(d: str, *, titles_only: bool = False
     mtime, title) (memory_delete's resolver, `/memory list`, the session-start
     note) this avoids reading every body in the store. Any caller that uses the
     body must take the default.
+
+    Supersession filter (0.158.20): a note whose footer carries `_superseded_by:`
+    is NOT returned — this scanner is the ONE authoritative layer for the rule
+    (see the supersession section above), which is why search, the session-start
+    note and `/memory optimize` all inherit it for free. `include_superseded=
+    True` opts back in, for the surfaces that must keep retired notes reachable:
+    `/memory list`, `/memory unsupersede`, and the `supersedes` resolver. In
+    titles_only mode the field is read from a bounded TAIL read (the footer lives
+    at EOF, the head cannot see it) off the same open file — one open per note
+    either way.
 
     One side effect (drift stamping): when the scan is running over *this
     project's* memory dir inside a git repo, a note that carries no `_drift:`
@@ -211,16 +563,21 @@ def _iter_notes(d: str, *, titles_only: bool = False
         if not name.endswith(".md"):
             continue
         path = os.path.join(d, name)
+        tail: list = [""]
         if titles_only:
-            head = _read_memory_title(path, name)
+            head = _read_memory_title(path, name, tail=tail)
             if head is None:
                 continue
             title, content = head[0], head[1]
+            if not include_superseded and _superseded_in_head(content, tail[0]):
+                continue
         else:
             read = _read_memory_file(path, name)
             if read is None:
                 continue
             title, content = read
+            if not include_superseded and _note_superseded_by(content):
+                continue
             if backfill_root:
                 stamped = _stamp_note_now(content, backfill_root)
                 if stamped is not None:
@@ -231,6 +588,30 @@ def _iter_notes(d: str, *, titles_only: bool = False
             mtime = 0.0
         out.append((name, path, mtime, title, content))
     return out
+
+
+def _superseded_in_head(head: str, tail: str) -> str:
+    """The `_superseded_by:` value of a note whose body we did NOT read, from the
+    head and the bounded tail `_read_memory_title` collected in one open. A field
+    already visible in the head (a tiny or hand-edited note) is trusted, else the
+    tail answers it; an empty tail (unreadable EOF) means "live", because a note
+    whose head read fine is not dropped over a footer probe that failed."""
+    return _note_superseded_by(head) or _note_superseded_by(tail)
+
+
+def _note_tail(path: str) -> str:
+    """The footer window of one note (the last _NOTE_TAIL_BYTES), for a caller
+    that needs a footer field without reading the body and does not have
+    `_read_memory_title`'s tail at hand. '' on any failure."""
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-_NOTE_TAIL_BYTES, os.SEEK_END)
+            except OSError:
+                f.seek(0)  # shorter than the probe window
+            return f.read(_NOTE_TAIL_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _backfill_root(d: str) -> str:
@@ -276,8 +657,9 @@ def _backfill_persist(path: str, content: str, stamped: tuple) -> str:
 
 
 def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
-                       kind: str = "", derived: str | None = None
-                       ) -> tuple[str, str] | None:
+                       kind: str = "", derived: str | None = None,
+                       supersedes: str | None = None, summary_of=None,
+                       redactions: list | None = None) -> tuple[str, str] | None:
     """The single memory writer: shared by the memory_write tool and
     `/memory save` so both produce identical files. Returns (path, scope), or
     None when gate=True and the user denied the confirmation.
@@ -293,6 +675,24 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
     bytes unchanged, so a pre-`_derived` footer round-trips identically.
     Provenance is RECORDED, never enforced: a derived note stays visible to
     search and to the session-start note.
+
+    summary_of: optional list of SOURCE NOTE FILENAMES this note was
+    consolidated from (`/memory optimize` merges, `/memory reflect` promotions).
+    Written as `_summary_of: a.md,b.md` on the same footer line, capped at
+    _SUMMARY_OF_MAX names. PROVENANCE ONLY — like `_derived:`, it changes no
+    ranking, no filtering, no visibility.
+
+    supersedes: optional filename of the note this one RETIRES, already
+    resolved by the caller (see `_memory_cmd._resolve_note_target` — the
+    resolver `memory_delete` uses, so an ambiguous target can refuse the whole
+    write). Stamps `_supersedes: <file>` here; the CALLER stamps the matching
+    `_superseded_by:`/`_valid_until:` pair onto the old note, because that needs
+    THIS note's final filename.
+
+    redactions: optional list the caller owns; one label per secret this write
+    redacted is appended to it (never the matched text) so the caller can report
+    the count. Redaction happens here, on the TITLE and BODY ONLY — see the
+    redaction section above for why the footer is never scanned.
 
     Resolves project→global fallback (no project root), avoids a doubled H1
     when the body already starts with its own title, makedirs 0700, and never
@@ -316,6 +716,16 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
     if lines and lines[0].startswith("# ") and lines[0][2:].strip() == title:
         body = "\n".join(lines[1:]).strip()
 
+    # THE redaction choke point. Before the gate, so what the user approves is
+    # what lands on disk; the title too, since a token can land in a title. Best
+    # effort: `_redact_secrets` swallows its own regex failures, so a redaction
+    # bug degrades to "unscanned", never to "write failed".
+    labels: list = []
+    title = _redact_secrets(title, labels)
+    body = _redact_secrets(body, labels)
+    if labels and redactions is not None:
+        redactions.extend(labels)
+
     if scope == "global":
         memories_dir = _memories_dir()
     else:
@@ -337,8 +747,16 @@ def _write_memory_file(title: str, body: str, scope: str, gate: bool = False,
         footer += f"  _kind: {kind}"
     if derived:
         footer += f"  _derived: {derived}"
+    if summary_of:
+        field = _summary_of_field(summary_of)
+        if field:
+            footer += f"  {field}"
+    if supersedes:
+        footer += f"  _supersedes: {supersedes}"
     # Drift stamp: which commit this note is verified against, plus the repo
     # paths its body mentions ('' outside a git repo — no stamp, not a lie).
+    # Computed from the ALREADY REDACTED body, and appended AFTER redaction: the
+    # stamp's sha must never pass through the scanner (see the trap note above).
     drift = _drift_line(body, _drift_root())
     if drift:
         footer += f"  {drift}"

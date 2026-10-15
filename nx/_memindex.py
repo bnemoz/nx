@@ -186,6 +186,11 @@ def _fts_phrase(term: str) -> str:
 
 
 def _list_notes_on_disk(d: str) -> list[tuple[str, float]]:
+    """Every `.md` note on disk with its mtime, newest-name first. RAW by
+    design — supersession filtering happens in `_index_note`, which is where a
+    note's body is already in hand (this listing is also the "does this store
+    have any notes at all" probe that decides whether to drop the index file,
+    and a store of nothing-but-retired notes should still keep its file)."""
     out: list[tuple[str, float]] = []
     try:
         for name in os.listdir(d):
@@ -203,11 +208,22 @@ def _list_notes_on_disk(d: str) -> list[tuple[str, float]]:
 
 def _index_note(conn: sqlite3.Connection, d: str, name: str, mtime: float) -> None:
     """Read one note and put its row into the index (or drop the row when the
-    note became unreadable — the scan fallback wouldn't have served it)."""
-    from ._memory_cmd import _read_memory_file
+    note became unreadable — the scan fallback wouldn't have served it — or when
+    it became SUPERSEDED, for the same reason: `_iter_notes`, the scan fallback,
+    no longer serves a retired note, so an indexed row for one would be the one
+    path by which a superseded note could still reach a search. `search_dir`
+    hands its candidate rows straight to `_memory_scan`'s re-filter, which never
+    re-reads the file, so the exclusion has to happen HERE (mirroring how a
+    vanished note's row is dropped) rather than as a post-query filter — it
+    keeps the invariant self-healing and costs one footer check per re-index,
+    which is already the cost of reading the body.
+
+    Self-healing in both directions: unsuperseding a note rewrites its footer,
+    which moves its mtime, which makes the next reconcile re-index it."""
+    from ._memory_cmd import _note_superseded_by, _read_memory_file
     read = _read_memory_file(os.path.join(d, name), name)
     conn.execute("DELETE FROM memories_fts WHERE name = ?", (name,))
-    if read is None:
+    if read is None or _note_superseded_by(read[1]):
         return
     title, content = read
     conn.execute(

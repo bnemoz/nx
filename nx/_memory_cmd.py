@@ -30,14 +30,17 @@ from . import _state as st
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
 from ._memory_store import (  # noqa: F401 (re-exports)
-    MEMORY_KINDS, _MEMORY_FOOTER_RE, _annotate_drift, _confirm_memory,
-    _drift_challenge, _drift_demote, _drift_freshness, _drift_line, _drift_root,
-    _first_title, _iter_memory_dirs, _iter_notes, _memories_dir,
-    _memory_confirm_preview, _memory_dirs_for, _note_derived, _note_kind,
-    _parse_drift,
+    MEMORY_KINDS, _MEMORY_FOOTER_RE, _annotate_drift, _clear_supersession,
+    _confirm_memory, _drift_challenge, _drift_demote, _drift_freshness,
+    _drift_line, _drift_root, _first_title, _iter_memory_dirs, _iter_notes,
+    _memories_dir, _memory_confirm_preview, _memory_dirs_for, _note_derived,
+    _note_kind, _note_summary_of, _note_superseded_by, _note_supersedes,
+    _parse_drift, _redact_secrets, _redaction_note, _note_tail,
+    _SUPERSESSION_MAX_HOPS,
     _project_memories_dir, _publish_memory, _read_memory_file,
     _read_memory_title, _read_note_preview, _slugify, _stamp_note_now,
-    _write_memory_file,
+    _write_memory_file, resolve_note_target, repoint_superseded,
+    stamp_superseded,
 )
 from ._memory_search import (  # noqa: F401 (re-exports)
     MEMORY_SEARCH_DEFAULT_LIMIT, _MemoryHit, _memory_scan,
@@ -60,6 +63,7 @@ def _memory_usage_inline() -> None:
     print(f"{DIM}    /memory save [focus...]     save a memory (optional focus guidance){RESET}")
     print(f"{DIM}    /memory remember <query>    search memories{RESET}")
     print(f"{DIM}    /memory delete <target>     remove one memory (title/file/prefix){RESET}")
+    print(f"{DIM}    /memory unsupersede <target>  bring a note a supersession retired back{RESET}")
     print(f"{DIM}    /memory list                list all memories{RESET}")
     print(f"{DIM}    /memory archived [target]   list archived notes, or restore one{RESET}")
     print(f"{DIM}    /memory optimize [dry] [focus]  merge duplicates, retire stale notes "
@@ -76,6 +80,7 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
                                    guidance for the model: e.g. "focus on config")
     /memory remember <query>     — keyword search through saved memories
     /memory delete <target>      — remove one memory (title/file/prefix)
+    /memory unsupersede <target> — restore one a supersession retired
     /memory list                 — list all saved memories
     /memory archived [target]    — list notes /memory optimize archived, or
                                    restore one by title/file/prefix
@@ -103,6 +108,11 @@ def _cmd_memory(messages: list[dict[str, Any]], user_input: str) -> None:
     if sub == "delete":
         target = parts[2] if len(parts) >= 3 else ""
         _cmd_memory_delete(target)
+        return
+
+    if sub in ("unsupersede", "unretire"):
+        target = parts[2] if len(parts) >= 3 else ""
+        _cmd_memory_unsupersede(target)
         return
 
     if sub == "save":
@@ -299,15 +309,24 @@ def _cmd_memory_save(messages: list[dict[str, Any]], notes: str | None = None) -
     # already showed (see _extract_derived_marker / the prompt's PRIOR ART line).
     body, derived = _extract_derived_marker(body)
 
+    redactions: list = []
     try:
-        written = _write_memory_file(title, body, "project", derived=derived)
+        written = _write_memory_file(title, body, "project", derived=derived,
+                                     redactions=redactions)
     except OSError as e:
         print(f"{C.ERROR}  ✗ couldn't write memory: {e}{RESET}")
         return
     if written is None:  # gate denied — not possible with gate=False; kept safe
         return
     path, _scope = written
-    print(f"{DIM}  ✓ saved memory: {title}{RESET}")
+    # The distiller reads 48K chars of tool output, so this is the path most
+    # likely to have picked up a credential — say so rather than let the user
+    # believe the note holds what the model wrote.
+    note = _redaction_note(redactions)
+    if note:
+        print(f"{C.WARNING}  {note.strip()}{RESET}")
+    saved = _read_memory_file(path, os.path.basename(path))
+    print(f"{DIM}  ✓ saved memory: {_first_title(saved[1], title) if saved else title}{RESET}")
     print(f"{DIM}    {path}{RESET}")
 
 
@@ -347,21 +366,144 @@ def _cmd_memory_delete(target: str) -> None:
 def _cmd_memory_list() -> None:
     """List all saved memories with titles and dates — both scopes (global
     first, the same order every scanner uses), each row labelled. A
-    project-only repo used to report "no memories saved yet" here."""
-    files = []
-    for d, label in _iter_memory_dirs("project"):
-        for name, _path, mtime, title, _content in _iter_notes(d, titles_only=True):
-            files.append((mtime, name, title, label))
+    project-only repo used to report "no memories saved yet" here.
 
-    if not files:
+    Superseded notes ARE shown (marked, after the live ones): the search/injection
+    views hide them, so this is the surface that keeps a retired note findable.
+    A note you can only find by hand is silent data-loss if supersession ever
+    misfires, so the reversible path is advertised here too."""
+    retired: list = []
+    files: list = []
+    for d, label in _iter_memory_dirs("project"):
+        live = _iter_notes(d, titles_only=True)
+        names = {r[0] for r in live}
+        files.extend((r[2], r[0], r[3], label, r[4]) for r in live)
+        # The retired set is the DIFFERENCE between a filtered and an unfiltered
+        # scan, so the filter itself stays the single authority (a note counts as
+        # retired exactly when the live scan refuses to serve it).
+        for name, path, mtime, title, head in _iter_notes(
+                d, titles_only=True, include_superseded=True):
+            if name not in names:
+                retired.append((mtime, name, title, label, path))
+
+    live_n = len(files)
+    if not files and not retired:
         print(f"{DIM}  no memories saved yet{RESET}")
         return
 
     files.sort(key=lambda x: x[0], reverse=True)
-    print(f"{DIM}  memories ({len(files)}):{RESET}")
-    for i, (mtime, name, title, label) in enumerate(files, 1):
+    print(f"{DIM}  memories ({live_n}):{RESET}")
+    for i, (mtime, _name, title, label, _head) in enumerate(files, 1):
         date = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"  {C.SUCCESS}{i:>2}.{RESET} [{label}] {title}  {DIM}({date}){RESET}")
+    if retired:
+        retired.sort(key=lambda x: x[0], reverse=True)
+        print(f"{DIM}  superseded ({len(retired)}) — hidden from memory_search and "
+              f"the session-start note; `/memory unsupersede <title|file|prefix>` "
+              f"brings one back:{RESET}")
+        for mtime, _name, title, label, path in retired:
+            date = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+            # The pointer lives in the footer, past the head window on any normal
+            # note, so read it from the bounded tail (only for the few retired
+            # rows this prints, never for the live ones).
+            by = _note_superseded_by(_note_tail(path)) or "?"
+            print(f"  {C.WARNING}×{RESET} [{label}] {title}  "
+                  f"{DIM}({date} · superseded by {by}){RESET}")
+
+
+def _retire_note(old_path: str, old_name: str, new_path: str) -> str:
+    """Stamp the note the just-written note retires, then RE-POINT anything that
+    already pointed at it. Returns '' on success, else a one-line note for the
+    tool result.
+
+    The re-point is what keeps the graph FLAT (no A→B→C chains): if an earlier
+    note was retired into `old_name`, and `old_name` now retires into the new
+    note, the earlier one is restamped to point straight at the new note. A chain
+    would leave a middle link nothing resolves forward from — the live note at
+    its tip would be found by walking forward from nothing.
+
+    Supersession must never fail the write that caused it: the new note is
+    already published and durable here, so a note we could not stamp just stays
+    live (visible, harmless, pair simply not recorded)."""
+    if not stamp_superseded(old_path, os.path.basename(new_path)):
+        return (f"\nWARNING: wrote the new note but could not mark {old_name} as "
+                f"superseded (unreadable, unwritable, or it has no footer); it "
+                f"stays live.")
+    repoint_superseded(old_name, os.path.basename(new_path))
+    return ""
+
+
+def _resolve_supersedes(target: str, scope: str) -> tuple:
+    """Resolve a `supersedes` target to (entry, refusal). Exactly one of the two
+    is non-empty: `entry` is the (name, path, mtime, title, label) note to
+    retire, or `refusal` explains why NOTHING should be written.
+
+    Ambiguity and unknown targets fail safe — never supersede-by-guess. A target
+    that is ALREADY retired is REDIRECTED to the note that retired it (walk
+    capped at _SUPERSESSION_MAX_HOPS, a hand-edited cycle bails out) rather than
+    chained: A→B→C would leave a dangling middle link that nothing resolves
+    forward from, and redirecting keeps one flat retired→live pair per note."""
+    hops = 0
+    cur = (target or "").strip()
+    while True:
+        entry, cands, all_entries = resolve_note_target(cur, scope)
+        if entry is None:
+            if not all_entries:
+                return None, (f"ERROR: `supersedes` {cur!r} — no saved memories "
+                              f"to supersede; nothing was written.")
+            listing = "\n".join(f"  - {e[3]} ({e[0]})" for e in cands[:10])
+            verb = ("matches" if len(cands) > 1 else "matches no saved memory — "
+                    "recent")
+            return None, (f"ERROR: `supersedes` {cur!r} {verb} {len(cands)} "
+                          f"note(s); nothing was written. Name an exact title or "
+                          f"filename:\n{listing}")
+        by = ""
+        try:
+            read = _read_memory_file(entry[1], entry[0])
+            by = _note_superseded_by(read[1]) if read is not None else ""
+        except Exception:
+            by = ""
+        if not by:
+            return entry, ""
+        hops += 1
+        if hops > _SUPERSESSION_MAX_HOPS or by == cur:
+            return None, (f"ERROR: `supersedes` {target!r} is caught in a "
+                          f"supersession chain ({cur} → {by}); nothing was "
+                          f"written.")
+        cur = by
+
+
+def _cmd_memory_unsupersede(target: str) -> None:
+    """`/memory unsupersede <title|file|prefix>` — undo a supersession: clear the
+    target's `_superseded_by:`/`_valid_until:` footer fields so the note is live
+    again. The file never left disk, so this is the whole restore."""
+    if not target:
+        print(f"{C.WARNING}  usage: /memory unsupersede <title | filename | "
+              f"unique prefix>{RESET}")
+        return
+    entry, cands, _all = resolve_note_target(target, "project")
+    if entry is None:
+        listing = "\n".join(f"  - {e[3]} ({e[0]})" for e in cands[:10])
+        print(f"{C.WARNING}  {target!r} is ambiguous or unknown — nothing "
+              f"changed:{RESET}\n{listing}")
+        return
+    read = _read_memory_file(entry[1], entry[0])
+    if read is None:
+        print(f"{C.ERROR}  ✗ couldn't read {entry[1]}{RESET}")
+        return
+    if not _note_superseded_by(read[1]):
+        print(f"{DIM}  {entry[3]} is not superseded — nothing to restore{RESET}")
+        return
+    if not _confirm_memory(f"unsupersede memory {entry[1]}"):
+        return
+    try:
+        from ._private import atomic_write_private
+        atomic_write_private(entry[1], _clear_supersession(read[1]))
+    except OSError as e:
+        print(f"{C.ERROR}  ✗ couldn't rewrite {entry[0]}: {e}{RESET}")
+        return
+    print(f"  {C.SUCCESS}unsuperseded{RESET} {entry[3]}  "
+          f"{DIM}(live again: search + the session-start note see it){RESET}")
 
 
 def _superseded_drift_challenge(title: str, scope: str) -> str:
@@ -395,7 +537,8 @@ def _superseded_drift_challenge(title: str, scope: str) -> str:
 
 
 def memory_write(
-    title: str, body: str, scope: str = "project", kind: str = "", **_: Any
+    title: str, body: str, scope: str = "project", kind: str = "",
+    supersedes: str = "", **_: Any
 ) -> str:
     """Persist a memory note the model can recall in future sessions.
 
@@ -409,8 +552,16 @@ def memory_write(
     "fact", "gotcha", or "episodic" (one-off project event). Untagged is fine;
     the tag only helps ranking and injection treat the note appropriately.
 
-    Search first: prefer updating/superseding an existing note (memory_delete
-    the stale one) over accumulating near-duplicates.
+    supersedes: name (title / filename / unique title prefix) of the note this
+    one replaces. Prefer it over memory_delete: the old note STAYS on disk, is
+    stamped `_superseded_by:`, and stops appearing in memory_search, the
+    session-start note and `/memory optimize` — reversibly, via
+    `/memory unsupersede`. An ambiguous or unknown target writes NOTHING and
+    returns the candidates.
+
+    Anything credential-shaped in the title or body is replaced with
+    `[REDACTED:<label>]` on the way to disk (notes are re-injected into every
+    future session, so a token must not be archived); the result says how many.
 
     Goes through the approval gate (it writes a file) — same as write_file.
     """
@@ -424,12 +575,22 @@ def memory_write(
         scope = "project"
     if kind and kind not in MEMORY_KINDS:
         kind = ""  # unrecognized tag: store kind-free rather than refuse
+    # Resolve the retirement FIRST: an ambiguous or unknown `supersedes` must
+    # write nothing at all (never supersede-by-guess), so this precedes the gate.
+    target, refusal = (None, "")
+    if (supersedes or "").strip():
+        target, refusal = _resolve_supersedes(supersedes, scope)
+        if refusal:
+            return refusal
     # Snapshot the superseded note's staleness BEFORE writing (afterward the
     # new note carries the same title and looks fresh by construction).
     challenge = _superseded_drift_challenge(title, scope)
 
+    redactions: list = []
     try:
-        written = _write_memory_file(title, body, scope, gate=True, kind=kind)
+        written = _write_memory_file(
+            title, body, scope, gate=True, kind=kind,
+            supersedes=(target[0] if target else None), redactions=redactions)
     except OSError as e:
         return f"ERROR: {type(e).__name__}: {e}"
     if written is None:
@@ -440,7 +601,15 @@ def memory_write(
         rel = os.path.relpath(path)
     except ValueError:
         pass
-    return f"saved {scope} memory: {title}\nfile: {rel}" + challenge
+    # The new note is durable now; retiring the old one cannot fail it.
+    retired = _retire_note(target[1], target[0], path) if target else ""
+    # Report the title as WRITTEN: a secret in the title is redacted on disk, and
+    # echoing the caller's raw title back would re-state the credential we just
+    # refused to store.
+    read = _read_memory_file(path, os.path.basename(path))
+    shown = _first_title(read[1], title) if read is not None else title
+    return (f"saved {scope} memory: {shown}\nfile: {rel}" + retired
+            + _redaction_note(redactions) + challenge)
 
 
 # --- the /memory fullscreen view (0.151.0) -------------------------------------

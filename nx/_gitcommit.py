@@ -10,6 +10,7 @@ run_bash's job); the user reviews a diff, not an argv.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from typing import Any
@@ -140,6 +141,52 @@ def git_commit(files: str = "", message: str = "", path: str = "", **_: Any) -> 
             pass
 
 
+# 0.158.21: the commit guard scanned the WHOLE staged diff, including context
+# lines. Those are already-committed content, so a token-shaped string that is
+# legitimately committed somewhere (the redaction tests' own fixtures) made
+# every future edit to that file refuse to commit — the guard blocked the edit
+# while being unable to undo the thing it was objecting to. Only ADDED lines can
+# introduce a secret, so only added lines are scanned.
+_ADDED_LINE = re.compile(r"^\+(?!\+\+\+)")
+_DIFF_FILE = re.compile(r"^\+\+\+ b/(.+)$")
+
+# Redaction/secret tests can only be tested with token-shaped fixtures, and the
+# guard would otherwise refuse the very commit that adds them (0.158.20 hit
+# exactly this). Exemption requires an explicit `nx-allow-secret` marker on an
+# added line in that file AND a test-shaped path, so it cannot exempt
+# application code. A marker is greppable and appears in the reviewed diff, so a
+# smuggled real secret stays visible and attributable — the honest trade, rather
+# than a blanket tests/ exemption that a model could trip by "testing".
+_SECRET_ALLOW_MARKER = "nx-allow-secret"
+_TEST_PATH = re.compile(r"(?:^|/)tests/|^test_|(?:^|/)test_[^/]+\.py$")
+
+
+def _scan_staged_diff(staged: str) -> str | None:
+    """First secret-shaped string introduced by this diff, or None.
+
+    Per-file, added lines only; a test-path file carrying the allow marker on an
+    added line is skipped (see `_SECRET_ALLOW_MARKER`)."""
+    from ._bash_jobs import _contains_secret
+    chunks: dict[str, list[str]] = {}
+    cur = ""
+    for line in (staged or "").splitlines():
+        m = _DIFF_FILE.match(line)
+        if m:
+            cur = m.group(1).strip()
+            chunks.setdefault(cur, [])
+            continue
+        if _ADDED_LINE.match(line):
+            chunks.setdefault(cur, []).append(line)
+    for path, added in chunks.items():
+        body = "\n".join(added)
+        if _TEST_PATH.search(path) and _SECRET_ALLOW_MARKER in body:
+            continue
+        hit = _contains_secret(body, env_dumps=False)
+        if hit:
+            return hit
+    return None
+
+
 def _git_commit_with_index(repo: str, file_list: list[str], message: str,
                            timeout: int, idx: str, head: str | None = None) -> str:
     from ._bash_jobs import _confirm  # lazy: avoid an import cycle at module load
@@ -154,8 +201,7 @@ def _git_commit_with_index(repo: str, file_list: list[str], message: str,
         return ("[git_commit] nothing staged — every path in `files` was already "
                 "committed, unchanged, or ignored; nothing was committed")
     staged = staged or ""
-    from ._bash_jobs import _contains_secret
-    hit = _contains_secret(staged, env_dumps=False)
+    hit = _scan_staged_diff(staged)
     if hit:
         return (f"REFUSED: the staged diff contains a secret-shaped string "
                 f"({hit}…) — remove the secret and commit again. Nothing was "

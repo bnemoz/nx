@@ -161,6 +161,14 @@ import nx as m  # noqa: E402
 # which would have cost hundreds of tokens for every session). Measured floor
 # (chars/3.5, this test's method, NX_SUBAGENTS/NX_VISION off): 5167 -> 5223, a
 # +56 tok delta. BUDGET_TOKENS stays 6000 — headroom absorbs it.
+# 0.158.20: memory_write gains one optional `supersedes` string, so supersession
+# becomes DATA (the retired note is stamped and filtered) instead of the
+# docstring plea that told the model to memory_delete the stale one. One
+# property on a schema already on the floor, again chosen over a new tool.
+# Measured floor (same method): 5223 -> 5286, a +63 tok delta. BUDGET_TOKENS
+# stays 6000 — headroom absorbs it. (The redaction pass and the `_summary_of:`
+# footer field cost ZERO floor tokens: both are store-side, and the redaction
+# notice rides a tool RESULT, not the per-turn schema.)
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 6000)  # hard: recorded, justified
 SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
 

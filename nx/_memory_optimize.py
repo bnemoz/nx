@@ -791,9 +791,12 @@ def _apply_plan(plan: _Plan, known: dict[str, _OptNote],
         try:
             # A merged note is distilled from nx's own notes, not from direct
             # observation — stamp provenance so a consolidated belief is never
-            # mistaken for a first-hand one (see _write_memory_file).
+            # mistaken for a first-hand one (see _write_memory_file). `_summary_of`
+            # carries WHICH notes: the group's filenames, capped by the writer.
+            # Provenance only — it changes no ranking, filtering or visibility.
             written = _write_memory_file(title, text, _group_scope(group),
-                                         derived="memory")
+                                         derived="memory",
+                                         summary_of=[n.name for n in group])
         except OSError as e:
             print(f"{C.ERROR}  ✗ couldn't write merged note: {e}{RESET}")
             return

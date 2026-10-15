@@ -107,16 +107,48 @@ def _rank_hit(content: str, query: str) -> float:
     return score
 
 
+# Display-only bounds on one result's preview snippet (nothing ranking-adjacent:
+# _rank_hit scores the raw body, these only trim what reaches the result block).
+# PER-LINE keeps a single long paragraph line (a /memory save or /memory optimize
+# merge can produce a distilled wall of text) from dominating its own snippet;
+# TOTAL caps the whole joined snippet so NX_MEMORY_SEARCH_LIMIT=8 fused results
+# can't ride one unbounded block. 240 matches _lessons._SNIPPET_CHARS, the
+# lessons arm's per-snippet cap, so both arms' result blocks cost about the
+# same; measured over the real memory corpus, 240 covers the median line
+# (110 chars) with headroom while p90 body lines run ~727, so long lines are
+# common enough that the cap earns its keep. 480 total (2x per-line) lets four
+# short lines through uncut while still bounding a snippet to roughly one
+# lesson snippet's cost per result.
+MEMORY_SNIPPET_LINE_CHARS = 240
+MEMORY_SNIPPET_TOTAL_CHARS = 480
+
+
 def _memory_snippet(content: str, query: str, max_lines: int = 4) -> str:
-    """First `max_lines` of a memory body (title line stripped) as a preview."""
+    """First `max_lines` of a memory body (title line stripped) as a preview,
+    capped to MEMORY_SNIPPET_LINE_CHARS per line and MEMORY_SNIPPET_TOTAL_CHARS
+    overall; over-long pieces get a visible `…` rather than a silent cut."""
     lines = content.splitlines()
     out = []
+    total = 0
+    if max_lines <= 0:
+        return ""
     for ln in lines:
         if ln.startswith("# ") and not out:
             continue  # skip the H1 title (already shown separately)
         if not ln.strip():
             continue
-        out.append(ln.strip())
+        s = ln.strip()
+        if len(s) > MEMORY_SNIPPET_LINE_CHARS:
+            s = s[:MEMORY_SNIPPET_LINE_CHARS] + "…"
+        sep = " / " if out else ""
+        if out and total + len(sep) + len(s) > MEMORY_SNIPPET_TOTAL_CHARS:
+            room = MEMORY_SNIPPET_TOTAL_CHARS - total - len(sep) - 1
+            if room <= 0:
+                break
+            out.append(s[:room] + "…")
+            break
+        out.append(s)
+        total += len(sep) + len(s)
         if len(out) >= max_lines:
             break
     return " / ".join(out)
@@ -186,12 +218,20 @@ def _memory_scan(
     return hits, 0, total
 
 
-def _scan_memory_entries(scope: str = "project") -> list[_MemoryHit]:
+def _scan_memory_entries(scope: str = "project",
+                         include_superseded: bool = False) -> list[_MemoryHit]:
     """Every saved memory as a hit — no query, no snippet, no limit. The
-    resolver behind memory_delete and `/memory delete`."""
+    resolver behind memory_delete and `/memory delete`.
+
+    `include_superseded` opts retired notes back in. Search must never see them
+    (that is the point of retiring them), but DELETION is the one consumer that
+    legitimately must: a retired note is still on disk, and without this the
+    only way to reclaim it would be by hand. `/memory list`'s retired section and
+    `/memory unsupersede` pass True for the same reason."""
     hits: list[_MemoryHit] = []
     for d, label in _iter_memory_dirs(scope):
-        for name, _path, mtime, title, _content in _iter_notes(d, titles_only=True):
+        for name, _path, mtime, title, _content in _iter_notes(
+                d, titles_only=True, include_superseded=include_superseded):
             hits.append(_MemoryHit(mtime, name, title, "", label, 0.0))
     hits.sort(key=lambda h: -h.mtime)  # newest first, same order memory_search uses
     return hits
@@ -402,7 +442,8 @@ def memory_delete(target: str, scope: str = "project", confirm: bool = True,
         return "ERROR: memory_delete requires a non-empty `target`"
     if scope not in ("project", "global"):
         scope = "project"
-    entries = _scan_memory_entries(scope)
+    # A retired note is still a real file the user may want gone for good.
+    entries = _scan_memory_entries(scope, include_superseded=True)
     if not entries:
         return "[no memories saved yet]"
 

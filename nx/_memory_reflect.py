@@ -338,8 +338,11 @@ def _cmd_memory_reflect(arg: str = "") -> None:
             # `/memory reflect` generalizes over digests of EXISTING notes
             # (_write_body_prompt's sources are _RefNote digests), so its output
             # is memory-derived by construction — stamp the provenance.
+            # `_summary_of` names the source notes the pass actually read (capped
+            # by the writer); provenance only, never a filter.
             written = _write_memory_file(title, body, scope, gate=False,
-                                         kind=kind, derived="memory")
+                                         kind=kind, derived="memory",
+                                         summary_of=[s.name for s in srcs])
         except OSError as e:
             return f"  ✗ {kind} ({scope}): {type(e).__name__}: {e}"
         if written is None:
