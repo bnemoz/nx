@@ -210,12 +210,16 @@ from ._sources import (
     _provider_order, _startup_probes_skipped,
 )
 
-# Bootstrap the source registry. Deliberately kept here (not inside
-# _sources.py) rather than as a _sources.py-import-time side effect: tests
-# rely on `importlib.reload(m)` (this module) to re-provision sources from
-# freshly-set env vars, and reload() only re-runs the reloaded module's own
-# top-level code — a submodule that's already in sys.modules would NOT be
-# re-executed, so this bootstrap would go stale on reload if it lived there.
+# Bootstrap the source registry. _discover_sources() itself builds st.SOURCES
+# from env vars but does NOT touch the network; switch_source() (which calls
+# resolve_model() and arms the capability/thinking probes) is deferred to
+# nx._bootstrap.ensure_active_source(), invoked from _cli.main() — see that
+# module for the reasoning. Kept here (not inside _sources.py) rather than as
+# a _sources.py-import-time side effect: tests rely on `importlib.reload(m)`
+# (this module) to re-provision sources from freshly-set env vars, and
+# reload() only re-runs the reloaded module's own top-level code — a
+# submodule that's already in sys.modules would NOT be re-executed, so this
+# bootstrap would go stale on reload if it lived there.
 st.SOURCES = {}        # name → Source
 st.SOURCE_ORDER = []   # preserve definition order for /source listing
 st.ACTIVE = None       # current Source
@@ -235,29 +239,26 @@ st.MODEL = None
 st._LAST_PROMPT_TOKENS = 0
 
 _discover_sources()
-
-# Pick the starting source: --source flag, then NX_ACTIVE env, then first.
+# Wire the active source. The CLI path never relies on this: _cli.main() calls
+# ensure_active_source() after its --help/--version short-circuit, and the
+# argv guard below keeps `nx --help`/`nx sessions`/etc. import-time cheap (a
+# bare `import nx` from a test or library caller pays switch_source() here —
+# gated per-probe by NX_SKIP_STARTUP_PROBES — so the pre-0.159 "import nx
+# leaves st.ACTIVE/st.client/st.MODEL set" contract holds for non-CLI
+# consumers, which the test suite's module-dict rewinds depend on).
+from ._bootstrap import rearm as _rearm_bootstrap
+_rearm_bootstrap()
+from ._bootstrap import ensure_active_source as _ensure_active_source
 _start = None
 for _i, _arg in enumerate(sys.argv):
     if _arg == "--source" and _i + 1 < len(sys.argv):
         _start = sys.argv[_i + 1]
         break
-_start = _start or os.environ.get("NX_ACTIVE") or (st.SOURCE_ORDER[0] if st.SOURCE_ORDER else None)
-if not _start or _start not in st.SOURCES:
-    _start = st.SOURCE_ORDER[0] if st.SOURCE_ORDER else None
-# --help/--version/-h exit before any source is ever used (see
-# _cli_help_or_version in _cli.py) — skip switch_source()'s network calls
-# (resolve_model()'s /v1/models round-trip, capability probe) so `nx --help`
-# against an unreachable host stays instant instead of blocking ~10-15s.
-# switch_source() itself must still run on every import: it wires
-# st.ACTIVE/st.client/st.MODEL, and tests (test_sources.py) reload nx and
-# assert that wiring. Per-probe skipping — resolve_model's network fallback,
-# the capability/thinking background probes, the ctx overrun probe — is what
-# NX_SKIP_STARTUP_PROBES (nx/_sources.py) gates instead.
-if _start and not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])) \
-        and sys.argv[1:2] not in (["config"], ["eval"], ["sessions"], ["ls"], ["list"],
-                                 ["update"], ["gc"]):
-    switch_source(_start)
+if not ({"-h", "--help", "--version", "-v"} & set(sys.argv[1:])) \
+        and sys.argv[1:2] not in (["config"], ["eval"], ["sessions"], ["ls"],
+                                  ["list"], ["update"], ["gc"]):
+    _ensure_active_source()
+
 
 # --- approval gating --------------------------------------------------------
 # Three risk levels (low < medium < high) plus an explicit "prompt all" state
@@ -1101,6 +1102,15 @@ _COLOR_NAMES = {"CYAN", "GREEN", "YELLOW", "RED", "MAGENTA", "GRAY", "BLUE",
 
 class _StateProxyModule(_types.ModuleType):
     def __getattr__(self, name: str) -> Any:
+        # Lazy source wiring (0.159.1): switch_source() no longer runs at
+        # import time — see nx/_bootstrap.py. Any read of ACTIVE/client/MODEL
+        # through the `nx` module object gets the wiring transparently; the
+        # CLI invokes ensure_active_source() explicitly in main() instead.
+        # Subsequent reads are plain dict hits (ensure_active_source() is
+        # idempotent, and switch_source() leaves these names set on st).
+        if name in ("ACTIVE", "client", "MODEL"):
+            from ._bootstrap import ensure_active_source
+            ensure_active_source()
         if name in _STATE_NAMES:
             return getattr(st, name)
         if name in _COLOR_NAMES:

@@ -12,8 +12,7 @@ import json
 import time
 from typing import Any, Callable, Optional
 
-from ._openai_client import APIConnectionError, APIError
-import httpx
+from ._state import APIConnectionError, APIError
 from ._ansi import (
     DIM, RESET, LifeSpinner, C,
 )
@@ -86,6 +85,14 @@ from ._turn_toolcalls import (  # noqa: F401 (re-exports)
 )
 
 Message = dict[str, Any]  # one entry in the OpenAI-style `messages` array
+
+# httpx (and _openai_client's lazy load of it) is only needed on the network
+# error-classification paths below — defer so `import nx` stays light.
+def _httpx():
+    import httpx as _h
+    import nx._openai_client as _oc
+    _oc._load_httpx()
+    return _h
 
 
 class _LoggingStream:
@@ -601,7 +608,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
                     except Exception:
                         pass
                 break
-    except (APIError, APIConnectionError, httpx.HTTPError) as e:
+    except (APIError, APIConnectionError, _httpx().HTTPError) as e:
         stream_error = e
         close = getattr(stream, "close", None)
         if close:
@@ -662,7 +669,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         ttft_ms=(parser.t_first * 1000.0) if parser.t_first is not None else None,
     )
     if stream_error is not None:
-        if isinstance(stream_error, httpx.TimeoutException):
+        if isinstance(stream_error, _httpx().TimeoutException):
             # P3-2 (0.51.0): a mid-stream timeout is a FAILURE, not a completed
             # turn — it used to return TURN_DONE here, which headless callers
             # scored as a clean pass on truncated output. First spend the

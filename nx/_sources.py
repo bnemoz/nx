@@ -72,7 +72,15 @@ class Source:
         client_kwargs: dict[str, Any] = {"base_url": base_url, "api_key": self.api_key}
         if self.http_headers:
             client_kwargs["default_headers"] = self.http_headers
-        self.client = OpenAI(**client_kwargs)
+        # Lazy client (0.159.1): the OpenAI/httpx client is built on first
+        # use, not in the constructor — _discover_sources() runs at import
+        # time (and on every test reload), and building N clients there
+        # dragged the ~45 ms httpx chain into every `import nx`, even
+        # `nx --help`. switch_source() binds st.client to
+        # src.client (this property), so the first turn pays the cost; all
+        # later accesses are a cached attribute hit.
+        self._client = None
+        self._client_built = False
         # Lazily-resolved max context window (in tokens) for the active model,
         # or None when no probe could determine it. Both a value and a miss are
         # cached: an over-max_tokens probe can be *accepted* by servers which
@@ -89,6 +97,8 @@ class Source:
         # server that comes up after nx started is still resolvable by the next
         # /source.
         self._resolved_model: str | None = None
+
+
         # PF-11 (0.59.0): model id -> the request shape (tools/tool_choice/
         # extra_body) this endpoint accepted, learned once and reused by
         # open_stream()'s fallback ladder. See nx/_manifest.py.
@@ -141,6 +151,27 @@ class Source:
         # always pass it through. Set via NX_SOURCE_<NAME>_EXTRA_BODY (a JSON
         # string) or the /provider slash command (ephemeral, per-session).
         self.extra_body = extra_body or None
+
+    @property
+    def client(self):
+        """The OpenAI-compatible client for this source, built on first use
+        (see the constructor comment for why this is lazy). Assignable: a few
+        tests and the eval stub install duck-typed stand-in clients
+        (``src.client = _FakeClient(...)``); assigning replaces the cached
+        instance exactly like the pre-0.159.1 plain attribute did."""
+        if self._client is None and not self._client_built:
+            self._client_built = True
+            client_kwargs: dict[str, Any] = {"base_url": self.base_url,
+                                             "api_key": self.api_key}
+            if self.http_headers:
+                client_kwargs["default_headers"] = self.http_headers
+            self._client = OpenAI(**client_kwargs)
+        return self._client
+
+    @client.setter
+    def client(self, value) -> None:
+        self._client = value
+        self._client_built = True
 
     def extra_request_kwargs(self, model: str | None = None) -> dict[str, Any]:
         """extra_body kwarg to merge into every chat.completions.create(), or

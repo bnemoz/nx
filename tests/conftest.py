@@ -137,6 +137,13 @@ os.chdir(_ROOT)
 
 import nx  # noqa: E402,F401  (baseline import; probes skipped)
 
+# 0.159.1: switch_source() wiring is lazy (nx/_bootstrap.ensure_active_source,
+# triggered on first nx.ACTIVE/client/MODEL read). Touch it once here so the
+# module-dict baseline below captures the wired state (st.client/st.MODEL/st
+# .ACTIVE set) — tests that rewind nx.* dicts to this snapshot and then call
+# compress()/the turn loop assert client is not None.
+nx.ACTIVE
+
 
 def _is_nx(name):
     return name == "nx" or name.startswith("nx.")

@@ -25,9 +25,7 @@ import sys
 import threading
 from typing import Any
 
-import httpx
 from ._openai_client import APIConnectionError
-
 from ._ansi import C, DIM, RESET
 from ._env import _env_int, _env_float
 from ._logging import _log_event, _llog
@@ -38,8 +36,6 @@ from ._plan import _latest_plan_turn
 from ._metrics import _abbr, _record_usage
 from . import _state as st
 from . import TOOLS
-
-# --- re-exports from the split-out layers (single import surface preserved) ---
 from ._runtime_notes import (  # noqa: F401 (re-exports)
     RUNTIME_NOTE_PREFIX, _flush_pending_background_notice,
     _is_runtime_note, _keep_past_notes, _last_is_dangling_tool,
@@ -54,6 +50,14 @@ from ._request_opts import (  # noqa: F401 (re-exports)
 from ._stream_errors import (  # noqa: F401 (re-exports)
     _CTX_OVERFLOW_RE, _is_context_overflow_error, _is_request_field_rejection,
 )
+
+# httpx is only needed on the error-classification paths below (same lazy
+# pattern as _turn.py — keeps `import nx` free of the ~45 ms httpx chain).
+def _httpx():
+    import httpx as _h
+    import nx._openai_client as _oc
+    _oc._load_httpx()
+    return _h
 
 # --- env-derived request flags (owned here: tests reload this module and
 # patch these names — _request_opts reads them lazily at call time) ----------
@@ -345,7 +349,7 @@ def open_stream(
                     tools=tools if tools_ok else None, stream=True,
                     stream_options={"include_usage": True}, **opts)
                 break  # succeeded — remember the shape for the next turn
-            except (APIConnectionError, httpx.HTTPError):
+            except (APIConnectionError, _httpx().HTTPError):
                 raise  # transport failure — retrying without tools won't help
             except Exception as e:
                 # Context-window overrun: the prompt + tools no longer fit.
@@ -375,7 +379,7 @@ def open_stream(
         _pin_shape(call_src, call_model, rung)
         # Wrap the stream so every chunk is captured to the log on its way out.
         return _LoggingStream(stream, _llog)
-    except (APIConnectionError, httpx.HTTPError) as e:
+    except (APIConnectionError, _httpx().HTTPError) as e:
         st._LAST_API_ERROR = f"{type(e).__name__}: {e}"
         from ._subagent import _subagent_quiet
         if not _subagent_quiet():

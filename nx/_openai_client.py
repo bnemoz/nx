@@ -26,9 +26,43 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Literal, overload
 
-import httpx
-
 from ._env import _env_float, _env_int
+
+# httpx is deliberately NOT imported at module top: it (plus httpcore, anyio,
+# h11, certifi) costs ~45 ms of every `import nx` — including `nx --help`,
+# `nx sessions`, and the whole test suite — and is only actually needed once a
+# real client is constructed or an exception is classified. Everything below
+# references `httpx.X` lazily via this module-global alias; _load_httpx() runs
+# on the OpenAI() constructor path (the only path that reaches the network) so
+# all later attribute lookups are plain dict hits on a fully-loaded module.
+httpx: Any = None  # replaced by the real module on first _load_httpx()
+
+
+def _load_httpx():
+    """Import httpx on first use and bind it as this module's `httpx` global.
+    Returns the module. Cheap idempotent no-op after the first call.
+
+    Raises ImportError (not silently skipped) if httpx is missing — nx's
+    pyproject lists it as a hard dependency, so this only fires in a broken
+    install and should say so at the exact call site that needed it."""
+    global httpx
+    if httpx is None:
+        try:
+            import httpx as _httpx
+        except ImportError as e:
+            raise ImportError(
+                "httpx is required to talk to a model endpoint "
+                "(pip install httpx)") from e
+        httpx = _httpx
+    return httpx
+
+
+def __getattr__(name: str):
+    # Legacy entry point: `from ._openai_client import APIError` used to mean
+    # "import nx", which pulled httpx. Now these import nothing heavy.
+    if name == "__path__":
+        raise AttributeError(name)
+    return globals()[name]
 
 
 class APIError(Exception):
@@ -437,6 +471,7 @@ class OpenAI:
         default_headers: dict[str, str] | None = None,
         transport: httpx.BaseTransport | None = None,
     ):
+        _load_httpx()
         self.base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if default_headers:

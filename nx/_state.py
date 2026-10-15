@@ -56,6 +56,18 @@ MODEL: str | None = None
 # TO. Read-only for anything but the probes themselves.
 PROBE_GENERATION: int = 0
 
+
+def __getattr__(name: str):
+    # Lazy re-export of the API exception types: they live in _openai_client,
+    # but importing that at _state's module top would (pre-0.159.0) drag the
+    # ~45 ms httpx chain into every `import nx`. _state is imported by nearly
+    # every submodule, so `from ._state import APIError` must stay cheap.
+    if name in ("APIError", "APIConnectionError"):
+        from ._openai_client import APIError, APIConnectionError  # noqa: F401
+        return globals().setdefault(name, APIError if name == "APIError"
+                                    else APIConnectionError)
+    raise AttributeError(name)
+
 # Updated by model_turn() on every turn that reports a prompt-token count.
 # Read by _maybe_autocompress() to decide whether to silently auto-compress.
 _LAST_PROMPT_TOKENS: int = 0

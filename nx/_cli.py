@@ -354,6 +354,12 @@ def main() -> None:
     # --help/--version short-circuit before any source/network setup.
     if _cli_help_or_version(sys.argv[1:]):
         return
+    # Wire the active source (0.159.1): switch_source() no longer runs at
+    # `import nx` time (see nx/_bootstrap.py) — every path that reaches here
+    # needs a model connection, so run it exactly once, after the offline
+    # short-circuits above and before onboarding/REPL/one-shot dispatch.
+    from ._bootstrap import ensure_active_source
+    ensure_active_source()
     # First-run onboarding (0.77.0): `nx setup` re-runs the wizard on demand;
     # a bare `nx` with NO endpoint configured anywhere walks the user through
     # pasting one before `import nx` fires its startup network probes (which
