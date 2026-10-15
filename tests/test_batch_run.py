@@ -179,6 +179,19 @@ def test_parse_tasks_rejects_path_session_ids(nx_fresh, tmp_path):
         nx._batch._parse_tasks(f)
 
 
+def test_parse_tasks_validates_autowake(nx_fresh, tmp_path):
+    """0.163.0: the task object's `autowake` field is a BOOLEAN — a string
+    (the classic "false" trap, truthy in Python) is a parse error, so a typo
+    can never silently turn a headless chain on or off."""
+    nx, tmp = nx_fresh
+    assert nx._batch._parse_tasks(
+        _write_tasks(tmp, ['{"instruction": "x", "autowake": true}']))[0]["autowake"] is True
+    assert nx._batch._parse_tasks(
+        _write_tasks(tmp, ['{"instruction": "x", "autowake": false}']))[0]["autowake"] is False
+    with pytest.raises(nx._batch._BatchUsageError, match="autowake must be a boolean"):
+        nx._batch._parse_tasks(_write_tasks(tmp, ['{"instruction": "x", "autowake": "false"}']))
+
+
 # --- argument parsing ---------------------------------------------------------
 
 def test_arg_parsing(nx_fresh):
@@ -186,7 +199,11 @@ def test_arg_parsing(nx_fresh):
     o = nx._batch._parse_batch_args(["-f", "t.jsonl", "--parallel", "4",
                                      "--continue-on-error", "--max-turns", "9"])
     assert o == {"file": "t.jsonl", "parallel": 4, "continue_on_error": True,
-                 "max_turns": 9, "timeout": None, "model": None}
+                 "max_turns": 9, "timeout": None, "model": None,
+                 "autowake": False}
+    # 0.163.0 (Phase E): --autowake parses, and is off unless asked for
+    assert nx._batch._parse_batch_args(["-f", "t", "--autowake"])["autowake"] is True
+    assert nx._batch._parse_batch_args(["-f", "t"])["autowake"] is False
     assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "900"])["timeout"] == 900.0
     assert nx._batch._parse_batch_args(["-f", "t", "--timeout", "2.5"])["timeout"] == 2.5
     with pytest.raises(nx._batch._BatchUsageError):
@@ -387,7 +404,12 @@ def test_batch_active_false_outside_batch(nx_fresh):
 
 def test_verify_and_bg_scan_gated_off_for_batch(fake_loop, tmp_path, monkeypatch):
     """A batch worker must not launch NX_VERIFY_CMD nor run the bg-completion
-    scan (both are interactive-parent-only machinery)."""
+    scan (both are interactive-parent-only machinery).
+
+    0.163.0 (AUTOWAKE_SPEC Phase E) narrows this contract, it does not drop
+    it: the bg SCAN gate stays shut for an autowake-OFF task (this test), and
+    `--autowake` is the explicit opt-in that opens it for that task alone —
+    see test_autowake_opens_the_bg_scan_gate."""
     nx, calls, holder = fake_loop
     launched = []
     monkeypatch.setattr(nx, "_launch_verify_if_settled",
@@ -1050,3 +1072,233 @@ def test_unknown_flag_values_still_misuse(nx_fresh, tmp_path, monkeypatch):
     assert code == nx._batch.EXIT_MISUSE
     assert "ghost" in err.getvalue()
     assert buf.getvalue() == ""  # no API call, no JSONL line
+
+
+
+# --- autowake: headless chaining (0.163.0, AUTOWAKE_SPEC Phase E) --------------
+#
+# The contract this block pins (the existing test_verify_and_bg_scan_gated_off_-
+# for_batch above keeps the autowake-OFF half of it):
+# - OFF (default) => the JSONL stream and the loop calls are exactly what
+#   0.162.0 produced: no new keys, no wake turns, the bg-scan gate stays shut;
+# - ON => a completion note staged during the task's first turn (the shape of
+#   a finished async agent's answer) produces a SECOND model turn inside the
+#   same task, carrying the synthetic wake instruction + the flushed note on
+#   the task's own transcript, and the result line reports autowake/wakes;
+# - ON with no effective timeout => the task fails with a clear error (exit 4)
+#   and the model is never asked for anything (F4 — prefer refusing over an
+#   unattended unbounded spend);
+# - deadline lapsed mid-chain => status error, timed_out true, exit 4, and NO
+#   further wakes;
+# - --parallel 2 with autowake => notes never cross tasks (the regression for
+#   Phase E prerequisite 1; the sibling test file test_batch_notice_ownership
+#   .py carries the async-agent-thread version).
+#
+# Offline throughout: the fake turn loop records exactly like the file's
+# `fake_loop` fixture (which these tests use for the source wiring only) and
+# wake decisions ride the real batch_wake_due() sweep over the real notice
+# frames. `behavior(messages, n)` runs at the END of the n-th turn.
+
+def _aw_loop(nx, calls, behavior):
+    """Fake loop recording like fake_loop, then running behavior (whose
+    non-None return replaces the 'done' summary). `behavior(messages, n)` gets
+    THIS TASK's own 1-based turn number, not the process-wide call count."""
+    def loop(messages, force_final=False, recovery_sampling=False,
+             on_step=None, max_turns_override=None):
+        task = nx._batch._batch_task()
+        tid = (task or {}).get("id")
+        n = sum(1 for c in calls if c["id"] == tid) + 1
+        calls.append({
+            "id": tid,
+            "n": n,
+            "messages": [dict(m) for m in messages],
+            "instruction": messages[-1]["content"],
+        })
+        out = behavior(messages, n)
+        return out if out is not None else {"status": "done", "turns": 1}
+    return loop
+
+
+def _stage_note_for_task(text):
+    """Stage a completion note into THIS thread's notice frame — the exact
+    channel a finished async agent's answer takes under Phase E ownership."""
+    from nx import _notices
+    _notices.set_("_PENDING_SUBAGENT_NOTICE", text)
+
+
+def test_autowake_off_result_shape_unchanged(fake_loop, tmp_path, monkeypatch):
+    """F5: with the flag off (the default) the result line carries no new
+    fields and the loop is called exactly once per task — 0.162.0's stream."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "t1"}'])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f])
+    assert code == 0, err.getvalue()
+    line = json.loads(buf.getvalue().strip())
+    assert "wakes" not in line and "autowake" not in line
+    assert len(calls) == 1
+
+
+def test_autowake_task_field_false_beats_flag(fake_loop, tmp_path, monkeypatch):
+    """A task's own `autowake: false` opts it out of a --autowake run; its
+    staged note waits undelivered and NO wake turn fires."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "a", "id": "opted-out", "autowake": false, '
+        '"timeout_seconds": 30}',
+    ])
+    monkeypatch.setattr(nx, "_run_model_turn_loop", _aw_loop(
+        nx, calls, lambda m, n: _stage_note_for_task(
+            "[Runtime note: agent-1 finished. Its answer: ok]")))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--timeout", "60"])
+    assert code == 0, err.getvalue()
+    line = json.loads(buf.getvalue().strip())
+    assert len(calls) == 1  # opted out: no wake despite the staged note
+    assert line["status"] == "done" and "wakes" not in line
+
+
+def test_autowake_finished_agent_gets_second_turn(fake_loop, tmp_path, monkeypatch):
+    """ON: a note staged by the first turn (a finished async agent's answer)
+    produces a second model turn inside the same task (F2), carrying the
+    synthetic wake instruction and the flushed note (F3)."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "chain"}'])
+    from nx import _autowake
+
+    def behavior(messages, n):
+        if n == 1:  # "the agent finished while this turn was running"
+            _stage_note_for_task("[Runtime note: background sub-agent agent-1 "
+                                 "finished. Its answer: 42]")
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", _aw_loop(nx, calls, behavior))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--timeout", "60"])
+    assert code == 0, err.getvalue()
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "done"
+    assert line["autowake"] is True and line["wakes"] == 1
+    assert len(calls) == 2, calls  # and NOT a third: nothing left to report
+    second = calls[1]["messages"]
+    contents = [m["content"] for m in second if isinstance(m.get("content"), str)]
+    assert _autowake.WAKE_INSTRUCTION in contents, contents
+    assert any(c.startswith("[Runtime note: background sub-agent agent-1")
+               for c in contents), contents
+    wake_msgs = [m for m in second if m.get("content") == _autowake.WAKE_INSTRUCTION]
+    assert wake_msgs and all(m["role"] == "user" for m in wake_msgs)
+
+
+def test_autowake_requires_timeout(fake_loop, tmp_path, monkeypatch):
+    """F4: --autowake with no effective timeout fails the TASK (exit 4, status
+    error, a clear message) — never runs, never crashes the run."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "unbounded"}'])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake"])
+    assert code == nx._batch.EXIT_ERROR
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "error" and line["exit_code"] == 4
+    assert line["autowake"] is True
+    assert "timeout" in (line["error"] or "").lower()
+    assert calls == []  # the model was never asked for anything
+
+
+def test_autowake_timeout_from_env_satisfies_guard(fake_loop, tmp_path, monkeypatch):
+    """The timeout satisfying the autowake guard may come from
+    NX_TASK_TIMEOUT_SECONDS or the task's own `timeout_seconds` field — any
+    non-zero effective budget counts."""
+    nx, calls, holder = fake_loop
+    monkeypatch.setattr(nx._batch, "_TASK_TIMEOUT_DEFAULT", 120)
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "bounded"}'])
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake"])
+    assert code == 0, err.getvalue()
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "done" and line.get("autowake") is True
+
+
+def test_autowake_deadline_mid_chain_stops_waking(fake_loop, tmp_path, monkeypatch):
+    """Deadline tripped mid-chain: status error + timed_out true + exit 4, and
+    NO further wakes even though the second turn staged another note."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "slowchain"}'])
+
+    def behavior(messages, n):
+        # every turn stages a fresh note (the chain WOULD continue); the second
+        # turn overruns the 0.2s deadline
+        _stage_note_for_task(f"[Runtime note: background sub-agent agent-{n} "
+                             f"finished. Its answer: more]")
+        if n >= 2:
+            time.sleep(0.3)
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", _aw_loop(nx, calls, behavior))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--timeout", "0.2"])
+    assert code == nx._batch.EXIT_ERROR
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "error" and line["exit_code"] == 4
+    assert line.get("timed_out") is True
+    assert "timeout" in (line["error"] or "").lower()
+    assert line.get("wakes") == 1  # the wake that was already running finished
+    assert len(calls) == 2         # and no third turn fired
+
+
+def test_autowake_opens_the_bg_scan_gate(fake_loop, tmp_path, monkeypatch):
+    """Phase E deliberately narrows the bg-scan gate: an autowake-ON batch task
+    runs the completion sweep on its first tool call (the channel is the task's
+    own now); an autowake-OFF task keeps the pre-0.163 gate shut."""
+    nx, calls, holder = fake_loop
+    from nx._dispatch import run_tool
+    import nx._batch as batch_mod
+    scan_ran = []
+    monkeypatch.setattr(nx._dispatch, "_scan_background_completions",
+                        lambda jobs=None: scan_ran.append(1) or "")
+    monkeypatch.setattr(nx.st, "_BG_SCAN_DONE", False)
+    batch_mod._TASK_TLS.task = {"instruction": "x", "_autowake": True}
+    try:
+        run_tool("read_file", {"path": "README.md"})
+        assert scan_ran == [1]  # autowake ON: the scan runs
+    finally:
+        batch_mod._TASK_TLS.task = None
+    batch_mod._TASK_TLS.task = {"instruction": "x", "_autowake": False}
+    try:
+        nx.st._BG_SCAN_DONE = False
+        run_tool("read_file", {"path": "README.md"})
+        assert scan_ran == [1]  # autowake OFF: still gated (0.162.0 behavior)
+    finally:
+        batch_mod._TASK_TLS.task = None
+
+
+def test_autowake_parallel_notes_never_cross(fake_loop, tmp_path, monkeypatch):
+    """F5 regression for prerequisite 1: --parallel 2 + autowake ON — each
+    task's wake turn carries ONLY its own note, and each chain is exactly one
+    wake long."""
+    nx, calls, holder = fake_loop
+    f = _write_tasks(tmp_path, [
+        '{"instruction": "alpha", "id": "alpha", "timeout_seconds": 60}',
+        '{"instruction": "beta", "id": "beta", "timeout_seconds": 60}',
+    ])
+    def behavior(messages, n):
+        tid = nx._batch._batch_task().get("id")
+        if n == 1:  # this task's own agent finishes after its first turn
+            _stage_note_for_task(f"[Runtime note: background sub-agent {tid}-1 "
+                                 f"finished. Its answer: {tid}]")
+
+    monkeypatch.setattr(nx, "_run_model_turn_loop", _aw_loop(nx, calls, behavior))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--parallel", "2"])
+    assert code == 0, err.getvalue()
+    lines = [json.loads(l) for l in buf.getvalue().strip().splitlines()]
+    got = [(l["id"], l.get("wakes"), l["status"],
+            len([c for c in calls if c["id"] == l["id"]])) for l in lines]
+    assert len(got) == 2, got
+    assert all(g[1] == 1 and g[2] == "done" and g[3] == 2 for g in got), got
+    for line in lines:
+        tid = line["id"]
+        mine = [c for c in calls if c["id"] == tid]
+        assert len(mine) == 2, (tid, [c["id"] for c in calls])
+        contents = [m["content"] for m in mine[1]["messages"]
+                    if isinstance(m.get("content"), str)]
+        notes = [c for c in contents
+                 if c.startswith("[Runtime note: background sub-agent")]
+        assert notes and all(f"{tid}-1" in nt for nt in notes), (tid, notes)

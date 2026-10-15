@@ -262,6 +262,16 @@ def _run_bash(command: str, _cwd: str | None = None) -> tuple[str, str]:
                            "cwd": os.getcwd()}, f)
         except OSError:
             pass
+        # Per-task job ownership (0.163.0, AUTOWAKE_SPEC Phase E prereq 2):
+        # when a batch task driver installed a job scope on this thread, the
+        # pid belongs to THAT task — not to the process. The completion sweep
+        # narrows to it, and the task's finally kills whatever is still alive.
+        # No-op (one attribute lookup) for every other caller.
+        try:
+            from ._bg_completions import bg_scope_add
+            bg_scope_add(pid)
+        except Exception:  # noqa: BLE001 — bookkeeping must never fail a launch
+            pass
     return pid, log_path
 
 

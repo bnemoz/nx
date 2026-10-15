@@ -21,10 +21,22 @@ Lifecycle: a turn loop calls `install_notice_ctx()` once at its top and
 loop context (per-thread) → module dict (the pre-swarm default store).
 Nesting seeds from the enclosing context and copies back on pop, so a sync
 sub-loop stages into the parent the way it always did.
+
+Cross-thread staging (0.163.0, AUTOWAKE_SPEC Phase E prerequisite 1): a frame
+may be `publish()`ed, which registers it against the installing thread's
+ident so a thread that KNOWS its owner (an async sub-agent worker, which
+carries the spawning turn's thread ident on its job record) can stage into
+the OWNER's frame with `set_(name, value, owner_ident=...)` instead of the
+process-global module store. That is what stops a `nx run --parallel 2`
+sibling task from receiving (and delivering into its own transcript) the note
+another task's agent finished — the cross-talk `_batch.py` documented. An
+owner_ident that is not published falls back to the old module-store write,
+so nothing is ever dropped.
 """
 from __future__ import annotations
 
 import contextvars
+import threading
 from typing import Any
 
 from . import _state as st
@@ -32,6 +44,12 @@ from . import _state as st
 _MISSING = object()
 
 SLOTS = tuple(st._NOTICE_DEFAULTS.keys())
+
+# Frames published for cross-thread staging, keyed by the publishing thread's
+# ident. Guarded by _PUBLISH_LOCK (tiny: publish/unpublish happen once per
+# batch task, lookups once per staged note).
+_PUBLISH_LOCK = threading.Lock()
+_PUBLISHED: dict[int, "NoticeFrame"] = {}
 
 
 def _frame_slots() -> dict:
@@ -74,6 +92,60 @@ class NoticeFrame:
 def current() -> NoticeFrame | None:
     """This thread's notice frame, or None outside a turn loop."""
     return _CURRENT.get()
+
+
+def publish(fr: NoticeFrame) -> int:
+    """Register `fr` against the CALLING thread's ident so a thread that knows
+    it (an async sub-agent worker carries the spawning turn's ident) can stage
+    into it instead of the process-global module store. Returns the ident to
+    hand to the workers; pair with `unpublish` in the owner's finally. Called
+    by the batch task driver (nx/_batch.py); the interactive REPL does not
+    publish, so its behavior is byte-identical."""
+    ident = threading.get_ident()
+    with _PUBLISH_LOCK:
+        _PUBLISHED[ident] = fr
+    return ident
+
+
+def unpublish(ident: int, fr: "NoticeFrame | None" = None) -> None:
+    """Drop the frame published by `ident`. When `fr` is given the entry is
+    removed only if it is still that frame, so a stale finally can never drop
+    the frame a later task on the same (recycled) thread ident published."""
+    with _PUBLISH_LOCK:
+        if fr is not None and _PUBLISHED.get(ident) is not fr:
+            return
+        _PUBLISHED.pop(ident, None)
+
+
+def stage_for_owner(owner_ident: "int | None", name: str, value: Any) -> bool:
+    """Stage `value` into the frame published by `owner_ident`, merging with
+    anything already staged there. Returns True when the note landed in a
+    published frame; False means no such frame (owner finished / no batch task)
+    and the caller must fall back to the ordinary frameless `set_`, which keeps
+    the pre-0.163 module-store path and its module-store drain in
+    `_runtime_notes._flush_module_store_notes` intact.
+
+    Never touches the calling thread's own `_CURRENT` frame — a worker staging
+    here must not adopt the owner's slots as its own."""
+    if owner_ident is None:
+        return False
+    with _PUBLISH_LOCK:
+        fr = _PUBLISHED.get(owner_ident)
+        if fr is None:
+            return False
+        slots = fr.slots
+        if name not in slots:
+            # A frame installed before this slot existed (module reload /
+            # conftest eviction): patch it the way _frame_slots() would, but
+            # without going through that helper (it reads _CURRENT).
+            slots[name] = st._NOTICE_DEFAULTS.get(name)
+        cur = slots.get(name)
+        if isinstance(cur, str) and cur and isinstance(value, str):
+            if value not in cur:
+                slots[name] = f"{cur}\n{value}"
+        else:
+            slots[name] = value
+    return True
 
 
 def install_notice_ctx() -> NoticeFrame:
@@ -140,6 +212,19 @@ def pop_notice_ctx(fr: NoticeFrame) -> None:
             # Write the plain module-global default (no dict-entry dance here:
             # notice slots have no hot read site, and tests rewind vars(st)).
             setattr(st, name, fr.slots[name])
+    _CURRENT.set(fr.prev)
+
+
+def discard_notice_ctx(fr: NoticeFrame) -> None:
+    """Detach `fr` WITHOUT folding it back (0.163.0, AUTOWAKE_SPEC Phase E).
+
+    `pop_notice_ctx` exists for NESTED loops: a sub-loop's staged notes belong
+    to its parent, so folding is correct. A batch TASK is a root owner — an
+    undelivered note has no parent to inherit it, and folding it into the
+    process-global module store would hand one finished task's leftovers to
+    whichever task a thread-pool worker runs next. Detach and drop."""
+    if _CURRENT.get() is not fr:
+        return  # stale finally after a swapped frame
     _CURRENT.set(fr.prev)
 
 

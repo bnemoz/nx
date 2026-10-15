@@ -43,9 +43,21 @@ write and run commands; without it, every gated call comes back
 
 Sub-agents compose: a task may `spawn_agent(async=true)` exactly as in the
 REPL — the answer lands as a [Runtime note] in that task's own transcript.
-With --parallel > 1 the pending-note channel is process-global, so an async
-agent's note can land in a sibling task's turn; prefer --parallel 1 when a
-task relies on async sub-agents.
+Since 0.163.0 each task owns its note channel and its background jobs: the
+task driver installs a private notice frame (`nx/_notices.py`) and a private
+bg-job scope (`nx/_bg_completions.py`) around the whole task, and an async
+agent stages into the frame of the turn that spawned it, so a `--parallel N`
+sibling can no longer receive (or consume) another task's completion note.
+
+Headless chaining (--autowake, 0.163.0, AUTOWAKE_SPEC Phase E): a task that
+backgrounds work does not have to end there. With `--autowake` / the task's
+`autowake: true` field the driver starts a SYNTHETIC turn for that task when a
+completion note is staged or a sweep finds finished work — the same
+user-role instruction and note flush the REPL's wake path uses. The chain is
+bounded by the task's own wall-clock deadline and turn cap, which is why an
+autowake task with no timeout (NX_TASK_TIMEOUT_SECONDS default 0 = off) is
+REFUSED: an unattended, unbounded headless agent is not something to
+accidentally configure.
 """
 from __future__ import annotations
 
@@ -105,6 +117,10 @@ Per-task override keys (object tasks only; each wins over its run flag):
   "model"            model for this task, same syntax as --model
   "approval_policy"  "headless-allow:<globs>" for this task (the same
                      value NX_APPROVAL_POLICY takes)
+  "autowake"         true|false: auto-continue this task when its background
+                     work finishes (the per-task form of --autowake). Requires
+                     a timeout (this task's `timeout_seconds`, --timeout or
+                     NX_TASK_TIMEOUT_SECONDS) — see --autowake below.
 
 flags:
   -f, --prompt-file <path>   JSONL task file ("-" reads stdin; required)
@@ -126,6 +142,18 @@ flags:
                              stops at the next model-turn boundary and the
                              result line reports status "error", the timeout
                              in `error`, and "timed_out": true
+      --autowake             auto-continue a task when its background work
+                             finishes (background bash job or async
+                             sub-agent): the driver appends the same synthetic
+                             wake instruction the REPL uses and runs another
+                             turn, until nothing is finished-and-unreported.
+                             Off by default (off = unchanged behavior). The
+                             chain is bounded by the per-task turn cap AND the
+                             per-task timeout, so it REQUIRES a timeout: with
+                             no effective timeout each autowake task fails
+                             immediately with an error instead of spending
+                             unattended forever. A task's own "autowake":
+                             true/false field wins over this flag.
       --json                 accepted for symmetry with --prompt-file; JSONL
                              results are always emitted
 
@@ -145,6 +173,7 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
     opts: dict[str, Any] = {
         "file": None, "parallel": 1, "continue_on_error": False,
         "max_turns": None, "timeout": None, "model": None,
+        "autowake": False,
     }
     i = 0
     while i < len(argv):
@@ -198,6 +227,9 @@ def _parse_batch_args(argv: list[str]) -> dict[str, Any]:
             i += 2
         elif a == "--continue-on-error":
             opts["continue_on_error"] = True
+            i += 1
+        elif a == "--autowake":
+            opts["autowake"] = True
             i += 1
         elif a in ("--json",):
             i += 1  # accepted for symmetry; JSONL is always emitted
@@ -260,6 +292,12 @@ def _parse_tasks(path: str) -> list[dict[str, Any]]:
             # 0.156.0: the three override keys validate HERE — a bad posture or
             # model must never reach the API (exit 2, no JSONL line). Unknown
             # OTHER keys keep being silently ignored (forward-compat schema).
+            # 0.163.0: `autowake` joins them — but as a BOOLEAN, so it gets its
+            # own check (a string "false" must not silently mean true).
+            if "autowake" in task and not isinstance(task["autowake"], bool):
+                raise _BatchUsageError(
+                    f"task line {lineno}: autowake must be a boolean, got "
+                    f"{type(task['autowake']).__name__}: {task['autowake']!r}")
             for key in ("approval", "model", "approval_policy"):
                 if key in task and not isinstance(task[key], str):
                     raise _BatchUsageError(
@@ -406,10 +444,170 @@ def _task_posture(task: dict[str, Any]) -> "tuple[tuple[bool, str | None] | None
     return (False, None), "prompt-all"  # prompt_all
 
 
+def _task_autowake(task: dict[str, Any], run_autowake: bool) -> bool:
+    """Resolve one task's autowake flag: its own field wins over the run flag."""
+    raw = task.get("autowake")
+    if isinstance(raw, bool):
+        return raw
+    return run_autowake
+
+
+def _owner_finished_unstaged_agents(owner_ident: "int | None") -> bool:
+    """Async agents SPAWNED BY THIS TASK that finished without their note
+    being staged (0.163.0). `nx/_autowake._finished_unstaged_subagents` is the
+    interactive twin; the batch version must be owner-scoped or a
+    `--parallel N` sibling's finished agent would wake this task (a phantom
+    wake by §2's definition). None (no published frame — the driver never got
+    this far) scopes to nothing and reports False rather than matching every
+    ownerless record in the process."""
+    if owner_ident is None:
+        return False
+    try:
+        from ._subagent import _ASYNC_AGENTS, _ASYNC_LOCK
+        with _ASYNC_LOCK:
+            return any(rec.get("status") not in ("running", "queued")
+                       and not rec.get("announced")
+                       and rec.get("owner_ident") == owner_ident
+                       for rec in _ASYNC_AGENTS.values())
+    except Exception:
+        return False
+
+
+def _task_finished_unseen_bg_jobs(jobs) -> bool:
+    """Finished, never-announced bg jobs that belong to THIS task (its
+    per-task pid scope). Mirrors `nx/_autowake._finished_unseen_bg_jobs`'s
+    filters and adds the scope, for the same reason as above."""
+    try:
+        import os as _os
+        from ._verify import _is_verify_job
+        from ._bg_completions import bg_scope
+        from . import _notices
+        from . import _state as _st
+        if not jobs:
+            return False
+        pids = bg_scope()
+        seen = _notices.get("_BG_NOTICE_SEEN")
+        if seen is None:
+            seen = set(getattr(_st, "_BG_NOTICE_BASELINE", set()) or set())
+        mine = _os.getpid()
+        for j in jobs:
+            pid = str(j.get("pid", ""))
+            if not pid or pid in seen or j.get("alive"):
+                continue
+            if j.get("owner_pid") != mine or _is_verify_job(j):
+                continue
+            if pids is not None and pid not in pids:
+                continue
+            if not j.get("log_path") or not _os.path.exists(j["log_path"]):
+                continue
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def batch_wake_due(jobs=None) -> bool:
+    """The batch entry point of the auto-continuation decision (0.163.0,
+    AUTOWAKE_SPEC Phase E F2): True when THIS task's driver should start a
+    synthetic wake turn.
+
+    `nx/_autowake.wake_due()` is the interactive decision and cannot be
+    reused: its liveness guards (`_TURN_ACTIVE`, `_subagent_ctx()`,
+    `_batch_active()`, `_async_running()`) all evaluate the shared process
+    state from the poller's point of view, and the batch guard at the top of
+    it makes it answer False for every batch task — which is exactly right for
+    the poller thread and exactly wrong for the driver. §4.3 of the spec is
+    explicit that Phase E must key off an explicit entry point rather than the
+    ambient thread-local predicate, so this is its own decision:
+
+    * runs the SAME completion sweep `run_tool()` runs on a turn's first tool
+      call, threading one `list_bg_jobs()` result through it (the way
+      `wake_due()` threads it), so a text-only turn's finished job gets
+      announced exactly once;
+    * returns True on anything newly staged in THIS task's notice frame, or on
+      finished-but-unreported work owned by THIS task (async agent by
+      spawning-thread ident, bg job by the task's pid scope);
+    * applies NONE of the interactive-only guards — not turn-active (the
+      driver is between turns on its own thread by construction), not the
+      streak cap (the chain's bound is the task deadline plus the loop's own
+      turn cap, both already armed).
+
+    Also deliberately NOT applied, with reasons:
+    * Phase C's stall trigger — its guards are the user-returning-to-the-
+      keyboard grace period plus a plan revision the model may never touch in
+      a headless run, and its "nothing in flight" premise has no owner here.
+      A headless chain that ends with work in flight simply ends; §2's
+      phantom-wake ban outranks the convenience.
+    * Phase D's token budget — its accumulator is fed by the REPL/Telegram
+      post-turn seam and reset by a TYPED turn, which a headless task never
+      has; wiring a second feed for it would be a new unbounded-in-the-other-
+      direction counter. The deadline is the cost bound for batch.
+
+    *jobs* lets a caller that already scanned the pid->log map share it."""
+    from ._autowake import _any_pending_notice
+    from ._bg_completions import _run_bg_completion_scan
+    owner_ident = getattr(_TASK_TLS, "owner_ident", None)
+    if jobs is None:
+        try:
+            from ._bash_jobs import list_bg_jobs
+            jobs = list_bg_jobs()
+        except Exception:
+            jobs = None
+    if jobs:
+        try:
+            _run_bg_completion_scan(jobs=jobs)
+        except Exception:
+            pass
+    if _any_pending_notice():
+        return True
+    if _owner_finished_unstaged_agents(owner_ident):
+        return True
+    return _task_finished_unseen_bg_jobs(jobs)
+
+
+def _bg_task_scopes() -> set:
+    """This thread's per-task bg-job scope (creating it when absent, so a
+    caller inside a task's turn loop — a tool, a test — can register a pid it
+    launched). The real driver installs one per task via `bg_scope_install()`;
+    this accessor is the stable seam for callers that don't own the lifecycle.
+    """
+    from ._bg_completions import bg_scope, bg_scope_install
+    pids = bg_scope()
+    return pids if pids is not None else bg_scope_install()
+
+
+def _batch_autowake_active() -> bool:
+    """True when THIS thread's batch task has autowake enabled. The shared turn
+    machinery reads it to decide whether the interactive-parent-only completion
+    sweep belongs to a batch turn: off keeps today's gate (no scan), on lets
+    the sweep run so a chained task hears about its own finished work."""
+    task = _batch_task()
+    if task is None:
+        return False
+    return bool(task.get("_autowake"))
+
+
+def _reap_task_bg_jobs(pids: "set[str] | None") -> None:
+    """Kill every live bg job this task launched (P2 task-end cleanup)."""
+    if not pids:
+        return
+    try:
+        from ._bash_jobs import cancel_kill_group, _pid_is_alive
+    except ImportError:
+        return
+    for pid in pids:
+        try:
+            if _pid_is_alive(int(pid)):
+                cancel_kill_group(pid, "")
+        except (TypeError, ValueError, OSError):
+            pass
+
+
 def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
                   max_turns: int | None,
                   timeout_seconds: float | None = None,
-                  model_default: str | None = None) -> dict[str, Any]:
+                  model_default: str | None = None,
+                  autowake_default: bool = False) -> dict[str, Any]:
     """Run one task headlessly: fresh messages, fresh metrics, fresh session
     id; the turn loop's chat output is suppressed (quiet). Returns the merged
     result dict (the JSONL line's content). Never raises — a raise is an
@@ -419,11 +617,18 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     loop aborts at the next model-turn boundary with status "error" and
     `timed_out` set on the result line, and the turn cap's forced-final
     rescue is skipped so a hung task cannot stretch one more turn past its
-    budget."""
+    budget.
+
+    autowake (0.163.0, Phase E): when True, the driver runs a synthetic wake
+    turn whenever the completion sweep finds finished work for this task.
+    Refuses when no timeout is armed (unbounded headless spend)."""
     import nx as _m  # lazy: the package re-exports what the loop needs
     from ._repl_state import _fresh_metrics
     from ._subagent import _ASYNC_QUIET_SLOTS
     from ._turn import _ensure_ctx_probe, _task_deadline_at
+    from ._turn_retry import _task_deadline_exceeded, _task_timeout_summary
+    from . import _notices
+    from ._bg_completions import bg_scope_install, bg_scope_clear
 
     instruction = task["instruction"].strip()
     task_id = task.get("id") if isinstance(task.get("id"), str) else f"task-{idx}"
@@ -450,6 +655,26 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         "approval": _task_posture(task)[1],
     }
     started = time.time()
+    autowake = _task_autowake(task, autowake_default)
+    # The result line grows `autowake: true` ONLY for a chained task (off runs
+    # stay byte-identical to 0.162.0's stream). Set before the refusal below so
+    # a refused autowake task is identifiable in the stream as one too.
+    if autowake:
+        result["autowake"] = True
+    # F4 (0.163.0): refuse an unbounded headless chain rather than spend
+    # forever with no keyboard. A clear task error (exit 4), not a crash and
+    # not a silent pass — and deliberately BEFORE any per-task state is
+    # installed, so the refusal touches no quiet slot, notice frame or job
+    # scope (everything below has a matching finally).
+    if autowake and timeout_seconds is None:
+        result["error"] = (
+            "--autowake requires a per-task timeout: the wake chain is bounded "
+            "by the task deadline, and with no timeout an unattended headless "
+            "task could spend forever. Set --timeout <seconds>, the task's "
+            "\"timeout_seconds\" field, or NX_TASK_TIMEOUT_SECONDS (0 means "
+            "off), or drop --autowake.")
+        result["exit_code"] = EXIT_ERROR
+        return result
     # Quiet the whole worker thread (no spinner/stream/footer/tool box) and
     # mark the TLS task slot so the shared turn machinery can skip
     # interactive-only behavior. The REPL never runs inside batch mode, so
@@ -473,6 +698,18 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
     posture_scope_force, _approval_disp = _task_posture(task)
     model_spec = task.get("model") or model_default
     policy_spec = task.get("approval_policy")
+    # 0.163.0 (Phase E): note ownership + job ownership are per TASK, not per
+    # process. The frame is what the task's own flush reads and what its
+    # agents' notes are routed into (published under this thread's ident);
+    # the job scope is the pid set this task launched, which narrows the
+    # completion sweep and is killed off at task end. Installed
+    # unconditionally (both are prerequisite bug fixes); only the WAKE loop is
+    # gated on the autowake flag.
+    task["_autowake"] = autowake
+    notice_frame = _notices.install_notice_ctx()
+    owner_ident = _notices.publish(notice_frame)
+    _TASK_TLS.owner_ident = owner_ident
+    bg_scope_install()
     scopes = contextlib.ExitStack()
     try:
         # (i) posture: yolo → (True, None); a level or prompt-all → (False, x)
@@ -503,6 +740,60 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         start_idx = len(messages)
         summary = _m._run_model_turn_loop(messages, on_step=None,
                                           max_turns_override=max_turns)
+        # --- headless chaining (0.163.0, AUTOWAKE_SPEC Phase E F2/F3) --------
+        # The driver — this thread, between turns — decides and acts, exactly
+        # like the REPL does; nothing here runs on a poller thread (§2). Each
+        # wake is one more `_run_model_turn_loop` call on the SAME messages
+        # list, so the transcript (the task's answer channel) grows the way a
+        # chained REPL session's does: synthetic user instruction, then the
+        # finished work's [Runtime note], then the model's turn.
+        #
+        # No streak cap: the bound is the wall-clock deadline (armed above,
+        # evaluated at every step boundary and re-checked here before each
+        # wake) plus the turn cap — and for that second one to be a REAL bound
+        # on a chained task it has to be counted ACROSS the chain, since each
+        # wake is a fresh `_run_model_turn_loop` call with its own MAX_MODEL_TURNS
+        # budget. So the driver accumulates the turns the summaries report and
+        # stops at the same number the loop would have stopped at. A chain that
+        # stops with finished work still unsaid reports the turn cap ("cap",
+        # exit 3) rather than a clean finish; a chain that stops because there
+        # is nothing left to report stays "done".
+        #
+        # Phase C's stall trigger and Phase D's token budget are deliberately
+        # NOT applied — the reasons are in batch_wake_due()'s docstring.
+        turn_budget = int(max_turns) if max_turns else int(
+            getattr(st, "MAX_MODEL_TURNS", 500) or 500)
+        total_turns = int(summary.get("turns") or 0) if isinstance(summary, dict) else 0
+        wakes = 0
+        chain_capped = False
+        while autowake and isinstance(summary, dict) and summary.get("status") == "done":
+            if _task_deadline_exceeded():
+                # A chain that outlived its deadline reports the timeout, not
+                # a clean finish — and stops waking (no further spend).
+                summary = _task_timeout_summary(total_turns)
+                break
+            if total_turns >= turn_budget:
+                # Only claim the cap if there is genuinely something to say;
+                # otherwise the honest answer is still "done".
+                chain_capped = batch_wake_due()
+                break
+            if not batch_wake_due():
+                break
+            from ._autowake import wake_instruction
+            messages.append({"role": "user", "content": wake_instruction()})
+            # Same order as the REPL's wake path (_repl.py): the sweep is
+            # already done by the decision above, then the notes are flushed
+            # up front, because a wake turn may end as plain text and notes
+            # otherwise only flush on its first tool call.
+            _m._flush_pending_background_notice(messages)
+            wakes += 1
+            summary = _m._run_model_turn_loop(messages, on_step=None,
+                                              max_turns_override=max_turns)
+            total_turns += int(summary.get("turns") or 0) if isinstance(summary, dict) else 0
+        if wakes:
+            result["wakes"] = wakes
+        if chain_capped:
+            summary = {"status": "cap", "turns": total_turns}
         result.update(_m._one_shot_result(messages, start_idx, summary,
                                           time.time() - started,
                                           metrics=task_metrics))
@@ -526,6 +817,15 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
         _task_deadline_at(None)
         st._set_thread_metrics(prev_metrics)
         _TASK_TLS.task = None
+        # Per-task cleanup, in the order ownership was taken: drop the frame
+        # WITHOUT folding (an undelivered note must not leak into the module
+        # store for a sibling task to drain), then kill whatever detached jobs
+        # this task still owns.
+        _notices.unpublish(owner_ident, notice_frame)
+        _notices.discard_notice_ctx(notice_frame)
+        _TASK_TLS.owner_ident = None
+        _reap_task_bg_jobs(bg_scope_clear())
+        task.pop("_autowake", None)
         with _QUIET_GUARD:
             _QUIET_HOLDERS -= 1
             if _QUIET_HOLDERS <= 0:
@@ -647,6 +947,9 @@ def run_batch(argv: list[str]) -> int:
     run_id = time.strftime("%Y%m%d-%H%M%S")
     parallel = opts["parallel"]
     max_turns = opts["max_turns"]
+    if opts.get("autowake"):
+        sys.stderr.write("nx run: --autowake on — chained tasks are bounded by "
+                         "their per-task timeout (required) and turn cap\n")
     # Per-task wall-clock budget: --timeout wins over NX_TASK_TIMEOUT_SECONDS;
     # a task's own `timeout_seconds` field (resolved per task, below) wins over
     # both. None/0 = off.
@@ -677,7 +980,8 @@ def run_batch(argv: list[str]) -> int:
             stop_scheduling.set()
             return
         res = _run_one_task(task, run_id, idx, max_turns, task_timeout,
-                            model_default=opts["model"])
+                            model_default=opts["model"],
+                            autowake_default=bool(opts.get("autowake")))
         with lock:
             results.append(res)
         _emit(res)

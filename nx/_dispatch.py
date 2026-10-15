@@ -313,9 +313,15 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     # turns long after the parent's per-turn reset, so the flag alone can't
     # keep them out anymore.
     from ._subagent import _subagent_ctx
-    from ._batch import _batch_active
+    from ._batch import _batch_active, _batch_autowake_active
     from . import _notices
-    if not _notices.get("_BG_SCAN_DONE") and _subagent_ctx() is None and not _batch_active():
+    # 0.163.0 (AUTOWAKE_SPEC Phase E): a batch task with autowake ON *does* run
+    # the sweep — it is now the task's own (framed, job-scoped) channel, so the
+    # "belongs to the interactive parent" objection is gone and a chained task
+    # has to hear about its own finished work. An autowake-off batch task keeps
+    # the old gate, unchanged.
+    if (not _notices.get("_BG_SCAN_DONE") and _subagent_ctx() is None
+            and (not _batch_active() or _batch_autowake_active())):
         _notices.set_("_BG_SCAN_DONE", True)
         # Module-attribute call so a test patching nx._dispatch._scan_background_completions
         # (the historical seam) lands — see test_batch_run.test_verify_and_bg_scan_gated_off_for_batch.

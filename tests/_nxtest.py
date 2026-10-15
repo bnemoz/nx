@@ -326,6 +326,23 @@ def nx_state_reset_body() -> None:
             t.join(timeout=2)
         with sa._ASYNC_LOCK:
             sa._ASYNC_AGENTS.clear()
+    # 0.163.0 (AUTOWAKE_SPEC Phase E) per-task OWNERSHIP residue: three hidden
+    # homes a batch task can leave a live entry in if its finally never ran —
+    # a published notice frame (a foreign thread could still stage a note into
+    # a finished task's slots), the batch task TLS (task dict + owner ident),
+    # and the per-thread bg-job scope. All three are released by production
+    # finally paths, so this only catches a test that died mid-task; drained
+    # here centrally rather than in the batch tests, per AGENTS.md.
+    if no is not None:
+        pub = getattr(no, "_PUBLISHED", None)
+        if pub is not None:
+            pub.clear()
+    bt = sys.modules.get("nx._batch")
+    if bt is not None:
+        bt._TASK_TLS.__dict__.clear()
+    bgm = sys.modules.get("nx._bg_completions")
+    if bgm is not None:
+        bgm._BG_SCOPE_TLS.__dict__.clear()
     rec = sys.modules.get("nx._recovery")
     if rec is not None:
         reset = getattr(rec, "_reset_store", None)

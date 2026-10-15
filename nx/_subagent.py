@@ -806,6 +806,28 @@ def _finalize_async_record(job_id: str, handle: "AgentJob | None",
                 rec["announced"] = True
 
 
+def _stage_notice_owner(rec: "dict | None", key: str, text: str,
+                       prev: "str | None" = None) -> None:
+    """Stage one [Runtime note] into the notice slot `key`, honoring note
+    OWNERSHIP (0.163.0, AUTOWAKE_SPEC Phase E prerequisite 1).
+
+    An async agent's worker thread has no notice frame, so a plain
+    `_notices.set_` lands in the process-global module store — where ANY
+    sibling turn loop's flush drains it. That is the documented
+    `nx run --parallel 2` cross-talk: task A's agent answer got delivered into
+    task B's transcript, and A never received it (its `announced` mark was
+    already burned). When the record carries an `owner_ident` (the spawning
+    turn's thread ident) and that turn published its frame — only a batch task
+    driver does that — the note goes straight into the OWNER's frame. Otherwise
+    this is exactly the old merge-with-prev `set_`, byte-identical.
+    """
+    if _notices.stage_for_owner((rec or {}).get("owner_ident"), key, text):
+        return
+    if prev is None:
+        prev = _notices.get(key)
+    _notices.set_(key, f"{prev}\n{text}" if prev else text)
+
+
 def _stage_subagent_answer(job_id: str) -> None:
     """Stage the one-time [Runtime note] announcing a finished async agent.
 
@@ -868,7 +890,7 @@ def _stage_subagent_answer(job_id: str) -> None:
             note = "[Runtime note: background sub-agent " + job_id + \
                 " FAILED — " + answer[:600] + "\n" + \
                 "Retry the task inline (async=false) if it still matters.]"
-        _notices.set_(_PENDING_NOTICE_KEY, f"{prev}\n{note}" if prev else note)
+        _stage_notice_owner(rec, _PENDING_NOTICE_KEY, note, prev)
         if steered:
             # 0.106.0: the user steered this agent mid-run from /tabs — tell
             # the parent so it reads the answer in that light (the agent's
@@ -877,9 +899,7 @@ def _stage_subagent_answer(job_id: str) -> None:
                       f"{steered} time{'s' if steered != 1 else ''} while it "
                       "ran (mid-course adjustments queued from /tabs); its "
                       "report reflects them.]")
-            prev2 = _notices.get(_PENDING_NOTICE_KEY)
-            _notices.set_(_PENDING_NOTICE_KEY,
-                          f"{prev2}\n{s_note}" if prev2 else s_note)
+            _stage_notice_owner(rec, _PENDING_NOTICE_KEY, s_note)
         # Swarm P3: the full answer is on disk (report), so retaining the
         # whole body in the job record is pure RSS - up to
         # NX_SUBAGENT_MAX_FINISHED=20 records x whole answers. Keep a bounded
@@ -958,6 +978,13 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
             # its whole budget on reconnaissance is visible as turns
             # approaching max_turns long before it finalizes.
             "turns": 0,
+            # Note ownership (0.163.0, Phase E prereq 1): the thread ident of
+            # the turn that spawned this agent — the ONLY thread allowed to
+            # receive its [Runtime note]. Recorded here (this runs on the
+            # spawning thread) so the finalize path can stage into that turn's
+            # published notice frame instead of the process-global module
+            # store; None/unpublished keeps the pre-0.163 behavior.
+            "owner_ident": threading.get_ident(),
         }
         if queued:
             _ASYNC_QUEUED.append(job_id)

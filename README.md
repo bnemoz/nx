@@ -447,7 +447,7 @@ so an explicit `nx gc` always evaluates every rule. Exit codes: 0 = done,
 | `NX_MAX_TOKENS` | token cap for streaming requests (default 16000; `0` omits it) |
 | `NX_MAX_CONTINUATIONS` | auto-continues a reply that ended with `finish_reason="length"` (the token cap cut it mid-answer): the partial text becomes a real assistant turn, a resume note is appended, and the stream re-opens (default 2; `0` keeps the old single-turn behavior and marks the partial with a truncation marker) |
 | `NX_MAX_MODEL_TURNS` | cap on tool-call turns per run (default 500) |
-| `NX_TASK_TIMEOUT_SECONDS` | `nx run` per-task wall-clock cap in seconds (default 0 = off; `--timeout` or the task's `timeout_seconds` field override) — a task that exceeds it stops at the next model-turn boundary and reports `status: "error"`, `timed_out: true` |
+| `NX_TASK_TIMEOUT_SECONDS` | `nx run` per-task wall-clock cap in seconds (default 0 = off; `--timeout` or the task's `timeout_seconds` field override) — a task that exceeds it stops at the next model-turn boundary and reports `status: "error"`, `timed_out: true`. Since 0.163.0 it is also the bound on a `--autowake` chain: an autowake task with **no** effective timeout is refused with a task `error` (exit 4) instead of spending unattended forever |
 | `NX_METRICS_URL` | optional endpoint to push cumulative token usage after each turn |
 | `NX_HTTP_RETRIES` / `NX_HTTP_BACKOFF_BASE` / `NX_HTTP_TIMEOUT_CONNECT` / `NX_HTTP_TIMEOUT_READ` | transient-failure retries for every endpoint call: 429/5xx and read/write timeouts are retried up to N times beyond the first attempt (default 2; `0` off) with exponential backoff (base seconds, default 0.5 → 0.5s, 1s, 2s…) or the server's `Retry-After` when it sends one (capped at 30s). Never retried: refused connections (a cold-start fails fast) and anything after the first streamed byte. Per-request timeouts in seconds: connect 10 (refused/unreachable fails fast), read 900 (a slow server may need more — a read-timeout retry notice names this variable); `0` = no cap. Background probes never print these notices and drop their remaining retries once a `/source` switch supersedes them (`NX_PROBE_QUIET`) |
 | `NX_SKIP_STARTUP_PROBES` | skip every startup probe — `resolve_model()`'s `/v1/models` + `/props` round-trip, the capability/thinking fingerprint probes, the context-window metadata probes and the over-max_tokens overrun probe (default off; `1` disables). Startup becomes instant but model autodetection is off: set the model explicitly (`NX_MODEL` / `NX_SOURCE_<NAME>_MODEL`); tool-calling falls back to reactive text-protocol parsing until a turn reveals better. Also what keeps `import nx` network-free in test runs |
@@ -1012,9 +1012,10 @@ timed-out task counts as an error),
 `--model <id|source:id>` sets the default model for every task (a bare id
 rides the active source; `source:id` rides that registered source — the
 same syntax as `NX_SUBAGENT_MODEL_POOL` entries), `--source <name>` picks
-the endpoint. stdout carries ONLY the JSONL result
-lines — every human-facing render is suppressed; progress and the summary go
-to stderr.
+the endpoint, and `--autowake` (0.163.0) lets a task auto-continue when its
+background work finishes (see "Headless chaining" below). stdout carries ONLY
+the JSONL result lines — every human-facing render is suppressed; progress and
+the summary go to stderr.
 
 Per-task exit codes ride each result line (`exit_code` field): `0` done, `3`
 turn cap, `4` error/refused. An unreachable endpoint or a request the server
@@ -1047,6 +1048,46 @@ winning over its run-level flag (task field > run flag > env/default):
 - `"approval_policy"` — `"headless-allow:<globs>"` for that task, the same
   value `NX_APPROVAL_POLICY` takes; it wins over the env var for the task
   (and only for it).
+- `"autowake"` (0.163.0) — `true`/`false`: that task's own copy of `--autowake`
+  (its field wins over the flag, so one task in a mixed corpus can opt out).
+  Must be a real JSON boolean — a string like `"false"` is a parse error
+  (exit 2), because a truthy string would silently mean *on*.
+
+Headless chaining — `--autowake` (0.163.0, AUTOWAKE_SPEC Phase E)
+----------------------------------------------------------------
+
+A batch task that backgrounds work normally ENDS there: the answer arrives too
+late for the task that asked for it. With `--autowake` (or a task's
+`"autowake": true`) the task instead continues itself when its background work
+finishes — a detached `run_bash` job or an async `spawn_agent` — exactly the way
+the REPL auto-continues at the keyboard: the driver appends the same synthetic
+user-role wake instruction, flushes the finished work's `[Runtime note]` into
+the transcript, and runs another model turn. It keeps doing that until there is
+nothing finished-and-unreported left.
+
+The chain is bounded by the two limits the harness already has, both per task:
+the wall-clock deadline (`--timeout` / `timeout_seconds` /
+`NX_TASK_TIMEOUT_SECONDS`, evaluated at every model-turn boundary and re-checked
+before every wake) and the turn cap (`--max-turns` / `NX_MAX_MODEL_TURNS`,
+counted ACROSS the chain). There is deliberately no wake-streak cap here — an
+unattended chain needs a bound, and these are it. Which is why
+**`--autowake` requires a timeout**: a chained task with no effective timeout
+(0 = off is the default) fails immediately with a clear task `error` (exit 4)
+rather than spend forever with nobody watching. A chain whose deadline lapses
+mid-flight reports `status: "error"` with `timed_out: true` and stops waking,
+even if more work has finished. A chain stopped by the turn cap reports
+`status: "cap"` (exit 3).
+
+Chained result lines carry two extra fields — `"autowake": true` and
+`"wakes": <n>` (how many synthetic wake turns ran); an off run's stream is
+byte-identical to earlier versions.
+
+Notes and background jobs are per TASK, not per process (the prerequisite that
+made chaining safe to ship): each task owns a notice channel and the set of
+pids it launched, and an async agent stages its answer into the notice frame of
+the turn that spawned it. So `--parallel N` siblings can no longer receive (or
+consume) each other's completion notes and exit lines, and a task that ends
+with a detached job it launched has that job killed and reaped.
 
 The result line echoes the effective provenance for forensics: `model` (the
 model that actually answered) and `approval` (`yolo`, the level, or
@@ -1064,14 +1105,20 @@ Result-line shape (one JSON object per task):
  "model": "glm-5.3", "approval": "yolo", "error": null}
 ```
 
+A chained (`--autowake`) task's line adds `"autowake": true` and
+`"wakes": 1`; an off task's line is exactly the shape above.
+
 Tasks compose with sub-agents: a task's model may call `spawn_agent`
 (read-only by default, write tier with `NX_SUBAGENT_WRITE=1`) — spawns run in
 the background by default, so the finished agent's answer arrives in that
-task's transcript as a `[Runtime note]`. With `--parallel > 1` the
-async-note channel is process-global, so prefer `--parallel 1` when a task
-relies on background agents.
-`NX_VERIFY_CMD` and the interactive background-completion scan stay off for
-batch workers (they're parent-loop machinery).
+task's transcript as a `[Runtime note]`. Since 0.163.0 each task owns its note
+channel and its background jobs, so `--parallel > 1` no longer needs the
+`--parallel 1` caveat for tasks that rely on background agents — a sibling's
+answer can neither be delivered into this task nor be consumed out of it. To
+act on a finished agent inside the same task, run with `--autowake` (see
+"Headless chaining" above).
+`NX_VERIFY_CMD` stays off for batch workers (it is parent-loop machinery); the
+background-completion scan runs only for a task that opted into `--autowake`.
 
 ## Eval corpus
 

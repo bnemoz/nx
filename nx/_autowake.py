@@ -496,6 +496,15 @@ def wake_due(due_out: dict | None = None) -> bool:
     """True when the REPL should start a turn by itself: a completion note is
     staged (or stageable) and no turn is currently running.
 
+    The BATCH task driver has its own entry point — `nx/_batch.batch_wake_due`
+    (0.163.0, AUTOWAKE_SPEC Phase E) — because every liveness guard below is
+    the poller-thread's question ("is the REPL free to take a turn?"), and the
+    batch guard makes this answer False for a batch task by design. §4.3 of the
+    spec requires the batch path to key off an explicit entry point rather than
+    the ambient `_batch_active()` predicate; that entry point reuses THIS
+    module's primitives (`_any_pending_notice`, the shared completion sweep, the
+    threaded `list_bg_jobs()` result) instead of re-deciding anything.
+
     *due_out*: when given (a dict), receives {"stall": bool} describing THIS
     call's own branch decision. The REPL's re-check passes it: the one-shot
     _WAKE_STALL_PENDING marker is decided per evaluation, and a poller tick

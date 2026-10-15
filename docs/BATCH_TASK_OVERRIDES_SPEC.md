@@ -91,6 +91,7 @@ One grammar per key, mirroring `timeout_seconds`' ladder
 | `approval`   | `--approval`/`--yolo` | `NX_APPROVAL`         | prompt-all       |
 | `model`      | `--model`           | active source (`st.MODEL`) | process default |
 | `approval_policy` | (none — env only today) | `NX_APPROVAL_POLICY` | deny-all   |
+| `autowake` (0.163.0, addendum below) | `--autowake` | (requires a timeout: `NX_TASK_TIMEOUT_SECONDS`) | off |
 
 - **`approval`**: string, EXACTLY the `NX_APPROVAL` vocabulary normalized by
   `_normalize_approval` (`_approval.py:~90-113`) — `"yolo"`, `"low"`,
@@ -116,6 +117,15 @@ One grammar per key, mirroring `timeout_seconds`' ladder
   before env. No run flag — env covers the run level already; a per-task
   policy narrowing a `--yolo` run is exactly the "one kind of thing
   per task" case C4 documented as impossible without full YOLO.
+- **`autowake`** (0.163.0, AUTOWAKE_SPEC Phase E addendum): BOOLEAN, the
+  per-task form of the new `--autowake` run flag (field wins over flag).
+  Validated with its own check, not the three-string loop — a string
+  (`"false"`) is a parse error naming the line, because a truthy string would
+  silently mean *on*. Semantics, bounds (deadline + turn cap, NO streak cap)
+  and the refuse-without-timeout rule: README "Headless chaining", and
+  `docs/AUTOWAKE_SPEC.md` §Phase E. Chained result lines carry
+  `"autowake": true` + `"wakes": <n>`; off runs keep the pre-0.163 line shape
+  exactly.
 
 ## Validation — fail fast, names the line
 

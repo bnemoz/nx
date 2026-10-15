@@ -21,6 +21,57 @@ from . import _fullscreen
 _BG_SCAN_LOCK = threading.Lock()
 
 
+# --- per-task job scope (0.163.0, AUTOWAKE_SPEC Phase E prerequisite 2) -------
+# The sweep attributes a job to a session by `owner_pid != os.getpid()`
+# — one bucket per PROCESS. A `nx run --parallel N` process runs N tasks in N
+# threads that share that pid, so every task saw every other task's jobs: task
+# A's turn announced task B's exit line, and a chained task re-swept a job it
+# had already consumed. The batch task driver installs a SCOPE (the pids this
+# task launched) on its own thread; the sweep intersects with it when one is
+# installed, exactly like `jobs=` threads one list_bg_jobs() result through the
+# whole sweep instead of re-scanning. `None` (the interactive REPL, a sub-agent
+# loop, the poller) means "no narrowing" — the pre-0.163 behavior.
+_BG_SCOPE_TLS = threading.local()
+
+
+def bg_scope_install() -> set:
+    """Install an empty job scope on the calling thread and return it (the
+    batch task driver calls this once per task; jobs launched on that thread
+    join it via `bg_scope_add`)."""
+    pids: set[str] = set()
+    _BG_SCOPE_TLS.pids = pids
+    return pids
+
+
+def bg_scope() -> "set[str] | None":
+    """This thread's job scope, or None when none is installed."""
+    return getattr(_BG_SCOPE_TLS, "pids", None)
+
+
+def bg_scope_add(pid: "int | str | None") -> None:
+    """Record a job this thread's task launched. No-op outside a scope, so the
+    interactive path pays one attribute lookup and changes nothing."""
+    if pid is None or pid == "":
+        return
+    pids = getattr(_BG_SCOPE_TLS, "pids", None)
+    if pids is not None:
+        pids.add(str(pid))
+
+
+def bg_scope_clear() -> "set[str] | None":
+    """Remove this thread's scope and return it (the driver reaps it at task
+    end, so the set survives its own owner by one step)."""
+    pids = getattr(_BG_SCOPE_TLS, "pids", None)
+    _BG_SCOPE_TLS.pids = None
+    return pids
+
+
+def _in_scope(pid: str) -> bool:
+    """True when `pid` may be announced to this thread's task."""
+    pids = getattr(_BG_SCOPE_TLS, "pids", None)
+    return pids is None or pid in pids
+
+
 def _scan_background_completions(jobs=None) -> str | None:
     """One-time notice for tracked background jobs that finished since the
     model last looked (checked on the first tool call of each turn).
@@ -56,6 +107,13 @@ def _scan_background_completions(jobs=None) -> str | None:
                     continue
                 if _is_verify_job(j):
                     continue  # NX_VERIFY_CMD outcome has its own dedicated note path
+                if not _in_scope(pid):
+                    # 0.163.0 (Phase E prereq 2): a batch task only ever hears
+                    # about jobs IT launched. Deliberately NOT marked seen —
+                    # the owning task still has to announce it, and this thread
+                    # must not consume its sibling's note out of the shared
+                    # pid->log map.
+                    continue
                 if j.get("alive"):
                     continue  # still running — the existing [background] flow covers it
                 if pid in seen:
