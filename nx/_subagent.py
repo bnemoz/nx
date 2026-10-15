@@ -965,6 +965,15 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
     job = AgentJob(_new_job_id())
     job_id = job.job_id
     sem = _async_semaphore()
+    # Job ownership (0.163.1, review fix 2): the SAME reason the note channel
+    # needs `owner_ident` — this runs on the spawning thread, so it is where
+    # the parent task's bg-job scope (its pid set) is still reachable. Handed
+    # to the worker below, which installs it on ITS thread so a bg job this
+    # agent backgrounds joins the parent task's sweep and its task-end reap
+    # instead of being invisible to both. None outside a batch task (REPL,
+    # nested agents under a REPL) → the worker stays unscoped, as before.
+    from ._bg_completions import bg_scope as _bg_scope_now
+    owner_bg_scope = _bg_scope_now()
     with _ASYNC_LOCK:
         _prune_queued()
         queued = sem is not None and sem._value == 0  # type: ignore[attr-defined]
@@ -985,6 +994,9 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
             # published notice frame instead of the process-global module
             # store; None/unpublished keeps the pre-0.163 behavior.
             "owner_ident": threading.get_ident(),
+            # The spawning task's live pid set object (shared, not copied) —
+            # installed by the worker thread; see `bg_scope_adopt`.
+            "owner_bg_scope": owner_bg_scope,
         }
         if queued:
             _ASYNC_QUEUED.append(job_id)
@@ -1029,11 +1041,20 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
                     rec["started"] = time.time()
                 _prune_queued()
         _ASYNC_QUIET_SLOTS.quiet = True
+        # Share the parent task's bg-job scope for this thread's whole life (see
+        # the spawn site): `bg_scope_add` from a run_bash this agent runs then
+        # lands in the OWNING task's pid set, so the task's completion sweeps
+        # announce the job and `_reap_task_bg_jobs` kills it at task end.
+        from ._bg_completions import bg_scope_adopt, bg_scope_restore
+        with _ASYNC_LOCK:
+            _rec = _ASYNC_AGENTS.get(job_id)
+        prev_bg_scope = bg_scope_adopt((_rec or {}).get("owner_bg_scope"))
         try:
             _run_async_agent(job_id, instruction, max_turns, tier=tier,
                              scope=scope, worktree=worktree,
                              announce=announce, handle=job)
         finally:
+            bg_scope_restore(prev_bg_scope)
             # The record is final the moment _run_async_agent returns — set
             # the join Event BEFORE the sink-drop / sem-release / eviction
             # tail so a joiner never waits on bookkeeping.

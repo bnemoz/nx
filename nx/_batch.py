@@ -506,6 +506,36 @@ def _task_finished_unseen_bg_jobs(jobs) -> bool:
     return False
 
 
+def batch_wake_pending(jobs=None) -> bool:
+    """The READ-ONLY half of `batch_wake_due` (0.163.1): would a wake turn have
+    anything to say, WITHOUT running the completion sweep that answers it.
+
+    Every predicate here is a read: `_any_pending_notice` reads notice slots,
+    `_owner_finished_unstaged_agents` reads the agent records, and
+    `_task_finished_unseen_bg_jobs` reads the job list plus this task's seen set
+    and pid scope (it marks nothing — the sweep does that). A caller that only
+    needs to pick a STATUS WORD must use this instead of `batch_wake_due`:
+    running the real decision mutates (stages notes, marks pids seen) and a
+    driver on its way out drops those notes with the task's frame, so the
+    sweep's work would be spent on a decision and then thrown away (the
+    0.163.1 review's M1).
+
+    *jobs* lets a caller share an already-computed list_bg_jobs() result."""
+    from ._autowake import _any_pending_notice
+    owner_ident = getattr(_TASK_TLS, "owner_ident", None)
+    if jobs is None:
+        try:
+            from ._bash_jobs import list_bg_jobs
+            jobs = list_bg_jobs()
+        except Exception:
+            jobs = None
+    if _any_pending_notice():
+        return True
+    if _owner_finished_unstaged_agents(owner_ident):
+        return True
+    return _task_finished_unseen_bg_jobs(jobs)
+
+
 def batch_wake_due(jobs=None) -> bool:
     """The batch entry point of the auto-continuation decision (0.163.0,
     AUTOWAKE_SPEC Phase E F2): True when THIS task's driver should start a
@@ -543,10 +573,12 @@ def batch_wake_due(jobs=None) -> bool:
       has; wiring a second feed for it would be a new unbounded-in-the-other-
       direction counter. The deadline is the cost bound for batch.
 
-    *jobs* lets a caller that already scanned the pid->log map share it."""
-    from ._autowake import _any_pending_notice
+    *jobs* lets a caller that already scanned the pid->log map share it.
+
+    The three predicates below are factored into `batch_wake_pending()` so a
+    caller that must NOT mutate (the driver choosing between "done" and
+    "cap") can ask the same question read-only."""
     from ._bg_completions import _run_bg_completion_scan
-    owner_ident = getattr(_TASK_TLS, "owner_ident", None)
     if jobs is None:
         try:
             from ._bash_jobs import list_bg_jobs
@@ -558,11 +590,7 @@ def batch_wake_due(jobs=None) -> bool:
             _run_bg_completion_scan(jobs=jobs)
         except Exception:
             pass
-    if _any_pending_notice():
-        return True
-    if _owner_finished_unstaged_agents(owner_ident):
-        return True
-    return _task_finished_unseen_bg_jobs(jobs)
+    return batch_wake_pending(jobs)
 
 
 def _bg_task_scopes() -> set:
@@ -774,10 +802,23 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
                 break
             if total_turns >= turn_budget:
                 # Only claim the cap if there is genuinely something to say;
-                # otherwise the honest answer is still "done".
-                chain_capped = batch_wake_due()
+                # otherwise the honest answer is still "done". Read-only
+                # (0.163.1 M1): this decides a status word on a task that is
+                # about to END, and the old `batch_wake_due()` call here ran
+                # the real sweep — staging notes and marking pids seen — for
+                # notes the task's finally then dropped undelivered.
+                chain_capped = batch_wake_pending()
                 break
             if not batch_wake_due():
+                break
+            # 0.163.1 M2: the guard at the top of this loop is not the last
+            # moment before the spend — the sweep above (a registry walk plus a
+            # log-tail read) runs in between, so a chain that started
+            # microseconds before the deadline could still pay for a whole
+            # extra model turn. Re-armed here, with nothing but in-process
+            # bookkeeping left between the check and the call.
+            if _task_deadline_exceeded():
+                summary = _task_timeout_summary(total_turns)
                 break
             from ._autowake import wake_instruction
             messages.append({"role": "user", "content": wake_instruction()})
@@ -790,6 +831,19 @@ def _run_one_task(task: dict[str, Any], run_id: str, idx: int,
             summary = _m._run_model_turn_loop(messages, on_step=None,
                                               max_turns_override=max_turns)
             total_turns += int(summary.get("turns") or 0) if isinstance(summary, dict) else 0
+        # Drain whatever the task still owns (0.163.1 review fix 1). Between
+        # loops — and on a run with no wake loop at all — this thread's notice
+        # frame IS the task's own F0, and an async agent that finished during
+        # the FINAL turn staged straight into it (`stage_for_owner`), so with no
+        # further turn loop to seed a nested frame from F0 and no wake-loop
+        # flush, the note would be dropped by `discard_notice_ctx` below without
+        # ever being read (pre-0.163 the worker wrote the module store and the
+        # next turn's drain delivered it). One unconditional drain into the
+        # task's own transcript covers both paths; every slot it reads is
+        # frame-scoped to F0 (or the module store), so it is a no-op when the
+        # task has nothing staged, and it can never touch a sibling task's
+        # notes — those live in that task's own frame.
+        _m._flush_pending_background_notice(messages)
         if wakes:
             result["wakes"] = wakes
         if chain_capped:

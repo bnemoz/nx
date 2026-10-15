@@ -66,6 +66,32 @@ def bg_scope_clear() -> "set[str] | None":
     return pids
 
 
+def bg_scope_adopt(pids: "set[str] | None") -> "set[str] | None":
+    """Install an EXISTING scope on the calling thread, returning what it
+    replaced (0.163.1, review fix 2).
+
+    `bg_scope_install` makes a NEW set, which is right for the owner (the task
+    driver) and wrong for anyone who has to share one: an async sub-agent runs
+    its whole turn loop on its own worker thread, where this thread-local is
+    None, so a `run_bash` it backgrounded called `bg_scope_add` into nothing —
+    the job escaped the parent task's sweep narrowing AND its task-end reap
+    (an orphaned live process and a completion note that reached nobody).
+    The spawn site hands the worker the PARENT'S set object (not a copy), so
+    a pid added on the worker thread is immediately visible to the parent
+    task's sweeps and to `_reap_task_bg_jobs`.
+
+    Pair with `bg_scope_restore` in the adopting thread's finally. None means
+    "no scope" (the interactive path) and restores the pre-0.163 behavior."""
+    prev = getattr(_BG_SCOPE_TLS, "pids", None)
+    _BG_SCOPE_TLS.pids = pids
+    return prev
+
+
+def bg_scope_restore(prev: "set[str] | None") -> None:
+    """Put back what `bg_scope_adopt` replaced (the worker's finally)."""
+    _BG_SCOPE_TLS.pids = prev
+
+
 def _in_scope(pid: str) -> bool:
     """True when `pid` may be announced to this thread's task."""
     pids = getattr(_BG_SCOPE_TLS, "pids", None)

@@ -1243,6 +1243,87 @@ def test_autowake_deadline_mid_chain_stops_waking(fake_loop, tmp_path, monkeypat
     assert len(calls) == 2         # and no third turn fired
 
 
+def test_chain_cap_decision_does_not_run_the_sweep(fake_loop, tmp_path,
+                                                  monkeypatch):
+    """0.163.1 M1: choosing between "done" and "cap" at the turn budget must not
+    run the mutating completion sweep.
+
+    The old code asked `batch_wake_due()` — the real wake decision, which sweeps
+    (stages notes, marks pids seen) — purely to pick a status word, on a task
+    that then ENDS, so the notes it staged were dropped with the task's frame.
+    `batch_wake_pending()` is the read-only twin: same three predicates, no
+    sweep."""
+    nx, calls, holder = fake_loop
+    from nx import _batch as batch_mod
+
+    swept = []
+    monkeypatch.setattr("nx._bg_completions._run_bg_completion_scan",
+                        lambda jobs=None: swept.append(1))
+    # One job in the registry — the sweep only runs when there is a map to
+    # walk, so an empty list would prove nothing about the mutation half.
+    monkeypatch.setattr("nx._bash_jobs.list_bg_jobs",
+                        lambda mine_only=True: [{"pid": "55555",
+                                                 "owner_pid": os.getpid(),
+                                                 "alive": False}])
+    # Something genuinely to report: the cap claim must come back True...
+    monkeypatch.setattr(batch_mod, "_owner_finished_unstaged_agents",
+                        lambda owner_ident: True)
+
+    assert batch_mod.batch_wake_pending() is True
+    assert swept == [], "batch_wake_pending ran the mutating sweep"
+    # ...while the real decision still sweeps (the wake path depends on it).
+    assert batch_mod.batch_wake_due() is True
+    assert swept == [1], swept
+
+    # And through the driver: a chain that hits the turn budget with work still
+    # pending reports the cap, without spending a sweep on the decision.
+    swept.clear()
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "capped"}'])
+    monkeypatch.setattr(nx, "_run_model_turn_loop",
+                        _aw_loop(nx, calls, lambda m, n: None))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--timeout", "60", "--max-turns", "1"])
+    # "cap" is a non-clean finish: batch's exit code for it (3), by design.
+    assert code == 3, (code, err.getvalue())
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "cap", line
+    assert swept == [], "the driver's cap decision ran the mutating sweep"
+
+
+def test_deadline_rechecked_after_the_wake_decision(fake_loop, tmp_path,
+                                                    monkeypatch):
+    """0.163.1 M2: the deadline is re-checked immediately before each wake turn,
+    not only at the top of the loop.
+
+    `batch_wake_due()` runs between the two checks (a registry walk plus log-tail
+    reads), so a chain that entered the loop microseconds before its deadline
+    could still pay for a whole extra model turn. The sweep is where the drift
+    comes from, so the fake decision below stands in for a slow one."""
+    nx, calls, holder = fake_loop
+    from nx import _batch as batch_mod
+
+    def slow_wake_due(jobs=None):
+        # The decision returns True (something to report) but takes long enough
+        # that the deadline lapses INSIDE it — i.e. after the loop-top check.
+        time.sleep(0.25)
+        _stage_note_for_task("[Runtime note: background sub-agent agent-1 "
+                             "finished. Its answer: 42]")
+        return True
+
+    monkeypatch.setattr(batch_mod, "batch_wake_due", slow_wake_due)
+    f = _write_tasks(tmp_path, ['{"instruction": "a", "id": "tight"}'])
+    monkeypatch.setattr(nx, "_run_model_turn_loop",
+                        _aw_loop(nx, calls, lambda m, n: None))
+    buf, err = _capture_stdout(monkeypatch)
+    code = _run(nx, ["-f", f, "--autowake", "--timeout", "0.2"])
+    assert code == nx._batch.EXIT_ERROR, err.getvalue()
+    line = json.loads(buf.getvalue().strip())
+    assert line["status"] == "error" and line.get("timed_out") is True
+    assert len(calls) == 1, \
+        f"a wake turn fired after the deadline lapsed inside the decision: {calls}"
+    assert "wakes" not in line, line
+
+
 def test_autowake_opens_the_bg_scan_gate(fake_loop, tmp_path, monkeypatch):
     """Phase E deliberately narrows the bg-scan gate: an autowake-ON batch task
     runs the completion sweep on its first tool call (the channel is the task's
