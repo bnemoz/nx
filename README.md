@@ -133,6 +133,6 @@ Annotated multi-source example: [`sources.example.env`](sources.example.env).
 
 **nx** — your tokens, not the harness's.
 
-*MIT License · fork-inspired by [Sentdex/minion](https://github.com/Sentdex/minion)*
+*MIT License · inspired by [Sentdex/minion](https://github.com/Sentdex/minion)*
 
 </div>
