@@ -136,3 +136,7 @@ Annotated multi-source example: [`sources.example.env`](sources.example.env).
 *MIT License · inspired by [Sentdex/minion](https://github.com/Sentdex/minion)*
 
 </div>
+
+---
+
+For local development guidelines and technical architecture details, please refer to CONTRIBUTING.md.
