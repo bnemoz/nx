@@ -11,9 +11,23 @@ the user already knows, or to shave a few tokens off a tight context window).
 from __future__ import annotations
 
 import os
+import subprocess
 
 from ._env import _env_int
 from . import _state as st
+
+
+def _ls_head() -> str:
+    """Run `ls | head -20` in the cwd; returns '' on any failure (the note
+    then simply omits the listing)."""
+    try:
+        out = subprocess.run(
+            ["ls"], capture_output=True, text=True, timeout=5, check=False
+        )
+        names = [line for line in out.stdout.splitlines() if line][:20]
+        return "\n".join(names)
+    except Exception:
+        return ""
 
 
 def _cwd_and_root() -> tuple[str, str | None]:
@@ -43,8 +57,12 @@ def _load_orientation_note() -> dict[str, str] | None:
     lines = [f"Working directory: {cwd}"]
     if root:
         lines.append(f"Project root: {root}")
+    listing = _ls_head()
+    if listing:
+        lines.append("Top-level entries:\n" + listing)
     lines.append(
-        "Orient with run_bash `ls` (read-only, approval-free for pure reads)."
+        "Orient with run_bash `ls` (read-only, approval-free for pure reads) "
+        "for the full listing if it seems relevant."
     )
     return {
         "role": "user",
