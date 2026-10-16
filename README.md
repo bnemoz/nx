@@ -1,19 +1,32 @@
+<div align="center">
+
 # nx (pronounced "annex")
 
-A coding agent that keeps its per-turn floor under ~5K tokens, so a
-128K-1M-token context window stays mostly yours. Most harnesses burn 20K-50K+
-tokens of system prompt and tool schemas before your first message even lands,
-paid on *every turn*; nx holds an **enforced, mechanically-counted budget of
-~5K tokens** (6000) — a `SYSTEM` prompt plus always-on tool schemas, nothing
-else — while keeping genuinely descriptive schemas. Point it at any
-OpenAI-compatible endpoint — a local llama.cpp / vLLM / SGLang server, or a
-remote API like OpenRouter, Together, or Z.ai — and get an agent that reads,
-writes, edits, and runs shell commands in your project. Every write/edit/bash
-call is risk-classified and gated by an approval prompt (unless you pass
-`--yolo`). Run `nx --tokens` to see the exact counted floor for your backend.
+**A coding agent that keeps its per-turn floor under ~5K tokens — so a 128K–1M context window stays mostly *yours*.**
 
-*Origins:* nx started (v0.1.0) as a fork-inspired experiment based on
-[Sentdex/minion](https://github.com/Sentdex/minion).
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square)](docs/test-architecture.md)
+
+[Quick start](#quick-start) · [Worth knowing first](#worth-knowing-first) · [Headline capabilities](#headline-capabilities) · [Full docs](#full-documentation)
+
+</div>
+
+---
+
+Most agent harnesses burn 20K–50K+ tokens of system prompt and tool schemas
+before your first message even lands — paid on *every turn*. nx holds an
+**enforced, mechanically-counted budget of ~5K tokens** (6000): a `SYSTEM`
+prompt plus always-on tool schemas, nothing else, while keeping genuinely
+descriptive schemas. Point it at any OpenAI-compatible endpoint — a local
+llama.cpp / vLLM / SGLang server, or a remote API like OpenRouter, Together,
+or Z.ai — and get an agent that reads, writes, edits, and runs shell commands
+in your project. Every write/edit/bash call is risk-classified and gated by an
+approval prompt (unless you pass `--yolo`). Run `nx --tokens` to see the exact
+counted floor for your backend.
+
+> [!TIP]
+> Try it in one line: `nx -p "what does this repo's build system look like?"`
 
 ## Quick start
 
@@ -63,6 +76,28 @@ nx
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (comma-separated names + per-source vars) |
 | `NX_ENV_FILE` | override the env file read at startup (default `~/.env`) |
 
+> [!NOTE]
+> Press <kbd>Esc</kbd> to interrupt the agent mid-turn; `/help` lists all
+> slash commands in the REPL.
+
+<details>
+<summary><strong>Multi-source config in 30 seconds</strong></summary>
+
+```
+NX_SOURCES=local,zai
+
+NX_SOURCE_LOCAL_BASE_URL=http://localhost:8080/v1
+NX_SOURCE_LOCAL_API_KEY=sk-noop
+
+NX_SOURCE_ZAI_BASE_URL=https://api.z.ai/api/paas/v4
+NX_SOURCE_ZAI_MODEL=glm-x-preview
+```
+
+Switch mid-session with `/source zai`; context is preserved across switches.
+Full annotated example: [`sources.example.env`](sources.example.env).
+
+</details>
+
 ## Headline capabilities
 
 - **Risk-gated approvals** — every write/edit/bash call is risk-classified
@@ -92,6 +127,12 @@ metrics, and architecture. Also in `docs/`:
 
 Annotated multi-source example: [`sources.example.env`](sources.example.env).
 
-## License
+---
 
-MIT License. See [`LICENSE`](LICENSE).
+<div align="center">
+
+**nx** — your tokens, not the harness's.
+
+*MIT License · fork-inspired by [Sentdex/minion](https://github.com/Sentdex/minion)*
+
+</div>
