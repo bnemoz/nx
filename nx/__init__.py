@@ -566,6 +566,17 @@ from ._webfetch import WEB_FETCH_TOOL, WEBFETCH_ENABLED
 if WEBFETCH_ENABLED:
     TOOLS.append(WEB_FETCH_TOOL)
 
+# run_tools (schema + engine in nx/_ptc_exec.py, 0.162.0, PTC Phase 2):
+# programmatic tool calling — the model's Python runs in an `-I` subprocess
+# with the Phase 1 stub module importable as `stubs`; each stub call routes
+# back through run_tool() over a NDJSON pipe, restricted to the read-only
+# allowlist. Schema joins TOOLS unconditionally (a _TOOL_GATES entry decided
+# per-turn visibility, the lint_check posture); NX_PTC (below) defaults OFF
+# this phase — 0 schema tokens until a session opts in; the Phase 4 per-model
+# heuristic decides the default.
+from ._ptc_exec import RUN_TOOLS_TOOL
+TOOLS.append(RUN_TOOLS_TOOL)
+
 FINAL_ANSWER_TOOL = {"type": "function", "function": {
     "name": "final_answer",
     "description": "End the turn with the answer the user sees; it must stand on its own, since the transcript before it is not re-shown. Call it when the work is done or when you need something from the user. Stop by calling this, not by replying with plain text.",
@@ -856,6 +867,10 @@ from ._dispatch import (
     _invalidate_tool_list_cache, _TOOL_GATES, search_tools,
     run_tool, _tool_args_parse_error, _run_bg_completion_scan,
 )
+# PTC Phase 2 (0.162.0): nudge text + pipe allowlist (the engine itself is
+# registered in DISPATCH by _dispatch.py).
+from ._dispatch import PTC_FANOUT_GUIDANCE  # noqa: F401
+from ._ptc_exec import ptc_allowlist  # noqa: F401
 from ._tool_gates import _GATE_REFUSALS
 from ._delegation_note import _delegation_enabled
 from ._tool_cache import (  # noqa: F401 (re-export for tests)
@@ -987,6 +1002,11 @@ NX_WEBFETCH = WEBFETCH_ENABLED
 # tool (default off — most sessions lint via CI or verify hooks instead).
 # NX_LINT_CMD overrides the fixed command shape; NX_LINT_TIMEOUT caps the call.
 NX_LINT = LINT_ENABLED
+# run_tools (nx/_ptc_exec.py, 0.162.0): NX_PTC=1 opts IN to programmatic tool
+# calling (default off this phase — the Phase 4 rollout flips the default to
+# the per-model heuristic). NX_PTC_TIMEOUT overrides the default per-script
+# timeout (30s); NX_PTC_TIMEOUT_MAX caps a requested one (120s).
+NX_PTC = _env_int("NX_PTC", 0)
 # recall_lessons (nx/_lessons.py, 0.102.0): result cap for the BM25
 # cross-session recall tool (default 5; 0 = unbounded). Read at call time.
 NX_LESSONS_LIMIT = _env_int("NX_LESSONS_LIMIT", 5)

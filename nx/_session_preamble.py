@@ -167,3 +167,20 @@ DELEGATION_STREAK_NOTICE = (
     "answers. If the files you're reading are the exact ones an edit already "
     "in hand needs, ignore this and continue.]"
 )
+
+# Fifth instance of the same one-shot pattern (0.162.0, PTC Phase 2): a session
+# with run_tools offered (NX_PTC=1) that grinds through ≥2 solo exploration
+# reads. Staged once by run_tool() alongside the delegation counter; the
+# one-time nudge text lives here beside the other four guidance strings.
+PTC_FANOUT_GUIDANCE = (
+    "[Runtime note: run_tools is available this session — use it for ≥2 "
+    "independent READS in one turn. import stubs; stubs.read_file(...) / "
+    "stubs.search_files(...) / stubs.list_dir(...) / stubs.memory_search(...) "
+    "/ stubs.recall_lessons(...) return the tool result string, and your "
+    "script's printed output is what lands back in context (results are free "
+    "to filter, loop, and combine in the script instead of re-billing each "
+    "one). "
+    "The pipe is read-only: writes, run_bash and spawn_agent stay normal "
+    "JSON tool calls. Single reads stay as ordinary tool calls too — "
+    "run_tools pays off from 2+ independent reads onward.]"
+)

@@ -1,0 +1,554 @@
+"""PTC Phase 2 (docs/ptc-migration-spec.md §Phase 2 + Audit): `run_tools(code)` —
+the execution engine that turns the Phase 1 stub module into a live call path.
+
+Design (settled; the Audit section is authoritative where the spec body is not):
+
+* The model's Python runs in a **subprocess** (`sys.executable -I -X utf8`,
+  argv-only, `start_new_session=True` per the `_bash_jobs.py:235` precedent so
+  Esc can kill the whole process group without touching the terminal). The
+  rendered stub module is written to a temp dir next to a generated launcher
+  and is importable as `stubs`. `-I` implies `-E -s`: no PYTHONPATH, no user
+  site, and the script dir is inserted explicitly by the launcher (isolated
+  mode does not prepend it).
+
+* **Pipe protocol** (NDJSON, harness-side reader loop): the launcher's
+  `_capture(name, args)` sends `{id, name, args}` frames on the child's
+  stdout and blocks reading a response line; the harness answers
+  `{id, result}` or `{id, error}`. Every routed call goes through
+  `run_tool(name, args)` (`nx/_dispatch.py:201`) **unmodified** — plan gate,
+  withheld refusals, breaker check, arg repair, write fence, hooks, cache,
+  undo snapshot and sanitize all apply per-call exactly as in JSON mode.
+  Results therefore pass through `run_tool`'s sanitize exactly once (the
+  harness never re-sanitizes what `run_tool` returned).
+
+* **Allowlist** (Audit correction #2): stub-callable tools are the explicit
+  INTERSECTION `_dispatch._CACHEABLE_READ_TOOLS ∩ _plan.PLAN_READONLY_TOOLS`
+  — the six pure reads. Not the union: PLAN_READONLY_TOOLS contains
+  spawn_agent/todo_write/plan_edit which must NOT be script-callable. Any
+  other name over the pipe gets a standard refusal string (no dispatch).
+  Approval-needing calls are refused by the allowlist itself; `_EscToChat`
+  escaping a deeper prompt is additionally handled as a kill+skip-fill
+  (turn-layer parity below).
+
+* **Sandbox honesty** (Audit): the subprocess is untrusted but
+  capability-poor. There is no OS-level network isolation and none is
+  claimed — the read-only allowlist plus the write fence inside `run_tool`
+  are the actual boundary. No unshare/seccomp is added.
+
+* **Turn-layer parity**: per-call failures come back as `"ERROR: ..."`
+  result strings inside the script (never raise across the pipe); a
+  script-level exception, a timeout, or a protocol violation folds into ONE
+  error result for `run_tools` plus the same malformed-args breaker
+  increment `_turn_toolcalls.py:200-216` applies to a malformed JSON call.
+  Esc/`KeyboardInterrupt` kills the process group and every unanswered
+  in-flight `_capture` is skip-filled with an error frame before the kill
+  (the launcher unblocks and exits; the transcript for the `run_tools` call
+  itself is written by the JSON-mode skip-fill loop around it — parity with
+  `_turn_toolcalls.py:269-327`).
+
+* **Phase 3 shape**: the reader thread only moves frames into a queue; the
+  serial dispatch loop is one function (`_dispatch_pipe_call`). A
+  `ThreadPoolExecutor` can replace the serial loop later without touching the
+  protocol or the dispatcher (writes are already lock-guarded).
+"""
+from __future__ import annotations
+
+import json
+import os
+import queue
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from typing import Any
+
+from . import _state as st
+from ._env import _env_int
+
+RUN_TOOLS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_tools",
+        "description": "PTC: run a Python `code` script in a sandboxed subprocess with the session's read tools importable as `import stubs` (stubs.read_file(path), stubs.search_files(pattern), ... — see the [Runtime note] carrying the stub module source). Read-only: any other tool name (writes, run_bash, spawn_agent) is refused over the pipe; single tool calls stay as normal JSON tool calls. Returns the script's captured stdout; a script exception or timeout is one error result.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python source; `import stubs`, call stubs.<tool>(...) for >=2 independent READS in one turn (loops/filters over many files; results come back as strings inside your script — print what you want back in context). The script is untrusted code run with -I; the read-only allowlist is the boundary"},
+                "timeout": {"type": "integer", "description": "Wall-clock seconds (default 0 = session default NX_PTC_TIMEOUT, 30; hard cap NX_PTC_TIMEOUT_MAX, 120)"},
+            },
+            "required": ["code"],
+        },
+    },
+}
+
+
+def _ptc_enabled() -> bool:
+    """True when the run_tools schema is being offered this session. Reads the
+    live top-level attribute first (tests/REPL flip it), then the env var —
+    the `_delegation_enabled()` pattern."""
+    import nx as _m
+    try:
+        return bool(_m.NX_PTC)
+    except AttributeError:
+        return bool(_env_int("NX_PTC", 0))
+
+
+# --- prompt surface (spec §Prompt wiring; Audit-corrected) ---------------------
+# Session-start PTC note, `_delegation_note.py` style: static text (so riding
+# the pinned prefix is safe — pin_prefix only breaks when head BYTES change,
+# and these bytes are per-session constants), gate-gated like the delegation
+# note. The DYNAMIC part (the stub-module source) never rides the prefix: it
+# ships as a one-time [Runtime note] tail (see _stage_stub_source).
+PTC_NOTE_MARKER = "[PTC note:"
+PTC_NOTE = (
+    PTC_NOTE_MARKER + " programmatic tool calling is enabled this session: "
+    "the run_tools tool runs a Python script with the session's read tools "
+    "importable as `import stubs` (stubs.read_file(...), "
+    "stubs.search_files(...), stubs.list_dir(...), stubs.memory_search(...), "
+    "stubs.recall_lessons(...) — each returns the tool result string; your "
+    "script's printed output is what re-enters context).\n"
+    "- Use it for \u2265\u0032 independent reads in one turn (loops, filters, cross-file "
+    "aggregation); keep single calls as ordinary JSON tool calls.\n"
+    "- The pipe is read-only: writes, run_bash, spawn_agent and every other "
+    "tool stay normal JSON tool calls; a script that calls one gets a refusal "
+    "string.\n"
+    "- The exact stub-module source arrives once as a [Runtime note] on your "
+    "first tool call — read it before writing a script.]"
+)
+
+
+def _load_ptc_note() -> dict[str, str] | None:
+    """User-role session-start PTC note, or None when run_tools is not offered
+    (the _load_delegation_note() contract, consumed by _prefix.prefix_notes())."""
+    if not _ptc_enabled():
+        return None
+    return {"role": "user", "content": PTC_NOTE}
+
+
+def _append_ptc_note(text: str) -> None:
+    """Stage a PTC runtime note (nudge and/or stub source) on the shared
+    _PENDING_PTC_NOTICE slot; a nudge and a source staged in the same turn
+    ride ONE note instead of overwriting each other."""
+    from . import _notices
+    cur = _notices.get("_PENDING_PTC_NOTICE")
+    _notices.set_("_PENDING_PTC_NOTICE", (cur + "\n" + text) if cur else text)
+
+
+def _stage_stub_source() -> None:
+    """Ship the generated stub-module source ONCE as a [Runtime note] tail —
+    the Audit's hard rule: the source is dynamic (it follows the gate vector)
+    so it must NEVER enter the pinned prefix; the runtime-note tail is
+    append-only and cache-safe. Fires on the first parent-loop tool call of a
+    PTC session (see _dispatch.run_tool); sub-agent/batch loops skip — they
+    don't own the parent's notice channel (their scripts still get the right
+    render: run_tools re-renders per call via render_stub_module_for_turn())."""
+    if st._PTC_SOURCE_SHIPPED or not _ptc_enabled():
+        return
+    from ._subagent import _subagent_ctx
+    from ._batch import _batch_active
+    if _subagent_ctx() is not None or _batch_active():
+        return
+    st._PTC_SOURCE_SHIPPED = True
+    from ._ptc_stubs import render_stub_module_for_turn
+    try:
+        src = render_stub_module_for_turn()
+    except Exception:  # noqa: BLE001 — a failed render must not break a call
+        st._PTC_SOURCE_SHIPPED = False
+        return
+    _append_ptc_note(
+        "[Runtime note: PTC stub module for run_tools(code) — generated from "
+        "this turn's offered tool set (re-shipped whenever the gate set "
+        "changes). Inside run_tools, `import stubs` and call these; each "
+        "returns the tool result string, and only your script's printed "
+        "output re-enters the conversation.\n" + src + "\n]")
+
+
+def ptc_allowlist() -> frozenset[str]:
+    """Stub-callable tool names: the explicit intersection of the dispatch
+    read-cache tuple and the plan-mode read-only set (Audit correction #2 —
+    the union would expose spawn_agent/todo_write/plan_edit to scripts).
+    Resolved at call time so both source tables stay the single truth; lazy
+    import keeps this module off the early import path."""
+    from ._dispatch import _CACHEABLE_READ_TOOLS
+    from ._plan import PLAN_READONLY_TOOLS
+    return frozenset(_CACHEABLE_READ_TOOLS) & frozenset(PLAN_READONLY_TOOLS)
+
+
+def _ptc_refusal(name: str) -> str:
+    """Standard refusal for a non-allowlisted name over the pipe — the same
+    'not available + what to do instead' shape as _GATE_REFUSALS."""
+    allowed = ", ".join(sorted(ptc_allowlist()))
+    return (f"{name} is not callable from a run_tools script — the PTC pipe is "
+            f"read-only ({allowed}). Every other tool (writes, run_bash, "
+            "spawn_agent, ...) must be a normal JSON tool call this turn; make "
+            "the read you need here and the change outside the script.")
+
+
+def _breaker_increment() -> None:
+    """One malformed-args breaker increment for `run_tools` itself, mirroring
+    `_turn_toolcalls.py:200-216` (streak count, trip at the limit, the
+    _PTC_BREAKER_TRIPPED baseline counter). A script-level failure is PTC's
+    version of a malformed call: same accounting, so the fallback ladder sees
+    PTC and JSON failures alike."""
+    from ._breaker import _breaker_views
+    tool_name = "run_tools"
+    if st.MALFORMED_TOOL_BREAKER_LIMIT <= 0:
+        return
+    failures, broken = _breaker_views()
+    count = failures.get(tool_name, 0) + 1
+    failures[tool_name] = count
+    if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
+        broken.add(tool_name)
+        st._PTC_BREAKER_TRIPPED += 1
+
+
+# --- the generated child side ---------------------------------------------------
+# The launcher runs under -I beside the rendered stubs.py and the model's
+# user_script.py. It owns the ONLY capability the child has: the frame pipe on
+# its real stdin/stdout (fd 0/1). Real stdout/stderr are captured into a
+# StringIO so script printing can never corrupt the frame channel; the script's
+# exception (if any) rides the terminal `done` frame.
+
+_PTC_LAUNCHER_SRC = '''"""nx run_tools launcher — generated per call by nx/_ptc_exec.py. Do not edit."""
+import io
+import json
+import os
+import sys
+import threading
+import traceback
+
+_MAX_CAPTURE = 200000
+
+_here = os.path.dirname(os.path.realpath(sys.argv[0]))
+# -I does not prepend the script dir; insert it so `import stubs` resolves to
+# the module rendered next to this launcher and nothing else.
+sys.path.insert(0, _here)
+
+_out = sys.stdout   # the frame channel stays on the real stdout (fd 1)
+_in = sys.stdin     # response lines come from the real stdin (fd 0)
+_cap = io.StringIO()
+sys.stdout = _cap   # script prints never touch the frame channel
+sys.stderr = _cap
+_lock = threading.Lock()
+_seq = [0]
+
+
+def _send(obj):
+    _out.write(json.dumps(obj) + "\\n")
+    _out.flush()
+
+
+def _capture(name, args):
+    """Marshal one stub call to the harness and block for its answer.
+    Failures arrive as "ERROR: ..." strings (the run_tool convention), never
+    as raises across the pipe — a refused or failed call is the script's to
+    handle, exactly as an ERROR tool result is JSON mode's."""
+    global _seq
+    with _lock:
+        _seq[0] += 1
+        cid = _seq[0]
+        try:
+            _send({"id": cid, "name": name, "args": args})
+        except Exception:
+            return "ERROR: run_tools pipe closed by the harness"
+        line = _in.readline()
+    if not line:
+        return ("ERROR: run_tools pipe closed by the harness (the script was "
+                "killed or the turn ended; results are not available)")
+    try:
+        resp = json.loads(line)
+    except ValueError:
+        return "ERROR: malformed harness response frame"
+    if "error" in resp:
+        return "ERROR: " + str(resp["error"])
+    return str(resp.get("result", ""))
+
+
+import stubs  # noqa: E402  (rendered by render_stub_module_for_turn())
+stubs._capture = _capture
+
+_err = None
+try:
+    with open(os.path.join(_here, "user_script.py"), encoding="utf-8") as _f:
+        _code = _f.read()
+    exec(compile(_code, "run_tools_script", "exec"), {"__name__": "__main__"})
+except SystemExit as _e:
+    if _e.code not in (0, None):
+        _err = "SystemExit(%r)" % (_e.code,)
+except BaseException:
+    _err = traceback.format_exc(20)
+finally:
+    _text = _cap.getvalue()
+    if len(_text) > _MAX_CAPTURE:
+        _text = _text[:_MAX_CAPTURE] + "\\n[script output truncated]"
+    try:
+        _send({"type": "done", "stdout": _text, "error": _err})
+    except Exception:
+        pass
+'''
+
+
+def _skip_fill_reason(exc: BaseException | None) -> str:
+    """Skip-fill wording for in-flight captures, mirroring the JSON-mode
+    skip-fill strings at _turn_toolcalls.py:269-327 (Esc vs hard-cancel)."""
+    if isinstance(exc, KeyboardInterrupt):
+        return "CANCELLED by user (Ctrl+C hard cancel) — script killed"
+    return "CANCELLED by user (Esc) — script killed, returned to chat input"
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the script's whole process group (it owns one via
+    start_new_session), SIGKILL after a short grace. Never raises; a proc that
+    already exited is a no-op."""
+    if proc.poll() is not None:
+        return
+    try:
+        try:
+            os.killpg(proc.pid, 15)  # SIGTERM the group
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, 9)  # SIGKILL the group
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+    except Exception:  # noqa: BLE001 — teardown must never mask the real path
+        pass
+
+
+class _PtcProtocolError(Exception):
+    """A frame the harness cannot parse, or a child that died mid-protocol."""
+
+
+def _dispatch_pipe_call(name: Any, args: Any, respond) -> None:
+    """Route ONE pipe request and answer it with `respond(payload)`.
+
+    This is the Phase 3 seam: the function is self-contained (allowlist check
+    + run_tool + reply), so a ThreadPoolExecutor can map frames through it
+    concurrently once fan-out lands — writes already go through the caller's
+    write lock. Every refusal/failure is reported as `{id, error}`; the
+    launcher converts those into "ERROR: ..." return values, so per-call
+    failures never kill the script (parity: an ERROR tool result in JSON
+    mode doesn't kill the turn either)."""
+    allow = ptc_allowlist()
+    if not isinstance(name, str) or name not in allow:
+        respond({"error": _ptc_refusal(str(name))})
+        return
+    if not isinstance(args, dict):
+        respond({"error": f"script sent non-object args ({type(args).__name__})"})
+        return
+    # Module-attribute lookup so tests can monkeypatch nx._dispatch.run_tool
+    # (the historical fake-dispatch seam) and have it land here.
+    from . import _dispatch as _disp
+    from ._approval import _EscToChat
+    try:
+        result = _disp.run_tool(name, dict(args))
+    except _EscToChat:
+        raise  # control-flow signal, not an error: must reach the turn layer
+                 # so the JSON-mode skip-fill writes the CANCELLED result
+    except Exception as e:  # noqa: BLE001 — run_tool folds its own errors;
+        # anything escaping it (a hook exploding, say) still gets a frame.
+        respond({"error": f"{type(e).__name__}: {e}"})
+        return
+    if isinstance(result, list):  # content-parts (read_image) can't ride the pipe
+        result = "[non-text tool result]"
+    respond({"result": result if isinstance(result, str) else str(result)})
+
+
+def run_tools(code: str = "", timeout: int = 0) -> str:
+    """The `run_tools` tool body: run the model's Python with `stubs`
+    importable, dispatching stub calls back through run_tool() over a NDJSON
+    frame pipe. Returns the script's captured stdout (sanitized ONCE here,
+    like every tool result by run_tool's tail) — per-call results live inside
+    the script, exactly as tool results live inside a JSON-mode turn."""
+    from ._approval import _EscToChat
+    from ._interrupt import cancel_requested
+
+    code = str(code or "")
+    if not code.strip():
+        return "ERROR: run_tools: `code` is empty — pass a Python script that imports `stubs`."
+    try:
+        limit = int(timeout or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    default_limit = _env_int("NX_PTC_TIMEOUT", 30)
+    hard_max = _env_int("NX_PTC_TIMEOUT_MAX", 120)
+    limit = limit if limit > 0 else default_limit
+    limit = max(1, min(limit, hard_max))
+
+    # The stub module for THIS turn (gate-aware: a sub-agent's tiered set gets
+    # its own render, Phase 1 memo rules apply). Rendered once per call,
+    # memoized across calls by _ptc_stubs.
+    from ._ptc_stubs import render_stub_module_for_turn
+    stub_src = render_stub_module_for_turn()
+
+    workdir = tempfile.mkdtemp(prefix="nx-ptc-")
+    try:
+        with open(os.path.join(workdir, "stubs.py"), "w", encoding="utf-8") as f:
+            f.write(stub_src)
+        with open(os.path.join(workdir, "run_tools_launcher.py"), "w",
+                  encoding="utf-8") as f:
+            f.write(_PTC_LAUNCHER_SRC)
+        with open(os.path.join(workdir, "user_script.py"), "w",
+                  encoding="utf-8") as f:
+            f.write(code)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-X", "utf8",
+             os.path.join(workdir, "run_tools_launcher.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+            start_new_session=True,  # own process group: Esc kills the script's
+            # whole group, never the terminal (the _bash_jobs.py:235 precedent)
+            cwd=os.getcwd(),
+        )
+        st._ACTIVE_PTC_PROC = proc  # visible to tests/teardown; cleared below
+
+        frames: "queue.Queue[str | None]" = queue.Queue()
+
+        def _reader() -> None:  # daemon: moves frames, owns nothing else.
+            try:
+                for line in proc.stdout:
+                    frames.put(line)
+            except Exception:  # noqa: BLE001 — EOF/pipe teardown race
+                pass
+            finally:
+                frames.put(None)  # EOF sentinel
+
+        threading.Thread(target=_reader, daemon=True).start()
+
+        write_lock = threading.Lock()
+
+        def _respond(payload: dict) -> None:
+            try:
+                with write_lock:
+                    proc.stdin.write(json.dumps(payload) + "\n")
+                    proc.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                pass  # child already gone; the loop notices via EOF
+
+        script_out: str | None = None
+        script_err: str | None = None
+        pending_id: int | None = None  # the ONE in-flight capture (Phase 2
+        # dispatch is serial, so at most one request awaits its reply)
+        n_calls = 0
+        n_failed = 0
+        timed_out = False
+        interrupted: BaseException | None = None
+        deadline = time.monotonic() + limit
+        # Phase 3 replaces this serial loop with a ThreadPoolExecutor mapping
+        # frames through _dispatch_pipe_call (index-ordered like
+        # _run_read_only_parallel); the protocol and that function stay as-is.
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    line = frames.get(timeout=min(remaining, 0.25))
+                except queue.Empty:
+                    if cancel_requested():
+                        interrupted = KeyboardInterrupt("hard cancel")
+                        break
+                    continue
+                if line is None:  # EOF without a done frame
+                    raise _PtcProtocolError(
+                        "script exited without a completion frame")
+                try:
+                    frame = json.loads(line)
+                except ValueError:
+                    raise _PtcProtocolError("malformed frame from the script")
+                if frame.get("type") == "done":
+                    script_out = frame.get("stdout") or ""
+                    script_err = frame.get("error")
+                    break
+                cid = frame.get("id")
+                if not isinstance(cid, int):
+                    raise _PtcProtocolError("frame without an id")
+                n_calls += 1
+                if not _call_will_dispatch(frame.get("name"), frame.get("args")):
+                    n_failed += 1
+                pending_id = cid
+                _dispatch_pipe_call(frame.get("name"), frame.get("args"),
+                                    lambda payload, _cid=cid:
+                                    _respond(dict(payload, id=_cid)))
+                pending_id = None
+        except (_EscToChat, KeyboardInterrupt) as e:
+            interrupted = e
+        except _PtcProtocolError as e:
+            script_err = f"PTC protocol error: {e}"
+        finally:
+            if interrupted is not None or timed_out or script_err is not None:
+                # Skip-fill BEFORE the kill: every in-flight `_capture` gets a
+                # well-formed `{id, error}` response so the launcher unblocks,
+                # its script sees an ERROR result (not a hang), and the kill
+                # lands on a child that is already exiting — the transcript
+                # entry for the run_tools call itself is written by the JSON
+                # skip-fill loop wrapped around this call (parity with
+                # _turn_toolcalls.py:269-327, which still sees the raise).
+                if interrupted is not None and pending_id is not None:
+                    _respond({"id": pending_id,
+                              "error": _skip_fill_reason(interrupted)})
+                _kill_group(proc)
+            else:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _kill_group(proc)
+            if st._ACTIVE_PTC_PROC is proc:
+                st._ACTIVE_PTC_PROC = None
+
+        if interrupted is not None:
+            raise interrupted
+
+        out_text = script_out or ""
+        if timed_out:
+            # NOT a breaker event: a correct-but-slow script is not malformed
+            # output (JSON mode trips the breaker only on parse failures), so
+            # a legit long job must never withdraw run_tools via the fallback
+            # ladder — fold the error result and let the model retry smaller.
+            return _fold(f"ERROR: run_tools timed out after {limit}s — the "
+                         f"script's process group was killed. Split the work "
+                         f"into smaller scripts or raise the per-call "
+                         f"`timeout` (cap {hard_max}s).", out_text)
+        if script_err:
+            _breaker_increment()
+            head = script_err.strip().splitlines()
+            return _fold("ERROR: run_tools script failed: "
+                         + ("\n".join(head[-6:]) if head else "unknown error"),
+                         out_text)
+
+        summary = (f"[run_tools: {n_calls} stub call(s)"
+                   + (f", {n_failed} refused/failed" if n_failed else "")
+                   + f", {limit}s cap]")
+        body = out_text.strip()
+        if not body:
+            body = "(script printed nothing — print the summary you want back)"
+        from ._text_fallback import _sanitize_tool_result
+        return _sanitize_tool_result(f"{summary}\n--- script stdout ---\n{body}")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _call_will_dispatch(name: Any, args: Any) -> bool:
+    """True when this frame's call will NOT be refused by the allowlist (the
+    failure count for the run_tools summary; mirrors how the JSON turn counts
+    ERROR/DENIED results without touching the breaker)."""
+    return isinstance(name, str) and name in ptc_allowlist() and isinstance(args, dict)
+
+
+def _fold(head: str, script_out: str) -> str:
+    """One error result for run_tools with whatever the script printed so far
+    attached (the same ERROR-fold shape every tool failure uses), sanitized
+    exactly once here."""
+    from ._text_fallback import _sanitize_tool_result
+    text = head
+    if script_out.strip():
+        text += "\n--- script stdout before the failure ---\n" + script_out.strip()[:2000]
+    return _sanitize_tool_result(text)

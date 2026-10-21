@@ -396,6 +396,14 @@ _PTC_BRACKET_SALVAGED: int = 0       # read-tool bracket-closure salvages
 _PTC_NORMALIZED: int = 0             # double-encoded / pair-list folds
 _PTC_HARD_FAILED: int = 0            # unrecoverable parse failures
 _PTC_BREAKER_TRIPPED: int = 0        # breaker opened for a tool this turn
+# PTC Phase 2 (0.162.0): flips True once the one-time run_tools fan-out nudge
+# has fired this session (see _dispatch.run_tool / _session_preamble's
+# PTC_FANOUT_GUIDANCE); _PTC_SOURCE_SHIPPED flips True once the stub-module
+# source rode a runtime note; _ACTIVE_PTC_PROC is the live run_tools child
+# (None between calls) so Esc/teardown paths can see the script's group.
+_PTC_NUDGED: bool = False
+_PTC_SOURCE_SHIPPED: bool = False
+_ACTIVE_PTC_PROC = None
 
 # --- text-only-after-stall guard ---------------------------------------------
 # Set when a real tool call runs after this reasoning-stall episode's first
@@ -569,6 +577,10 @@ _NOTICE_DEFAULTS: dict[str, Any] = {
     # next prompt but must never itself wake the REPL (it is in
     # _autowake._NON_WAKE_NOTICE_SLOTS).
     "_PENDING_WAKE_HOLD_NOTICE": None,
+    # 0.162.0 (PTC Phase 2): the run_tools fan-out nudge and the one-time
+    # stub-module source note, staged by run_tool()/run_tools() (nx/_ptc_exec,
+    # nx/_dispatch) and flushed with the other pending notes.
+    "_PENDING_PTC_NOTICE": None,
 }
 
 # --- post-edit verification (NX_VERIFY_CMD) ------------------------------------

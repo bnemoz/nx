@@ -60,6 +60,7 @@ from ._lint import lint_check
 from ._project_tools import search_project_tools, call_project_tool
 from ._toolblocks import ToolBlock, current_recorder, tool_accent, tool_display
 from ._undo import snapshot as _undo_snapshot, push_if_absent as _undo_push_once
+from ._ptc_exec import _ptc_enabled
 
 # --- re-exports from the split-out layers (single import surface preserved) ---
 from ._tool_gates import (  # noqa: F401 (re-exports)
@@ -72,6 +73,7 @@ from ._breaker import (  # noqa: F401 (re-exports)
 )
 from ._session_preamble import (  # noqa: F401 (re-exports)
     BACKGROUND_GUIDANCE, DELEGATION_STREAK_NOTICE, MULTI_EDIT_GUIDANCE,
+    PTC_FANOUT_GUIDANCE,
     YOLO_ASYNC_GUIDANCE,
     _DELEGATION_NUDGE_THRESHOLD, _MULTI_EDIT_NUDGE_THRESHOLD, _initial_messages,
     _messages_show_prior_backgrounding, _messages_show_prior_delegation_nudge,
@@ -102,6 +104,11 @@ DISPATCH = {
 DISPATCH["search_tools"] = lambda pattern="": search_tools(pattern)
 DISPATCH["search_project_tools"] = search_project_tools
 DISPATCH["call_project_tool"] = call_project_tool
+# run_tools (PTC Phase 2, 0.162.0): the stub-pipe engine (nx/_ptc_exec.py).
+# Gated (NX_PTC) like lint_check — the schema is only OFFERED when the gate
+# opens; run_tool's pre-dispatch gate re-check refuses an emitted name anyway.
+from ._ptc_exec import run_tools as _ptc_run_tools  # noqa: E402
+DISPATCH["run_tools"] = _ptc_run_tools
 
 # Observation pack recall tool (0.67.0): pages an archived large tool result
 # back verbatim. Schema appended to TOOLS in __init__.py; gated to appear
@@ -315,6 +322,13 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
     from ._subagent import _subagent_ctx
     from ._batch import _batch_active, _batch_autowake_active
     from . import _notices
+    # PTC Phase 2 (0.162.0): ship the stub-module source once, as a runtime-
+    # note tail, on the first parent-loop tool call of a PTC session (the
+    # source is gate-dependent so it rides the append-only tail, never the
+    # pinned prefix; the staging helper self-gates on NX_PTC + loop kind).
+    if _ptc_enabled():
+        from ._ptc_exec import _stage_stub_source
+        _stage_stub_source()
     # 0.163.0 (AUTOWAKE_SPEC Phase E): a batch task with autowake ON *does* run
     # the sweep — it is now the task's own (framed, job-scoped) channel, so the
     # "belongs to the interactive parent" objection is gone and a chained task
@@ -360,6 +374,20 @@ def run_tool(name: str, args: dict[str, Any]) -> str | list:
                     st._READ_STREAK = 0
                     from . import _notices
                     _notices.set_("_PENDING_DELEGATION_NOTICE", DELEGATION_STREAK_NOTICE)
+            # PTC Phase 2 one-time nudge (0.162.0): the same fan-out evidence
+            # (≥2 solo exploration reads) in a session where run_tools is
+            # actually offered. Paid ONCE per session (st._PTC_NUDGED), rides
+            # the normal notice flush, and never re-arms — unlike the
+            # delegation streak this is a capability announcement, not a
+            # behavior correction; the nudge text lives in _session_preamble
+            # beside the other four guidance strings.
+            if (name in ("read_file", "list_dir", "search_files")
+                    and st._READ_STREAK >= 2 and not st._PTC_NUDGED
+                    and _dc_ctx() is None and not _dc_batch()):
+                if _ptc_enabled():
+                    st._PTC_NUDGED = True
+                    from ._ptc_exec import _append_ptc_note
+                    _append_ptc_note(PTC_FANOUT_GUIDANCE)
         else:
             st._READ_STREAK = 0
     if name in _CACHEABLE_READ_TOOLS:

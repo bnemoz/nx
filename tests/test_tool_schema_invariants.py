@@ -93,7 +93,9 @@ def test_every_tool_appears_once():
     # 0.158.9: git_status/git_diff/git_log/sed_edit retire (still dispatchable) — 28.
     # 0.158.11: apply_patch retires outright (its body is edit_file's `diff`
     # mode, and the name no longer dispatches) — 27.
-    assert len(names) == 27
+    # 0.162.0: run_tools joins (PTC Phase 2; registered in TOOLS, withheld
+    # per-turn by its NX_PTC gate, the lint_check/critique posture) — 28.
+    assert len(names) == 28
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
