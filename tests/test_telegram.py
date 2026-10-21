@@ -109,6 +109,13 @@ def test_md_html_link_and_bullet():
     assert '<a href="https://example.com/a_b">docs</a>' in html_
 
 
+def test_md_html_renders_table_as_aligned_pre_block():
+    html_, _ = tg._md_html(
+        "before\n\n| a | bb |\n| --- | --- |\n| 1 | x |\n| 22 | |\n\nafter")
+    assert html_.startswith("before\n\n<pre>| a | bb |")
+    assert html_.endswith("| 22 |  |</pre>\n\nafter")
+
+
 def test_send_uses_parse_mode_and_falls_back_on_parse_error():
     calls = []
 

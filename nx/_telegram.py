@@ -272,6 +272,40 @@ def _chunk(text: str, limit: int = TG_MAX_MESSAGE) -> list[str]:
 # --- markdown -> Telegram HTML (parse_mode fallback rendering) ----------------
 
 _FENCE_RE = re.compile(r"^\s*```(\w*)\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+
+
+def _mono(text: str) -> str:
+    """One block inside Telegram <pre>. ASCII tables (|---|) only stay
+    aligned in a monospace block; zero-width spaces (from text wrapping)
+    would widen the glyphs, so they go."""
+    return "<pre>%s</pre>" % _html.escape(text.replace("\u200b", ""), quote=False)
+
+
+def _table_html(lines: list[str], start: int) -> tuple[str, int]:
+    """`lines[start]` is a `| a | b |` row and `lines[start+1]` the `|---|`
+    separator: returns (Telegram HTML, next unconsumed line index). The
+    separator's column count is authoritative (blank trailing cells vanish
+    otherwise); rows are padded/truncated to it inside one <pre> so the
+    pipes stay aligned. A non-row line ends the table."""
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    ncol = len(cells(lines[start + 1]))
+    rows = [cells(lines[start])]
+    i = start + 2
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            rows.append(cells(lines[i]))
+            i += 1
+        else:
+            break
+    out = []
+    for row in rows:
+        padded = [_inline_md(c) for c in (row + [""] * ncol)[:ncol]]
+        out.append("| " + " | ".join(padded) + " |")
+    return _mono("\n".join(out)), i
 
 
 def _inline_md(line: str) -> str:
@@ -301,7 +335,11 @@ def _md_html(chunk: str, open_pre: bool = False) -> tuple[str, bool]:
     in_pre = open_pre
     if in_pre:
         out.append("<pre><code>")   # reopened: the fence opened last chunk
-    for line in chunk.split("\n"):
+    lines = chunk.split("\n")
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        idx += 1
         m = _FENCE_RE.match(line)
         if in_pre:
             if m:
@@ -315,6 +353,14 @@ def _md_html(chunk: str, open_pre: bool = False) -> tuple[str, bool]:
             lang = m.group(1)
             out.append('<pre><code class="language-%s">' % lang if lang
                        else "<pre><code>")
+            continue
+        # A markdown table: this `| ... |` row followed by the `|---|` one.
+        # Rendered as one block <pre> (the only place pipes stay aligned);
+        # its lines are consumed wholesale.
+        if idx < len(lines) and _TABLE_SEP_RE.match(lines[idx]) \
+                and line.strip().startswith("|"):
+            table_html, idx = _table_html(lines, idx - 1)
+            out.append(table_html)
             continue
         out.append(_inline_md(line))
     return "\n".join(out), in_pre
