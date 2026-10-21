@@ -163,8 +163,8 @@ def _normalize_usage(
         }
     if not usage:
         # Fallback: estimate from client-side character counts via the shared
-        # estimator (nx/_tokens.py: exact tiktoken when installed, else
-        # chars/3.5). Flagged `estimated: 1` so accounting (and /cost) can
+        # estimator (nx/_tokens.py, chars/3.5). Flagged `estimated: 1` so
+        # accounting (and /cost) can
         # show the provenance instead of billing an estimate as a measured
         # number.
         fallback_chars = _resolve(fallback_chars)

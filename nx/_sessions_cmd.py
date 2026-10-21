@@ -406,15 +406,10 @@ def _cli_tokens(args: list[str]) -> bool:
             return n
         method = f"server /tokenize ({active.name})"
     else:
-        # Both branches count through the shared estimator (nx/_tokens.py);
-        # only the label differs, since the estimator itself picks tiktoken
-        # when it is importable and the chars/3.5 heuristic when it is not.
+        # Both branches count through the shared estimator (nx/_tokens.py).
         from . import _tokens as tokens
         count = tokens.estimate_tokens
-        if tokens.encoding_available():
-            method = "tiktoken/cl100k_base (approximate for non-OpenAI models; no /tokenize endpoint found)"
-        else:
-            method = "chars/3.5 estimate (no /tokenize endpoint found; pip install tiktoken for a closer approximation)"
+        method = "chars/3.5 estimate (no /tokenize endpoint found)"
     system_tokens = count(SYSTEM)
     tools_tokens = count(json.dumps(tools))
     user_tokens = count("hey")

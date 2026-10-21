@@ -54,7 +54,7 @@ def test_token_report_shape_and_role_subtotals(nx_fresh):
     from nx._ctxreport import _messages_token_report, _estimate_tokens
     assert _estimate_tokens("") == 0
     from nx import _tokens as _tk
-    # estimator-aware: exact via tiktoken when installed, else ceil(n/3.5)
+    # same estimator both sides (chars/3.5)
     assert _estimate_tokens("a" * 400) == _tk.estimate_tokens("a" * 400)
     msgs = _msgs()
     rep = _messages_token_report(msgs)

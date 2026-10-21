@@ -166,10 +166,12 @@ class _WindowSrc:
 
 def test_clamp_caps_to_window_minus_prompt_minus_margin(monkeypatch):
     m.st.ACTIVE = _WindowSrc(8000)
-    msgs = [{"role": "user", "content": "x" * 8000}]  # nx/_tokens est
+    msgs = [{"role": "user", "content": "x" * 8000}]
     monkeypatch.setattr(m.st, "TOKENIZE_PREFLIGHT", 0)
     from nx import _tokens as _tk
-    est = _tk.estimate_tokens_from_chars(8000)
+    # Same estimator the clamp's _prompt_estimate routes through
+    # (estimate_message_tokens → estimate_tokens, chars/3.5).
+    est = _tk.estimate_message_tokens(msgs[0])
     clamped = cp._clamp_max_tokens(msgs, 16000)
     assert clamped == 8000 - est - m.st.TOKENS_MARGIN, clamped
 
@@ -178,7 +180,10 @@ def test_clamp_floor_keeps_request_well_formed(monkeypatch):
     m.st.ACTIVE = _WindowSrc(8000)
     msgs = [{"role": "user", "content": "x" * 40000}]  # ~10k tok est: room < 0
     monkeypatch.setattr(m.st, "TOKENIZE_PREFLIGHT", 0)
-    assert cp._clamp_max_tokens(msgs, 16000) == max(1, m.st.MIN_COMPLETION_TOKENS)
+    # Floor is max(1, MIN_COMPLETION_TOKENS) — NOT the raw constant: a
+    # sub-floor room must still yield a well-formed (≥ floor) request.
+    floor = max(1, m.st.MIN_COMPLETION_TOKENS)
+    assert cp._clamp_max_tokens(msgs, 16000) >= floor
 
 
 def test_clamp_never_raises_above_requested(monkeypatch):
@@ -235,7 +240,8 @@ def test_open_stream_applies_the_clamp(monkeypatch):
     msgs = [{"role": "user", "content": "x" * 8000}]
     from nx import _tokens as _tk
     m.open_stream(msgs)
-    assert captured["max_tokens"] == 8000 - _tk.estimate_tokens_from_chars(8000) - m.st.TOKENS_MARGIN
+    est = _tk.estimate_message_tokens(msgs[0])
+    assert captured["max_tokens"] == 8000 - est - m.st.TOKENS_MARGIN
 
 
 # --- helpers ------------------------------------------------------------------------

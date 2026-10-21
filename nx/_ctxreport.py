@@ -3,8 +3,8 @@
 Two pieces:
 
 1. `_estimate_tokens` / `_messages_token_report` — per-message estimates via
-   the shared estimator in `nx/_tokens.py` (exact tiktoken/cl100k_base when
-   installed, else chars/3.5) with a per-role breakdown. Used by /ctx to show
+   the shared estimator in `nx/_tokens.py` (chars/3.5) with a per-role
+   breakdown. Used by /ctx to show
    where the context actually goes.
    When the active source's /tokenize endpoint works, /ctx uses it for the
    total (exact); per-message numbers stay estimated (tokenizing each message

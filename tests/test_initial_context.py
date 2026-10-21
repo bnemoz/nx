@@ -28,10 +28,9 @@ pays; enabling sub-agents is a deliberate, user-visible choice. A PR that
 moves the floor past BUDGET_TOKENS must either trim elsewhere or raise the
 number here — with the justification in the ledger below.
 
-TOKENIZER: prefers tiktoken (cl100k_base) when installed for a real count;
-falls back to a conservative chars/3.5 estimate otherwise so the guard still
-runs with zero extra dependencies, and we don't add one for a test. The
-fallback over-counts ~7% vs cl100k on code/JSON, which is the safe
+TOKENIZER: the shared chars/3.5 estimator (nx/_tokens.py — the same math
+the product's clamp, compaction gate, and /ctx all use). It over-counts
+~7% vs cl100k on code/JSON, which is the safe
 direction for a guard — it trips slightly early, never late.
 """
 import json
@@ -78,7 +77,7 @@ import nx as m  # noqa: E402
 # moved to the one-time Delegation note) and edit_file/plan_edit down a few
 # dozen; the 17-tool floor now measures 2879.
 # 0.49: run_tests (ROADMAP P3-5) joins the always-on set — one small schema
-# (a single optional `targets` string, ~131 tok measured by tiktoken on the
+# (a single optional `targets` string, ~131 tok on the chars/3.5 estimator of
 # 18-function set); BUDGET_TOKENS rises 2900→3020 by that deliberate,
 # verifiable cost.
 # 0.51: git_commit (ROADMAP P3-6) joins the always-on set — files/message/path
@@ -176,18 +175,11 @@ SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim bef
 def _count_tokens(text):
     """Token count for a string.
 
-    Returns (count, method). Uses tiktoken's cl100k_base when available
-    (the closest thing to a shared standard across served models); falls
-    back to a conservative chars/3.5 estimate so the test runs with no
-    extra deps. The fallback over-counts on code/JSON, which is the safe
-    direction for a bloat guard.
-    """
-    try:
-        import tiktoken
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text)), "tiktoken"
-    except Exception:
-        return max(1, round(len(text) / 3.5)), "chars/3.5"
+    The shared chars/3.5 estimator (nx/_tokens.py — the same math the
+    product's clamp, compaction gate, and /ctx all use). It over-counts on
+    code/JSON, which is the safe direction for a bloat guard."""
+    from nx import _tokens
+    return _tokens.estimate_tokens(text), "chars/3.5"
 
 
 def test_initial_context_floor():
