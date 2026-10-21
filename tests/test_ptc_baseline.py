@@ -34,6 +34,17 @@ def nx_fresh(tmp_path, monkeypatch):
     yield nx, tmp_path
     from nx import _compress
     _compress.set_toolcalls_mode("auto")
+    # Breaker residue: test_breaker_tripped_counter opens the breaker for
+    # write_file (limit=1) on the reloaded state module and nothing rewinds
+    # it — the reload fork survives this file, so a LATER test's stub render
+    # (gate vector includes the broken set) omits write_file and the child
+    # script dies with AttributeError instead of the allowlist refusal.
+    # Same poison class the argv-rewind wall guards against (0.155.4).
+    st = nx._state
+    st._MALFORMED_TOOL_FAILURES.clear()
+    st._MALFORMED_TOOL_BROKEN.clear()
+    from nx import _breaker
+    _breaker.rearm_run_tools_trip_watch()
 
 
 def _reset_ptc(nx):

@@ -306,6 +306,12 @@ class _null_ctx:
 # ---------------------------------------------------------------------------
 def test_repl_wake_runs_turn_and_flushes_notice(monkeypatch):
     _silence()
+    # Pin argv (test_todo_command.py's run_with precedent): main() parses the
+    # process argv (0.139.0's strict unknown-verb check raises SystemExit(2)
+    # for pytest's own argv[0]) — the same class of poison the conftest
+    # argv-rewind wall guards against.
+    old_argv = sys.argv
+    sys.argv = ["nx"]
     saved = {k: getattr(m, k) for k in
              ("read_multiline", "model_turn", "_banner", "_record_input",
               "_flush_pending_background_notice")}
@@ -351,6 +357,7 @@ def test_repl_wake_runs_turn_and_flushes_notice(monkeypatch):
         for k, v in saved.items():
             setattr(m, k, v)
         m.st._PENDING_SUBAGENT_NOTICE = None
+        sys.argv = old_argv
         _restore()
 
 
@@ -358,6 +365,8 @@ def test_repl_wake_restores_typed_prefill(monkeypatch):
     """Text typed before the wake must reappear at the next prompt, not be
     swallowed by the auto-continuation turn."""
     _silence()
+    old_argv = sys.argv
+    sys.argv = ["nx"]  # argv pin, as in test_repl_wake_runs_turn_and_flushes_notice
     saved = {k: getattr(m, k) for k in
              ("read_multiline", "model_turn", "_banner", "_record_input")}
     m._banner = lambda: ""
@@ -391,6 +400,7 @@ def test_repl_wake_restores_typed_prefill(monkeypatch):
         for k, v in saved.items():
             setattr(m, k, v)
         m.st._WAKE_PREFILL = ""
+        sys.argv = old_argv
         _restore()
 
 
@@ -471,6 +481,8 @@ def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
     that ends as plain text (no tool call) still delivers the finished job's
     exit line into the transcript."""
     _silence()
+    old_argv = sys.argv
+    sys.argv = ["nx"]  # argv pin (0.139.0 strict main() argv check)
     saved = {k: getattr(m, k) for k in
              ("read_multiline", "model_turn", "_banner", "_record_input",
               "_flush_pending_background_notice", "_run_bg_completion_scan")}
@@ -516,6 +528,7 @@ def test_repl_wake_delivers_note_on_text_only_turn(monkeypatch):
             setattr(m, k, v)
         m.st._BG_NOTICE_SEEN = None
         m.st._PENDING_BG_COMPLETION_NOTICE = None
+        sys.argv = old_argv
         _restore()
 
 
@@ -528,6 +541,8 @@ def test_repl_user_turn_clears_stale_wake_flag(monkeypatch):
     clears _WAKE_DUE at its start; anything genuinely undelivered is
     re-derived by wake_due()'s fresh sweep after the turn."""
     _silence()
+    old_argv = sys.argv
+    sys.argv = ["nx"]  # argv pin (0.139.0 strict main() argv check)
     saved = {k: getattr(m, k) for k in
              ("read_multiline", "model_turn", "_banner", "_record_input",
               "_flush_pending_background_notice")}
@@ -588,6 +603,7 @@ def test_repl_user_turn_clears_stale_wake_flag(monkeypatch):
         for k, v in saved.items():
             setattr(m, k, v)
         m.st._PENDING_SUBAGENT_NOTICE = None
+        sys.argv = old_argv
         _restore()
 
 

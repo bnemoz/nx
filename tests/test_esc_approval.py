@@ -365,6 +365,8 @@ def test_malformed_args_circuit_breaker_drops_tool():
 # 6. REPL drops back to chat input on TURN_ESC (no extra model turn)
 # ---------------------------------------------------------------------------
 def test_repl_breaks_on_esc():
+    old_argv = sys.argv
+    sys.argv = ["nx"]  # argv pin: main() parses the process argv strictly
     saved_read_multiline = m.read_multiline
     saved_model_turn = m.model_turn
     saved_banner = m._banner
@@ -401,6 +403,7 @@ def test_repl_breaks_on_esc():
         m.model_turn = saved_model_turn
         m._banner = saved_banner
         builtins.print = _REAL_PRINT
+        sys.argv = old_argv
     print("PASS — REPL breaks inner loop on TURN_ESC, no extra model turn")
 
 
@@ -626,6 +629,8 @@ def test_reasoning_only_empty_completion_forces_final_without_empty_assistant():
 
 
 def test_repl_recover_command_forces_visible_checkpoint():
+    old_argv = sys.argv
+    sys.argv = ["nx"]  # argv pin: main() parses the process argv strictly
     saved_read_multiline = m.read_multiline
     saved_model_turn = m.model_turn
     saved_banner = m._banner
@@ -658,6 +663,7 @@ def test_repl_recover_command_forces_visible_checkpoint():
         m.model_turn = saved_model_turn
         m._banner = saved_banner
         builtins.print = _REAL_PRINT
+        sys.argv = old_argv
     print("PASS — /recover forces a low-temp visible checkpoint")
 
 
