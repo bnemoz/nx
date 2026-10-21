@@ -383,6 +383,20 @@ _BREAKER_ENDPOINT_KEY: Any = BREAKER_UNOBSERVED
 _TALLY_ARG_REPAIRS: int = 0   # args/name repairs applied this turn
 _TALLY_RETRIES: int = 0       # corrective nudges / recovery cuts this turn
 
+# --- PTC Phase 0 baseline (docs/ptc-migration-spec.md) ------------------------
+# Per-turn tool-call / repair-loop counters, incremented in
+# _handle_native_tool_calls, shown as the `ptc-baseline` footer field, reset
+# per turn alongside the _TALLY_* counters above. Fan-out size is the N a
+# _should_parallelize batch would have covered (0 = sequential turn).
+_PTC_TURN_TOOL_CALLS: int = 0        # tool calls in this turn's native batch
+_PTC_FANOUT_SIZE: int = 0            # batch size when the turn parallelized
+_PTC_ENVELOPE_CHARS: int = 0         # sum of the raw JSON args strings
+_PTC_REPAIRED_BY_CANDIDATES: int = 0 # malformed args repaired by candidates
+_PTC_BRACKET_SALVAGED: int = 0       # read-tool bracket-closure salvages
+_PTC_NORMALIZED: int = 0             # double-encoded / pair-list folds
+_PTC_HARD_FAILED: int = 0            # unrecoverable parse failures
+_PTC_BREAKER_TRIPPED: int = 0        # breaker opened for a tool this turn
+
 # --- text-only-after-stall guard ---------------------------------------------
 # Set when a real tool call runs after this reasoning-stall episode's first
 # nudge (see _run_model_turn_loop's TURN_TOOL branch). While it is True, a
