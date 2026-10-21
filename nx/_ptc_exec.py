@@ -63,10 +63,66 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from typing import Any
 
 from . import _state as st
 from ._env import _env_int
+
+
+def _ptc_preexec() -> None:  # pragma: no cover — runs in the forked child
+    """Best-effort OS hardening for the PTC child, run between fork and exec
+    (`preexec_fn`). Two layers, both optional and silent on failure:
+
+    1. seccomp deny for the socket/connect family (libseccomp when present):
+       network egress is the exfiltration channel the stub allowlist cannot
+       govern, since the script may import socket/urllib directly. SCMP_ACT_ERRNO
+       (EACCES) rather than SIGKILL so a stray call raises a catchable Python
+       error instead of nuking the interpreter.
+    2. prctl NO_NEW_PRIVS — belt-and-braces: the child never gains privileges
+       even if something execs a setuid binary.
+
+    Not a security boundary against the user themselves (the child still has
+    the user's filesystem rights); it closes the network + privilege-escalation
+    doors for the untrusted-model-script case, which is the threat in the spec
+    (docs/ptc-migration-spec.md §Risk table). Failures are tolerated so the
+    feature still works on non-Linux / hardened kernels (EACCES on seccomp
+    syscalls under some containers)."""
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(None, use_errno=True)
+        PR_SET_NO_NEW_PRIVS = 38
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            pass  # tolerated: hardened/old kernel
+        seccomp_name = ctypes.util.find_library("seccomp")
+        if not seccomp_name:
+            return
+        sc = ctypes.CDLL(seccomp_name, use_errno=True)
+        SCMP_ACT_ALLOW = 0x7FFF0000
+        SCMP_ACT_ERRNO = 0x00050000
+        EACCES = 13
+        sc.seccomp_init.restype = ctypes.c_void_p
+        sc.seccomp_rule_add.argtypes = (
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint)
+        sc.seccomp_syscall_resolve_name.restype = ctypes.c_int
+        ctx = sc.seccomp_init(SCMP_ACT_ALLOW)
+        if not ctx:
+            return
+        # Anything that can create a network endpoint or ship bytes out:
+        for call in ("socket", "socketpair", "connect", "accept", "accept4",
+                     "bind", "listen", "sendto", "sendmsg", "sendmmsg",
+                     "recvfrom", "recvmsg", "getsockopt", "setsockopt"):
+            nr = sc.seccomp_syscall_resolve_name(call.encode())
+            if nr < 0:
+                continue  # not on this kernel
+            sc.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | EACCES, nr, 0)
+        # AF_UNIX sockets stay available to the pipe... they do NOT: the pipe
+        # protocol uses os.read/os.write on fds inherited from the parent, not
+        # socketpair, so denying socket() entirely is protocol-safe.
+        sc.seccomp_load(ctypes.c_void_p(ctx))
+    except Exception:  # noqa: BLE001 — hardening is best-effort, never fatal
+        pass
 
 RUN_TOOLS_TOOL = {
     "type": "function",
@@ -401,19 +457,27 @@ def _dispatch_pipe_call(name: Any, args: Any, respond) -> None:
     respond({"result": result if isinstance(result, str) else str(result)})
 
 
-def _dispatch_pipe_batch(batch: list[tuple[int, Any, Any]], respond) -> int:
+def _dispatch_pipe_batch(batch: list[tuple[int, Any, Any]], respond,
+                         deadline: float | None = None) -> tuple[int, bool]:
     """Dispatch a BATCH of pending pipe frames (Phase 3): >1 call goes through
     a ThreadPoolExecutor (bound of _run_read_only_parallel), 1 call stays on
     the serial fast path — no pool. Replies are emitted in frame-id order once
     the batch completes (the protocol carries ids either way); run_tool is
     resolved per-call via the module attribute, so a monkeypatched
-    nx._dispatch.run_tool applies from pool threads. Returns the peak number
-    of concurrently in-flight calls (== len(batch) for the pooled path)."""
+    nx._dispatch.run_tool applies from pool threads. Returns (peak concurrent
+    in-flight calls, timed_out) — timed_out means the wall-clock deadline
+    expired while the batch was still running; unanswered calls then get
+    skip-filled by the run_tools finally (kill + error frames), so a hung
+    dispatch (a blocked hook, a FIFO read) can never outlive the script's
+    budget."""
     if len(batch) <= 1:
         cid, name, args = batch[0]
         _dispatch_pipe_call(name, args,
                             lambda payload: respond(dict(payload, id=cid)))
-        return 1
+        return 1, False
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        return len(batch), True
     replies: dict[int, dict] = {}
 
     def _one(item: tuple[int, Any, Any]) -> None:
@@ -423,10 +487,31 @@ def _dispatch_pipe_batch(batch: list[tuple[int, Any, Any]], respond) -> int:
                             replies.__setitem__(_cid, dict(payload, id=_cid)))
 
     with ThreadPoolExecutor(max_workers=min(8, len(batch))) as pool:
-        list(pool.map(_one, batch))
+        futures = [pool.submit(_one, item) for item in batch]
+        if deadline is None:
+            for f in futures:
+                f.result()
+            timed_out = False
+        else:
+            budget = max(0.0, deadline - time.monotonic())
+            done, not_done = concurrent.futures.wait(
+                futures, timeout=budget)
+            timed_out = bool(not_done)
+            if timed_out:
+                # Cancel what can still be cancelled and leave the rest to
+                # the skip-fill + kill path (pool threads are daemonic-ish:
+                # shutdown(wait=False) lets the with-block return while a
+                # wedged run_tool thread dies with the process group kill).
+                for f in not_done:
+                    f.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                for cid, _n, _a in batch:
+                    replies.setdefault(
+                        cid, {"id": cid,
+                              "error": _skip_fill_reason(None)})
     for cid in sorted(replies):
         respond(replies[cid])
-    return len(batch)
+    return len(batch), timed_out
 
 
 def run_tools(code: str = "", timeout: int = 0) -> str:
@@ -490,6 +575,7 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                  "HOME": os.environ.get("HOME", "/tmp"),
                  "LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},
+            preexec_fn=_ptc_preexec,  # seccomp net-deny + NO_NEW_PRIVS (best-effort)
         )
         st._ACTIVE_PTC_PROC = proc  # visible to tests/teardown; cleared below
 
@@ -592,8 +678,12 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                                 ((f[1], f[2]) for f in batch)
                                 if not _call_will_dispatch(_n, _a))
                 pending_ids = {f[0] for f in batch}
-                n_concurrent = max(n_concurrent,
-                                   _dispatch_pipe_batch(batch, _respond))
+                peak, batch_timed_out = _dispatch_pipe_batch(
+                    batch, _respond, deadline=deadline)
+                n_concurrent = max(n_concurrent, peak)
+                if batch_timed_out:
+                    timed_out = True
+                    break
                 pending_ids = set()
                 if held_done is not None:
                     # The completion frame was already in the queue during the

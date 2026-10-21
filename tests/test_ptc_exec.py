@@ -436,3 +436,66 @@ def test_cacheable_tuple_is_one_source_of_truth():
     finally:
         _dispatch.run_tool = orig
     assert monkey_called == ["recall_lessons"]
+
+
+# --- 8. hardening (0.165.3): batch deadline + seccomp net-deny ------------------
+
+def test_batch_deadline_fires_on_hung_dispatch(ptc_on, fake_dispatch, tmp_path,
+                                               monkeypatch):
+    """The reviewer's finding #2: the deadline was only checked BETWEEN
+    batches — a hung run_tool body inside _dispatch_pipe_batch blocked past
+    it. With the future-based batch the wait is bounded and the script folds
+    into the timeout error result."""
+    monkeypatch.chdir(tmp_path)
+    calls: list = []
+
+    def hung_run_tool(name, args):
+        calls.append(name)
+        import time as _t
+        _t.sleep(60)  # far past the 3s budget
+        return "NEVER"
+
+    monkeypatch.setattr(_dispatch, "run_tool", hung_run_tool)
+    res = _ptc_exec.run_tools(
+        "import stubs\nprint(stubs.search_files(pattern='x'))\n", timeout=3)
+    assert "timed out after 3s" in res
+    assert calls  # the hung dispatch was actually entered
+    # and the harness returned promptly, not after 60s
+
+
+def test_seccomp_blocks_child_network(ptc_on, fake_dispatch, tmp_path,
+                                      monkeypatch):
+    """Reviewer's finding #1 mitigation: the child gets _ptc_preexec —
+    seccomp denies the socket family (EACCES) and prctl sets NO_NEW_PRIVS.
+    The pipe (inherited fds) is unaffected. Skips when libseccomp is absent
+    (macOS, minimal containers) — the preexec is best-effort by design."""
+    import ctypes.util
+    if not ctypes.util.find_library("seccomp"):
+        pytest.skip("libseccomp not available")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    res = _ptc_exec.run_tools(
+        "import socket\n"
+        "try:\n"
+        "    s = socket.socket()\n"
+        "    s.connect(('93.184.216.34', 80))\n"
+        "    print('NET FAIL')\n"
+        "except OSError as e:\n"
+        "    print('blocked', e.errno)\n"
+        "import stubs\n"
+        "print(stubs.read_file(path='a.txt'))\n", timeout=30)
+    assert "blocked 13" in res  # EACCES from the seccomp filter
+    assert "FAKE[a.txt]" in res  # pipe protocol unaffected
+
+
+def test_env_scrubbed_in_child(ptc_on, fake_dispatch, tmp_path, monkeypatch):
+    """0.165.2's scrub, pinned: no canary secret reaches the child env."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PTC_CANARY_SECRET", "supersecret123")
+    res = _ptc_exec.run_tools(
+        "import os\n"
+        "print('LEAK' if 'PTC_CANARY_SECRET' in os.environ else 'clean')\n"
+        "import stubs\nprint(stubs.read_file(path='a.txt'))\n", timeout=30)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    assert "clean" in res
+    assert "LEAK" not in res
