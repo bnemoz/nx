@@ -64,6 +64,11 @@ def build_workspace() -> None:
     WS.mkdir(parents=True)
     big_file(WS / "big.txt", 12000)      # ~700KB of varied text
     big_file(WS / "big2.txt", 12000)
+    # Task B also needs its gen/ dirs to exist: write_file never creates
+    # parent dirs (by design — a typo'd path must fail, not silently create),
+    # and the stub serves the next script turn regardless of a tool error.
+    for d in range(6):
+        (WS / f"gen/dir_{d}").mkdir(parents=True)
 
 
 def main() -> None:
@@ -80,9 +85,17 @@ def main() -> None:
     script_a.append({"final": "done reading"})
 
     # Task B: 1500 write_file calls to unique paths (path churn), then final.
+    # Brace note: the comprehension's `for` must bind to the tool_call dict, not
+    # to the args dict — `{{...args...}} for i in ...` inside one dict display
+    # parses as a one-element list whose single entry is a DICT COMPREHENSION
+    # keyed 'tool_call', leaving exactly ONE turn (the last call, i=1499). That
+    # bug shipped in 0.108.5: the churn task "passed" in 2 turns, writing one
+    # file, for eight months.
     script_b = [{"tool_call": {"name": "write_file", "args": {
         "path": f"gen/dir_{i // 250}/file_{i}.txt",
-        "content": f"payload {i} " + "x" * 500}} for i in range(1500)}]
+        "content": f"payload {i} " + "x" * 500}}}
+                for i in range(1500)]
+    assert len(script_b) == 1500, f"script_b collapsed to {len(script_b)}"
     script_b.append({"final": "done writing"})
 
     SCENARIOS["ram-a"] = {"title": "big transcript", "instruction": instr_a,

@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.update(
     NX_ENV_FILE="/dev/null",
     NX_SKIP_STARTUP_PROBES="1",
@@ -20,8 +20,8 @@ os.environ.update(
     # defaults: spill + autocompress ON, as in a real chat
 )
 
-import nx as _m
 from nx import _state as st
+from nx import _sources as _m
 from nx._batch import run_batch
 from nx._eval_cmd import SCENARIOS, _stub_server
 
@@ -69,8 +69,8 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 saved = (st.ACTIVE, st.client, st.MODEL, dict(st.SOURCES), list(st.SOURCE_ORDER))
 old_cwd = os.getcwd()
 try:
-    src = _m._sources.Source("ram-stub", base_url, "sk-h", "ram-stub")
-    src.client = _m._sources.OpenAI(base_url=base_url, api_key="sk-h")
+    src = _m.Source("ram-stub", base_url, "sk-h", "ram-stub")
+    src.client = _m.OpenAI(base_url=base_url, api_key="sk-h")
     src._context_window = None
     src._context_window_probe_attempted = True
     st.SOURCES["ram-stub"] = src
