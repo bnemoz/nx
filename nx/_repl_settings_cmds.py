@@ -188,6 +188,106 @@ def _cmd_source(user: str, state: _ReplState) -> None:
         st._METRICS.source = target
 
 
+def _cmd_model(user: str, state: _ReplState) -> None:
+    """/model — model-first view over the same machinery /source drives.
+
+    Bare: list every model nx can serve, grouped by source, current one
+    starred. `/model <model-id>`: find the source advertising that id and
+    switch to it (exact match first, then unambiguous fuzzy match; the id
+    "default" means the active/only source's configured default). If two or
+    more sources serve the same id, fall back to the two-arg form's answer:
+    stay put with a message naming the sources. `/model <name> <model>` is
+    the /source override form — same source-level switch, non-sticky."""
+    import nx as _m
+    sp = user.split()
+    active_name = st.ACTIVE.name if st.ACTIVE is not None else None
+    if len(sp) == 1:
+        print(f"{DIM}  models:{RESET}")
+        for sname in st.SOURCE_ORDER:
+            src = st.SOURCES[sname]
+            mark = f"{C.SUCCESS}★{RESET}" if sname == active_name else f"{DIM} ·{RESET}"
+            ids = src.list_model_ids()
+            ids = list(ids) if ids else [src.display_model()]
+            for mid in ids:
+                cur = (sname == active_name and mid == st.MODEL)
+                m_mark = f"{C.SUCCESS}★{RESET}" if cur else f"{DIM} ·{RESET}"
+                print(f"  {mark} {C.ACCENT}{sname:<12}{RESET} {m_mark} {mid}")
+        print(f"{DIM}  /model <model-id> to switch · /model <source> <model>"
+              f" to pin · /source for endpoint detail{RESET}")
+        return
+    if len(sp) == 2:
+        target = sp[1]
+        # Two-arg escape hatch even in the two-token form: a source name with
+        # no model means "its configured default".
+        if target in st.SOURCES:
+            _switch_to(st, target, None, state, _m)
+            return
+        if target == "default":
+            if active_name is None:
+                print(f"{C.ERROR}  ✗ no active source — use /model <source>{RESET}")
+                return
+            _switch_to(st, active_name, None, state, _m)
+            return
+        hits = [sname for sname in st.SOURCE_ORDER
+                if target in (st.SOURCES[sname].list_model_ids() or [])]
+        if not hits:
+            fuzzy = _fuzzy_model_hits(target)
+            if len(fuzzy) == 1:
+                hits = [fuzzy[0][0]]
+                target = fuzzy[0][1]
+        if not hits:
+            print(f"{C.ERROR}  ✗ no source serves {target!r} — /model lists"
+                  f" what's available{RESET}")
+            return
+        if len(hits) > 1:
+            names = ", ".join(hits)
+            print(f"{C.ERROR}  ✗ {target!r} is served by several sources"
+                  f" ({names}) — pick one: /model <source> {target}{RESET}")
+            return
+        sname = hits[0]
+        pin = None if st.SOURCES[sname].display_model() == target else target
+        _switch_to(st, sname, pin, state, _m, pin_model=target)
+        return
+    # Three+ tokens: the /source override form.
+    _cmd_source(f"/source {' '.join(sp[1:])}", state)
+
+
+def _fuzzy_model_hits(prefix: str) -> list[tuple[str, str]]:
+    """(source, model-id) pairs whose id fuzzily matches prefix, unique by id
+    across sources (an id several sources serve is ambiguous — skip it)."""
+    from ._chatbox import _fuzzy_filter
+    by_id: dict[str, list[str]] = {}
+    for sname in st.SOURCE_ORDER:
+        for mid in st.SOURCES[sname].list_model_ids() or []:
+            by_id.setdefault(mid, []).append(sname)
+    out = []
+    for mid, sources in by_id.items():
+        if mid not in _fuzzy_filter(list(by_id), prefix):
+            continue
+        if len(sources) != 1:
+            continue  # ambiguous id: the exact-match path already told the user
+        out.append((sources[0], mid))
+    return out
+
+
+def _switch_to(st_mod, target: str, model_override: str | None,
+               state: _ReplState, _m, pin_model: str | None = None) -> None:
+    """Shared post-switch printout for /model (and reusable by /source)."""
+    if not switch_source(target, model_override=model_override):
+        return
+    src = st_mod.SOURCES[target]
+    ctx = src.resolve_context_window()
+    ctx_s = f" · {_abbr(ctx)} ctx" if isinstance(ctx, int) and ctx > 0 else ""
+    via = f" (via {src.name})" if pin_model else ""
+    print(f"{BOLD}{C.WARNING}  → {st_mod.MODEL}{via}{RESET} "
+          f"{DIM}({src.base_url}{ctx_s}){RESET}")
+    print(_m._banner())
+    state.session_dirty = True
+    if st_mod._METRICS is not None:
+        st_mod._METRICS.model = st_mod.MODEL
+        st_mod._METRICS.source = target
+
+
 def _cmd_theme(user: str, state: _ReplState) -> None:
     import nx as _m
     sp = user.split()

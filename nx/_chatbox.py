@@ -597,7 +597,8 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
             cmd, rest = buf[0].split(" ", 1)
             matches = _match_slash_args(cmd, rest)
             kind = "arg"
-        elif len(buf) == 1 and buf[0].startswith("/source ") and buf[0].count(" ") == 2:
+        elif len(buf) == 1 and buf[0].startswith(("/source ", "/model ")) \
+                and buf[0].count(" ") == 2:
             _cmd, src_name, rest = buf[0].split(" ", 2)
             matches = _match_source_model(src_name, rest)
             kind = "arg2"
@@ -1012,10 +1013,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                             compute_matches()
                             render()
                             continue
-                        if cmd == "/source":
-                            # /source has a second (model) level -- don't
-                            # submit on an exact source-name match, advance
-                            # to the model dropdown instead.
+                        if cmd in ("/source", "/model"):
+                            # /source and /model have a second (model) level --
+                            # don't submit on an exact source-name match,
+                            # advance to the model dropdown instead.
                             buf[row] = new_line + " "
                             col = len(buf[row])
                             compute_matches()
@@ -1147,10 +1148,10 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                         if new_line != buf[row]:
                             buf[row] = new_line
                             col = len(buf[row])
-                        elif cmd == "/source":
-                            # /source has a second (model) level -- a second
-                            # Tab (exact source name already typed) advances
-                            # to the model dropdown instead of doing nothing.
+                        elif cmd in ("/source", "/model"):
+                            # /source and /model have a second (model) level --
+                            # a second Tab (exact source name already typed)
+                            # advances to the model dropdown instead.
                             buf[row] = new_line + " "
                             col = len(buf[row])
                     elif current_matches:

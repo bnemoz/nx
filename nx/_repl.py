@@ -49,7 +49,7 @@ from ._wip import _cmd_wip
 from ._memory_optimize import _cmd_memory_optimize  # noqa: F401 (re-export for tests)
 from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for tests)
 from ._repl_settings_cmds import (
-    _cmd_quit, _cmd_help, _cmd_source, _cmd_theme, _cmd_reasoning,
+    _cmd_quit, _cmd_help, _cmd_source, _cmd_model, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
     _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro, _cmd_review, _cmd_build,
@@ -199,6 +199,7 @@ def _cmd_panel(user: str, state: _ReplState) -> None:
 bind_handlers({
     "/quit": _cmd_quit,
     "/help": _cmd_help,
+    "/model": _cmd_model,
     "/source": _cmd_source,
     "/theme": _cmd_theme,
     "/reasoning": _cmd_reasoning,

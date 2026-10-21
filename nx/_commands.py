@@ -33,6 +33,26 @@ from ._ansi import THEMES
 ArgOptions = Union[list, Callable[[], list]]
 
 
+def _model_id_options() -> "list[str]":
+    """First-arg dropdown options for /model: every model id any source
+    advertises (via GET /models, cached), plus source names (the default-
+    switch escape hatch) and "default". Network-free unless a source's id
+    list was never fetched — same trade as /source's dropdown."""
+    names: "list[str]" = []
+    seen: "set[str]" = set()
+    for sname in st.SOURCE_ORDER:
+        src = st.SOURCES[sname]
+        for mid in src.list_model_ids() or []:
+            if mid not in seen:
+                seen.add(mid)
+                names.append(mid)
+        if sname not in seen:
+            seen.add(sname)
+            names.append(sname)
+    names.append("default")
+    return names
+
+
 @dataclass
 class CommandSpec:
     """Metadata for one slash command. `handler` binds at import of the
@@ -63,7 +83,10 @@ _SPECS = [
     # (name, help, args, aliases, arg_options, tier, group)
     ("/help", "list all slash commands", None, [], None, 1, "session"),
     ("/init", "generate/update AGENTS.md for this project", None, [], None, 1, "session"),
-    ("/source", "list sources, switch to one, or override its model",
+    ("/model", "list models, switch by model id, or pin a source's model",
+     "[model-id | source] [model]",
+     [], lambda: _model_id_options(), 1, "model"),
+    ("/source", "list sources (endpoints), switch to one, or override its model",
      "[name] [model]", [], lambda: list(st.SOURCE_ORDER), 1, "model"),
     ("/theme", "list color themes, or switch to one", "[name]", [],
      sorted(THEMES), 1, "display"),
