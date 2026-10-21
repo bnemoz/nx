@@ -106,7 +106,7 @@ PTC_NOTE = (
     PTC_NOTE_MARKER + " programmatic tool calling is enabled this session: "
     "the run_tools tool runs a Python script with the session's read tools "
     "importable as `import stubs` (stubs.read_file(...), "
-    "stubs.search_files(...), stubs.list_dir(...), stubs.memory_search(...), "
+    "stubs.search_files(...), stubs.memory_search(...), "
     "stubs.recall_lessons(...) — each returns the tool result string; your "
     "script's printed output is what re-enters context).\n"
     "- Use it for \u2265\u0032 independent reads in one turn (loops, filters, cross-file "
@@ -179,7 +179,10 @@ def ptc_allowlist() -> frozenset[str]:
 def _ptc_refusal(name: str) -> str:
     """Standard refusal for a non-allowlisted name over the pipe — the same
     'not available + what to do instead' shape as _GATE_REFUSALS."""
-    allowed = ", ".join(sorted(ptc_allowlist()))
+    # Only names actually rendered as stubs (Phase 1 exclusions dropped, and
+    # retired-from-the-floor names like list_dir never appear in a render).
+    from ._ptc_stubs import EXCLUDED_TOOLS
+    allowed = ", ".join(sorted(ptc_allowlist() - EXCLUDED_TOOLS))
     return (f"{name} is not callable from a run_tools script — the PTC pipe is "
             f"read-only ({allowed}). Every other tool (writes, run_bash, "
             "spawn_agent, ...) must be a normal JSON tool call this turn; make "

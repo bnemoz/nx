@@ -175,7 +175,7 @@ DELEGATION_STREAK_NOTICE = (
 PTC_FANOUT_GUIDANCE = (
     "[Runtime note: run_tools is available this session — use it for ≥2 "
     "independent READS in one turn. import stubs; stubs.read_file(...) / "
-    "stubs.search_files(...) / stubs.list_dir(...) / stubs.memory_search(...) "
+    "stubs.search_files(...) / stubs.memory_search(...) "
     "/ stubs.recall_lessons(...) return the tool result string, and your "
     "script's printed output is what lands back in context (results are free "
     "to filter, loop, and combine in the script instead of re-billing each "
