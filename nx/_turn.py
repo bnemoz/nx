@@ -482,6 +482,7 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     st._PTC_NORMALIZED = 0
     st._PTC_HARD_FAILED = 0
     st._PTC_BREAKER_TRIPPED = 0
+    st._PTC_FANOUT_SCRIPTS = 0
     quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"

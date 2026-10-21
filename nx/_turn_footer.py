@@ -171,6 +171,9 @@ def _ptc_baseline_field() -> str:
     fanout = getattr(st, "_PTC_FANOUT_SIZE", 0)
     if fanout:
         parts.append(f"fan-out x{fanout}")
+    scripts = getattr(st, "_PTC_FANOUT_SCRIPTS", 0)
+    if scripts:
+        parts.append(f"script-fan-out x{scripts}")
     if repaired or salvaged or normalized or hard or tripped:
         bits = []
         if repaired:

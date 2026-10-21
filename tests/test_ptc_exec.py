@@ -59,7 +59,7 @@ def fake_dispatch(monkeypatch):
 
     def _fake(name, args):
         calls.append((name, dict(args)))
-        return f"FAKE[{name}]"
+        return f"FAKE[{args.get('path', name)}]"
 
     monkeypatch.setattr(_dispatch, "run_tool", _fake)
     return calls
@@ -93,7 +93,7 @@ def test_script_write_call_refused_never_dispatched(ptc_on, fake_dispatch, tmp_p
         "print('W:' + w)\n"
         "s = stubs.todo_write(todos=[{'text': 'x', 'status': 'pending'}])\n"
         "print('S:' + s)\n", timeout=60)
-    assert "FAKE[read_file]" in res
+    assert "FAKE[a.txt]" in res
     # Refused names never reach dispatch at all (allowlist, before run_tool).
     assert [n for n, _ in fake_dispatch] == ["read_file"]
     assert "ERROR:" in res and "write_file is not callable" in res
@@ -321,3 +321,118 @@ def test_per_call_failure_returns_error_string_not_raise(ptc_on, monkeypatch,
         "print('AFTER' if r.startswith('ERROR') else 'RAISED')\n", timeout=30)
     assert "AFTER" in res  # script kept running after the failed call
     assert res.startswith("[run_tools:")
+
+
+# --- Phase 3: batch fan-out, launcher reader thread, telemetry ------------------
+
+def test_dispatch_pipe_batch_concurrent_and_id_ordered():
+    """Batch of 2 with staggered sleeps: replies arrive in id order AND the
+    fast call does not wait for the slow one (real concurrency)."""
+    import time as _t
+    started: list[float] = []
+    finished: dict[str, float] = {}
+
+    def _fake(name, args):
+        started.append(_t.monotonic())
+        _t.sleep({"read_file": 0.3, "search_files": 0.0}[name])
+        finished[args["cid"]] = _t.monotonic()
+        return f"FAKE[{name}]"
+
+    calls: list[dict] = []
+    orig = _dispatch.run_tool
+    _dispatch.run_tool = _fake
+    try:
+        _ptc_exec._dispatch_pipe_batch(
+            [(1, "read_file", {"cid": "slow"}),
+             (2, "search_files", {"cid": "fast"})],
+            lambda payload: calls.append(payload))
+    finally:
+        _dispatch.run_tool = orig
+    assert [c["id"] for c in calls] == [1, 2]
+    assert calls[0]["result"] == "FAKE[read_file]"
+    assert calls[1]["result"] == "FAKE[search_files]"
+    # call 2 (0.0s sleep) finished well before call 1 (0.3s) would have allowed
+    assert finished["fast"] - started[0] < 0.25
+    assert finished["slow"] - started[0] >= 0.25
+
+
+def test_dispatch_pipe_batch_fast_path_no_pool(monkeypatch):
+    """A 1-frame batch stays serial: zero ThreadPoolExecutor instantiations."""
+    created: list = []
+
+    class _SpyExecutor(_ptc_exec.ThreadPoolExecutor):
+        def __init__(self, *a, **k):
+            created.append(1)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(_ptc_exec, "ThreadPoolExecutor", _SpyExecutor)
+    orig = _dispatch.run_tool
+    _dispatch.run_tool = lambda name, args: f"FAKE[{name}]"
+    got: list[dict] = []
+    try:
+        _ptc_exec._dispatch_pipe_batch([(7, "read_file", {})],
+                                       lambda p: got.append(p))
+    finally:
+        _dispatch.run_tool = orig
+    assert got == [{"id": 7, "result": "FAKE[read_file]"}]
+    assert not created
+
+
+def test_e2e_threaded_script_two_stub_reads(ptc_on, fake_dispatch, tmp_path,
+                                            monkeypatch):
+    """A child script calling stubs from 2 concurrent threads gets both
+    results through the launcher's reader-thread pipe."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("AAA", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("BBB", encoding="utf-8")
+    res = _ptc_exec.run_tools(
+        "import stubs, threading\n"
+        "out = {}\n"
+        "def one(): out['a'] = stubs.read_file(path='a.txt')\n"
+        "def two(): out['b'] = stubs.read_file(path='b.txt')\n"
+        "t1, t2 = threading.Thread(target=one), threading.Thread(target=two)\n"
+        "t1.start(); t2.start(); t1.join(); t2.join()\n"
+        "print(out['a'] + '|' + out['b'])\n", timeout=60)
+    # both threads got their own (correct) result through the pipe
+    assert "FAKE[a.txt]|FAKE[b.txt]" in res
+    assert len(fake_dispatch) == 2
+
+
+def test_fanout_scripts_counter_and_footer_field(ptc_on, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("y", encoding="utf-8")
+    start = st._PTC_FANOUT_SCRIPTS
+    _ptc_exec.run_tools(
+        "import stubs\n"
+        "print(stubs.read_file(path='a.txt'), stubs.read_file(path='b.txt'))\n",
+        timeout=30)
+    assert st._PTC_FANOUT_SCRIPTS == start + 1
+    # a 1-call script must NOT increment
+    _ptc_exec.run_tools("import stubs\nprint(stubs.read_file(path='a.txt'))\n",
+                        timeout=30)
+    assert st._PTC_FANOUT_SCRIPTS == start + 1
+    # footer field
+    monkeypatch.setattr(st, "_PTC_TURN_TOOL_CALLS", 1)
+    monkeypatch.setattr(st, "_PTC_FANOUT_SCRIPTS", 1)
+    from nx import _turn_footer
+    assert "script-fan-out x1" in _turn_footer._ptc_baseline_field()
+
+
+def test_cacheable_tuple_is_one_source_of_truth():
+    """Audit correction #4: prefetch/spec_reads import _dispatch's tuple —
+    recall_lessons included, identity shared, and maybe_speculate dispatches."""
+    from nx import _spec_reads, _tool_prefetch
+    assert (_tool_prefetch._CACHEABLE_READ_TOOLS
+            is _dispatch._CACHEABLE_READ_TOOLS)
+    assert "recall_lessons" in _tool_prefetch._CACHEABLE_READ_TOOLS
+    assert "recall_lessons" in _ptc_exec.ptc_allowlist()
+    monkey_called: list = []
+    orig = _dispatch.run_tool
+    _dispatch.run_tool = lambda name, args: (
+        monkey_called.append(name) or "LESSONS")
+    try:
+        _spec_reads.maybe_speculate("recall_lessons", '{"query": "x"}')
+    finally:
+        _dispatch.run_tool = orig
+    assert monkey_called == ["recall_lessons"]

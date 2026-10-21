@@ -62,6 +62,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import _state as st
@@ -231,8 +232,10 @@ _in = sys.stdin     # response lines come from the real stdin (fd 0)
 _cap = io.StringIO()
 sys.stdout = _cap   # script prints never touch the frame channel
 sys.stderr = _cap
-_lock = threading.Lock()
-_seq = [0]
+_lock = threading.Lock()   # guards _seq only (frame writes are atomic-enough
+_seq = [0]                 # via GIL line buffering, but stay tidy)
+_waiters = {}              # capture id -> ([response], threading.Event)
+_waiters_lock = threading.Lock()
 
 
 def _send(obj):
@@ -240,27 +243,59 @@ def _send(obj):
     _out.flush()
 
 
+def _reader():
+    """Owns _in exclusively: one thread reads response frames and wakes the
+    per-call waiter, so script threads may stub-call concurrently. EOF clears
+    every pending waiter with a None response (the pipe-closed string)."""
+    while True:
+        line = _in.readline()
+        if not line:
+            break
+        try:
+            resp = json.loads(line)
+            if not isinstance(resp, dict):
+                raise ValueError
+        except ValueError:
+            resp = {"error": "malformed harness response frame"}
+        cid = resp.get("id")
+        with _waiters_lock:
+            waiter = _waiters.pop(cid, None) if isinstance(cid, int) else None
+        if waiter is not None:
+            waiter[0].append(resp)
+            waiter[1].set()
+    with _waiters_lock:
+        pending = list(_waiters.values())
+        _waiters.clear()
+    for holder, ev in pending:
+        holder.append(None)
+        ev.set()
+
+
 def _capture(name, args):
     """Marshal one stub call to the harness and block for its answer.
     Failures arrive as "ERROR: ..." strings (the run_tool convention), never
     as raises across the pipe — a refused or failed call is the script's to
-    handle, exactly as an ERROR tool result is JSON mode's."""
+    handle, exactly as an ERROR tool result is JSON mode's. Thread-safe:
+    several script threads may capture concurrently (Phase 3)."""
     global _seq
     with _lock:
         _seq[0] += 1
         cid = _seq[0]
-        try:
-            _send({"id": cid, "name": name, "args": args})
-        except Exception:
-            return "ERROR: run_tools pipe closed by the harness"
-        line = _in.readline()
-    if not line:
+    holder: list = []
+    ev = threading.Event()
+    with _waiters_lock:
+        _waiters[cid] = (holder, ev)
+    try:
+        _send({"id": cid, "name": name, "args": args})
+    except Exception:
+        with _waiters_lock:
+            _waiters.pop(cid, None)
+        return "ERROR: run_tools pipe closed by the harness"
+    ev.wait()
+    if not holder or holder[0] is None:
         return ("ERROR: run_tools pipe closed by the harness (the script was "
                 "killed or the turn ended; results are not available)")
-    try:
-        resp = json.loads(line)
-    except ValueError:
-        return "ERROR: malformed harness response frame"
+    resp = holder[0]
     if "error" in resp:
         return "ERROR: " + str(resp["error"])
     return str(resp.get("result", ""))
@@ -268,6 +303,7 @@ def _capture(name, args):
 
 import stubs  # noqa: E402  (rendered by render_stub_module_for_turn())
 stubs._capture = _capture
+threading.Thread(target=_reader, daemon=True).start()
 
 _err = None
 try:
@@ -359,6 +395,34 @@ def _dispatch_pipe_call(name: Any, args: Any, respond) -> None:
     respond({"result": result if isinstance(result, str) else str(result)})
 
 
+def _dispatch_pipe_batch(batch: list[tuple[int, Any, Any]], respond) -> int:
+    """Dispatch a BATCH of pending pipe frames (Phase 3): >1 call goes through
+    a ThreadPoolExecutor (bound of _run_read_only_parallel), 1 call stays on
+    the serial fast path — no pool. Replies are emitted in frame-id order once
+    the batch completes (the protocol carries ids either way); run_tool is
+    resolved per-call via the module attribute, so a monkeypatched
+    nx._dispatch.run_tool applies from pool threads. Returns the peak number
+    of concurrently in-flight calls (== len(batch) for the pooled path)."""
+    if len(batch) <= 1:
+        cid, name, args = batch[0]
+        _dispatch_pipe_call(name, args,
+                            lambda payload: respond(dict(payload, id=cid)))
+        return 1
+    replies: dict[int, dict] = {}
+
+    def _one(item: tuple[int, Any, Any]) -> None:
+        cid, name, args = item
+        _dispatch_pipe_call(name, args,
+                            lambda payload, _cid=cid:
+                            replies.__setitem__(_cid, dict(payload, id=_cid)))
+
+    with ThreadPoolExecutor(max_workers=min(8, len(batch))) as pool:
+        list(pool.map(_one, batch))
+    for cid in sorted(replies):
+        respond(replies[cid])
+    return len(batch)
+
+
 def run_tools(code: str = "", timeout: int = 0) -> str:
     """The `run_tools` tool body: run the model's Python with `stubs`
     importable, dispatching stub calls back through run_tool() over a NDJSON
@@ -434,10 +498,11 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
 
         script_out: str | None = None
         script_err: str | None = None
-        pending_id: int | None = None  # the ONE in-flight capture (Phase 2
-        # dispatch is serial, so at most one request awaits its reply)
+        pending_ids: set[int] = set()  # captures awaiting a reply (batch-wide:
+        # the Phase 3 skip-fill answers EVERY id in the batch before the kill)
         n_calls = 0
         n_failed = 0
+        n_concurrent = 0  # peak in-flight stub calls (summary + deprecation base)
         timed_out = False
         interrupted: BaseException | None = None
         deadline = time.monotonic() + limit
@@ -471,14 +536,54 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                 cid = frame.get("id")
                 if not isinstance(cid, int):
                     raise _PtcProtocolError("frame without an id")
-                n_calls += 1
-                if not _call_will_dispatch(frame.get("name"), frame.get("args")):
-                    n_failed += 1
-                pending_id = cid
-                _dispatch_pipe_call(frame.get("name"), frame.get("args"),
-                                    lambda payload, _cid=cid:
-                                    _respond(dict(payload, id=_cid)))
-                pending_id = None
+                # Phase 3: drain every ALREADY-pending frame into one batch and
+                # map it through the pool; frames arriving mid-batch wait for
+                # the next iteration (the reader thread keeps buffering).
+                batch = [(cid, frame.get("name"), frame.get("args"))]
+                held_done = None
+                while True:
+                    try:
+                        extra_line = frames.get_nowait()
+                    except queue.Empty:
+                        break
+                    if extra_line is None:  # EOF mid-batch: handled next loop
+                        frames.put(None)
+                        break
+                    try:
+                        extra = json.loads(extra_line)
+                    except ValueError:
+                        raise _PtcProtocolError(
+                            "malformed frame from the script")
+                    if extra.get("type") == "done":
+                        # Hold — do NOT re-queue: putting it back at the tail
+                        # inverts the queue if the reader's EOF sentinel is
+                        # already in it ([None, done] → the sentinel gets
+                        # consumed first and a completed script reports a
+                        # false protocol error + breaker increment).
+                        held_done = extra_line
+                        break
+                    extra_id = extra.get("id")
+                    if not isinstance(extra_id, int):
+                        raise _PtcProtocolError("frame without an id")
+                    batch.append((extra_id, extra.get("name"),
+                                  extra.get("args")))
+                n_calls += len(batch)
+                n_failed += sum(1 for _n, _a in
+                                ((f[1], f[2]) for f in batch)
+                                if not _call_will_dispatch(_n, _a))
+                pending_ids = {f[0] for f in batch}
+                n_concurrent = max(n_concurrent,
+                                   _dispatch_pipe_batch(batch, _respond))
+                pending_ids = set()
+                if held_done is not None:
+                    # The completion frame was already in the queue during the
+                    # drain — the script finished; consume it now instead of
+                    # looping back around (where the EOF sentinel would be
+                    # dequeued first).
+                    extra = json.loads(held_done)
+                    script_out = extra.get("stdout") or ""
+                    script_err = extra.get("error")
+                    break
         except (_EscToChat, KeyboardInterrupt) as e:
             interrupted = e
         except _PtcProtocolError as e:
@@ -492,8 +597,8 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                 # entry for the run_tools call itself is written by the JSON
                 # skip-fill loop wrapped around this call (parity with
                 # _turn_toolcalls.py:269-327, which still sees the raise).
-                if interrupted is not None and pending_id is not None:
-                    _respond({"id": pending_id,
+                for _cid in sorted(pending_ids):
+                    _respond({"id": _cid,
                               "error": _skip_fill_reason(interrupted)})
                 _kill_group(proc)
             else:
@@ -524,8 +629,12 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                          + ("\n".join(head[-6:]) if head else "unknown error"),
                          out_text)
 
+        if n_calls > 1:
+            st._PTC_FANOUT_SCRIPTS += 1  # deprecation baseline (Phase 3)
         summary = (f"[run_tools: {n_calls} stub call(s)"
                    + (f", {n_failed} refused/failed" if n_failed else "")
+                   + (f", peak {n_concurrent} concurrent" if n_concurrent > 1
+                      else "")
                    + f", {limit}s cap]")
         body = out_text.strip()
         if not body:

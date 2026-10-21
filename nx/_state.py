@@ -396,6 +396,8 @@ _PTC_BRACKET_SALVAGED: int = 0       # read-tool bracket-closure salvages
 _PTC_NORMALIZED: int = 0             # double-encoded / pair-list folds
 _PTC_HARD_FAILED: int = 0            # unrecoverable parse failures
 _PTC_BREAKER_TRIPPED: int = 0        # breaker opened for a tool this turn
+_PTC_FANOUT_SCRIPTS: int = 0         # run_tools scripts with >1 stub call
+                                     # (Phase 3 deprecation baseline)
 # PTC Phase 2 (0.162.0): flips True once the one-time run_tools fan-out nudge
 # has fired this session (see _dispatch.run_tool / _session_preamble's
 # PTC_FANOUT_GUIDANCE); _PTC_SOURCE_SHIPPED flips True once the stub-module
