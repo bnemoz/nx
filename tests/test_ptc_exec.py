@@ -492,10 +492,36 @@ def test_env_scrubbed_in_child(ptc_on, fake_dispatch, tmp_path, monkeypatch):
     """0.165.2's scrub, pinned: no canary secret reaches the child env."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PTC_CANARY_SECRET", "supersecret123")
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     res = _ptc_exec.run_tools(
         "import os\n"
         "print('LEAK' if 'PTC_CANARY_SECRET' in os.environ else 'clean')\n"
         "import stubs\nprint(stubs.read_file(path='a.txt'))\n", timeout=30)
-    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     assert "clean" in res
     assert "LEAK" not in res
+
+
+def test_landlock_blocks_writes_outside_workdir(ptc_on, fake_dispatch,
+                                                tmp_path, monkeypatch):
+    """0.165.4: the Landlock layer denies every fs write outside the script's
+    own tempdir (project tree, home, /etc) while stub reads keep working.
+    Skips on kernels without Landlock — preexec degrades silently there."""
+    import ctypes as C
+    libc = C.CDLL(None, use_errno=True)
+    libc.syscall.restype = C.c_long
+    libc.syscall.argtypes = [C.c_long] * 7
+    if libc.syscall(444, 0, 0, 1, 0, 0, 0) < 0:  # version probe
+        pytest.skip("Landlock not available on this kernel")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    res = _ptc_exec.run_tools(
+        "import os\n"
+        "try:\n"
+        "    open('ll_escape_probe', 'w').write('x'); print('WRITE FAIL')\n"
+        "except OSError as e:\n"
+        "    print('write blocked', e.errno)\n"
+        "import stubs\n"
+        "print(stubs.read_file(path='a.txt'))\n", timeout=30)
+    assert "write blocked 13" in res
+    assert "FAKE[a.txt]" in res
+    assert not (tmp_path / "ll_escape_probe").exists()

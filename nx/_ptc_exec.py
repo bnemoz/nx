@@ -70,59 +70,124 @@ from . import _state as st
 from ._env import _env_int
 
 
-def _ptc_preexec() -> None:  # pragma: no cover — runs in the forked child
+def _ptc_preexec(workdir: str = "") -> None:  # pragma: no cover — forked child
     """Best-effort OS hardening for the PTC child, run between fork and exec
-    (`preexec_fn`). Two layers, both optional and silent on failure:
+    (`preexec_fn`). Three layers, all optional and silent on failure:
 
     1. seccomp deny for the socket/connect family (libseccomp when present):
        network egress is the exfiltration channel the stub allowlist cannot
        govern, since the script may import socket/urllib directly. SCMP_ACT_ERRNO
        (EACCES) rather than SIGKILL so a stray call raises a catchable Python
        error instead of nuking the interpreter.
-    2. prctl NO_NEW_PRIVS — belt-and-braces: the child never gains privileges
-       even if something execs a setuid binary.
+    2. Landlock filesystem lockdown (kernel >= 5.13 with the LSM enabled):
+       a ruleset that handles EVERY fs right, grants read+execute beneath `/`
+       and read+write beneath the script's own workdir (and /dev, which the
+       interpreter may need for /dev/urandom) — every write outside the
+       workdir (project tree, home, /etc) returns EACCES. This closes the
+       documented 0.165.2 limit: the child could previously write anywhere
+       its user could.
+    3. prctl NO_NEW_PRIVS — also required by landlock_restrict_self; the
+       child never gains privileges even if something execs a setuid binary.
 
-    Not a security boundary against the user themselves (the child still has
-    the user's filesystem rights); it closes the network + privilege-escalation
-    doors for the untrusted-model-script case, which is the threat in the spec
-    (docs/ptc-migration-spec.md §Risk table). Failures are tolerated so the
-    feature still works on non-Linux / hardened kernels (EACCES on seccomp
-    syscalls under some containers)."""
+    The child therefore cannot: reach the network, write outside its tempdir,
+    or gain privileges. It CAN: read (project files via the stub reads, its
+    own interpreter), execute, and talk the pipe protocol over inherited fds.
+    Failures are tolerated (macOS, old kernels, containers that block
+    seccomp/landlock syscalls) so the feature degrades to the 0.165.2
+    posture rather than breaking."""
     try:
         import ctypes
         import ctypes.util
         libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        libc.syscall.argtypes = [ctypes.c_long] * 7
         PR_SET_NO_NEW_PRIVS = 38
-        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-            pass  # tolerated: hardened/old kernel
-        seccomp_name = ctypes.util.find_library("seccomp")
-        if not seccomp_name:
-            return
-        sc = ctypes.CDLL(seccomp_name, use_errno=True)
-        SCMP_ACT_ALLOW = 0x7FFF0000
-        SCMP_ACT_ERRNO = 0x00050000
-        EACCES = 13
-        sc.seccomp_init.restype = ctypes.c_void_p
-        sc.seccomp_rule_add.argtypes = (
-            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint)
-        sc.seccomp_syscall_resolve_name.restype = ctypes.c_int
-        ctx = sc.seccomp_init(SCMP_ACT_ALLOW)
-        if not ctx:
-            return
-        # Anything that can create a network endpoint or ship bytes out:
-        for call in ("socket", "socketpair", "connect", "accept", "accept4",
-                     "bind", "listen", "sendto", "sendmsg", "sendmmsg",
-                     "recvfrom", "recvmsg", "getsockopt", "setsockopt"):
-            nr = sc.seccomp_syscall_resolve_name(call.encode())
-            if nr < 0:
-                continue  # not on this kernel
-            sc.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | EACCES, nr, 0)
-        # AF_UNIX sockets stay available to the pipe... they do NOT: the pipe
-        # protocol uses os.read/os.write on fds inherited from the parent, not
-        # socketpair, so denying socket() entirely is protocol-safe.
-        sc.seccomp_load(ctypes.c_void_p(ctx))
+        libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        _ptc_landlock(libc, workdir)
+        _ptc_seccomp_net_deny(libc, ctypes.util)
     except Exception:  # noqa: BLE001 — hardening is best-effort, never fatal
         pass
+
+
+def _ptc_landlock(libc, workdir: str) -> None:  # pragma: no cover
+    """Layer 2: every fs right handled; read+execute beneath `/`, read+write
+    beneath `workdir` (and /dev for /dev/urandom, /proc read for runtime).
+    Unprivileged; silently skipped when the kernel lacks Landlock (ABI probe
+    returns < 0) or a rule cannot be added."""
+    import struct
+    import ctypes  # noqa: F401 — _addr uses it; keep the layer self-contained
+    SYS_CREATE_RULESET, SYS_ADD_RULE, SYS_RESTRICT_SELF = 444, 445, 446
+    RULE_PATH_BENEATH = 1
+    (EXECUTE, WRITE_FILE, READ_FILE, READ_DIR, REMOVE_DIR, REMOVE_FILE,
+     MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK, MAKE_FIFO, MAKE_BLOCK,
+     MAKE_SYM, REFER, TRUNCATE, IOCTL_DEV) = (1 << i for i in range(16))
+    READX = READ_FILE | READ_DIR | EXECUTE
+    WRITE_ALL = (WRITE_FILE | MAKE_REG | MAKE_DIR | REMOVE_DIR | REMOVE_FILE
+                 | MAKE_CHAR | MAKE_SOCK | MAKE_FIFO | MAKE_BLOCK | MAKE_SYM
+                 | REFER | TRUNCATE | IOCTL_DEV)
+    attr = struct.pack("<Q", 0xFFFF)  # handle every fs right (ABI 5+)
+    rs_fd = libc.syscall(SYS_CREATE_RULESET, _addr(attr),
+                         len(attr), 0, 0, 0, 0)
+    if not isinstance(rs_fd, int) or rs_fd < 0:
+        return  # pre-5.13 kernel or LSM disabled — degrade silently
+
+    def grant(path: str, access: int) -> bool:
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        try:
+            rule = struct.pack("<Qq", access, fd)
+            return libc.syscall(SYS_ADD_RULE, rs_fd, RULE_PATH_BENEATH,
+                                _addr(rule), 0, 0, 0) == 0
+        finally:
+            os.close(fd)
+
+    ok = grant("/", READX)
+    if workdir:
+        ok = grant(workdir, READX | WRITE_ALL) and ok
+    # /dev (urandom) and /proc (runtime self-stats): read, plus write under
+    # /dev since some environments create pipes/ptys there at startup.
+    ok = grant("/dev", READX | WRITE_ALL) and ok
+    ok = grant("/proc", READX | WRITE_FILE | TRUNCATE | MAKE_REG) and ok
+    if not ok:
+        return  # partial ruleset is worse than none — degrade to no Landlock
+    libc.syscall(SYS_RESTRICT_SELF, rs_fd, 0, 0, 0, 0, 0)
+    # fd is closed by exec or process exit; no leak either way.
+
+
+def _addr(b: bytes) -> int:  # pragma: no cover — trivial helper
+    import ctypes
+    return ctypes.cast(ctypes.c_char_p(b), ctypes.c_void_p).value
+
+
+def _ptc_seccomp_net_deny(libc, ctypes_util) -> None:  # pragma: no cover
+    """Layer 1: SCMP_ACT_ERRNO(EACCES) for the socket/connect family via
+    libseccomp (when present). Kept separate from the Landlock layer so each
+    degrades independently."""
+    import ctypes
+    seccomp_name = ctypes_util.find_library("seccomp")
+    if not seccomp_name:
+        return
+    sc = ctypes.CDLL(seccomp_name, use_errno=True)
+    SCMP_ACT_ALLOW = 0x7FFF0000
+    SCMP_ACT_ERRNO = 0x00050000
+    EACCES = 13
+    sc.seccomp_init.restype = ctypes.c_void_p
+    sc.seccomp_rule_add.argtypes = (
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint)
+    sc.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    ctx = sc.seccomp_init(SCMP_ACT_ALLOW)
+    if not ctx:
+        return
+    # Anything that can create a network endpoint or ship bytes out. The pipe
+    # protocol uses os.read/os.write on inherited fds, not socketpair, so
+    # denying socket() entirely is protocol-safe.
+    for call in ("socket", "socketpair", "connect", "accept", "accept4",
+                 "bind", "listen", "sendto", "sendmsg", "sendmmsg",
+                 "recvfrom", "recvmsg", "getsockopt", "setsockopt"):
+        nr = sc.seccomp_syscall_resolve_name(call.encode())
+        if nr < 0:
+            continue  # not on this kernel
+        sc.seccomp_rule_add(ctx, SCMP_ACT_ERRNO | EACCES, nr, 0)
+    sc.seccomp_load(ctypes.c_void_p(ctx))
 
 RUN_TOOLS_TOOL = {
     "type": "function",
@@ -575,7 +640,7 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                  "HOME": os.environ.get("HOME", "/tmp"),
                  "LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},
-            preexec_fn=_ptc_preexec,  # seccomp net-deny + NO_NEW_PRIVS (best-effort)
+            preexec_fn=lambda: _ptc_preexec(workdir),  # seccomp+landlock+NNP
         )
         st._ACTIVE_PTC_PROC = proc  # visible to tests/teardown; cleared below
 
