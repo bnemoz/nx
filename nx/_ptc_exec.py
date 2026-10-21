@@ -72,11 +72,11 @@ RUN_TOOLS_TOOL = {
     "type": "function",
     "function": {
         "name": "run_tools",
-        "description": "PTC: run a Python `code` script in a sandboxed subprocess with the session's read tools importable as `import stubs` (stubs.read_file(path), stubs.search_files(pattern), ... — see the [Runtime note] carrying the stub module source). Read-only: any other tool name (writes, run_bash, spawn_agent) is refused over the pipe; single tool calls stay as normal JSON tool calls. Returns the script's captured stdout; a script exception or timeout is one error result.",
+        "description": "PTC: run a Python `code` script in an isolated subprocess with the session's read tools importable as `import stubs` (stubs.read_file(path), stubs.search_files(pattern), ... — see the [Runtime note] carrying the stub module source). Read-only pipe: any other tool name (writes, run_bash, spawn_agent) is refused over the pipe; single tool calls stay as normal JSON tool calls. The script is unsandboxed at the OS level — the allowlist governs the stub pipe, not the Python language. Returns the script's captured stdout; a script exception or timeout is one error result.",
         "parameters": {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "Python source; `import stubs`, call stubs.<tool>(...) for >=2 independent READS in one turn (loops/filters over many files; results come back as strings inside your script — print what you want back in context). The script is untrusted code run with -I; the read-only allowlist is the boundary"},
+                "code": {"type": "string", "description": "Python source; `import stubs`, call stubs.<tool>(...) for >=2 independent READS in one turn (loops/filters over many files; results come back as strings inside your script — print what you want back in context). The script is untrusted code run with -I; the read-only allowlist is the pipe boundary (the script itself is unsandboxed at the OS level, so its own prints — not tool results — are what to review)"},
                 "timeout": {"type": "integer", "description": "Wall-clock seconds (default 0 = session default NX_PTC_TIMEOUT, 30; hard cap NX_PTC_TIMEOUT_MAX, 120)"},
             },
             "required": ["code"],
@@ -354,6 +354,10 @@ def _kill_group(proc: subprocess.Popen) -> None:
                 os.killpg(proc.pid, 9)  # SIGKILL the group
             except (ProcessLookupError, PermissionError):
                 proc.kill()
+            try:  # reap — a SIGKILLed child left unwaited stays a zombie
+                proc.wait(timeout=2.0)
+            except Exception:  # noqa: BLE001 — teardown must never raise
+                pass
     except Exception:  # noqa: BLE001 — teardown must never mask the real path
         pass
 
@@ -430,7 +434,14 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
     importable, dispatching stub calls back through run_tool() over a NDJSON
     frame pipe. Returns the script's captured stdout (sanitized ONCE here,
     like every tool result by run_tool's tail) — per-call results live inside
-    the script, exactly as tool results live inside a JSON-mode turn."""
+    the script, exactly as tool results live inside a JSON-mode turn.
+
+    Isolation posture: the child is NOT OS-sandboxed (it runs as this user
+    with filesystem/network reach); the read-only allowlist governs the stub
+    pipe, not the Python language. The boundary here is the scrubbed
+    environment (no secrets via os.environ), the allowlist + write fence
+    inside run_tool for pipe-routed calls, and the process-group kill on
+    timeout/cancel."""
     from ._approval import _EscToChat
     from ._interrupt import cancel_requested
 
@@ -453,6 +464,7 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
     stub_src = render_stub_module_for_turn()
 
     workdir = tempfile.mkdtemp(prefix="nx-ptc-")
+    proc = None
     try:
         with open(os.path.join(workdir, "stubs.py"), "w", encoding="utf-8") as f:
             f.write(stub_src)
@@ -463,6 +475,9 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                   encoding="utf-8") as f:
             f.write(code)
 
+        # Scrubbed env: the child is unsandboxed (`-I` isolates Python, not
+        # the OS), so an inherited environment would hand API keys/tokens to
+        # the script via os.environ. Only what the protocol needs is passed.
         proc = subprocess.Popen(
             [sys.executable, "-I", "-X", "utf8",
              os.path.join(workdir, "run_tools_launcher.py")],
@@ -472,6 +487,9 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
             start_new_session=True,  # own process group: Esc kills the script's
             # whole group, never the terminal (the _bash_jobs.py:235 precedent)
             cwd=os.getcwd(),
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "HOME": os.environ.get("HOME", "/tmp"),
+                 "LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},
         )
         st._ACTIVE_PTC_PROC = proc  # visible to tests/teardown; cleared below
 
@@ -608,9 +626,6 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     _kill_group(proc)
-            if st._ACTIVE_PTC_PROC is proc:
-                st._ACTIVE_PTC_PROC = None
-
         if interrupted is not None:
             raise interrupted
 
@@ -644,6 +659,12 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
         from ._text_fallback import _sanitize_tool_result
         return _sanitize_tool_result(f"{summary}\n--- script stdout ---\n{body}")
     finally:
+        # Single teardown: kill the child no matter which window raised, then
+        # clear the test-visible handle, then drop the tempdir. Covers the
+        # Popen→reader/queue setup span that previously had no kill coverage.
+        if proc is not None and proc.poll() is None:
+            _kill_group(proc)
+        st._ACTIVE_PTC_PROC = None
         shutil.rmtree(workdir, ignore_errors=True)
 
 
