@@ -20,6 +20,13 @@ When you split or extend a module, moved names are re-exported from the old home
 
 From now on we follow semver; bump version numbers as changes are made.
 
+## Clean-Tree Policy
+
+After every feature, bugfix, or doc update, `git status` must be fully clean —
+nothing modified, staged, or untracked. Land scoped commits per logical unit;
+audit scratch/notes files, then commit or delete them; gitignore generated
+artifacts (benchmarks, build outputs).
+
 ## Build, Test, and Development Commands
 
 Use `uv` for local development:
