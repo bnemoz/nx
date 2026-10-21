@@ -853,6 +853,11 @@ def _cmd_toolcalls(user: str, state: _ReplState) -> None:
             st._MALFORMED_TOOL_FAILURES = {}
             st._MALFORMED_TOOL_BROKEN = set()
             st._BREAKER_ENDPOINT_KEY = st.BREAKER_UNOBSERVED
+            # PTC Phase 4: a full reset re-arms the run_tools fallback ladder
+            # too (the drop is reversible by design — NX_PTC=1 forces it on
+            # without a reset, this clears it so `auto` decides again).
+            from ._ptc_rollout import clear_ptc_ladder
+            clear_ptc_ladder()
             print(f"{DIM}  malformed-args streaks cleared, all tools re-offered{RESET}")
         return
     print(f"{DIM}  tool-calling mode: {toolcalls_mode()}{RESET}")

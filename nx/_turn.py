@@ -474,6 +474,15 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
     # across its retry cycles until the next model_turn() starts.
     st._TALLY_ARG_REPAIRS = 0
     st._TALLY_RETRIES = 0
+    st._PTC_TURN_TOOL_CALLS = 0
+    st._PTC_FANOUT_SIZE = 0
+    st._PTC_ENVELOPE_CHARS = 0
+    st._PTC_REPAIRED_BY_CANDIDATES = 0
+    st._PTC_BRACKET_SALVAGED = 0
+    st._PTC_NORMALIZED = 0
+    st._PTC_HARD_FAILED = 0
+    st._PTC_BREAKER_TRIPPED = 0
+    st._PTC_FANOUT_SCRIPTS = 0
     quiet = _subagent_quiet()
     spinner_label = (
         "forcing final answer · esc to interrupt"

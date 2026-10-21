@@ -41,6 +41,9 @@ PREFIX_MARKERS = (
     "[Saved memories",
     "[Orientation note:",
     "[Delegation note:",
+    # 0.162.0 (PTC Phase 2): the run_tools session-start note (static text;
+    # the dynamic stub source rides the runtime-note tail, never the prefix).
+    "[PTC note:",
 )
 
 # This session's pinned head: the JSON of SYSTEM followed by the prefix notes as
@@ -165,6 +168,7 @@ def prefix_notes() -> list[dict[str, Any]]:
     in turn is imported early, and each producer pulls optional machinery
     (sub-agent config, memory store) that must not run at import time.
     """
+    from ._ptc_exec import _load_ptc_note
     from ._agents import _load_agents_md_note
     from ._memory_cmd import _load_memory_note
     from ._orientation import _load_orientation_note
@@ -176,6 +180,11 @@ def prefix_notes() -> list[dict[str, Any]]:
         _load_memory_note(root),
         _load_orientation_note(),
         _load_delegation_note(),
+        # 0.162.0 (PTC Phase 2): static PTC note, present only when run_tools
+        # is offered (NX_PTC=1) — the delegation-note pattern. The stub-module
+        # source itself is NOT here: it ships as a runtime-note tail
+        # (_ptc_exec._stage_stub_source) so the pinned head bytes never move.
+        _load_ptc_note(),
     )
     return [n for n in candidates if n is not None]
 

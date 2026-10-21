@@ -1,8 +1,12 @@
 # PTC Migration Spec — programmatic tool calling for nx
 
-Status: DRAFT — nothing landed yet (all phases unstarted) · original target 0.160.x → 0.164.x has
-passed; retarget on first landing · Basis: arXiv 2608.06370 (BFCL v4, 14 models),
-CodeAct (Wang et al. 2024), Anthropic advanced tool use.
+Status: IMPLEMENTED through Phase 4 on branch `ptc-migration` (Phases 0–4: b38e938,
+a1e7484, 45d544c, f3ae652, 0.164.0) · original target 0.160.x → 0.164.x · Basis: arXiv
+2608.06370 (BFCL v4, 14 models), CodeAct (Wang et al. 2024), Anthropic advanced tool use.
+Audit corrections applied during implementation: `NX_SPECULATIVE_READS` defaults ON; the
+Phase 2 read-only allowlist is the INTERSECTION (5 pure-read tools), not the union; a
+script timeout is not a breaker event; the Phase 3 done-frame re-queue race was fixed by
+holding (not re-queuing) the completion frame.
 
 ## Problem
 

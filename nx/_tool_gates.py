@@ -26,6 +26,34 @@ from . import _state as st
 from ._plan import plan_active
 from ._delegation_note import _delegation_enabled
 from ._obs import obs_enabled as _obs_enabled  # noqa: F401 (gate callable)
+from ._ptc_rollout import _ptc_enabled as _ptc_gate_open  # PTC Phase 4 resolver
+
+
+def _ptc_nudge_back_to_json() -> None:
+    """The fallback ladder's nudge (0.164.0, spec §Phase 4): run_tools was
+    dropped from the gate vector for this session (2 breaker trips), so the
+    tool-list cache must be dropped too — the same mechanism
+    _invalidate_tool_list_cache serves. The model is steered back to JSON on
+    its next withheld attempt by the static _GATE_REFUSALS["run_tools"]
+    wording ("Make the calls directly as normal tool calls instead")."""
+    _invalidate_tool_list_cache()
+
+
+def ptc_fallback_ladder_engaged() -> None:
+    """Entry point the breaker calls when run_tools trips for the 2nd time in
+    one session (nx/_breaker._note_run_tools_opens): st._PTC_DISABLED was
+    already set by the caller; here we drop the memoized tool list so the
+    schema disappears from the NEXT turn's vector (the gate itself re-reads
+    the flag live, but _active_tools() is memoized on the gate vector). Mirrors the
+    drop onto the `nx.NX_PTC` attribute too, so the _ptc_exec._ptc_enabled
+    readers (PTC note, stub staging) go quiet in the same turn — unless
+    NX_PTC=1 is the env override, in which case the ladder never lands."""
+    _ptc_nudge_back_to_json()
+    from ._ptc_rollout import _ptc_env_override
+    if _ptc_env_override() != "1":
+        import nx as _m
+        _m.NX_PTC = 0
+
 
 def _floor_slimmed() -> bool:
     """NX_TOOL_FLOOR_SLIM=1 withholds the slimming-set schemas behind
@@ -78,6 +106,13 @@ _TOOL_GATES: dict[str, Any] = {
     # lint_check (0.94.0): tier-2, opt-in via NX_LINT=1. Read-only lint over
     # edited files without an approval-gated run_bash round-trip.
     "lint_check": lambda: bool(getattr(_m_safe(), "NX_LINT", 0)),
+    # run_tools (0.162.0, PTC Phase 2; rollout policy 0.164.0, Phase 4):
+    # programmatic tool calling. The gate delegates to the Phase 4 resolver
+    # (nx/_ptc_rollout._ptc_enabled): NX_PTC=1 hard on, NX_PTC=0 hard off,
+    # auto/unset → per-model heuristic (claude-*/gpt-5*/o3*/o4* on, gpt-4o*/
+    # gpt-4.1* off) with the session fallback ladder layered underneath — the
+    # ladder's drop is defeated only by the explicit NX_PTC=1 override.
+    "run_tools": _ptc_gate_open,
     # Stable gateways for project-local manifest tools. They are opt-in, so
     # ordinary sessions retain their existing prompt floor; once enabled the
     # two generic schemas never vary with the project's actual tool catalog.
@@ -97,6 +132,7 @@ _GATE_REFUSALS: dict[str, str] = {
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",
     "obs_recall": "(NX_OBS is off — nothing was packed, so there is nothing to recall).",
     "lint_check": "(NX_LINT is off — linting is disabled this session). Fix style issues yourself from the diff, or run the linter with run_bash if the user asks.",
+    "run_tools": "(NX_PTC is off — programmatic tool calling is disabled this session). Make the calls directly as normal tool calls instead.",
     "duckdb": "(NX_TOOL_FLOOR_SLIM=1 — the SQL tool is tier-2 in this session to keep the shared floor small). Ask search_tools for its schema, or shell out to the duckdb CLI with run_bash.",
     "search_project_tools": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",
     "call_project_tool": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",

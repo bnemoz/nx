@@ -839,6 +839,18 @@ def switch_source(name: str, model_override: str | None = None) -> bool:
     st.ACTIVE = src
     st.client = src.client
     st.MODEL = model_override if model_override else src.resolve_model()
+    # PTC Phase 4 (0.164.0): re-bake the rollout heuristic's answer for the NEW
+    # model id onto nx.NX_PTC (an explicit env NX_PTC=1/0 keeps the override —
+    # resolve_ptc_setting reads it first). A model/source switch also drops
+    # the session's fallback-ladder state: the drop is endpoint evidence, and
+    # the per-model heuristic re-decides run_tools here (0.40 breaker doctrine
+    # — same clearing the _breaker_views() re-key does, done eagerly so an
+    # unchanged-key switch (/model on one source) resets too).
+    import nx as _nx
+    from ._ptc_rollout import resolve_ptc_setting
+    _nx.NX_PTC = resolve_ptc_setting()
+    st._PTC_DISABLED = False
+    st._PTC_BREAKER_TRIPS = 0
     # A model change (different source, or a per-switch model override on a
     # multi-model host like Together) means the cached max-context may no longer
     # apply — drop it so the footer re-probes against the new model next turn.

@@ -15,8 +15,10 @@ from typing import Any
 from . import _state as st
 from ._approval import _EscToChat
 
-_CACHEABLE_READ_TOOLS = ("read_file", "list_dir", "search_files",
-                         "git_status", "git_diff", "git_log", "memory_search")
+from ._dispatch import _CACHEABLE_READ_TOOLS  # single source of truth (Audit
+# correction #4 — do NOT keep a local divergent tuple here)
+
+__all__ = ["_CACHEABLE_READ_TOOLS"]
 
 
 def _tool_cache_key(name: str, args: dict[str, Any]) -> tuple[str, str]:

@@ -152,6 +152,47 @@ def _capture_last_prompt_tokens(usage: Any, timings: Optional[dict]) -> None:
                               if reported else None)
 
 
+def _ptc_baseline_field() -> str:
+    """PTC Phase 0 (docs/ptc-migration-spec.md): one dim `ptc-baseline` footer
+    line consolidating the repair-loop / breaker counters already threaded from
+    _handle_native_tool_calls (nx/_turn_toolcalls.py), the per-turn tool-call
+    count, fan-out size and the tool-call envelope token estimate (the JSON
+    args strings themselves, chars/3.5 via nx/_tokens). Renders nothing on a
+    turn with no native tool calls."""
+    calls = getattr(st, "_PTC_TURN_TOOL_CALLS", 0)
+    if not calls:
+        return ""
+    repaired = getattr(st, "_PTC_REPAIRED_BY_CANDIDATES", 0)
+    salvaged = getattr(st, "_PTC_BRACKET_SALVAGED", 0)
+    normalized = getattr(st, "_PTC_NORMALIZED", 0)
+    hard = getattr(st, "_PTC_HARD_FAILED", 0)
+    tripped = getattr(st, "_PTC_BREAKER_TRIPPED", 0)
+    parts = [f"{calls} call{'s' if calls != 1 else ''}"]
+    fanout = getattr(st, "_PTC_FANOUT_SIZE", 0)
+    if fanout:
+        parts.append(f"fan-out x{fanout}")
+    scripts = getattr(st, "_PTC_FANOUT_SCRIPTS", 0)
+    if scripts:
+        parts.append(f"script-fan-out x{scripts}")
+    if repaired or salvaged or normalized or hard or tripped:
+        bits = []
+        if repaired:
+            bits.append(f"cand-repaired {repaired}")
+        if salvaged:
+            bits.append(f"salvaged {salvaged}")
+        if normalized:
+            bits.append(f"normalized {normalized}")
+        if hard:
+            bits.append(f"hard-failed {hard}")
+        if tripped:
+            bits.append(f"breaker-tripped {tripped}")
+        parts.append(" · ".join(bits))
+    env_n = getattr(st, "_PTC_ENVELOPE_CHARS", 0)
+    if env_n:
+        parts.append(f"≈{tokens.estimate_tokens_from_chars(env_n)} env tok")
+    return "ptc-baseline: " + " · ".join(parts)
+
+
 def _cache_hit_field(hit: Optional[float]) -> str:
     """The colored `cached: N%` field for the stats footer. Hit-rate color:
     green at/above 75%, yellow at/above 40%, red below — a cold (first-turn)
@@ -396,6 +437,9 @@ def _render_footer(usage: Any, timings: Optional[dict], streamed_chars: int,
         if ttft:
             parts.append(f"{C.STATUS_BAR}{ttft*1000:4.0f}{RESET}{DIM}ms ttft")
         parts.append(f"{C.STATUS_BAR}{elapsed:4.1f}{RESET}{DIM}s wall")
+        ptc = _ptc_baseline_field()
+        if ptc:
+            parts.append(f"{DIM}{ptc}{RESET}")
         _footer_row(parts, tally)
     elif usage and (usage.completion_tokens or 0):
         gen_n = usage.completion_tokens or 0

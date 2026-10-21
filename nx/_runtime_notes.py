@@ -109,7 +109,7 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
     # _dispatch._scan_background_completions.
     for _slot in ("_PENDING_MULTI_EDIT_NOTICE", "_PENDING_VERIFY_NOTICE",
                   "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
-                  "_PENDING_WAKE_HOLD_NOTICE"):
+                  "_PENDING_WAKE_HOLD_NOTICE", "_PENDING_PTC_NOTICE"):
         _text = _notices.get(_slot)
         if _text:
             messages.append({"role": "user", "content": _text})
@@ -133,7 +133,9 @@ _MODULE_NOTE_SLOTS = ("_PENDING_BG_COMPLETION_NOTICE", "_PENDING_SUBAGENT_NOTICE
                       "_PENDING_DELEGATION_NOTICE", "_PENDING_YOLO_ASYNC_NOTICE",
                       # 0.160.0: staged framelessly (poller thread / idle REPL),
                       # so the module-store drain is its normal delivery path.
-                      "_PENDING_WAKE_HOLD_NOTICE")
+                      "_PENDING_WAKE_HOLD_NOTICE",
+                      # 0.162.0 (PTC): the run_tools nudge / stub-source note.
+                      "_PENDING_PTC_NOTICE")
 
 
 def _flush_module_store_notes(messages: list[dict[str, Any]],

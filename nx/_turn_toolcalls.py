@@ -153,6 +153,19 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
     st._NATIVE_TOOL_CALLS_CONFIRMED = True  # server is actually using native tool_calls this session
     quiet = _subagent_quiet()
     ordered = [tcs[i] for i in sorted(tcs)]
+    # PTC Phase 0 baseline (docs/ptc-migration-spec.md): per-turn tool-call
+    # counters + fan-out size, recorded for the `ptc-baseline` footer line.
+    # Same pattern as the _TALLY_* counters: plain routed st globals,
+    # incremented at the repair sites, reset per turn by model_turn().
+    st._PTC_TURN_TOOL_CALLS = len(ordered)
+    st._PTC_FANOUT_SIZE = len(ordered) if _should_parallelize(
+        [(c["name"], {}) for c in ordered]) else 0
+    st._PTC_ENVELOPE_CHARS = sum(len(c.get("args") or "") for c in ordered)
+    st._PTC_REPAIRED_BY_CANDIDATES = 0
+    st._PTC_BRACKET_SALVAGED = 0
+    st._PTC_NORMALIZED = 0
+    st._PTC_HARD_FAILED = 0
+    st._PTC_BREAKER_TRIPPED = 0
     parsed_args = []
     parse_error = None
     for c in ordered:
@@ -162,6 +175,9 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         for candidate in repair_json_candidates(raw):
             try:
                 obj = json.loads(candidate)
+                if candidate != raw:
+                    # a LATER candidate parsed: the raw payload was malformed
+                    st._PTC_REPAIRED_BY_CANDIDATES += 1
                 break
             except json.JSONDecodeError as e:
                 err = e
@@ -171,6 +187,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             salvaged = _salvage_truncated_args(raw)
             if salvaged is not None:
                 obj = salvaged
+                st._PTC_BRACKET_SALVAGED += 1
                 _repair_log("salvaged_truncated_args",
                             f"{c.get('name')}: closure repair accepted "
                             f"({len(raw)} -> {len(json.dumps(salvaged))} chars)",
@@ -182,12 +199,15 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             # them here; anything else stays a parse failure (nudge+breaker).
             folded = normalize_tool_args(obj)
             if isinstance(folded, dict):
+                if folded is not obj:
+                    st._PTC_NORMALIZED += 1
                 obj = folded
             elif obj is not None:
                 err = json.JSONDecodeError(
                     f"arguments must be a JSON object, got {type(obj).__name__}", "", 0)
                 obj = None
         if obj is None:
+            st._PTC_HARD_FAILED += 1
             parse_error = (c, err)
             break
         parsed_args.append(obj)
@@ -207,6 +227,7 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
             failures[tool_name] = count
             if count >= st.MALFORMED_TOOL_BREAKER_LIMIT:
                 broken.add(tool_name)
+                st._PTC_BREAKER_TRIPPED += 1
         broken_now = _breaker_broken(tool_name)
         st._TALLY_RETRIES += 1  # routes through _recovery's descriptors
         _repair_log("malformed_args", f"{tool_name}: {detail}",
