@@ -172,3 +172,114 @@ Retire hand-rolled batching in favor of stub-level batching.
 | Double-parsing of results (script + context render) | Results pass through `run_tool` sanitize exactly once |
 | Model writes scripts for single calls (overhead) | Nudge: "use run_tools for ≥2 independent reads"; keep JSON for singletons |
 | Older models regress | Per-model default + session fallback ladder (Phase 4) |
+
+---
+
+## Audit (pre-implementation, code-verified)
+
+All file:line claims in this spec were verified against the tree on 2026-10-21. Confirmed
+exactly: `_turn_toolcalls.py:158-193` (repair loop), `:200-216` (breaker), `:269-327`
+(skip-fill); `run_tool` at `_dispatch.py:201`; `TOOLS` at `__init__.py:395-441` with
+`oneOf` for `read_file`/`search_files` at `:397`/`:420`; `_active_tools()` at
+`_tool_gates.py:126` with the sub-agent bypass at `:144-146`; `_gate_vector` memo key =
+`tuple(sorted((name, bool(gate())) …)) + tuple(sorted(broken))` at `_tool_gates.py:121-123`;
+`_subagent_tools()` at `_subagent_tiers.py:143`; `_TOOL_RESULT_CACHE` at `_state.py:586`
+(key builder `_tool_cache_key` `_dispatch.py:155-156`; validation `cache_valid()`
+`_tool_cache.py:227`, `git_state_stamp` `:142`, `drop_changed_entries` `:336`);
+`_run_read_only_parallel` at `_tool_prefetch.py:27` (`workers=min(8, len(jobs))` `:43`,
+`dict[int, str]` keyed by call index `:41`); `_prefetch_cacheable_tools` `:184`;
+`maybe_speculate` at `_spec_reads.py:125`.
+
+### Corrections to the body
+
+1. **`NX_SPECULATIVE_READS` defaults ON, not off** (§Phase 3, `_compress.py:152`:
+   `_env_int("NX_SPECULATIVE_READS", 1) != 0`; `=0` is the kill switch). Phase 3's
+   "remains a win in both paradigms" reasoning is unaffected, but any Phase 0 baseline
+   counter must record speculation as the *default* path, not an opt-in.
+2. **The Phase 2 read-only allowlist is wrong as written.** `PLAN_READONLY_TOOLS`
+   (`nx/_plan.py:48`) is a *plan-gate* set, not a read-only set: it contains
+   `plan_edit`, `todo_write`, `spawn_agent`, `wait_background`, `read_image`. Union with
+   `_CACHEABLE_READ_TOOLS` (`_dispatch.py:152`) would let stub scripts call `spawn_agent`
+   and mutate the todo list — both contradict §Phase 2's read-only rule and the
+   "spawn_agent not callable" exclusion. The Phase 2 allowlist must be the explicit
+   intersection `_CACHEABLE_READ_TOOLS ∩ PLAN_READONLY_TOOLS` (which is the 6 pure-read
+   tools) plus nothing else; do not reference the plan set alone. Note `read_image` is
+   excluded anyway (non-str return, §Phase 1 exclusions; `_tools.py:80` documents this).
+3. **Handler-kwarg tolerance is common but not universal.** `**_: Any` is present on
+   `read_file` (`_tools.py:52`), `search_files` (`:217-226`), `write_file`
+   (`_edit_tools.py:144`), `run_tests` (`_testrunner.py:325`), `lint_check`
+   (`_lint.py:112`) — but `duckdb_query` (`_duckdb.py:114`) and `web_fetch`
+   (`_webfetch.py:862`) lack it. The Phase 1 cross-check test must treat
+   missing-`**_` handlers as strict: a generated stub whose signature is narrower or
+   wider than such a handler's kwargs is a hard error, not a drift warning.
+4. **`recall_lessons` divergence is wider than stated** (§Phase 2 cache note): it's not
+   just `_tool_prefetch.py:18` — `_spec_reads.py:136-137` imports the *prefetch* tuple,
+   so speculation skips it too. Fix once: make both modules import
+   `_dispatch._CACHEABLE_READ_TOOLS`.
+
+### Implementation map for the build-out (per-phase file assignments)
+
+- **Phase 0** — `nx/_turn_footer.py` (new `ptc-baseline` footer line); counters read from
+  `_handle_native_tool_calls` state already threaded through `_turn_toolcalls.py`; new
+  `tests/test_ptc_baseline.py`.
+- **Phase 1** — new `nx/_ptc_stubs.py` (`render_stub_module`); golden-file +
+  `py_compile` test + handler-kwarg cross-check in one new test file; renders from
+  `_active_tools()` / `_subagent_tools()` per the gate rules above. Zero edits to
+  existing modules.
+- **Phase 2** — schema entry in `__init__.py` TOOLS + gate in `_tool_gates.py` (copy the
+  `lint_check` template: gate lambda at `_tool_gates.py:80`, refusal at `_GATE_REFUSALS:99`);
+  execution engine new `nx/_ptc_exec.py`; pipe protocol per §Subprocess below; stub-module
+  injection and nudge per §Prompt wiring below; tests in `tests/test_ptc_exec.py`.
+- **Phase 3** — concurrency lives in the harness side of `_ptc_exec.py` (mirror
+  `_run_read_only_parallel`'s `min(8, …)` + index-keyed results); deprecation telemetry
+  reads Phase 0 counters. `_spec_reads.py` untouched.
+
+### Subprocess & pipe protocol details (no code has this today — net-new)
+
+Existing subprocess precedent is uniform: argv-only `subprocess.run(..., capture_output=
+True, text=True, timeout=_env_int(...))`, no `shell=True`, error folded into a string
+(`_duckdb.py:160-168`, `_lint.py:145-151`, `_tools.py:312,388`). Reusable pieces:
+
+- **Pipe framing:** closest precedent is `_hooks.py:47-51` (JSON over stdin, stdout
+  capture). The `run_tools` protocol should be the inverse — harness-side reader loop
+  with per-call request/response frames `{id, name, args}` → `{id, result|error}`;
+  framing must be length-prefixed or NDJSON (tool results contain arbitrary text incl.
+  newlines).
+- **Kill/interrupt:** `_bash_jobs.py:235-236` is the precedent for
+  `start_new_session=True` — required so Esc (`_EscToChat`) can kill the script's whole
+  process group without touching the terminal; the skip-fill loop to mirror is
+  `_turn_toolcalls.py:269-327`.
+- **No-network sandbox: nothing to reuse.** No `unshare`/`seccomp`/`preexec_fn`/
+  env-denylist exists anywhere in `nx/`; `_fence.py:51` explicitly disclaims being a
+  sandbox. For Phase 2, "no network" is satisfied by construction (the stub module is the
+  only capability surface and it only opens the harness pipe) — the spec's rule should
+  read "the subprocess is untrusted but capability-poor: importable modules are the stdlib
+  subset that cannot escape (no `socket`, `subprocess`, `shutil`, `os.system` reachable
+  only if the model reimplements them — enforce by running with `-I` and a restricted
+  audit hook, not by pretending the GIL sandbox exists)". Do not claim OS-level network
+  isolation; the read-only allowlist + write fence in `run_tool` are the actual boundary.
+- **Timeout:** `_env_int`-derived like every other subprocess timeout (`NX_PTC_TIMEOUT`,
+  default the schema's 30); on `TimeoutExpired` kill the process group and fold one error
+  result for `run_tools`, breaker-incremented.
+
+### Prompt wiring details (§Phase 2 prompt surface)
+
+Copy `nx/_delegation_note.py` (the best template for "note present only when a flag
+gates a tool"): `DELEGATION_GUIDANCE:23`, marker constant `:108`, gate `_delegation_enabled()`
+`:111-119`. A PTC note is a new `_load_ptc_note()` producer in `_prefix.prefix_notes()`
+(`_prefix.py:158-180`), consumed by `_session_preamble._initial_messages():70-84` and the
+resume path. **Caveat:** `pin_prefix()` (`_prefix.py:198`) pins head bytes (`_prefix.py`
+is load-bearing) — the stub-module source must ride the runtime-note tail
+(`_runtime_notes.py:54-57`), not the prefix, and the one-time nudge is a fifth constant
+beside `BACKGROUND_GUIDANCE:97`/`YOLO_ASYNC_GUIDANCE:133`/`MULTI_EDIT_GUIDANCE:146`/
+`DELEGATION_STREAK_NOTICE:161` in `_session_preamble.py`.
+
+### Open items the phases must answer (not yet specified)
+
+- Where `run_tools` schema sits in `TOOLS` ordering and whether it appears in the stub
+  module itself (it must not recurse: no `run_tools` stub).
+- Sub-agent turn execution: does the pipe respect `_subagent_tools()` gating inside the
+  script too (stub render rule covers it) and does breaker state stay per-session or
+  per-tier?
+- Phase 4's per-model list needs a home — `_subagent_model.py` is the existing
+  model-ID-classification precedent.
