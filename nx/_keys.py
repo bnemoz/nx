@@ -83,6 +83,8 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("a", "live/as-sent"),
         ("c", "last compression report"),
         ("t", "per-call event log (/turns)"),
+        ("g", "tool gates (/tools)"),
+        ("S", "system-prompt floor (/prompt)"),
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),
@@ -98,6 +100,21 @@ KEYS: dict[str, list[tuple[str, str]]] = {
     # The /turns event-log view: `t` in the "context" surface jumps here (same
     # push-onto-the-shell-stack pattern as `c` → compress).
     "turns": [
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    # The /prompt system-prompt floor view: `S` in the "context" surface jumps
+    # here (same push-onto-the-shell-stack pattern as `c`/`t`). Capital `S`
+    # because every lowercase letter in this surface is already taken.
+    "prompt": [
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    # The /tools gate-transparency view: `g` in the "context" surface jumps
+    # here (same push-onto-the-shell-stack pattern as `c`/`t`/`S`).
+    "tools": [
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),

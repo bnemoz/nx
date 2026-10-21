@@ -287,3 +287,104 @@ def test_compression_view_is_registered_and_jumpable_from_context(monkeypatch):
     shell = _Shell()
     assert ctx.on_key("c", shell) == "repaint"
     assert isinstance(shell.pushed[0], _ctxreport.CompressionView)
+
+
+# --- Phase 7: the cumulative session token ledger ----------------------------
+
+def _metrics(input_tokens=1000, output_tokens=200, cache_read_tokens=500,
+             reasoning_tokens=50, api_calls=2, estimated_calls=0,
+             estimated_input_tokens=0, estimated_output_tokens=0):
+    from nx import _metrics as metrics_mod
+    m = metrics_mod._Metrics(session_id="t")
+    m.input_tokens = input_tokens
+    m.output_tokens = output_tokens
+    m.cache_read_tokens = cache_read_tokens
+    m.reasoning_tokens = reasoning_tokens
+    m.api_calls = api_calls
+    m.estimated_calls = estimated_calls
+    m.estimated_input_tokens = estimated_input_tokens
+    m.estimated_output_tokens = estimated_output_tokens
+    return m
+
+
+def test_ledger_sums_tokens_hit_pct_and_estimated_split(monkeypatch):
+    from nx import _state as st
+    monkeypatch.setattr(st, "_METRICS",
+                        _metrics(estimated_calls=1,
+                                 estimated_input_tokens=400,
+                                 estimated_output_tokens=80),
+                        raising=False)
+    lines = _ctxreport._ledger_lines()
+    text = "\n".join(lines)
+    assert "2 call(s)" in text
+    assert "~1500 tok" in text            # 1000 input + 500 cache_read
+    assert "~500 (33% hit)" in text       # 500/1500
+    assert "~250 tok" in text             # 200 output + 50 reasoning
+    assert "measured 1 call(s) · estimated 1 call(s)" in text
+    assert "~400 in / ~80 out est" in text
+
+
+def test_ledger_overhead_is_per_turn_floor_times_calls(monkeypatch):
+    from nx import _state as st
+    m = _metrics(api_calls=4)
+    monkeypatch.setattr(st, "_METRICS", m, raising=False)
+    monkeypatch.setattr(_ctxreport, "_turn_overhead_est", lambda: 120)
+    lines = _ctxreport._ledger_lines()
+    assert any("~480 tok paid" in ln and "x 4 call(s)" in ln for ln in lines)
+
+
+def test_ledger_zero_calls_placeholder(monkeypatch):
+    from nx import _state as st
+    monkeypatch.setattr(st, "_METRICS", None, raising=False)
+    assert _ctxreport._ledger_lines(None) == ["  no calls this session"]
+    m = _metrics(api_calls=0)
+    assert _ctxreport._ledger_lines(m) == ["  no calls this session"]
+
+
+def test_ledger_survives_garbage_metrics():
+    class _Junk:
+        api_calls = "x"          # garbage count → placeholder, not a crash
+    assert _ctxreport._ledger_lines(_Junk()) == ["  no calls this session"]
+
+    class _Weird:
+        api_calls = 1            # unknown/missing fields fall back to 0
+    lines = _ctxreport._ledger_lines(_Weird())
+    assert "1 call(s)" in "\n".join(lines)
+
+
+def test_ctx_total_prints_the_ledger_inline(monkeypatch, capsys):
+    from nx import _repl_settings_cmds as cmds
+    from nx import _state as st
+    monkeypatch.setattr(st, "_METRICS", _metrics(), raising=False)
+    cmds._cmd_ctx("/context total", _CtxState(2))
+    out = capsys.readouterr().out
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert "33% hit" in plain
+    # no fullscreen side effect — plain text only
+    assert "\x1b[?1049" not in out
+
+
+def test_ctx_total_placeholder_when_no_calls(monkeypatch, capsys):
+    from nx import _repl_settings_cmds as cmds
+    from nx import _state as st
+    monkeypatch.setattr(st, "_METRICS", None, raising=False)
+    cmds._cmd_ctx("/ctx total", _CtxState(2))
+    assert "no calls this session" in capsys.readouterr().out
+
+
+def test_turns_view_includes_the_ledger_section(monkeypatch):
+    from nx import _turnlog
+    from nx import _state as st
+    m = _metrics()
+    m.turns = [{"prompt_tokens": 1500, "cache_read_tokens": 500}]
+    monkeypatch.setattr(st, "_METRICS", m, raising=False)
+    lines = _turnlog._turnlog_report_lines()
+    text = "\n".join(lines)
+    assert "ledger:" in text and "33% hit" in text
+    assert "2 call(s) this session" in text
+    # and the view paints the same lines
+    view = _turnlog.turns_view(None)
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "",
+                                 "\n".join(view.render(240, 40)))
+    assert "ledger:" in plain and "33% hit" in plain

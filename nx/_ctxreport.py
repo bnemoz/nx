@@ -538,12 +538,72 @@ class ContextView(View):
             from ._turnlog import turns_view
             shell.push(turns_view(self.state))
             return "repaint"
+        if key == "S":
+            # Phase 5: jump to the annotated system-prompt floor (same push
+            # pattern as `c`/`t`; esc pops back here). Capital because every
+            # lowercase letter on this surface is taken.
+            if shell is None:
+                return "repaint"
+            from ._promptview import prompt_view
+            shell.push(prompt_view(self.state))
+            return "repaint"
+        if key == "g":
+            # Phase 4: jump to the tool-gate view (same push pattern as
+            # `c`/`t`/`S`; esc pops back here).
+            if shell is None:
+                return "repaint"
+            from ._toolview import tools_view
+            shell.push(tools_view(self.state))
+            return "repaint"
         if key == "r":
             self.refresh()
             return "repaint"
         if key in ("q", "esc", "ctrl-c", "ctrl-d"):
             return "quit"
         return "repaint"
+
+
+# --- Phase 7: the cumulative session token ledger ----------------------------
+
+def _ledger_lines(metrics: Any = None) -> list[str]:
+    """Cumulative session totals over st._METRICS as plain text (no ANSI).
+
+    What the per-call /turns rows show one call at a time, summed over the
+    whole session: tokens sent (input + cache_read), the cache-hit share and
+    hit %, tokens generated (output + reasoning), how much of that the server
+    MEASURED vs what the estimator guessed (the /cost provenance fields), and
+    the per-turn tools= overhead actually paid (per-turn floor x settled
+    calls). Defensive reads throughout — an unknown/garbage field falls back
+    to 0 and nothing here ever raises. No calls this session → one dim
+    placeholder line, the /turns convention.
+    """
+    m = metrics if metrics is not None else getattr(st, "_METRICS", None)
+    calls = _int_or(getattr(m, "api_calls", 0)) if m is not None else 0
+    if calls <= 0:
+        return ["  no calls this session"]
+
+    def _f(name: str) -> int:
+        return _int_or(getattr(m, name, 0))
+
+    sent = _f("input_tokens") + max(0, _f("cache_read_tokens"))
+    cache_hit = max(0, _f("cache_read_tokens"))
+    hit_pct = (100 * cache_hit // sent) if sent > 0 else 0
+    generated = _f("output_tokens") + _f("reasoning_tokens")
+    est_calls = _f("estimated_calls")
+    measured_calls = max(0, calls - est_calls)
+    overhead = _turn_overhead_est() * calls
+    return [
+        f"  ledger · {calls} call(s) this session",
+        f"  sent ~{sent} tok · cache-hit ~{cache_hit} ({hit_pct}% hit)",
+        f"  generated ~{generated} tok "
+        f"(output ~{_f('output_tokens')} · reasoning ~{_f('reasoning_tokens')})",
+        f"  measured {measured_calls} call(s) · "
+        f"estimated {est_calls} call(s) "
+        f"(~{_f('estimated_input_tokens')} in / "
+        f"~{_f('estimated_output_tokens')} out est)",
+        f"  overhead ~{overhead} tok paid this session "
+        f"(~{_turn_overhead_est()} tools schema x {calls} call(s))",
+    ]
 
 
 def _int_or(value: Any) -> int:

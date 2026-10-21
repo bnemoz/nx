@@ -125,6 +125,7 @@ _GLOBALS_FILES = [
     "test_autowake.py",
     "test_breaker_ergonomics.py",
     "test_breaker_integrity.py",
+    "test_breadcrumbs.py",
     "test_build.py",
     "test_chatbox_completion_cache.py",
     "test_chatbox_file_completion.py",

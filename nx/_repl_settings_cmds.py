@@ -344,6 +344,35 @@ def _cmd_reasoning(user: str, state: _ReplState) -> None:
               f"use on, off, or last{RESET}")
 
 
+def _cmd_breadcrumbs(user: str, state: _ReplState) -> None:
+    """Phase 6 (docs/EXPLAINABLE_HARNESS_SPEC.md): toggle the dim one-line
+    `[harness] ...` decision breadcrumbs. Same on|off toggle shape as
+    /reasoning — session state lives on nx._breadcrumbs.ENABLED (seeded from
+    the env, default on), and the choice persists to ~/.env as
+    NX_BREADCRUMBS via the same _set_env_var mechanism."""
+    from ._breadcrumbs import set_enabled
+    sp = user.split()
+    sub = sp[1].lower() if len(sp) > 1 else None
+    if sub in ("on", "show"):
+        set_enabled(True)
+        _set_env_var("NX_BREADCRUMBS", "1")
+        os.environ["NX_BREADCRUMBS"] = "1"
+        print(f"{BOLD}{C.WARNING}  → breadcrumbs: on{RESET} {DIM}(saved to ~/.env){RESET}")
+    elif sub in ("off", "hide"):
+        set_enabled(False)
+        _set_env_var("NX_BREADCRUMBS", "0")
+        os.environ["NX_BREADCRUMBS"] = "0"
+        print(f"{BOLD}{C.WARNING}  → breadcrumbs: off{RESET} {DIM}(saved to ~/.env){RESET}")
+    elif sub is None:
+        from ._breadcrumbs import enabled
+        print(f"{DIM}  breadcrumbs: {'on' if enabled() else 'off'}{RESET}")
+        print(f"{DIM}  /breadcrumbs on|off — harness decisions (salvage, "
+              f"retries, breaker) as dim inline lines{RESET}")
+    else:
+        print(f"{C.ERROR}  ✗ unknown /breadcrumbs arg {sub!r} — "
+              f"use on, off, or bare to show{RESET}")
+
+
 def _cmd_tooloutput(user: str, state: _ReplState) -> None:
     sp = user.split()
     sub = sp[1].lower() if len(sp) > 1 else None
@@ -503,6 +532,14 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
             print(f"{C.WARNING}  {n} outside 1..{len(messages)} — want e.g. /context t 12{RESET}")
             return
         print(_transcript_detail(messages[n - 1], n - 1))
+        return
+    if sub == "total":
+        # Phase 7: the cumulative session token ledger — always plain text
+        # (a quick check, never a fullscreen surface).
+        from ._ctxreport import _ledger_lines
+        for ln in _ledger_lines():
+            print(f"{DIM}{ln}{RESET}" if "no calls this session" in ln
+                  else f"  {ln.strip()}")
         return
     if sub == "all":
         # Every message row, none rolled up (0.42): the compact default hides

@@ -51,10 +51,13 @@ from ._memory_reflect import _cmd_memory_reflect  # noqa: F401 (re-export for te
 from ._repl_settings_cmds import (
     _cmd_quit, _cmd_help, _cmd_source, _cmd_model, _cmd_theme, _cmd_reasoning,
     _cmd_tooloutput, _cmd_toolcalls, _cmd_provider, _cmd_resources, _cmd_bg, _cmd_yolo, _cmd_approval, _cmd_reset,
+    _cmd_breadcrumbs,
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
     _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro, _cmd_review, _cmd_build,
 )
 from ._turnlog import _cmd_turns  # noqa: F401 (bound below; re-export for tests)
+from ._toolview import _cmd_toolgates  # noqa: F401 (bound below; re-export for tests)
+from ._promptview import _cmd_prompt  # noqa: F401 (bound below; re-export for tests)
 from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
 
@@ -205,6 +208,7 @@ bind_handlers({
     "/theme": _cmd_theme,
     "/reasoning": _cmd_reasoning,
     "/tooloutput": _cmd_tooloutput,
+    "/breadcrumbs": _cmd_breadcrumbs,
     "/toolcalls": _cmd_toolcalls,  # malformed-args breaker: show / reset [tool]
     "/provider": _cmd_provider,
     "/budget": _cmd_budget,
@@ -222,6 +226,8 @@ bind_handlers({
     "/undo": _cmd_undo,
     "/compress": _cmd_compress,
     "/turns": _cmd_turns,
+    "/prompt": _cmd_prompt,
+    "/toolgates": _cmd_toolgates,   # /tools is the legacy /tooloutput alias
     "/autocompress": _cmd_autocompress,
     "/sessions": _cmd_sessions_handler,
     "/resume": _cmd_resume_handler,

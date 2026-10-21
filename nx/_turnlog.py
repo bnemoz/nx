@@ -77,6 +77,16 @@ def _turnlog_report_lines(metrics: Any = None) -> list[str]:
             kind = str(e.get("kind") or "?")
             detail = str(e.get("detail") or "").replace("\n", " ")
             lines.append(f"    {kind}: {detail}" if detail else f"    {kind}")
+    # Phase 7: the cumulative session ledger as a trailing section. Imported
+    # from _ctxreport (which owns token accounting) at call time — no module
+    # cycle (_ctxreport only reaches back for turns_view lazily inside a key
+    # handler), so both surfaces share the one renderer.
+    try:
+        from ._ctxreport import _ledger_lines
+        lines.append("  ledger:")
+        lines.extend(_ledger_lines(m))
+    except Exception:
+        pass
     return lines
 
 

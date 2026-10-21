@@ -141,4 +141,7 @@ def _salvage_truncated_args(raw: str) -> dict | None:
         obj = json.loads(candidate)
     except (json.JSONDecodeError, KeyError, ValueError):
         return None
+    if isinstance(obj, dict):
+        from ._breadcrumbs import note
+        note("salvaged malformed tool args (bracket-closure repair accepted)")
     return obj if isinstance(obj, dict) else None

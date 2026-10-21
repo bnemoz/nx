@@ -398,6 +398,7 @@ so an explicit `nx gc` always evaluates every rule. Exit codes: 0 = done,
 | `NX_OBS_STORE_MAX_MB` | byte quota for the shared tool-result store (default `512`; `0` disables; over quota the oldest objects are evicted first) |
 | `NX_OBS_MAX_TRACKED` | bound on the in-process pack-send counters (default `4096`, drop-oldest) |
 | `NX_INTERRUPT_WATCHER` | `0` disables the stdin Esc-interrupt watcher for the whole process (default `1`). For headless runs (`nx run -f`, `--prompt-file`, `--parallel`) there is no tty to watch: this removes the watcher thread and its termios snapshot from every agent in a swarm. A quiet (background sub-agent / batch worker) loop never starts or arms the watcher regardless of this setting |
+| `NX_BREADCRUMBS` | `0`/`false`/`off` silences the dim `[harness] …` breadcrumb lines (salvage, retry-ladder, breaker events printed inline as they happen — default on). `/breadcrumbs on\|off` toggles it mid-session and persists here, the same mechanism `/reasoning` uses |
 | `NX_TOOL_FLOOR_SLIM` | `1` withholds the `duckdb` and `read_image` schemas behind `search_tools` (default off). For swarms: every agent pays the always-on tool floor, so demoting rarely-first-turn tools to tier-2 shrinks each agent's prompt by ~400 tokens with `search_tools` as the on-demand lifter |
 | `NX_STORE_BUSY_TIMEOUT_MS` | SQLite busy timeout for the session store and memory index (default `750` ms, was a hardcoded 5 s block). Under a shared `NX_HOME` a swarm's per-turn saves contend on one WAL write lock; a shorter wait plus bounded retry beats a 5 s stall, and every consumer degrades instead of raising on timeout |
 | `NX_REDUCER` | evidence-preserving reducer (default off; `1` enables): a large diagnostic output (build/test command) may be replaced by a compact receipt produced by a second model call, accepted only if EVERY quoted line verifies byte-for-byte against the on-disk archive (`~/.nx/evidence-preserving-reducer/`); any mismatch, schema miss, or missing failure evidence fails OPEN with the original output |
@@ -681,7 +682,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/delete [target]` | delete a saved session |
 | `/reset` | clear conversation, start a fresh session |
 | `/quit` | exit |
-| `/context [all\|t\|pin\|unpin\|clear]` | per-message context breakdown, full screen; p pins the selected turn against /compress; enter shows the full transcript of the selected message |
+| `/context [all\|t\|total\|pin\|unpin\|clear]` | per-message context breakdown, full screen; p pins the selected turn against /compress; enter shows the full transcript of the selected message |
 | `/cost` | session usage + per-source cost scoreboard |
 | `/status` | snapshot: source, model, caps, budgets, fence, approval |
 | `/memory [save\|remember\|delete\|list\|archived\|unsupersede\|optimize\|reflect]` | manage persistent memory (bare /memory: full screen) |
@@ -689,6 +690,8 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/todo` | show the model's current todo_write list, full screen; Ctrl+G |
 | `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |
 | `/turns` | per-model-call event log: tokens, cache %, harness interventions |
+| `/prompt` | what the harness says to the model: system + satellite prompts + tool schemas, token-weighted |
+| `/toolgates` | tool-gate transparency: active vs withheld this turn, unlock cost per tool |
 | `/compress [--show]` | summarize older turns into one, keep last 2 verbatim; --show prints what the last compression did (which turns folded, which stayed verbatim) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
@@ -703,6 +706,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/panel` | toggle the right status rail on the live region |
 | `/reasoning on\|off\|last` | on|off|last — toggle or show reasoning trace |
 | `/tooloutput on\|off\|last` | on|off|last — toggle or show tool-call result |
+| `/breadcrumbs on\|off` | show harness decisions (salvage, retries, breaker) as dim inline lines; on|off |
 | `/bg [kill <pid>\|all]` | this session's background jobs, full screen; Ctrl-B — /bg kill <pid> stops one, /bg all lists every session's |
 | `/diff [path]` | working-tree diff review, full screen; Ctrl-X — a commits via the reviewed git flow |
 | `/review [focus]` | scoped reviewer over the current work: ranked findings, no fixes (Ctrl+R) |

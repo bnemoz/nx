@@ -144,6 +144,17 @@ import nx  # noqa: E402,F401  (baseline import; probes skipped)
 # compress()/the turn loop assert client is not None.
 nx.ACTIVE
 
+# 0.168.0: capture the lazily-imported settings/view modules in the baseline
+# too — a test file that imports them at module scope while holding the
+# object must not see the globals rewind POP the module (unknown to the
+# baseline) and fork it out from under the test's reference.
+import nx._breadcrumbs  # noqa: E402,F401
+import nx._toolview  # noqa: E402,F401
+import nx._promptview  # noqa: E402,F401
+import nx._turnlog  # noqa: E402,F401
+import nx._ctxreport  # noqa: E402,F401
+import nx._repl_settings_cmds  # noqa: E402,F401
+
 
 def _is_nx(name):
     return name == "nx" or name.startswith("nx.")

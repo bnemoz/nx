@@ -122,6 +122,9 @@ def _breaker_broken(name: str) -> bool:
             usage_breaker(name, failures.get(name, 0))
         except Exception:  # noqa: BLE001 — telemetry must never break a gate
             pass
+        from ._breadcrumbs import note
+        note(f"breaker tripped: {name} dropped after "
+             f"{failures.get(name, 0)} malformed-args attempts")
         return True
     return name in broken
 
@@ -138,5 +141,9 @@ def _breaker_decay(name: str) -> None:
     endpoint can never inherit a stale `broken` mark from the previous one."""
     failures, broken = _breaker_views()
     if failures.pop(name, None) is not None:
+        was_broken = name in broken
         broken.discard(name)
         _TRIP_ANNOUNCED.discard(name)
+        if was_broken:
+            from ._breadcrumbs import note
+            note(f"breaker reset: {name} re-armed after a clean execution")

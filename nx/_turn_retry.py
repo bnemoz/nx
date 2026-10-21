@@ -36,6 +36,11 @@ def _retry_log(attempt: int, error_class: str) -> None:
         usage_retry(attempt, error_class)
     except Exception:  # noqa: BLE001 — telemetry must never break a retry
         pass
+    try:
+        from ._breadcrumbs import note
+        note(f"retrying after {error_class} (ladder step {attempt})")
+    except Exception:  # noqa: BLE001 — a breadcrumb must never break a retry
+        pass
 
 
 def _plural_ies(n: int) -> str:

@@ -100,7 +100,7 @@ _SPECS = [
     ("/context", "per-message context breakdown, full screen; "
      "p pins the selected turn against /compress; "
      "enter shows the full transcript of the selected message",
-     "[all|t|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
+     "[all|t|total|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
      ["pin", "unpin", "clear"], 1, "context"),
     ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1, "context"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval",
@@ -148,6 +148,12 @@ _SPECS = [
      "[cmd|off|run]", [], ["off", "run"], 1, "workflow"),
     ("/turns", "per-model-call event log: tokens, cache %, harness interventions",
      None, [], None, 1, "context"),
+    ("/prompt", "what the harness says to the model: system + satellite prompts "
+     "+ tool schemas, token-weighted",
+     None, [], None, 1, "context"),
+    ("/toolgates", "tool-gate transparency: active vs withheld this turn, "
+     "unlock cost per tool",
+     None, [], None, 1, "context"),
     ("/compress", "summarize older turns into one, keep last 2 verbatim; "
      "--show prints what the last compression did (which turns folded, "
      "which stayed verbatim)",
@@ -162,6 +168,8 @@ _SPECS = [
     ("/tooloutput", "on|off|last — toggle or show tool-call result",
      "on|off|last", [("/tools", "legacy alias for /tooloutput", False)],
      ["on", "off", "last"], 1, "display"),
+    ("/breadcrumbs", "show harness decisions (salvage, retries, breaker) as dim inline lines; on|off",
+     "on|off", [], ["on", "off"], 1, "display"),
     ("/toolcalls", "tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show",
      "[text|native|auto] [reset [tool]]", [],
      ["reset", "text", "native", "auto"], 1, "model"),

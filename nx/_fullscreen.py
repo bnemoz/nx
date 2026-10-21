@@ -660,6 +660,23 @@ def turns_view(state=None):
     return TurnsView(state)
 
 
+@register_view("prompt")
+def prompt_view(state=None):
+    """The `/prompt` system-prompt-floor view. The renderer lives in
+    `_promptview` (the module that owns the prompt report); this is only its
+    identity in the tiered registry."""
+    from ._promptview import PromptView
+    return PromptView(state)
+
+
+@register_view("tools")
+def tools_view(state=None):
+    """The `/tools` gate-transparency view. The renderer lives in `_toolview`;
+    this is only its identity in the tiered registry."""
+    from ._toolview import ToolsView
+    return ToolsView(state)
+
+
 @register_view("memory")
 def memory_view():
     from ._memory_cmd import MemoryView
