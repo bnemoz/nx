@@ -86,14 +86,13 @@ RUN_TOOLS_TOOL = {
 
 
 def _ptc_enabled() -> bool:
-    """True when the run_tools schema is being offered this session. Reads the
-    live top-level attribute first (tests/REPL flip it), then the env var —
-    the `_delegation_enabled()` pattern."""
-    import nx as _m
-    try:
-        return bool(_m.NX_PTC)
-    except AttributeError:
-        return bool(_env_int("NX_PTC", 0))
+    """True when the run_tools schema is being offered this session. Delegates
+    to the Phase 4 resolver (nx/_ptc_rollout._ptc_enabled): env hard override,
+    then the fallback ladder, then the nx.NX_PTC attribute (tests/REPL flip
+    it) — so a mid-session os.environ change cannot desync the gate and the
+    prompt surface."""
+    from ._ptc_rollout import _ptc_enabled as _resolve
+    return _resolve()
 
 
 # --- prompt surface (spec §Prompt wiring; Audit-corrected) ---------------------

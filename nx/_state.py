@@ -406,6 +406,14 @@ _PTC_FANOUT_SCRIPTS: int = 0         # run_tools scripts with >1 stub call
 _PTC_NUDGED: bool = False
 _PTC_SOURCE_SHIPPED: bool = False
 _ACTIVE_PTC_PROC = None
+# PTC Phase 4 (0.164.0, docs/ptc-migration-spec.md §Phase 4): the session
+# fallback ladder. _PTC_BREAKER_TRIPS counts the times the malformed-args
+# breaker OPENED for `run_tools` this session; on the 2nd trip the harness
+# drops run_tools from the gate vector (_PTC_DISABLED) and nudges back to
+# JSON. NX_PTC=1 is the hard override that forces it back on (the resolver in
+# nx/_ptc_rollout.py checks the override before the ladder).
+_PTC_BREAKER_TRIPS: int = 0
+_PTC_DISABLED: bool = False
 
 # --- text-only-after-stall guard ---------------------------------------------
 # Set when a real tool call runs after this reasoning-stall episode's first

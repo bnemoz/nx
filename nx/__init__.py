@@ -1002,11 +1002,18 @@ NX_WEBFETCH = WEBFETCH_ENABLED
 # tool (default off — most sessions lint via CI or verify hooks instead).
 # NX_LINT_CMD overrides the fixed command shape; NX_LINT_TIMEOUT caps the call.
 NX_LINT = LINT_ENABLED
-# run_tools (nx/_ptc_exec.py, 0.162.0): NX_PTC=1 opts IN to programmatic tool
-# calling (default off this phase — the Phase 4 rollout flips the default to
-# the per-model heuristic). NX_PTC_TIMEOUT overrides the default per-script
+# run_tools (nx/_ptc_exec.py, 0.162.0; rollout policy Phase 4, 0.164.0):
+# NX_PTC=1 opts IN to programmatic tool calling, NX_PTC=0 opts OUT (hard
+# overrides both ways — NX_PTC=1 also defeats the session fallback ladder).
+# Unset/`auto` (the Phase 4 default) resolves through the per-model rollout
+# heuristic (nx/_ptc_rollout.py): on for claude-*/gpt-5*/o3*/o4*-class models,
+# off for the gpt-4o/gpt-4.1-class regressors and anything unknown. This
+# attribute is the heuristic's ANSWER for the startup model (per-model
+# re-resolution happens where the model id is known: /source, /model and the
+# rollout resolver itself). NX_PTC_TIMEOUT overrides the default per-script
 # timeout (30s); NX_PTC_TIMEOUT_MAX caps a requested one (120s).
-NX_PTC = _env_int("NX_PTC", 0)
+from ._ptc_rollout import resolve_ptc_setting as _resolve_ptc_setting
+NX_PTC = _resolve_ptc_setting()
 # recall_lessons (nx/_lessons.py, 0.102.0): result cap for the BM25
 # cross-session recall tool (default 5; 0 = unbounded). Read at call time.
 NX_LESSONS_LIMIT = _env_int("NX_LESSONS_LIMIT", 5)

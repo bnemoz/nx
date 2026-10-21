@@ -53,7 +53,56 @@ def _breaker_views() -> tuple[dict[str, int], set[str]]:
             st._MALFORMED_TOOL_BROKEN.clear()
             _TRIP_ANNOUNCED.clear()
         st._BREAKER_ENDPOINT_KEY = key
+    _note_run_tools_opens(st._MALFORMED_TOOL_BROKEN)
     return st._MALFORMED_TOOL_FAILURES, st._MALFORMED_TOOL_BROKEN
+
+
+# PTC Phase 4 (0.164.0): liveness of the run_tools breaker for the fallback
+# ladder — True while the breaker currently HOLDS run_tools. Trip counting
+# diffs the broken set here (the one function every trip source's effect
+# passes through every turn — _tool_gates._gate_vector reads it, and both
+# trip sites write into the container it returns), so it cannot double-count
+# repeated failures against one open and works for the PTC site (which writes
+# the containers directly) without editing it.
+_RUN_TOOLS_BROKEN_SEEN = False
+
+
+def _note_run_tools_opens(broken: set) -> None:
+    """Count breaker OPENS for run_tools; the 2nd drop-for-the-session.
+
+    docs/ptc-migration-spec.md §Phase 4 fallback ladder: "if a session's
+    breaker trips twice on the run_tools key, drop run_tools from the gate
+    vector for that session and nudge back to JSON". An OPEN is the
+    false→true edge of the name in `broken` (decay/reset re-arms the edge);
+    the drop sets st._PTC_DISABLED (read by nx/_ptc_rollout._ptc_enabled and
+    mirrored onto nx.NX_PTC) and clears the memoized tool list via
+    _tool_gates. NX_PTC=1 (env) is the documented hard override that forces
+    the tool back on without clearing the drop; a model/source switch or a
+    full /toolcalls reset re-arms the ladder. Never raises into the gate."""
+    global _RUN_TOOLS_BROKEN_SEEN
+    seen_now = "run_tools" in broken
+    if seen_now == _RUN_TOOLS_BROKEN_SEEN:
+        return
+    _RUN_TOOLS_BROKEN_SEEN = seen_now
+    if not seen_now:
+        return  # decay/reset re-armed the edge; nothing to count
+    st._PTC_BREAKER_TRIPS = getattr(st, "_PTC_BREAKER_TRIPS", 0) + 1
+    if st._PTC_BREAKER_TRIPS < 2:
+        return
+    st._PTC_DISABLED = True
+    try:
+        from ._tool_gates import ptc_fallback_ladder_engaged
+        ptc_fallback_ladder_engaged()
+    except Exception:  # noqa: BLE001 — the ladder is a nudge, never a crash
+        pass
+
+
+def rearm_run_tools_trip_watch() -> None:
+    """Re-arm the ladder's edge detector (used by clear_ptc_ladder and the
+    test suite; the diff in _note_run_tools_opens also self-re-arms once the
+    name leaves `broken`)."""
+    global _RUN_TOOLS_BROKEN_SEEN
+    _RUN_TOOLS_BROKEN_SEEN = False
 
 
 def _breaker_broken(name: str) -> bool:

@@ -75,6 +75,7 @@ nx
 | `NX_BASE_URL` / `NX_MODEL` / `NX_API_KEY` | endpoint, model id, and key for the default source |
 | `NX_SOURCES` / `NX_SOURCE_*` | named multi-source endpoints (comma-separated names + per-source vars) |
 | `NX_ENV_FILE` | override the env file read at startup (default `~/.env`) |
+| `NX_PTC` | programmatic tool calling (`run_tools`): `1` on / `0` off / unset = per-model default (on for claude-*/gpt-5*/o3*/o4*, off for gpt-4o*-class); `NX_PTC_TIMEOUT` caps one script — full table in [docs/REFERENCE.md](docs/REFERENCE.md) |
 
 > [!NOTE]
 > Press <kbd>Esc</kbd> to interrupt the agent mid-turn; `/help` lists all
