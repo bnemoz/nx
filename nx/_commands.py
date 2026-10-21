@@ -98,8 +98,9 @@ _SPECS = [
     ("/resources", "show this nx process's CPU% and RSS memory", None,
      [("/resmon", "alias for /resources", True)], None, 1, "display"),
     ("/context", "per-message context breakdown, full screen; "
-     "p pins the selected turn against /compress",
-     "[all|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
+     "p pins the selected turn against /compress; "
+     "enter shows the full transcript of the selected message",
+     "[all|t|pin|unpin|clear]", [("/ctx", "alias for /context", True)],
      ["pin", "unpin", "clear"], 1, "context"),
     ("/cost", "session usage + per-source cost scoreboard", None, [], None, 1, "context"),
     ("/status", "snapshot: source, model, caps, budgets, fence, approval",

@@ -221,6 +221,80 @@ def _pinned_indexes() -> set[int]:
 # command's fallback, byte-identical to the pre-view `/context` output.
 # ---------------------------------------------------------------------------
 
+# --- Phase 1: transcript detail + as-sent (last-prompt tap) ------------------
+
+def _message_digest(msg: dict[str, Any]) -> str:
+    """sha256 hex of utf-8 role + text — the SAME function both the live view
+    and the as-sent tap apply, so identical inputs align by construction."""
+    import hashlib
+    role = str(msg.get("role") or "")
+    return hashlib.sha256(
+        role.encode("utf-8") + b"\x00"
+        + tokens.message_content_text(msg).encode("utf-8")).hexdigest()
+
+
+def _sent_message_text(msg: dict[str, Any]) -> str:
+    """One message rendered as plain text: text content, then tool-call
+    name+args, then tool results — everything the model actually saw."""
+    out: list[str] = []
+    text = tokens.message_content_text(msg).strip()
+    if text:
+        out.append(text)
+    for c in msg.get("tool_calls") or []:
+        fn = c.get("function") or {}
+        out.append(f"→ tool call: {fn.get('name') or '?'}({fn.get('arguments') or ''})")
+    if msg.get("role") == "tool":
+        out.append(f"← tool result: {text}")
+    return "\n".join(out) if out else "(empty)"
+
+
+def _transcript_detail_lines(msg: dict[str, Any], index: int,
+                             sent: dict[str, Any] | None,
+                             width: int) -> list[str]:
+    """The detail body for one message: full text (live), tool-call name+args,
+    tool results; in as-sent mode a role/index/digest header and whether the
+    message reached the model identical to live. Plain text, no ANSI, so the
+    inline `/context t <n>` path can reuse it byte-for-byte."""
+    from ._metrics import _abbr
+    lines = [f"[{index + 1}] role={msg.get('role', '?')}  "
+             f"~{_abbr(_message_tokens(msg))} est"]
+    if sent is not None:
+        d = _message_digest(msg)
+        match = (sent.get("sha256") or sent.get("digest")) == d
+        lines.append(f"as-sent index={sent.get('index', index)}  "
+                     f"digest={d[:12]}")
+        lines.append("identical to live" if match
+                     else "differs from live (elided/summarized)")
+    lines.append("")
+    text = _sent_message_text(msg)
+    if not text.strip():
+        text = "(empty)"
+    import textwrap
+    for ln in text.splitlines() or ["(empty)"]:
+        # wrap to the panel's own row budget (panel_row clips at
+        # _term_width()-6; 72 is the safe floor on the narrowest terminal)
+        lines.extend(textwrap.wrap(ln, max(24, min(72, width - 8))) or [""])
+    return lines
+
+
+def _transcript_detail(msg: dict[str, Any], index: int,
+                       sent: dict[str, Any] | None = None) -> str:
+    """Full transcript of one message as plain text (the view's detail pane
+    and `/context t <n>` print the same content; the inline path passes a
+    wide width so long lines are not wrapped)."""
+    return "\n".join(_transcript_detail_lines(msg, index, sent, 10_000))
+
+
+def _sent_snapshot_for(index: int) -> dict[str, Any] | None:
+    """The as-sent record for message `index` from the last-prompt tap
+    (st._LAST_PROMPT: list of {role, index, digest} dicts, newest call last),
+    or None when no settled call has been recorded yet."""
+    for e in reversed(getattr(st, "_LAST_PROMPT", None) or []):
+        if isinstance(e, dict) and e.get("index") == index:
+            return e
+    return None
+
+
 # message role -> semantic render role (never a raw palette hue: the Phase B
 # grep guard enforces it). Unknown roles degrade to MUTED.
 _MSG_ROLES = {
@@ -268,6 +342,8 @@ class ContextView(View):
         self.sel = 0
         self.report: dict[str, Any] = {}
         self.n_messages = -1
+        self.detail = False          # in the transcript detail pane (esc backs out)
+        self.as_sent = False         # live vs as-sent toggle ('a')
         self.refresh()
 
     def _messages(self) -> list[dict[str, Any]]:
@@ -297,6 +373,9 @@ class ContextView(View):
         return head
 
     def _footer(self) -> str:
+        if self.detail:
+            return (f"{self.sel + 1} · transcript"
+                    f"{' · as-sent' if self.as_sent else ''} · esc back")
         """Selection position, pin count and the per-role subtotals (by_role
         excludes the per-turn tools= overhead, which gets its own line above)."""
         from ._metrics import _abbr
@@ -312,6 +391,8 @@ class ContextView(View):
     def render(self, width: int, height: int) -> list[str]:
         from ._keys import hint_line
         from ._render import RESET, panel, role
+        if self.detail:
+            return self._render_detail(width, height)
         if len(self._messages()) != self.n_messages:
             self.refresh()          # a turn landed since the last frame
         rep = self.report
@@ -354,6 +435,26 @@ class ContextView(View):
             lines.append(f"{role('WARNING')}{self.notice[:width]}{RESET}")
         return lines[:height]
 
+    def _render_detail(self, width: int, height: int) -> list[str]:
+        """The transcript detail pane: the FULL selected message (text, tool
+        calls, tool results). Read-only subview — no new mutation; as-sent
+        mode marks the message identical-to / differing-from live."""
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        messages = self._messages()
+        idx = min(self.sel, max(0, len(messages) - 1))
+        sent = _sent_snapshot_for(idx) if self.as_sent else None
+        lines = [f"{role('ACCENT')}transcript{RESET}{role('MUTED')} — "
+                 f"{hint_line('context')}{RESET}"]
+        if self.as_sent and sent is None:
+            body = [f"{role('MUTED')}  — no settled call recorded —{RESET}"]
+        else:
+            body = [ln[:width] for ln in _transcript_detail_lines(
+                messages[idx], idx, sent, width)]
+        lines.extend(panel(f"message {idx + 1}/{len(messages)}",
+                           body, footer=self._footer()))
+        return lines[:height]
+
     def _toggle_pin(self) -> str:
         """Queue the pin/unpin of the selected row as the deferred action; the
         shell runs it AFTER leaving the alternate screen (the view's only
@@ -384,6 +485,14 @@ class ContextView(View):
 
     def on_key(self, key: str, shell: Any) -> str:
         self.notice = ""
+        if self.detail:
+            if key in ("esc", "q"):
+                self.detail = False
+                return "repaint"
+            if key == "a":
+                self.as_sent = not self.as_sent
+                return "repaint"
+            return "repaint"
         rows = list(self.report.get("rows") or [])
         last = max(0, len(rows) - 1)
         if key == "j/k":
@@ -402,8 +511,17 @@ class ContextView(View):
         if key == "pageup":
             self.sel = max(0, self.sel - 10)
             return "repaint"
-        if key in ("enter", "p", "space"):
+        if key in ("p", "space"):
             return self._toggle_pin()
+        if key == "enter":
+            if not rows:
+                self.notice = "no message rows to open"
+                return "repaint"
+            self.detail = True
+            return "repaint"
+        if key == "a":
+            self.as_sent = not self.as_sent
+            return "repaint"
         if key == "r":
             self.refresh()
             return "repaint"

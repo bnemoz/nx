@@ -498,6 +498,18 @@ def model_turn(messages: list[Message], reasoning_loop_cut_count: int = 0, malfo
         # KeyboardInterrupt handler) — otherwise the spinner line survives
         # into the scrollback above the next prompt.
         st._TURN_SPINNER = spinner
+    # Last-prompt tap (EXPLAINABLE_HARNESS_SPEC Phase 1): `messages` is the
+    # final list this request is built from, so this is the one place the
+    # as-sent view in /ctx can learn what the model actually received (digests
+    # only — see _state.record_last_prompt). Recorded BEFORE the open: a stream
+    # that later errors or is interrupted still went over the wire with these
+    # bytes, and the view must be able to say so. Skipped for a quiet
+    # (sub-agent/batch) turn: the snapshot is the PARENT transcript's provenance
+    # and an agent's own message list would overwrite it with digests of
+    # messages that aren't in /ctx at all — same ownership rule as the
+    # spinner/interrupt-writer guards above.
+    if not quiet:
+        st.record_last_prompt(messages)
     # Go through the top-level package (not a bare same-module reference) so
     # a test that monkeypatches `nx.open_stream` (to avoid a real model
     # round-trip) takes effect.

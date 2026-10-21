@@ -870,7 +870,9 @@ def test_context_view_pin_key_queues_the_existing_pin_helper(monkeypatch):
     view.pending_action()
     assert seen["pin"] == "1"            # specs are 1-based, row 0 -> "1"
     assert st._CTX_PINNED == [0]
-    assert view.on_key("enter", None) == "run"
+    # enter now OPENS the transcript pane (Phase 1 explainable harness); the
+    # pin stays on p/space
+    assert view.on_key("space", None) == "run"
     view.pending_action()
     assert seen["unpin"] == "1"
     assert st._CTX_PINNED == []

@@ -90,6 +90,44 @@ def test_model_turn_registers_and_clears_turn_spinner():
         m._state._TURN_SPINNER = None
 
 
+def test_model_turn_records_the_last_prompt_tap():
+    """EXPLAINABLE_HARNESS_SPEC Phase 1: model_turn() digests the FINAL message
+    list into st._LAST_PROMPT at request-build, so /ctx's as-sent view can say
+    what the model actually received. Recorded before the stream opens, so a
+    turn that streams no chunks at all still leaves a snapshot (the request
+    really did go out)."""
+    saved = (m.open_stream, m._turn.LifeSpinner)
+    m._interrupt_watcher = lambda: None
+    m._turn.LifeSpinner = _TrackingSpinner
+    m.open_stream = lambda messages, **kw: _with_patched_stream([])
+    st = m._state
+    st._LAST_PROMPT = None
+    try:
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "do the thing"}]
+        m.model_turn(msgs)
+        snap = st._LAST_PROMPT
+        assert snap is not None
+        assert [r["role"] for r in snap] == ["system", "user"]
+        assert [r["index"] for r in snap] == [0, 1]
+        assert all(len(r["sha256"]) == 64 for r in snap)
+        # A second call with an edited first row marks exactly that row changed
+        # (the compression-elision proxy the as-sent view renders). Appended rows
+        # have no previous entry at their index, so they read unchanged. (The
+        # empty-stream turn also appended its own retry nudge to `msgs`, which is
+        # precisely the point: the tap records what the NEXT request carries.)
+        msgs[0]["content"] = "rewritten sys"
+        msgs.append({"role": "assistant", "content": "done"})
+        n = len(msgs)
+        m.model_turn(msgs)
+        snap2 = st._LAST_PROMPT
+        assert len(snap2) == n
+        assert [r["changed"] for r in snap2[:3]] == [True, False, False]
+    finally:
+        m.open_stream, m._turn.LifeSpinner = saved
+        st._LAST_PROMPT = None
+
+
 def test_repl_interrupt_handler_wipes_registered_spinner():
     # Drive the exact wipe block from the REPL's KeyboardInterrupt handler:
     # a still-registered spinner (its line already painted) must be stopped

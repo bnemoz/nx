@@ -491,6 +491,19 @@ def _cmd_ctx(user: str, state: _ReplState) -> None:
         except (ValueError, TypeError) as e:
             print(f"{C.WARNING}  {e} — want e.g. /context pin 12  or  /context pin 4,8,12-15{RESET}")
         return
+    if sub in ("t", "transcript"):
+        # `/context t <n>` — one message's full transcript inline (the same
+        # rendering as the view's detail pane, plain text, non-tty-safe).
+        from ._ctxreport import _transcript_detail
+        if len(parts) < 3 or not parts[2].lstrip("-").isdigit():
+            print(f"{C.WARNING}  usage: /context t <n>  (1-based message number from /context){RESET}")
+            return
+        n = int(parts[2])
+        if n < 1 or n > len(messages):
+            print(f"{C.WARNING}  {n} outside 1..{len(messages)} — want e.g. /context t 12{RESET}")
+            return
+        print(_transcript_detail(messages[n - 1], n - 1))
+        return
     if sub == "all":
         # Every message row, none rolled up (0.42): the compact default hides
         # small turns behind a count; this is the full dump the hint names.

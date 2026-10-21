@@ -43,6 +43,58 @@ def test_wake_residue_is_swept():
     assert st._WAKE_CHAIN_BASE == 0
 
 
+def test_last_prompt_tap_records_role_index_digest():
+    """0.166.0 (EXPLAINABLE_HARNESS_SPEC Phase 1): the last-prompt tap stores
+    one digest row per message — role, position, and a sha256 over
+    role + the message's canonical text — and nothing else. The /ctx as-sent
+    view reads exactly these fields, so the row shape is pinned here."""
+    st._LAST_PROMPT = None
+    st.record_last_prompt([
+        {"role": "system", "content": "sys prompt"},
+        {"role": "user", "content": [{"type": "text", "text": "part a"},
+                                     {"type": "text", "text": " part b"}]},
+        {"role": "assistant", "content": ""},
+    ])
+    snap = st._LAST_PROMPT
+    assert [r["role"] for r in snap] == ["system", "user", "assistant"]
+    assert [r["index"] for r in snap] == [0, 1, 2]
+    assert all(len(r["sha256"]) == 64 for r in snap)
+    # No baseline to diff against on the first recorded call.
+    assert [r["changed"] for r in snap] == [False, False, False]
+
+
+def test_last_prompt_digest_tracks_content_not_identity():
+    """Same content ⇒ same digest (so an unchanged row reads `identical to
+    live`); different content ⇒ different digest; the role is part of the hash
+    input, so the same text under two roles does not collide. The list-of-parts
+    projection is the same `message_content_text` /ctx renders, so a parts form
+    and its joined string hash alike."""
+    st.record_last_prompt([{"role": "user", "content": "hello"}])
+    first = st._LAST_PROMPT[0]["sha256"]
+    st.record_last_prompt([{"role": "user", "content": "hello"}])
+    assert st._LAST_PROMPT[0]["sha256"] == first
+    assert st._LAST_PROMPT[0]["changed"] is False
+    st.record_last_prompt([{"role": "user", "content": "goodbye"}])
+    other = st._LAST_PROMPT[0]["sha256"]
+    assert other != first
+    assert st._LAST_PROMPT[0]["changed"] is True
+    st.record_last_prompt([{"role": "assistant", "content": "goodbye"}])
+    assert st._LAST_PROMPT[0]["sha256"] != other
+    st.record_last_prompt([{"role": "user",
+                            "content": [{"type": "text", "text": "hello"}]}])
+    assert st._LAST_PROMPT[0]["sha256"] == first
+
+
+def test_last_prompt_tap_is_drained():
+    """The tap is a session-scope global, so per AGENTS.md the drain lives in
+    the central fixture, not in a test. Residue would make the /ctx as-sent view
+    report provenance for messages a later test never sent."""
+    st.record_last_prompt([{"role": "user", "content": "residue"}])
+    assert st._LAST_PROMPT
+    nx_state_reset_body()
+    assert st._LAST_PROMPT is None
+
+
 def test_metrics_tls_is_cleared():
     st._METRICS_TLS.metrics = {"t": 1}
     st._METRICS_TLS.other = "residue"

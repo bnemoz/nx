@@ -109,6 +109,56 @@ _LAST_API_ERROR: str | None = None
 # Cleared by model_turn() before every open and consumed on read.
 _LAST_CONTEXT_OVERRUN: str | None = None
 
+# --- last-prompt tap (EXPLAINABLE_HARNESS_SPEC Phase 1) -----------------------
+# Per-message DIGESTS of the message list the last model request was built
+# from, written by _turn.py at request-build and read by the /ctx transcript
+# view ("show as-sent"). Digests, never text: the as-sent view only has to say
+# whether a row is `identical to live` or `elided/summarized since`, and a
+# full-text snapshot of every message would be an unbounded second copy of the
+# transcript. Session-lifetime like the other st.* state; drained by
+# nx_state_reset. Entry shape (see record_last_prompt):
+#   {"role": str, "index": int, "sha256": str, "changed": bool, "compressed": bool}
+# (`compressed` is the spec's name for the same marker — one value, two keys.)
+# None = no settled request recorded yet (fresh or resumed session) — the view
+# renders "— no settled call recorded —" and stays on live.
+_LAST_PROMPT: list[dict] | None = None
+
+
+def record_last_prompt(messages: list) -> None:
+    """Snapshot per-message digests of the message list a request is about to
+    be built from, into `_LAST_PROMPT` (EXPLAINABLE_HARNESS_SPEC Phase 1).
+
+    One pass over `messages`; nothing is retained but role, position, and a
+    sha256 over `role` + the message's canonical text (the SAME
+    `message_content_text` projection /ctx tokenizes, so the digest and the
+    view's rendered text agree on what a message IS — native tool-call args
+    included only insofar as that projection carries them).
+
+    `changed` (aliased `compressed`, the spec's wording) is a cheap DIFF MARKER,
+    not a compression verdict: True when the PREVIOUS snapshot had an entry at
+    this index whose (role, digest) differs — i.e. this row is not what the last
+    settled call sent. False on the first recorded call (no baseline to diff)
+    and for appended rows with no previous entry at that index, so the view can
+    point at which rows moved/elided between two settled calls without holding
+    two snapshots."""
+    global _LAST_PROMPT
+    from hashlib import sha256
+    # Lazy like __getattr__ above: _state is imported by nearly every module,
+    # and a top-level `from ._tokens import ...` would ride that import chain.
+    from ._tokens import message_content_text
+    prev = _LAST_PROMPT
+    snap: list[dict] = []
+    for i, msg in enumerate(messages):
+        role = str(msg.get("role") or "")
+        text = message_content_text(msg) if isinstance(msg, dict) else str(msg)
+        digest = sha256(role.encode("utf-8") + b"\x00" + text.encode("utf-8")).hexdigest()
+        was = prev[i] if (prev is not None and i < len(prev)) else None
+        changed = was is not None and (was.get("role"), was.get("sha256")) != (role, digest)
+        snap.append({"role": role, "index": i, "sha256": digest,
+                     "changed": changed, "compressed": changed})
+    _LAST_PROMPT = snap
+
+
 # Last turn's prompt-cache hit fraction (0.0–1.0, or None when the server
 # didn't report cache numbers). Written by _capture_last_prompt_tokens();
 # read by the stats footer and /ctx so the user can see whether the KV/prompt

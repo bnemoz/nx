@@ -78,7 +78,9 @@ KEYS: dict[str, list[tuple[str, str]]] = {
     ],
     "context": [
         ("j/k", "move"),
-        ("enter/p", "pin/unpin turn"),
+        ("enter", "open transcript"),
+        ("p/space", "pin/unpin turn"),
+        ("a", "live/as-sent"),
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),

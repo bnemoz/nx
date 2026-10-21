@@ -493,6 +493,11 @@ def nx_state_reset_body() -> None:
             pass
         st._BG_NOTICE_SEEN = None
         st._BG_SCAN_DONE = False
+        # 0.166.0 (EXPLAINABLE_HARNESS_SPEC Phase 1): the last-prompt tap. A
+        # digest snapshot left from a prior test makes the /ctx as-sent view
+        # report provenance for messages the NEXT test never sent (and hides
+        # the "no settled call recorded" path the view must also render).
+        st._LAST_PROMPT = None
     if no is not None:
         no._CURRENT.set(None)
         # Drain the module-level pending-note slots too. A worker that finished
