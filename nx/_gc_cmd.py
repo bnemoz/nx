@@ -31,7 +31,7 @@ the input-history buffer, logs/usage.jsonl and the web cache.
 
 -h, --help     print this usage and exit
 
-Retention is configured by env vars (see README's env table):
+Retention is configured by env vars (see docs/REFERENCE.md's env table):
 NX_GC_AGENT_REPORT_DAYS, NX_GC_UNDO_DAYS, NX_USAGE_LOG_MAX_MB,
 NX_WEBCACHE_MAX_MB; each rule is disabled by 0.
 

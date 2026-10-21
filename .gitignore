@@ -8,3 +8,5 @@ logs/
 .venv/
 .nx/
 tests/perf/.nx-*/
+bench_res/
+nx_talk.html

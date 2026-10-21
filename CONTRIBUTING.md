@@ -153,7 +153,7 @@ hits from it, not a formatted string, and never trusting scores across arms.
 
 Four opt-in mechanisms ported from the SoL-Pi (pi harness) extension, each a
 focused module with an env gate (fusion default ON since 0.67.1; the other
-three default OFF; see README's env table):
+three default OFF; see docs/REFERENCE.md's env table):
 
 - **Action fusion** (`nx/_fusion.py`, `NX_FUSION`, default ON since 0.67.1): the three edit tools
   accept `then_run` and run the follow-up command in the same tool call. The
@@ -187,7 +187,8 @@ Per AGENTS.md: env vars, not config files. New tunables:
   fails on any `NX_*` read in `nx/` that the README never names; internal
   tunables that shouldn't be user-facing go on that test's `_ALLOWLIST` with a
   reason instead.
-- Document in the README's environment variables table.
+- Document in docs/REFERENCE.md's environment variables table
+  (the README is intentionally thin — link, don't duplicate).
 
 **Per-source variants.** A setting that can differ per endpoint takes the
 `NX_SOURCE_<NAME>_<SETTING>` form (read at call time from the source's `name`,
@@ -355,7 +356,7 @@ test helpers), run the full suite — it's the cheaper of the two mistakes.
 - [ ] Is it in the chatbox `/` hint menu (registry row → automatic)?
 - [ ] If it takes an enum-like keyword argument, are the options in its
       `_SPECS` row's `arg_options` so the argument dropdown offers them?
-- [ ] README command table regenerated (`scripts/regen_commands_table.py`) —
+- [ ] docs/REFERENCE.md command table regenerated (`nx --dump-commands`) —
       or env var table updated, for a new `NX_*` variable?
 - [ ] Does an inline "unknown arg" / usage-error message (if any) match the
       documented syntax?

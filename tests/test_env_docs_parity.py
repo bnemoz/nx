@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""I-10 (PERF §6): fail on an NX_* var READ in nx/ but not documented in the
-README. The reverse direction (documented but never read) is
+"""I-10 (PERF §6): fail on an NX_* var READ in nx/ but not documented in
+docs/REFERENCE.md (the README is intentionally thin; the complete env table
+lives there). The reverse direction (documented but never read) is
 test_docs_parity.test_every_documented_env_var_is_actually_read.
 
 Deliberate non-variables (test fixtures like NX_FOO/NX_MY_TOKEN, the
@@ -16,7 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 sys.path.insert(0, REPO_ROOT)
 
-README = open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8").read()
+REFERENCE = open(os.path.join(REPO_ROOT, "docs", "REFERENCE.md"),
+                 encoding="utf-8").read()
 
 # name -> why it is deliberately not a README env var
 _ALLOWLIST = {
@@ -53,7 +55,7 @@ _ALLOWLIST = {
     # are NX_API_KEY/NX_SOURCE_*; /config lists provider keys by their real
     # names) — nothing to document.
     "NX_KEYS": "comment mention in /config, not a read variable",
-    # NX_APPROVAL_POLICY: documented in README since 0.135.1.
+    # NX_APPROVAL_POLICY: documented in REFERENCE since 0.135.1.
     # protocol tag regex NAMES in _text_fallback/_stream_parse — module-level
     # compiled-pattern identifiers, not environment variables:
     "NX_OPEN_TAG": "compiled regex identifier, not an env var",
@@ -124,15 +126,15 @@ def test_every_read_nx_var_is_documented():
     names = {n for n in names
              if "<" not in n and not n.endswith("_")
              and not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
-    documented = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", README))
+    documented = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", REFERENCE))
     documented = {n for n in documented
                   if "<" not in n and not n.endswith("_")
                   and not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
     undocumented = sorted(names - documented - set(_ALLOWLIST))
     assert not undocumented, (
-        f"NX_* vars read in nx/ but not in the README's env table: "
+        f"NX_* vars read in nx/ but not in the REFERENCE env table: "
         f"{undocumented} — document each (AGENTS.md: every NX_* tunable gets a "
-        f"README entry) or add it to _ALLOWLIST with a reason if it is not a "
+        f"docs/REFERENCE.md entry) or add it to _ALLOWLIST with a reason if it is not a "
         f"tunable")
 
 

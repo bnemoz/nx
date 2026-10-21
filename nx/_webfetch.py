@@ -756,7 +756,7 @@ def _web_search(query: str, engines: str = "", categories: str = "",
                     "now. Options: retry in a few minutes (a cached result may "
                     "exist), ask the user for a URL to `url`-fetch directly, or "
                     "set NX_SEARX_URL to a SearXNG instance (the preferred search "
-                    "backend — see the README's NX_WEBFETCH entry).")
+                    "backend — see the NX_WEBFETCH entry in docs/REFERENCE.md).")
         return ("No results (the lite endpoint's HTML may have changed — check "
                 "the layout before assuming the query matched nothing).")
     lines = [

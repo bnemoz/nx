@@ -97,7 +97,7 @@ Exit codes:
 
 Use `nx <command> --help` for details on a command. Run `nx sessions` to list
 saved sessions, `nx config doctor` to check the env layer, or `/help` in the
-REPL for the full in-session command list. See README.md for the full NX_* env
+REPL for the full in-session command list. See docs/REFERENCE.md for the full NX_* env
 var table.
 """
 
@@ -162,7 +162,7 @@ _VERBS = ("run", "telegram", "config", "eval", "sessions", "ls", "list", "prune"
 
 
 def _commands_markdown() -> str:
-    """The README `## Commands` table, generated from the slash-command
+    """The docs/REFERENCE.md command table, generated from the slash-command
     registry — same source `/help` renders from, so the docs can't go stale."""
     from ._commands import HELP_GROUP_ORDER, COMMANDS
     lines = ["| command | what it does |", "| --- | --- |"]

@@ -26,7 +26,11 @@ rp = sys.modules["nx._repl"]
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-README = open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8").read()
+# The user-facing README is intentionally thin (quick start + pointers); the
+# complete command/env tables live in docs/REFERENCE.md — parity checks run
+# against that file, which is where `nx --dump-commands` regenerates them.
+REFERENCE = open(os.path.join(REPO_ROOT, "docs", "REFERENCE.md"),
+                 encoding="utf-8").read()
 
 
 def _dispatch_keys() -> set[str]:
@@ -71,11 +75,12 @@ def test_arg_options_only_for_dispatched_commands():
 
 
 def _readme_command_rows() -> set[str]:
-    """Every slash-word in the README command table's first column (a cell may
-    list aliases and sub-commands: '/reset /clear /new', '/memory save|remember')."""
+    """Every slash-word in the REFERENCE command table's first column (a cell
+    may list aliases and sub-commands: '/reset /clear /new',
+    '/memory save|remember')."""
     rows = set()
     in_table = False
-    for line in README.splitlines():
+    for line in REFERENCE.splitlines():
         if line.startswith("| command |"):
             in_table = True
             continue
@@ -87,26 +92,27 @@ def _readme_command_rows() -> set[str]:
     return rows
 
 
-def test_every_dispatched_command_is_in_the_readme_table():
+def test_every_dispatched_command_is_in_the_reference_table():
     """Aliases live on their primary's row (they render inside its usage
     label), so only non-alias dispatch keys need a row of their own."""
     from nx import _commands as reg
     alias_names = {a[0] for spec in reg.COMMANDS.values() for a in spec.aliases}
     missing = _dispatch_keys() - alias_names - _readme_command_rows()
-    assert not missing, f"dispatched but absent from the README command table: {sorted(missing)}"
+    assert not missing, f"dispatched but absent from the REFERENCE command table: {sorted(missing)}"
 
 
 def test_generated_commands_table_matches_the_registry():
-    """The README command block is machine-generated (`nx --dump-commands`):
-    regenerate it and it must match the registry byte-for-byte."""
+    """The docs/REFERENCE.md command block is machine-generated
+    (`nx --dump-commands`): regenerate it and it must match the registry
+    byte-for-byte."""
     from nx import _cli
     expected = _cli._commands_markdown()
     mm = re.search(
         r"<!-- BEGIN GENERATED COMMANDS[^\n]*-->\n(.*?)\n<!-- END GENERATED COMMANDS -->",
-        README, re.DOTALL)
-    assert mm, "README generated-commands markers are missing"
+        REFERENCE, re.DOTALL)
+    assert mm, "REFERENCE generated-commands markers are missing"
     assert mm.group(1) == expected, (
-        "README command table is stale — run `nx --dump-commands` and paste the "
+        "docs/REFERENCE.md command table is stale — run `nx --dump-commands` and paste the "
         "output between the GENERATED COMMANDS markers")
 
 
@@ -120,10 +126,10 @@ def test_ctx_all_is_implemented_not_just_hinted():
 
 
 def test_every_documented_env_var_is_actually_read():
-    """Every NX_* var named in the README's env table must be read somewhere
+    """Every NX_* var named in the REFERENCE env table must be read somewhere
     in the repo (the NX_TEMPERATURE/NX_TOP_P failure mode: documented, never
     read). Table rows may document several vars on one line."""
-    names = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", README))
+    names = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", REFERENCE))
     # <NAME> placeholders are conventions, not variables; a trailing
     # underscore is the regex biting `NX_PRICE_<SOURCE>_INPUT`.
     names = {n for n in names if "<" not in n and not n.endswith("_")}
@@ -141,7 +147,7 @@ def test_every_documented_env_var_is_actually_read():
     for n in sorted(names):
         if not re.search(rf'["\']{n}["\']', blob):
             missing.append(n)
-    assert not missing, f"documented in README but read nowhere in the repo: {missing}"
+    assert not missing, f"documented in REFERENCE but read nowhere in the repo: {missing}"
 
 
 def test_dynamic_env_families_have_a_real_reader():

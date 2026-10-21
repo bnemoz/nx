@@ -93,7 +93,8 @@ NX_SOURCE_ZAI_BASE_URL=https://api.z.ai/api/paas/v4
 NX_SOURCE_ZAI_MODEL=glm-x-preview
 ```
 
-Switch mid-session with `/source zai`; context is preserved across switches.
+Switch mid-session with `/model <model-id>` (or `/source <name>` for the
+endpoint-level view); context is preserved across switches.
 Full annotated example: [`sources.example.env`](sources.example.env).
 
 </details>

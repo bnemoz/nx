@@ -688,7 +688,8 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/compress` | summarize older turns into one, keep last 2 verbatim |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
-| `/source [name] [model]` | list sources, switch to one, or override its model |
+| `/model [model-id \| source] [model]` | list models, switch by model id, or pin a source's model |
+| `/source [name] [model]` | list sources (endpoints), switch to one, or override its model |
 | `/provider [source] [order\|off]` | show or set OpenRouter provider-routing order |
 | `/budget [tokens\|off]` | show or set the reasoning token budget |
 | `/toolcalls [text\|native\|auto] [reset [tool]]` | tool-calling mode + breaker: text|native|auto, reset [tool], or bare to show |

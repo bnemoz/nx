@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""One-shot: regenerate the README generated-commands block from the registry."""
+"""One-shot: regenerate the docs/REFERENCE.md generated-commands block from
+the registry (the README no longer carries the command table)."""
 import os
 import re
 import sys
@@ -13,10 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nx import _cli  # noqa: E402
 
 table = _cli._commands_markdown()
-path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "README.md")
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+path = os.path.join(root, "docs", "REFERENCE.md")
 src = open(path, encoding="utf-8").read()
 new = re.sub(r"(<!-- BEGIN GENERATED COMMANDS[^\n]*-->\n).*?(\n<!-- END GENERATED COMMANDS -->)",
              lambda m: m.group(1) + table + m.group(2), src, flags=re.DOTALL)
 assert new != src, "markers not found"
 open(path, "w", encoding="utf-8").write(new)
-print("README command table regenerated")
+print("docs/REFERENCE.md command table regenerated")
