@@ -38,6 +38,7 @@ class _FakeMsg:
 class _FakeChoice:
     def __init__(self, content):
         self.message = _FakeMsg(content)
+        self.finish_reason = "stop"
 
 
 class _FakeResp:
@@ -55,6 +56,8 @@ class _FakeCompletions:
 
     def create(self, **kwargs):
         self.requests.append(kwargs)
+        if getattr(self, "responses_empty", False):
+            return _FakeResp("")
         return _FakeResp("fake summary of the conversation")
 
 
@@ -436,6 +439,73 @@ def test_fold_spills_big_tool_results_before_summarizing(nx_env):
     # the spill file exists and holds the full text
     odir = os.path.join(str(nx._state.SESSION_HOME), "overflow")
     assert os.path.isdir(odir) and os.listdir(odir)
+
+
+def test_compress_ledger_records_counts_and_ranges(nx_env):
+    """Phase 2: a completed fold records a counts+indexes-only ledger keyed by
+    PRE-compression indexes; a failed/no-op fold records nothing."""
+    nx, tmp = nx_env
+    client = _mk(nx)
+    from nx import _compress as cp
+    msgs = [{"role": "system", "content": nx.SYSTEM}] + [
+        {"role": "user" if j % 2 == 0 else "assistant", "content": f"turn {j // 2}"}
+        for j in range(10)]
+    before = len(msgs)
+    r = cp.compress(msgs, auto=False)
+    assert r is not None
+    led = nx._state._LAST_COMPRESSION
+    assert led is not None
+    assert led["before_messages"] == before
+    assert led["after_messages"] == len(msgs)
+    assert led["kept"] == 1 + nx.COMPRESS_KEEP  # system + verbatim tail
+    assert led["summarized"] == (before - led["kept"] - led["pinned"]
+                                  - led["dropped"])
+    assert led["dropped"] == 0
+    assert led["pinned"] == 0
+    assert led["summary_tokens_est"] > 0
+    assert led["ts"] > 0
+    covered = []
+    for rng in led["ranges"]:
+        assert rng["action"] in ("dropped", "summarized", "pinned-kept", "kept")
+        assert 0 <= rng["start"] < rng["end"] <= before
+        assert not any(k in rng for k in ("content", "text", "role"))
+        covered.extend(range(rng["start"], rng["end"]))
+    # every pre-compression message is accounted for exactly once
+    assert sorted(covered) == list(range(before))
+
+    # failure path: empty summary → ledger unchanged
+    client.chat.completions.responses_empty = True
+    stale = dict(led)
+    bad = [{"role": "system", "content": nx.SYSTEM}] + [
+        {"role": "user", "content": f"u{j}"} for j in range(10)]
+    assert cp.compress(bad, auto=False) is None
+    assert nx._state._LAST_COMPRESSION == stale
+
+
+def test_compress_ledger_marks_pinned_turns_kept(nx_env):
+    """Phase 2: pinned messages inside the folded region survive verbatim and
+    the ledger shows them as their own pinned-kept range."""
+    nx, tmp = nx_env
+    _mk(nx)
+    from nx import _compress as cp
+    msgs = [{"role": "system", "content": nx.SYSTEM}] + [
+        {"role": "user" if j % 2 == 0 else "assistant", "content": f"turn {j // 2}"}
+        for j in range(10)]
+    before = len(msgs)
+    # pin body index 1 (pre-compression message index 2)
+    nx._state._CTX_PINNED = [2]
+    try:
+        r = cp.compress(msgs, auto=False)
+        assert r is not None
+    finally:
+        nx._state._CTX_PINNED = []
+    led = nx._state._LAST_COMPRESSION
+    assert led is not None and led["pinned"] == 1
+    assert led["summarized"] == (led["before_messages"] - led["kept"]
+                                  - led["pinned"] - led["dropped"])
+    pk = [rng for rng in led["ranges"] if rng["action"] == "pinned-kept"]
+    assert len(pk) == 1 and pk[0]["start"] == 2 and pk[0]["end"] == 3
+    assert all(rng["action"] != "dropped" for rng in led["ranges"])
 
 
 def test_compress_call_is_bounded_and_routable(nx_env):

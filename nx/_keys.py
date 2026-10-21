@@ -81,6 +81,15 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("enter", "open transcript"),
         ("p/space", "pin/unpin turn"),
         ("a", "live/as-sent"),
+        ("c", "last compression report"),
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    # The /compress --show ledger view: `c` in the "context" surface jumps here
+    # (the registry itself has no cross-view notion — the jump is ContextView
+    # pushing CompressionView onto the shell's view stack).
+    "compress": [
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),

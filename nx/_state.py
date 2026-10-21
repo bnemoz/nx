@@ -159,6 +159,53 @@ def record_last_prompt(messages: list) -> None:
     _LAST_PROMPT = snap
 
 
+# --- last-compression ledger (EXPLAINABLE_HARNESS_SPEC Phase 2) ----------------
+# What the last completed compress() did to the transcript, written on the
+# real compression-completed path only (a failed/empty fold records nothing —
+# the context is unchanged) and read by the /ctx before/after view. Counts and
+# 0-based PRE-compression indexes ONLY, never message text: the ledger must not
+# become an unbounded second copy of the transcript (same rule as _LAST_PROMPT
+# above). Session-lifetime like the other st.* state; drained by nx_state_reset.
+# None = no fold completed yet this session. Entry shape (see
+# record_last_compression):
+#   {"kept", "dropped", "summarized", "summary_tokens_est", "pinned",
+#    "before_messages", "after_messages", "ts",
+#    "ranges": [{"start", "end", "action": "dropped"|"summarized"|"pinned-kept"}]}
+# with start/end half-open indexes into the pre-compression message list.
+_LAST_COMPRESSION: dict | None = None
+
+
+def record_last_compression(kept: int, summarized: int, summary_tokens_est: int,
+                            pinned: int, before_messages: int,
+                            after_messages: int, ts: float,
+                            ranges: list[dict] | None = None) -> None:
+    """Record what the last completed compress() did into `_LAST_COMPRESSION`
+    (EXPLAINABLE_HARNESS_SPEC Phase 2).
+
+    `kept` = messages kept verbatim in the tail, `summarized` = messages folded
+    into the summary, `pinned` = foldable messages that survived verbatim
+    because they were pinned, `before/after_messages` = total list lengths.
+    `ranges` carries half-open [start, end) spans over the PRE-compression
+    message list with an action per span; the setter derives `dropped` as
+    whatever the kept/summarized/pinned partition leaves unexplained. No
+    message text is retained — counts and indexes only."""
+    global _LAST_COMPRESSION
+    kept = int(kept)
+    summarized = int(summarized)
+    pinned = int(pinned)
+    _LAST_COMPRESSION = {
+        "kept": kept,
+        "summarized": summarized,
+        "dropped": max(0, before_messages - kept - summarized - pinned),
+        "summary_tokens_est": int(summary_tokens_est),
+        "pinned": pinned,
+        "before_messages": int(before_messages),
+        "after_messages": int(after_messages),
+        "ts": float(ts),
+        "ranges": list(ranges or []),
+    }
+
+
 # Last turn's prompt-cache hit fraction (0.0–1.0, or None when the server
 # didn't report cache numbers). Written by _capture_last_prompt_tokens();
 # read by the stats footer and /ctx so the user can see whether the KV/prompt

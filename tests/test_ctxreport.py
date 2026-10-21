@@ -1,9 +1,25 @@
-"""Phase 1 (transcript detail + as-sent) of the explainable harness: the
-ContextView detail pane, the live/as-sent toggle over st._LAST_PROMPT, and
-the inline `/context t <n>` output — same fixtures as test_fullscreen.py's
-ContextView block."""
+"""Phase 1 (transcript detail + as-sent) + Phase 2 (the last-compression
+ledger read side) of the explainable harness: the ContextView detail pane, the
+live/as-sent toggle over st._LAST_PROMPT, the inline `/context t <n>` output,
+and `/compress --show` / CompressionView over st._LAST_COMPRESSION — same
+fixtures as test_fullscreen.py's ContextView block."""
 
 from nx import _ctxreport
+
+# A ledger in the write side's shape: ranges are HALF-OPEN 0-based indexes into
+# the PRE-compression list, so [0,2) must render as the 1-based inclusive [1..2].
+_LEDGER = {
+    "kept": 3, "dropped": 0, "summarized": 4, "summary_tokens_est": 187,
+    "pinned": 1, "before_messages": 9, "after_messages": 5,
+    "ts": 1_750_000_000.0,
+    "ranges": [
+        {"start": 0, "end": 2, "action": "kept"},
+        {"start": 2, "end": 6, "action": "summarized"},
+        {"start": 6, "end": 7, "action": "pinned-kept"},
+        {"start": 7, "end": 9, "action": "kept"},
+    ],
+    "a_key_the_renderer_has_never_seen": "ignore me",
+}
 
 
 class _CtxState:
@@ -137,3 +153,137 @@ def test_message_digest_is_stable_sha256_of_role_and_text():
     assert d1 == hashlib.sha256(
         b"user\x00hello").hexdigest()
     assert d1 == _digest({"role": "user", "content": "hello"})
+
+
+# --- Phase 2: the last-compression ledger, read side -------------------------
+
+def test_compression_report_renders_counts_and_ranges():
+    import time
+    lines = _ctxreport._compression_report_lines(_LEDGER)
+    body = "\n".join(lines)
+    # header: local time + before → after
+    assert time.strftime("%Y-%m-%d %H:%M:%S",
+                         time.localtime(_LEDGER["ts"])) in lines[0]
+    assert "9 → 5 messages" in lines[0]
+    # counts line
+    counts = lines[1]
+    for want in ("kept 3", "dropped 0", "summarized 4", "pinned 1",
+                 "summary ~187 tok est"):
+        assert want in counts, want
+    # one line per range, in order
+    range_lines = [ln for ln in lines if ln.strip().startswith("[")]
+    assert len(range_lines) == len(_LEDGER["ranges"])
+    assert "ignore me" not in body          # unknown keys ignored
+
+
+def test_compression_ranges_render_1_based_inclusive():
+    # The write side's [start, end) is HALF-OPEN and 0-based: [0,2) covers
+    # messages 1 and 2, [2,6) covers 3..6.
+    lines = _ctxreport._compression_report_lines(_LEDGER)
+    range_lines = [ln for ln in lines if ln.strip().startswith("[")]
+    assert [ln.strip().split("]")[0] + "]" for ln in range_lines] == [
+        "[1..2]", "[3..6]", "[7..7]", "[8..9]"]
+
+
+def test_kept_action_renders_as_verbatim_untouched():
+    # "kept" includes the system + prefix block, so it must say the block was
+    # never touched — not merely "kept".
+    lines = _ctxreport._compression_report_lines(_LEDGER)
+    kept = [ln for ln in lines if ln.strip().startswith("[1..2]")]
+    assert len(kept) == 1
+    assert "verbatim, untouched" in kept[0]
+    # the other actions get their own wording, an unknown one passes through
+    assert any("pinned" in ln and "[7..7]" in ln for ln in lines)
+    lines = _ctxreport._compression_report_lines(
+        {"ranges": [{"start": 0, "end": 1, "action": "spliced"}]})
+    assert "[1..1] spliced" in "\n".join(lines)
+
+
+def test_compression_report_none_placeholder(monkeypatch):
+    from nx import _state as st
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", None, raising=False)
+    assert _ctxreport._compression_report_lines() == [
+        "  no compression recorded this session"]
+    # an attribute that does not exist at all behaves like None
+    monkeypatch.delattr(st, "_LAST_COMPRESSION", raising=False)
+    assert "no compression recorded this session" in \
+        _ctxreport._compression_report_lines()[0]
+
+
+def test_compression_report_survives_a_garbage_ledger():
+    # Defensive reads: missing counts render 0, a broken range is skipped.
+    lines = _ctxreport._compression_report_lines({"ranges": [
+        {"start": None, "end": 3, "action": "kept"},
+        {"start": 5, "end": 2, "action": "kept"},
+        "not-a-dict",
+    ]})
+    assert "kept 0" in lines[1] and "summary ~0 tok est" in lines[1]
+    assert not [ln for ln in lines if ln.strip().startswith("[")]
+
+
+def test_compress_show_prints_the_ledger_inline(monkeypatch, capsys):
+    from nx import _repl_settings_cmds as cmds
+    from nx import _state as st
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", _LEDGER, raising=False)
+    monkeypatch.setenv("NX_FULLSCREEN", "0")   # inline, no alternate screen
+    cmds._cmd_compress("/compress --show", _CtxState(3))
+    out = capsys.readouterr().out
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert _ctxreport._compression_report_lines(_LEDGER) == [
+        ln for ln in plain.splitlines()]
+    assert "9 → 5 messages" in plain and "[3..6]" in plain
+
+
+def test_compress_show_alias_and_none_case(monkeypatch, capsys):
+    from nx import _repl_settings_cmds as cmds
+    from nx import _state as st
+    monkeypatch.setenv("NX_FULLSCREEN", "0")
+    # the hidden /compact alias reaches the same branch
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", _LEDGER, raising=False)
+    cmds._cmd_compress("/compact show", _CtxState(3))
+    assert "[1..2]" in capsys.readouterr().out
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", None, raising=False)
+    cmds._cmd_compress("/compress --show", _CtxState(3))
+    assert "no compression recorded this session" in capsys.readouterr().out
+
+
+def test_compression_view_paints_the_same_lines(monkeypatch):
+    from nx import _render, _state as st
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", _LEDGER, raising=False)
+    view = _ctxreport.compression_view(_CtxState(3))
+    assert isinstance(view, _ctxreport.CompressionView)
+    body = "\n".join(view.render(240, 40))
+    assert _render.BOX_TL in body
+    plain = __import__("re").sub(r"\x1b\[[0-9;]*m", "", body)
+    for ln in _ctxreport._compression_report_lines():
+        assert ln.strip() in plain
+    # esc/q quit (read-only view: no third action to run)
+    assert view.on_key("r", None) == "repaint"
+    assert view.on_key("esc", None) == "quit"
+
+
+def test_compression_view_is_registered_and_jumpable_from_context(monkeypatch):
+    from nx import _fullscreen, _keys, _state as st
+    monkeypatch.setattr(st, "_LAST_COMPRESSION", _LEDGER, raising=False)
+    assert "compress" in _fullscreen.view_names()
+    assert isinstance(_fullscreen.make_view("compress", _CtxState()),
+                      _ctxreport.CompressionView)
+    # every advertised key of the new surface is handled
+    view = _ctxreport.compression_view()
+    for key, _meaning in _keys.keys_for("compress"):
+        assert view.on_key(key, None) in ("repaint", "quit", "run"), key
+    # `c` in the /context surface jumps to it via the shell's view stack
+    assert ("c", "last compression report") in _keys.keys_for("context")
+
+    class _Shell:
+        def __init__(self):
+            self.pushed = []
+
+        def push(self, v):
+            self.pushed.append(v)
+
+    ctx = _ctxreport.context_view(_CtxState(2))
+    shell = _Shell()
+    assert ctx.on_key("c", shell) == "repaint"
+    assert isinstance(shell.pushed[0], _ctxreport.CompressionView)

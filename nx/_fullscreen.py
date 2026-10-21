@@ -642,6 +642,15 @@ def context(state=None):
     return ContextView(state)
 
 
+@register_view("compress")
+def compress_view(state=None):
+    """The `/compress --show` ledger view. The renderer lives in `_ctxreport`
+    (the module that already renders every context/compression surface); this
+    is only its identity in the tiered registry."""
+    from ._ctxreport import CompressionView
+    return CompressionView(state)
+
+
 @register_view("memory")
 def memory_view():
     from ._memory_cmd import MemoryView

@@ -95,6 +95,17 @@ def test_last_prompt_tap_is_drained():
     assert st._LAST_PROMPT is None
 
 
+def test_last_compression_ledger_is_drained():
+    """Same session-scope global, same drain contract (Phase 2). Residue would
+    make the /ctx before/after view describe a fold a later test never ran."""
+    st.record_last_compression(kept=1, summarized=2, summary_tokens_est=10,
+                               pinned=0, before_messages=5, after_messages=3,
+                               ts=1.0)
+    assert st._LAST_COMPRESSION is not None
+    nx_state_reset_body()
+    assert st._LAST_COMPRESSION is None
+
+
 def test_metrics_tls_is_cleared():
     st._METRICS_TLS.metrics = {"t": 1}
     st._METRICS_TLS.other = "residue"

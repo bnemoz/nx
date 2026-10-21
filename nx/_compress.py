@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import threading
 from typing import Any
 
@@ -779,6 +780,47 @@ def compress(
     else:
         header = f"[Compressed context — {summarized_n} earlier turns summarized; last {len(tail)} turns kept verbatim]"
         new_mid = [{"role": "user", "content": f"{header}\n\n{summary}", "_digest": True}]
+    # Phase 2 ledger: counts + 0-based PRE-compression indexes only (no text).
+    # Computed from the final partition, BEFORE the splice below overwrites
+    # `messages` (the indexes must refer to the pre-compression list). Only the
+    # real compression-completed path records — every failure/empty-summary
+    # return above leaves the previous ledger untouched, which is honest: the
+    # context was not changed. The early `len(fold_body) <= keep` return also
+    # records nothing (zero-action folds carry no before/after information).
+    before_n = len(messages)
+    _body_start = (1 if sys_msg else 0) + fold_off  # first foldable message idx
+    _pin_coords = {_body_start + i for i in expanded} if pins else set()
+    _n_foldable = len(fold_body) - keep
+    _summarized_coords = ({_body_start + i for i in range(_n_foldable)} - _pin_coords)
+    # dangling leading tail turns moved into the summary prompt count as folded
+    _summarized_coords |= {_body_start + _n_foldable + j for j in range(n_dropped)}
+    # kept = everything verbatim EXCEPT the pinned messages (system/prefix
+    # head + the non-pinned tail); summarized = the folded region minus pins;
+    # so kept + summarized + pinned == before_messages exactly.
+    _kept_coords = [i for i in range(before_n)
+                    if i < _body_start
+                    or (i >= _body_start + _n_foldable + n_dropped
+                        and i not in _pin_coords)]
+
+    def _runs(coords: list[int], action: str) -> list[dict]:
+        out = []
+        for i in coords:
+            if out and out[-1]["end"] == i:
+                out[-1]["end"] = i + 1
+            else:
+                out.append({"start": i, "end": i + 1, "action": action})
+        return out
+
+    _ranges = (_runs(sorted(_summarized_coords), "summarized")
+               + _runs(sorted(_pin_coords), "pinned-kept")
+               + _runs(_kept_coords, "kept"))
+    st.record_last_compression(
+        kept=len(_kept_coords), summarized=len(_summarized_coords),
+        summary_tokens_est=len(summary) // 4,  # chars/3.5 estimator, rounded
+        pinned=len(_pin_coords), before_messages=before_n,
+        after_messages=len(new_mid) + len(tail) + (1 if sys_msg else 0)
+        + len(prefix_block), ts=time.time(), ranges=_ranges)
+
     messages[:] = (([sys_msg] if sys_msg else []) + prefix_block
                    + new_mid + tail)
     return len(tail), summarized_n, len(summary)

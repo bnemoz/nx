@@ -498,6 +498,10 @@ def nx_state_reset_body() -> None:
         # report provenance for messages the NEXT test never sent (and hides
         # the "no settled call recorded" path the view must also render).
         st._LAST_PROMPT = None
+        # 0.166.0 (EXPLAINABLE_HARNESS_SPEC Phase 2): the last-compression
+        # ledger. A stale ledger would make the /ctx before/after view describe
+        # a fold a later test never ran (and hide its "no fold yet" path).
+        st._LAST_COMPRESSION = None
     if no is not None:
         no._CURRENT.set(None)
         # Drain the module-level pending-note slots too. A worker that finished

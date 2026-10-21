@@ -966,8 +966,34 @@ def _undo_inline_list(_m) -> None:
         print(f"  {DIM}{i:>2}{RESET}  {c['tool']:<11} {paths}  {DIM}({_fmt_when(c.get('ts'))}){RESET}")
 
 
+def _print_compression_report() -> None:
+    """`/compress --show`'s inline ledger dump — the view body printed dim.
+
+    A one-shot print (no alternate screen), so it is also `open_view`'s
+    fallback when there is no usable tty."""
+    from ._ctxreport import _compression_report_lines
+    for line in _compression_report_lines():
+        print(f"{DIM}{line}{RESET}")
+
+
 def _cmd_compress(user: str, state: _ReplState) -> None:
     import nx as _m
+    # `/compress --show` (`/compress show`): the last compression's ledger,
+    # read-only — full screen when a tty is available, inline otherwise (the
+    # SAME helper the view paints, so the two surfaces cannot drift). Never
+    # touches the drain/confirm/fold path below. Reading the first argument
+    # rather than a fixed prefix keeps the /compact alias working.
+    _parts = user.split()
+    if len(_parts) >= 2 and _parts[1].lower() in ("--show", "show", "-s"):
+        from . import _fullscreen
+        from ._ctxreport import compression_view
+        if _fullscreen.wants_fullscreen():
+            _fullscreen.open_view(
+                compression_view(state),
+                fallback=lambda: _print_compression_report())
+            return
+        _print_compression_report()
+        return
     # 0.103.4: drain any queued autosave BEFORE folding. A pending
     # pre-compression snapshot that lands after the compressed save would hit
     # _merge_session_messages()'s compaction-rewrite branch and resurrect the

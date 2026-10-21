@@ -522,6 +522,14 @@ class ContextView(View):
         if key == "a":
             self.as_sent = not self.as_sent
             return "repaint"
+        if key == "c":
+            # Phase 2: jump to the last-compression ledger. The shell's own
+            # view stack does the navigation (push + "repaint" hands control
+            # over, esc pops back here); nothing is recomputed or mutated.
+            if shell is None:
+                return "repaint"
+            shell.push(compression_view(self.state))
+            return "repaint"
         if key == "r":
             self.refresh()
             return "repaint"
@@ -530,7 +538,150 @@ class ContextView(View):
         return "repaint"
 
 
+def _int_or(value: Any) -> int:
+    """Ledger counts render as ints; a missing/garbage count renders 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def context_view(state: Any = None) -> "ContextView":
     """The /context view object the fullscreen shell runs (`_fullscreen.context`
     is the thin alias the command path uses)."""
     return ContextView(state)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — the last-compression ledger, read side
+#
+# The WRITE side lives in `nx/_compress.py` (it publishes `st._LAST_COMPRESSION`,
+# session-lifetime, drained by the test fixture). This module only renders it:
+# `/compress --show` prints these lines inline and the `CompressionView` below
+# paints the SAME list in the alternate screen, so the two surfaces cannot drift
+# (the /context rule).
+#
+# Ledger schema (defensive reads only — unknown keys ignored, anything missing
+# falls back to 0, nothing here ever raises):
+#   {"kept": int, "dropped": int, "summarized": int, "summary_tokens_est": int,
+#    "pinned": int, "before_messages": int, "after_messages": int, "ts": float,
+#    "ranges": [{"start": int, "end": int, "action": str}, ...]}
+# `ranges` are HALF-OPEN 0-based indexes into the PRE-compression list, so the
+# display form is the 1-based INCLUSIVE `[start+1..end]`.
+# ---------------------------------------------------------------------------
+
+#: action -> what it means to the user. An unknown action renders verbatim
+#: (a new write-side action must not break an old render).
+_COMPRESSION_ACTIONS = {
+    # "kept" includes the system + prefix block, so it is not just "kept":
+    # those messages were never even considered for folding.
+    "kept": "kept — verbatim, untouched",
+    "pinned-kept": "kept — pinned, protected from folding",
+    "summarized": "summarized — folded into the summary",
+    "dropped": "dropped — evicted, not summarized",
+}
+
+
+def _compression_action_label(action: Any) -> str:
+    return _COMPRESSION_ACTIONS.get(str(action or "?"), str(action or "?"))
+
+
+def _compression_ts(ts: Any) -> str:
+    """Ledger timestamp as local time; anything unparseable renders as-is."""
+    try:
+        import time
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "?" if ts is None else str(ts)
+
+
+def _compression_range_line(rng: Any) -> str | None:
+    """One range as `[start+1..end] <action>` (half-open 0-based → inclusive
+    1-based). None for an entry with no usable indexes."""
+    if not isinstance(rng, dict):
+        return None
+    try:
+        lo, hi = int(rng.get("start")) + 1, int(rng.get("end"))
+    except (TypeError, ValueError):
+        return None
+    if hi < lo:
+        return None
+    return f"  [{lo}..{hi}] {_compression_action_label(rng.get('action'))}"
+
+
+def _compression_report_lines(ledger: dict | None = None) -> list[str]:
+    """The last-compression ledger as plain text lines (no ANSI).
+
+    `ledger` defaults to `st._LAST_COMPRESSION`; the None/absent case renders
+    the placeholder line the command shows dim. The fullscreen view paints the
+    exact same list, so both surfaces agree byte-for-byte.
+    """
+    led = getattr(st, "_LAST_COMPRESSION", None) if ledger is None else ledger
+    if not isinstance(led, dict):
+        return ["  no compression recorded this session"]
+    head = f"  last compression · {_compression_ts(led.get('ts'))}"
+    if led.get("before_messages") is not None \
+            or led.get("after_messages") is not None:
+        head += (f" · {_int_or(led.get('before_messages'))} → "
+                 f"{_int_or(led.get('after_messages'))} messages")
+    lines = [head,
+             f"  kept {_int_or(led.get('kept'))} · "
+             f"dropped {_int_or(led.get('dropped'))} · "
+             f"summarized {_int_or(led.get('summarized'))} · "
+             f"pinned {_int_or(led.get('pinned'))} · "
+             f"summary ~{_int_or(led.get('summary_tokens_est'))} tok est"]
+    ranges = [ln for ln in (_compression_range_line(r)
+                            for r in (led.get("ranges") or [])) if ln]
+    if ranges:
+        lines.append("  what happened to the turns "
+                     "(1-based, pre-compression numbering):")
+        lines.extend(ranges)
+    return lines
+
+
+class CompressionView(View):
+    """The `/compress --show` view: the last compression's ledger, read-only.
+
+    The same Phase-D pattern as `ContextView` minus the one deviation
+    ContextView was granted — this view mutates nothing at all. Its body IS
+    `_compression_report_lines()`, so the inline command output and the view
+    agree by construction; `r` re-reads the ledger, esc/q leave.
+    """
+
+    surface = "compress"
+    title = "last compression"
+
+    def __init__(self, state: Any = None) -> None:
+        super().__init__()
+        self.state = state
+        self.lines: list[str] = []
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.lines = _compression_report_lines()
+
+    def render(self, width: int, height: int) -> list[str]:
+        from ._keys import hint_line
+        from ._render import RESET, panel, role
+        lines = [f"{role('ACCENT')}compress{RESET}{role('MUTED')} — "
+                 f"{hint_line('compress')}{RESET}"]
+        budget = max(1, height - len(lines) - 2)   # hint line + box borders
+        body = [f"{role('MUTED')}{ln[:width]}{RESET}"
+                for ln in self.lines[:budget]]
+        lines.extend(panel(self.title, body,
+                           footer=f"{len(self.lines)} line(s) · the ledger "
+                                  f"covers this session only"))
+        return lines[:height]
+
+    def on_key(self, key: str, shell: Any) -> str:
+        self.notice = ""
+        if key == "r":
+            self.refresh()
+        if key in ("q", "esc", "ctrl-c", "ctrl-d"):
+            return "quit"
+        return "repaint"
+
+
+def compression_view(state: Any = None) -> "CompressionView":
+    """The /compress --show view object the fullscreen shell runs."""
+    return CompressionView(state)

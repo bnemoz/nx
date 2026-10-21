@@ -146,8 +146,11 @@ _SPECS = [
      "[goal|done|off|discard]", [], ["done", "off", "discard"], 1, "workflow"),
     ("/verify", "set / clear / force-run the post-edit verify command (NX_VERIFY_CMD)",
      "[cmd|off|run]", [], ["off", "run"], 1, "workflow"),
-    ("/compress", "summarize older turns into one, keep last 2 verbatim",
-     None, [("/compact", "alias for /compress", False)], None, 1, "context"),
+    ("/compress", "summarize older turns into one, keep last 2 verbatim; "
+     "--show prints what the last compression did (which turns folded, "
+     "which stayed verbatim)",
+     "[--show]", [("/compact", "alias for /compress", False)],
+     ["--show"], 1, "context"),
     ("/autocompress", "show or set the auto-compress threshold",
      "[pct|off|on]", [], ["off", "on"], 1, "context"),
     ("/recover", "force a low-temp visible checkpoint after a bad stream",
