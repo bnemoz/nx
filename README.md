@@ -115,6 +115,11 @@ Full annotated example: [`sources.example.env`](sources.example.env).
   instance (`nx setup`).
 - **Batch mode** — `nx run` executes task files headlessly, in parallel.
 - **Memory / recall** — persistent notes and past-session recall, searchable.
+- **See what the harness is doing** — nx is not a black box: `/context` shows
+  the per-message token budget with a full transcript per message (`enter`)
+  and a live/as-sent toggle (`a`) that reveals what compression changed;
+  `/compress --show` reports exactly what the last compression did; `/turns`
+  logs every model call (tokens, cache %, harness interventions).
 
 ## Full documentation
 

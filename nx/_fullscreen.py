@@ -651,6 +651,15 @@ def compress_view(state=None):
     return CompressionView(state)
 
 
+@register_view("turns")
+def turns_view(state=None):
+    """The `/turns` event-log view. The renderer lives in `_turnlog` (the
+    module that owns the per-call report); this is only its identity in the
+    tiered registry."""
+    from ._turnlog import TurnsView
+    return TurnsView(state)
+
+
 @register_view("memory")
 def memory_view():
     from ._memory_cmd import MemoryView

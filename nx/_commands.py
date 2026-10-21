@@ -146,6 +146,8 @@ _SPECS = [
      "[goal|done|off|discard]", [], ["done", "off", "discard"], 1, "workflow"),
     ("/verify", "set / clear / force-run the post-edit verify command (NX_VERIFY_CMD)",
      "[cmd|off|run]", [], ["off", "run"], 1, "workflow"),
+    ("/turns", "per-model-call event log: tokens, cache %, harness interventions",
+     None, [], None, 1, "context"),
     ("/compress", "summarize older turns into one, keep last 2 verbatim; "
      "--show prints what the last compression did (which turns folded, "
      "which stayed verbatim)",

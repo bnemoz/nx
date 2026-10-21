@@ -54,6 +54,7 @@ from ._repl_settings_cmds import (
     _cmd_budget, _cmd_init, _cmd_recover, _cmd_undo, _cmd_compress, _cmd_autocompress, _cmd_todo,
     _cmd_ctx, _cmd_cost, _cmd_verify, _cmd_status, _cmd_retro, _cmd_review, _cmd_build,
 )
+from ._turnlog import _cmd_turns  # noqa: F401 (bound below; re-export for tests)
 from ._plan import _cmd_plan, plan_active  # noqa: F401 (re-export for tests)
 
 
@@ -220,6 +221,7 @@ bind_handlers({
     "/recover": _cmd_recover,
     "/undo": _cmd_undo,
     "/compress": _cmd_compress,
+    "/turns": _cmd_turns,
     "/autocompress": _cmd_autocompress,
     "/sessions": _cmd_sessions_handler,
     "/resume": _cmd_resume_handler,

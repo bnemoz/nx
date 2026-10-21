@@ -299,6 +299,13 @@ class _Metrics:
         # prompt total (input + cache_read, per the OpenAI convention where
         # input EXCLUDES cache) and the cached portion the server reported.
         self.turns: list[dict[str, int]] = []
+        # Harness-event ring (explainable-harness Phase 3, newest last, same
+        # cap): notable interventions attributable to a settled call —
+        # {"ts": float, "kind": str, "detail": str, "call": int | None}.
+        # Recorded from record-side code that already touches _Metrics
+        # (add()/event()); _turn.py and _dispatch.py stay untouched, so
+        # retry/salvage kinds land when their recording points move here.
+        self.events: list[dict[str, Any]] = []
         # Per-source scoreboard for /cost: source name → totals dict. A /source
         # switch mid-session is exactly the comparison /cost exists for (local
         # vs hosted on the same task), so usage is bucketed by the ACTIVE
@@ -328,6 +335,16 @@ class _Metrics:
             "cache_read_tokens": delta.get("cache_read_tokens") or 0,
         })
         del self.turns[:-_TURN_RING_MAX]
+        # Derivable harness events (Phase 3): a settled call that paid full
+        # prompt price on a big context is a cache miss the /turns log should
+        # name. Threshold avoids flagging every cold first call.
+        if prompt_tokens := ((delta.get("input_tokens") or 0)
+                             + max(0, delta.get("cache_read_tokens") or 0)):
+            cached = delta.get("cache_read_tokens") or 0
+            if prompt_tokens > 2048 and cached == 0:
+                self.event("cache-miss",
+                           f"~{prompt_tokens} prompt tokens, 0 cached",
+                           call=len(self.turns) - 1)
         src = st.ACTIVE.name if st.ACTIVE is not None else (self.source or "unknown")
         bucket = self.by_source.setdefault(src, {
             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
@@ -339,6 +356,17 @@ class _Metrics:
         bucket["api_calls"] += 1
         if delta.get("estimated"):
             bucket["estimated_calls"] += 1
+
+    def event(self, kind: str, detail: str = "",
+              call: int | None = None) -> None:
+        """Record one harness event into the /turns ring (Phase 3). Cheap and
+        best-effort: a ring append, nothing more — never raises."""
+        try:
+            self.events.append({"ts": time.time(), "kind": kind,
+                                "detail": str(detail)[:200], "call": call})
+            del self.events[:-_TURN_RING_MAX]
+        except Exception:
+            pass
 
     def as_meta(self) -> dict[str, Any]:
         """The fields merged into the session JSON on save. by_source rides

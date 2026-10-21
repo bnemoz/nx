@@ -82,6 +82,7 @@ KEYS: dict[str, list[tuple[str, str]]] = {
         ("p/space", "pin/unpin turn"),
         ("a", "live/as-sent"),
         ("c", "last compression report"),
+        ("t", "per-call event log (/turns)"),
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),
@@ -90,6 +91,13 @@ KEYS: dict[str, list[tuple[str, str]]] = {
     # (the registry itself has no cross-view notion — the jump is ContextView
     # pushing CompressionView onto the shell's view stack).
     "compress": [
+        ("r", "refresh"),
+        ("?", "keys"),
+        ("esc", "back"),
+    ],
+    # The /turns event-log view: `t` in the "context" surface jumps here (same
+    # push-onto-the-shell-stack pattern as `c` → compress).
+    "turns": [
         ("r", "refresh"),
         ("?", "keys"),
         ("esc", "back"),

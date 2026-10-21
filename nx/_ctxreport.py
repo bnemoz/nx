@@ -530,6 +530,14 @@ class ContextView(View):
                 return "repaint"
             shell.push(compression_view(self.state))
             return "repaint"
+        if key == "t":
+            # Phase 3: jump to the per-call event log (same push pattern as
+            # the `c` jump above; esc pops back here).
+            if shell is None:
+                return "repaint"
+            from ._turnlog import turns_view
+            shell.push(turns_view(self.state))
+            return "repaint"
         if key == "r":
             self.refresh()
             return "repaint"

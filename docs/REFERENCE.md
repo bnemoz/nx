@@ -688,6 +688,7 @@ Run `/help` in the REPL for the full list. The essentials:
 | `/retro` | distill this session's friction (usage.jsonl) into gotcha memories |
 | `/todo` | show the model's current todo_write list, full screen; Ctrl+G |
 | `/wip [note]` | snapshot work state (branch, dirty files, todos, note) into the session |
+| `/turns` | per-model-call event log: tokens, cache %, harness interventions |
 | `/compress [--show]` | summarize older turns into one, keep last 2 verbatim; --show prints what the last compression did (which turns folded, which stayed verbatim) |
 | `/autocompress [pct\|off\|on]` | show or set the auto-compress threshold |
 | `/recover [note]` | force a low-temp visible checkpoint after a bad stream |
