@@ -181,6 +181,27 @@ def _is_sensitive_project_path(abs_path: str, project_root: str) -> bool:
     return any(rx.search(rel) for rx in _SENSITIVE_RELPATH_RES)
 
 
+def _project_root_in_home_dotdir() -> bool:
+    """True when PROJECT_ROOT itself lives under a dotdir in $HOME (e.g. a
+    nx worktree checkout at ~/.nx/worktrees/<name>). In that case the dotdir
+    is the project container, not a session-private area: in-project writes
+    inside it must still classify as in-project medium, exactly as they do
+    in a normal checkout. (~/.ssh-style protection is unaffected: the guard
+    only relaxes for paths already inside the project root.)"""
+    root = st.PROJECT_ROOT
+    if not root:
+        return False
+    home = os.path.realpath(os.path.expanduser("~"))
+    root = os.path.realpath(root)
+    if not _is_under_path(root, home):
+        return False
+    try:
+        rel = os.path.relpath(root, home)
+    except ValueError:
+        return False
+    return rel != "." and rel.split(os.sep)[0].startswith(".")
+
+
 def _local_risk_hint(action: str) -> tuple[str, str] | None:
     """Return (level, reason) when `action` is unambiguously classifiable per
     RISK_SYSTEM's own bucket definitions, without a model round-trip. Returns
@@ -216,7 +237,8 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
         if path:
             info = _classify_action_path(path)
             if (info.get("path_scope") == "in_project" and st.PROJECT_ROOT_IS_GIT
-                    and not info["path_touches_home_dotdir"]):
+                    and (not info["path_touches_home_dotdir"]
+                         or _project_root_in_home_dotdir())):
                 if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT or ""):
                     return ("high", "deletes a hook/CI/build file")
                 return ("medium", "deletes a file inside the project (undoable)")
@@ -226,7 +248,7 @@ def _local_risk_hint(action: str) -> tuple[str, str] | None:
         return None
     info = _classify_action_path(path)
     scope = info.get("path_scope")
-    if scope == "in_project" and st.PROJECT_ROOT_IS_GIT and not info["path_touches_home_dotdir"]:
+    if scope == "in_project" and st.PROJECT_ROOT_IS_GIT and (not info["path_touches_home_dotdir"] or _project_root_in_home_dotdir()):
         if _is_sensitive_project_path(info["primary_path"], st.PROJECT_ROOT or ""):
             return ("high", "writes a self-executing hook/CI/build file")
         return ("medium", "writes a file inside the project")

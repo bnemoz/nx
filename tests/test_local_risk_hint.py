@@ -64,10 +64,40 @@ def test_unknown_command_falls_through():
 
 
 def test_in_project_write_or_edit_is_medium_locally():
-    level, reason = m._local_risk_hint("write foo.py (10 bytes)")
-    assert level == "medium", (level, reason)
-    level, reason = m._local_risk_hint("edit foo.py")
-    assert level == "medium", (level, reason)
+    # Pin the CLASSIFIER's view (st.PROJECT_ROOT), not the physical checkout
+    # path: nx's own worktree checkouts live under ~/.nx/worktrees/, a home
+    # dotdir, and the in-project "medium" shortcut must not depend on where
+    # the repo happens to be checked out.
+    old_root, old_is_git = m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT
+    try:
+        m.st.PROJECT_ROOT = os.getcwd()
+        m.st.PROJECT_ROOT_IS_GIT = True
+        level, reason = m._local_risk_hint("write foo.py (10 bytes)")
+        assert level == "medium", (level, reason)
+        level, reason = m._local_risk_hint("edit foo.py")
+        assert level == "medium", (level, reason)
+    finally:
+        m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT = old_root, old_is_git
+
+
+def test_worktree_checkout_inside_home_dotdir_is_still_in_project():
+    # Regression pin: PROJECT_ROOT under ~/.nx/worktrees/... LOOKS like a
+    # session-private dir, but it is the actual project root — in-project
+    # writes must still be medium (nx runs inside its own worktrees).
+    old_root, old_is_git = m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT
+    try:
+        wt = os.path.join(os.path.expanduser("~"), ".nx", "worktrees", "nx-wt-demo")
+        m.st.PROJECT_ROOT = wt
+        m.st.PROJECT_ROOT_IS_GIT = True
+        level, reason = m._local_risk_hint(
+            f"write {os.path.join(wt, 'foo.py')} (10 bytes)")
+        assert level == "medium", (level, reason)
+        # dotdir protection OUTSIDE the project root must still hold
+        assert m._local_risk_hint(
+            f"write {os.path.join(os.path.expanduser('~'), '.ssh', 'authorized_keys')} (10 bytes)"
+        ) is None
+    finally:
+        m.st.PROJECT_ROOT, m.st.PROJECT_ROOT_IS_GIT = old_root, old_is_git
 
 
 def test_non_git_project_root_falls_through_instead_of_medium():
