@@ -169,7 +169,10 @@ import nx as m  # noqa: E402
 # footer field cost ZERO floor tokens: both are store-side, and the redaction
 # notice rides a tool RESULT, not the per-turn schema.)
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 6000)  # hard: recorded, justified
-SOFT_TOKENS = BUDGET_TOKENS - 50  # advisory: floor drift is under way, trim before it lands
+# Near-cap window (see the assert at the bottom of the budget test): failing
+# within this many tokens of BUDGET_TOKENS. 50 = one small schema tweak of
+# headroom; a deliberate CI experiment may raise it via NX_FLOOR_SOFT_WINDOW.
+SOFT_WINDOW_TOKENS = 50
 
 
 def _count_tokens(text):
@@ -230,11 +233,19 @@ def test_initial_context_floor():
         f"budget WITH a ledger justification. {breakdown}"
     )
 
-    # Advisory: 50 tokens of headroom left. Still passes, but this is the
-    # point to trim the fattest description rather than land on the budget.
-    if total >= SOFT_TOKENS:
-        print(f"NOTE: initial context {total} tok is within 50 of the "
-              f"{BUDGET_TOKENS}-tok floor budget. {breakdown}")
+    # Near-cap guard, HARD (durability audit P2: a soft warn is a warning
+    # nobody reads — the 2500 warn fired on every run for months). Landing
+    # within 50 tokens of the budget means floor drift is already under way;
+    # fail instead of note. ESCAPE HATCH: the window is a constant read by
+    # the test — SOFT_WINDOW_TOKENS below, overridable for a CI experiment
+    # via NX_FLOOR_SOFT_WINDOW, never for shipping past the budget.
+    soft_window = _env_int("NX_FLOOR_SOFT_WINDOW", SOFT_WINDOW_TOKENS)
+    assert total < BUDGET_TOKENS - soft_window, (
+        f"initial context {total} tok is within {soft_window} of the "
+        f"{BUDGET_TOKENS}-tok budget — trim the fattest schema description "
+        f"or, for a deliberate CI experiment only, set NX_FLOOR_SOFT_WINDOW. "
+        f"{breakdown}"
+    )
 
 
 if __name__ == "__main__":

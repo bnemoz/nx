@@ -111,18 +111,35 @@ _ALLOWLIST = {
     # churn nudge (0.117.0): turns-without-a-write before a write-tier agent
     # gets the "place your first edit" steering note (default 8):
     "NX_SUBAGENT_CHURN_NUDGE_TURN": "internal: write-tier churn nudge trigger turns (default 8)",
+    # floor-guard test-only escape hatch (durability audit P2): widens the
+    # near-cap window in test_initial_context for CI experiments; the budget
+    # itself (NX_FLOOR_BUDGET) is still hard:
+    "NX_FLOOR_SOFT_WINDOW": "test-suite only: widens the initial-context near-cap assert window",
 }
+
+
+_PARITY_TEST_FILES = {"test_docs_parity.py", "test_env_docs_parity.py"}
+
+
+def _repo_py_files():
+    """Every repo .py file EXCEPT this parity test's own file. The staleness
+    check below reads name occurrences; the parity test files themselves
+    mention every allowlisted name (docstrings, the _ALLOWLIST literal), so
+    including them made the staleness check self-certifying — it could never
+    fail. Durability audit P2."""
+    for top in ("nx", "tests"):
+        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top)):
+            for f in files:
+                if f.endswith(".py") and f not in _PARITY_TEST_FILES:
+                    yield os.path.join(root, f)
 
 
 def test_every_read_nx_var_is_documented():
     names = set()
-    for top in ("nx", "tests"):
-        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top)):
-            for f in files:
-                if f.endswith(".py"):
-                    names |= set(re.findall(
-                        r"NX_[A-Z][A-Z0-9_]*",
-                        open(os.path.join(root, f), encoding="utf-8").read()))
+    for path in _repo_py_files():
+        names |= set(re.findall(
+            r"NX_[A-Z][A-Z0-9_]*",
+            open(path, encoding="utf-8").read()))
     names = {n for n in names
              if "<" not in n and not n.endswith("_")
              and not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
@@ -141,13 +158,36 @@ def test_every_read_nx_var_is_documented():
 def test_allowlist_entries_have_reasons_and_still_exist():
     for reason in _ALLOWLIST.values():
         assert reason and reason.strip()
-    # an entry that stops being read anywhere should be pruned
-    stale = [k for k in _ALLOWLIST if not any(
-        k in open(os.path.join(root, f), encoding="utf-8").read()
-        for top in ("nx", "tests")
-        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top))
-        for f in files if f.endswith(".py"))]
+    # an entry that stops being read anywhere should be pruned. The walk
+    # excludes these parity test files (see _repo_py_files): this file's own
+    # _ALLOWLIST literal would otherwise satisfy the containment check and
+    # make the staleness assertion vacuous (durability audit P2).
+    # NX_PRICE_ family instances are resolved dynamically by prefix in
+    # nx/_cost.py (no literal occurrence) — their reader is pinned by the
+    # _price_for mechanism, not by name, so they're exempt from staleness.
+    stale = [k for k in _ALLOWLIST
+             if not k.startswith("NX_PRICE_") and not any(
+        k in open(path, encoding="utf-8").read()
+        for path in _repo_py_files())]
     assert not stale, f"allowlist entries no longer read anywhere: {stale}"
+
+
+def test_staleness_check_catches_a_dead_allowlist_key():
+    """Anti-vacuity pin: a planted dead allowlist key (nothing reads it) must
+    be flagged by the same staleness logic the live test uses — and must NOT
+    be flagged when the parity test files are (wrongly) included in the walk,
+    pinning the exclusion that makes the check able to fail."""
+    dead = "NX_PLANTED_DEAD_ALLOWLIST_KEY"
+    planted = dict(_ALLOWLIST)
+    planted[dead] = "planted: nothing reads this anywhere"
+
+    def _stale(allowlist, files):
+        return [k for k in allowlist if not any(
+            k in open(p, encoding="utf-8").read() for p in files)]
+
+    assert dead in _stale(planted, _repo_py_files())
+    all_files = list(_repo_py_files()) + [__file__]
+    assert dead not in _stale(planted, all_files)
 
 
 if __name__ == "__main__":

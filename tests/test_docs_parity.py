@@ -125,29 +125,70 @@ def test_ctx_all_is_implemented_not_just_hinted():
     assert "/context all" in src
 
 
-def test_every_documented_env_var_is_actually_read():
-    """Every NX_* var named in the REFERENCE env table must be read somewhere
-    in the repo (the NX_TEMPERATURE/NX_TOP_P failure mode: documented, never
-    read). Table rows may document several vars on one line."""
+def _documented_env_names() -> set[str]:
+    """NX_* names in the REFERENCE env table, minus placeholders/families."""
     names = set(re.findall(r"NX_[A-Z][A-Z0-9_]*", REFERENCE))
     # <NAME> placeholders are conventions, not variables; a trailing
     # underscore is the regex biting `NX_PRICE_<SOURCE>_INPUT`.
     names = {n for n in names if "<" not in n and not n.endswith("_")}
     # Families resolved dynamically from a prefix, pinned separately below:
     # role colors (NX_<ROLE>_COLOR) and per-source settings (NX_SOURCE_<NAME>_*).
-    names = {n for n in names
-             if not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
+    return {n for n in names
+            if not n.startswith("NX_SOURCE_") and not n.endswith("_COLOR")}
+
+
+def _nx_source_blob() -> str:
+    """Concatenated nx/ source only. A test's monkeypatch.setenv("NX_X", ...)
+    does NOT count as reading NX_X — the product must read what the docs
+    promise — so tests/ is deliberately excluded from this walk."""
     blob = ""
-    for top in ("nx", "tests"):
-        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, top)):
-            for f in files:
-                if f.endswith(".py"):
-                    blob += open(os.path.join(root, f), encoding="utf-8").read()
-    missing = []
-    for n in sorted(names):
-        if not re.search(rf'["\']{n}["\']', blob):
-            missing.append(n)
-    assert not missing, f"documented in REFERENCE but read nowhere in the repo: {missing}"
+    for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, "nx")):
+        for f in files:
+            if f.endswith(".py"):
+                blob += open(os.path.join(root, f), encoding="utf-8").read()
+    return blob
+
+
+def test_every_documented_env_var_is_actually_read():
+    """Every NX_* var named in the REFERENCE env table must be read somewhere
+    in nx/ (the NX_TEMPERATURE/NX_TOP_P failure mode: documented, never
+    read). Table rows may document several vars on one line. The pricing
+    family (NX_PRICE_*) is resolved dynamically from a prefix in nx/_cost.py
+    — documented per-model instances have no literal reader, so they're out
+    of scope here (the family mechanism is pinned by
+    test_dynamic_env_families_have_a_real_reader-style checks)."""
+    blob = _nx_source_blob()
+    missing = [n for n in sorted(_documented_env_names())
+               if not n.startswith("NX_PRICE_")
+               and not re.search(rf'["\']{n}["\']', blob)]
+    assert not missing, f"documented in REFERENCE but read nowhere in nx/: {missing}"
+
+
+def test_forward_scan_flags_a_documented_var_with_no_nx_reader(tmp_path):
+    """Anti-vacuity pin (durability audit P2): the forward scan must run
+    against nx/ ONLY. Run its exact detection logic over a tree that mimics
+    the old bug — a planted var that a tests/ file reads (monkeypatch.setenv)
+    but nx/ never does — and prove the scan still flags it as missing."""
+    planted = "NX_PLANTED_TEST_ONLY_VAR"
+    documented = _documented_env_names() | {planted}
+    # a tests/ file "reads" it (as via monkeypatch.setenv); nx/ does not:
+    test_tree = tmp_path / "tests"
+    test_tree.mkdir()
+    (test_tree / "fake_test.py").write_text(
+        f'monkeypatch.setenv("{planted}", "1")\n', encoding="utf-8")
+    test_blob = "".join(
+        open(os.path.join(root, f), encoding="utf-8").read()
+        for root, _d, files in os.walk(test_tree)
+        for f in files if f.endswith(".py"))
+    # with the tests/ blob included, the planted name would be "found":
+    assert re.search(rf'["\']{planted}["\']', test_blob)
+    # ...but the real scan walks nx/ only, so the name stays missing:
+    blob = _nx_source_blob()
+    assert not re.search(rf'["\']{planted}["\']', blob)
+    missing = [n for n in sorted(documented)
+               if not n.startswith("NX_PRICE_")
+               and not re.search(rf'["\']{n}["\']', blob)]
+    assert planted in missing
 
 
 def test_dynamic_env_families_have_a_real_reader():
