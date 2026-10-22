@@ -365,6 +365,15 @@ def nx_state_reset_body() -> None:
         mtls = getattr(st, "_METRICS_TLS", None)
         if mtls is not None:
             mtls.__dict__.clear()
+        # The process-global _METRICS itself: a test that armed the CLI's
+        # one-shot path (test_cli_version_flag's fake _fresh_metrics) leaves
+        # st._METRICS holding whatever the fake returned — a plain object()
+        # once blew up the next worker-mate's `_METRICS.model = ...` with an
+        # AttributeError. Unlike _METRICS_TLS this scalar isn't swept by the
+        # Tier B module-dict rewind (scalars aren't touched). Restore to the
+        # factory default (None) — the same value a fresh import has.
+        if getattr(st, "_METRICS", None) is not None:
+            st._METRICS = None
         # 0.155.0: the per-AGENT approval posture override. Installed by
         # `_state._posture_scope` around a sub-agent body and deleted in its
         # `finally`, so a clean run leaves nothing — but a spawn that died

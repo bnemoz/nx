@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from nx._metrics import _Metrics
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 os.environ.setdefault("NX_ENV_FILE", "/dev/null")
@@ -70,7 +72,7 @@ def test_prompt_flag_uses_inline_text(monkeypatch, capsys):
         return {"status": "ok"}
     monkeypatch.setattr(_cli, "_run_model_turn_loop", fake_loop)
     monkeypatch.setattr(_cli, "_ensure_ctx_probe", lambda a: None)
-    monkeypatch.setattr(_cli, "_fresh_metrics", lambda session_id=None: object())
+    monkeypatch.setattr(_cli, "_fresh_metrics", lambda session_id=None: _Metrics(session_id="one-shot"))
     with pytest.raises(SystemExit) as e:
         _cli._run_one_shot()
     assert e.value.code == 0
