@@ -1070,17 +1070,22 @@ def _prune_sessions_store() -> dict[str, int]:
     # removed — its snapshots are whole file contents, often secrets. The
     # CURRENT session's file is never a candidate, and /reset intentionally
     # keeps its predecessor's file (that session is still resumable).
+    # 0.168.1: liveness comes from the store's session rows, not the legacy
+    # per-session JSON mirror (unwritten since 0.101 — using it here deleted
+    # the undo files of every resumable session; see docs/DURABILITY_AUDIT.md
+    # P1-1). Same predicate as `_maybe_gc_artifacts`' store-based sweep.
     undo_removed = 0
     try:
-        from . import _undo
+        from . import _sessiondb, _undo
         undo_dir = os.path.join(st.SESSION_HOME, "undo")
+        live_ids = _sessiondb.all_ids()
         for name in os.listdir(undo_dir):
             if not name.endswith(".json"):
                 continue
             sid = name[:-len(".json")]
             if sid in ("undo", getattr(st, "SESSION_ID", None)):
                 continue  # legacy shared file / the live session
-            if os.path.exists(_session_path(sid)):
+            if sid in live_ids:
                 continue
             _undo.delete_persisted_for(sid)
             undo_removed += 1

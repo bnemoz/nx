@@ -212,6 +212,30 @@ def test_indexed_save_sweeps_stale_rows():
     assert live in m._load_index()
 
 
+def test_prune_keeps_undo_of_store_backed_sessions():
+    """0.168.1 (audit P1-1): prune's undo GC judged liveness by the legacy
+    per-session JSON mirror, unwritten since 0.101 — it deleted the undo file
+    of every resumable session. Liveness is now the store's session rows."""
+    _clear()
+    resumable = "20250101-120000-gcabd"
+    dead = "20250101-120000-gcabz"
+    m._write_session(resumable, [{"role": "user", "content": "resumable"}], {})
+    undo_dir = os.path.join(fs.st.SESSION_HOME, "undo")
+    os.makedirs(undo_dir, exist_ok=True)
+    keep_resumable = os.path.join(undo_dir, resumable + ".json")
+    keep_live = os.path.join(undo_dir, "undo.json")
+    gone = os.path.join(undo_dir, dead + ".json")
+    for p in (keep_resumable, keep_live, gone):
+        with open(p, "w") as f:
+            f.write("{}")
+    stats = fs._prune_sessions_store()
+    assert stats["undo_removed"] == 1
+    assert not os.path.exists(gone)
+    assert os.path.exists(keep_resumable)
+    # idempotent: second run removes nothing more
+    assert fs._prune_sessions_store()["undo_removed"] == 0
+
+
 # --- GC-on-delete ----------------------------------------------------------------
 
 def test_delete_session_collects_its_images():
