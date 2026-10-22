@@ -102,10 +102,22 @@ def _subagent_bash_allowed(command: str) -> bool:
         return hint is not None and hint[0] == "low"
     if head not in _SUBAGENT_BASH_ALLOW:
         return False
-    # find is allowlisted only in its listing form; these flags delete files or
-    # execute arbitrary commands (the same veto _risk.py's classifier applies).
-    if head == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
-                              for a in argv[1:]):
+    # Write/execute-shaped flags of otherwise read-only binaries. The veto
+    # scans the full argv INCLUDING the head — the same slice _risk.py:271
+    # uses for its find veto (matching the two homes is pinned by a meta-test,
+    # tests/test_subagent.py). 0.168.2: fixed the previous argv[1:] off-by-one
+    # that let `find -delete …` skip its first argument, and extended the veto
+    # to the other in-argv write escapes of allowlisted binaries (audit P1-3).
+    if head == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                                    "-fprintf", "-fprint", "-fprint0", "-fls")
+                              for a in parts):
+        return False
+    if head == "sort" and any(a == "-o" or a.startswith("--output=")
+                              for a in argv):
+        return False
+    if head in ("rg", "grep", "egrep", "fgrep") and any(
+            a.startswith("--pre") or a == "-O" or a.startswith("--hostname-bin=")
+            for a in argv):
         return False
     return True
 

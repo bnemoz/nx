@@ -268,7 +268,8 @@ def _local_risk_hint_bash(command: str) -> tuple[str, str] | None:
         if sub in _CHECKOUT_SWITCH_SUBCOMMANDS:
             return None  # could be branch switch (medium) or pathspec discard (high); let model judge
         return None
-    if cmd == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
+    if cmd == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+                                    "-fprintf", "-fprint", "-fprint0", "-fls")
                               for a in parts[1:]):
         return None  # find can destroy or run arbitrary commands with these
     if cmd == "env" and any(not a.startswith("-") and "=" not in a for a in parts[1:]):

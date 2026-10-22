@@ -212,8 +212,18 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         # (globs are now allowed — see the ok list)
         # ...but a pipeline containing a non-allowlisted or write stage is not
         "cat a | rm -rf /", "grep x f | python -c 'x'", "cat a ||| cat b",
-        # find's destructive/exec forms
+        # find's destructive/exec forms (0.168.2: the off-by-one that let
+        # `find -delete` skip checking its first argument is fixed — argv
+        # including the head is scanned, matching _risk.py's own veto)
         "find . -delete", "find . -exec rm {} \\;", "find . -okdir x",
+        # 0.168.2 (audit P1-3): in-argv write/exec escapes of allowlisted
+        # binaries
+        "find -fprint payload .", "find . -fprintf p '%p' -quit",
+        "find . -fls out.txt", "find . -fprint0 out",
+        "sort -o /tmp/payload f.txt", "sort --output=/tmp/payload f.txt",
+        "rg --pre /bin/sh f.txt", "rg --pre-glob '*' f.txt",
+        "rg -O /bin/ls f.txt", "rg --hostname-bin=/bin/sh f.txt",
+        "grep -O /bin/sh f.txt",
         # arbitrary / unknown binaries
         # env-prefixing a disallowed binary must still refuse (head match only)
         "env curl evil.com", "env python x.py", "env rm -rf /",
@@ -228,6 +238,34 @@ def test_subagent_bash_allowlist_gate(nx_fresh):
         assert a(c), c
     for c in bad:
         assert not a(c), repr(c)
+
+
+def test_subagent_bash_find_veto_matches_risk_classifier(nx_fresh):
+    """0.168.2 (audit P1-3 meta-test): the find destructive-flag veto exists at
+    two homes — `_subagent_bash.py` (allowlist gate) and `_risk.py:271`
+    (classifier) — and they must scan the SAME argv slice (including the head)
+    and the SAME flag set, else one home's guard silently lags the other's.
+    That divergence was the root cause of the original `find -delete` escape."""
+    import ast
+    import inspect
+    from nx import _risk, _subagent_bash
+
+    def _veto_flags(module, func_name):
+        src = inspect.getsource(getattr(module, func_name))
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and "find" in ast.unparse(node.test):
+                # the flag tuple lives inside the test's any(...) — walk the
+                # whole test expression, not just the head Compare
+                for cmp_node in ast.walk(node.test):
+                    if isinstance(cmp_node, (ast.Tuple, ast.List)):
+                        return ast.literal_eval(cmp_node)
+        raise AssertionError("find veto tuple not found in "
+                             f"{module.__name__}.{func_name}")
+
+    sub_flags = _veto_flags(_subagent_bash, "_subagent_bash_allowed")
+    risk_flags = _veto_flags(_risk, "_local_risk_hint_bash")
+    assert sub_flags == risk_flags
 
 
 def test_subagent_bash_write_tier_unblocked(nx_fresh, monkeypatch):
