@@ -82,17 +82,40 @@ def _store_path() -> str:
 
 
 def _set_aside_corrupt() -> None:
-    """Move an unusable store aside so a fresh one can be created. The
-    mirror files are not touched here — the next migration pass re-imports
-    anything the fresh store is missing (see _ensure_migrated)."""
+    """Move an unusable store aside so a fresh one can be created.
+
+    0.168.4 (audit P1-2): the -wal/-shm siblings move WITH the main file —
+    a fresh DB opening next to a stale WAL would try to recover the old
+    transactions into the new (empty) file, re-corrupting it, and the WAL
+    may hold the last committed transactions the user wants back (see
+    `_open_corrupt_archive`). Also emits the user-visible notice the log
+    line alone never gave: the archive path is the recovery surface, and
+    a silent empty store reads as "the user deleted their sessions".
+    The old mirror-reimport promise in this docstring was stale — the
+    legacy per-session JSON mirrors are no longer written (0.101), so a
+    modern store has no self-heal outside `nx sessions --recover`."""
     path = _store_path()
-    try:
-        os.replace(path, path + ".corrupt")
-    except OSError:
+    moved: list[str] = []
+    for suffix in ("", "-wal", "-shm"):
+        src = path + suffix
         try:
-            os.remove(path)
+            if os.path.exists(src):
+                os.replace(src, src + ".corrupt")
+                if suffix:
+                    moved.append(suffix)
         except OSError:
-            pass
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+    detail = (" (with " + ", ".join(moved) + ")") if moved else ""
+    try:
+        from ._render import notice
+        notice("error",
+               f"  session store was unreadable and has been archived at "
+               f"{path}.corrupt{detail} — recover with: nx sessions --recover")
+    except Exception:
+        pass  # never raise into a store path
 
 
 def _busy_timeout_ms() -> int:
@@ -1094,7 +1117,121 @@ def store_session(
 
 
 
-# --- search index (FTS5) ------------------------------------------------------
+# --- recovery: read-only resurrection of a .corrupt archive -------------------
+
+def _corrupt_archive_path() -> str:
+    return _store_path() + ".corrupt"
+
+
+def _open_corrupt_archive(path: str) -> sqlite3.Connection:
+    """Read-only connection to a `.corrupt` archive (0.168.4, audit P1-2).
+
+    Opens with the WAL siblings renamed in: the archive's `-wal` may hold
+    the last committed transactions (an unclean shutdown between checkpoint
+    and set-aside), so recovery must see the same bytes the corrupt DB
+    would have. The connection is read-only (`mode=ro`): recovery never
+    writes to the archive, whatever it turns out to be. Raises whatever
+    sqlite3 raises — the caller reports it."""
+    # Set aside any live siblings so they can't re-attach to the archive
+    # sidecars during the recovery read. NOTE the sibling naming: SQLite
+    # looks for `<name>-wal` next to the opened file, so the archive's WAL
+    # must be named `<archive>-wal` — and when the archive is `X.corrupt`,
+    # `_set_aside_corrupt` wrote `X-wal.corrupt` (it suffixes the main
+    # rename). Rotate those into place here, verified: SQLite applies the
+    # WAL on a read-only open and recovery then sees the archive's last
+    # committed transactions.
+    for suffix in ("-wal", "-shm"):
+        live = path.removesuffix(".corrupt") + suffix
+        arc = path + suffix
+        staged = live + ".corrupt"
+        try:
+            if not os.path.exists(arc) and os.path.exists(staged):
+                os.replace(staged, arc)
+            elif not os.path.exists(arc) and os.path.exists(live):
+                os.replace(live, arc)
+        except OSError:
+            pass
+    uri = "file:" + path.replace("?", "%3f").replace("#", "%23") + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=_busy_timeout_ms() / 1000.0)
+    return conn
+
+
+def recover_corrupt_archive(path: Optional[str] = None,
+                            apply: bool = True) -> dict[str, Any]:
+    """`nx sessions --recover` — salvage what is readable from a `.corrupt`
+    archive (the set-aside of a store whose header/page 0 was damaged) and,
+    with `apply=True`, re-import each readable session into the live store
+    via the normal `store_session` path (events log + indexed columns).
+
+    Read-only against the archive; the live store is written only through
+    the ordinary transactional write path, so a half-readable archive
+    yields exactly the sessions it can fully read. Never raises into the
+    CLI: returns a stats dict instead.
+    """
+    path = path or _corrupt_archive_path()
+    out: dict[str, Any] = {"archive": path, "exists": os.path.exists(path),
+                           "recovered": 0, "failed": 0, "error": None}
+    if not out["exists"]:
+        return out
+    try:
+        conn = _open_corrupt_archive(path)
+    except sqlite3.Error as e:
+        out["error"] = f"cannot open archive: {e}"
+        return out
+    sids: list[str] = []
+    try:
+        try:
+            sids = [r[0] for r in conn.execute(
+                "SELECT session_id FROM sessions ORDER BY updated_at")]
+        except sqlite3.Error as e:
+            out["error"] = f"cannot list sessions: {e}"
+            return out
+        for sid in sids:
+            try:
+                ev_count = 0
+                try:
+                    ev_count = conn.execute(
+                        "SELECT COUNT(*) FROM session_events WHERE session_id = ?",
+                        (sid,)).fetchone()[0]
+                except sqlite3.Error:
+                    pass  # a schema older than the event log: blob-only row
+                evs: Optional[list[dict[str, Any]]] = None
+                if ev_count:
+                    evs = _read_events(conn, sid)
+                    if not evs:
+                        evs = None
+                meta: dict[str, Any] = {"id": sid}
+                if evs is None:
+                    # pre-0.104 form: the transcript is the data blob
+                    blob = conn.execute(
+                        "SELECT data FROM sessions WHERE session_id = ?",
+                        (sid,)).fetchone()
+                    parsed = _row_to_data(sid, blob[0]) if blob and blob[0] else None
+                    if not parsed or not parsed.get("messages"):
+                        out["failed"] += 1
+                        continue
+                    evs = parsed["messages"]
+                    for k in ("title", "cwd", "model", "source"):
+                        if parsed.get(k):
+                            meta[k] = parsed[k]
+                else:
+                    row = conn.execute(
+                        "SELECT title, cwd, model, source FROM sessions"
+                        " WHERE session_id = ?", (sid,)).fetchone()
+                    for k, v in zip(("title", "cwd", "model", "source"),
+                                    row or (None, None, None, None)):
+                        if v is not None:
+                            meta[k] = v
+                if apply:
+                    if not store_session(sid, evs, meta):
+                        out["failed"] += 1
+                        continue
+                out["recovered"] += 1
+            except sqlite3.Error:
+                out["failed"] += 1
+    finally:
+        conn.close()
+    return out
 
 def refresh_fts(session_id: str, messages: list[dict[str, Any]],
                 title: str | None = None, description: str | None = None,

@@ -127,6 +127,114 @@ def test_corrupt_store_set_aside_and_recovers():
     assert db.load_session("20250101-120000-dbc2")["revision"] == 1
 
 
+def test_corrupt_store_archives_wal_siblings_and_notices(capsys):
+    """0.168.4 (audit P1-2): set-aside moves -wal/-shm WITH the main file —
+    a fresh DB opening next to a stale WAL re-corrupts — and emits the
+    user-visible notice naming the archive and `--recover`."""
+    _clear()
+    sid = "20250101-120000-dbc3"
+    db.store_session(sid, [_msg("user", "wal me")], {"title": "t"})
+    # simulate an unclean shutdown: a stale WAL + SHM next to a corrupt header
+    with open(db._store_path(), "r+b") as f:
+        f.write(b"not a databaseXXXX")
+    for suffix in ("-wal", "-shm"):
+        with open(db._store_path() + suffix, "w", encoding="utf-8") as f:
+            f.write("stale " + suffix)
+    db.load_session(sid)                          # triggers the set-aside
+    for suffix in ("", "-wal", "-shm"):
+        assert os.path.exists(db._store_path() + suffix + ".corrupt"), suffix
+    out = capsys.readouterr().out
+    assert ".corrupt" in out and "--recover" in out
+    # the fresh store (the retry re-created it) is empty but usable
+    assert db.load_session(sid) is None
+    assert db.store_session("20250101-120000-dbc4", [_msg("user", "fresh")])
+
+
+def test_recover_roundtrips_corrupt_archive():
+    """0.168.4 (audit P1-2 acceptance): `--recover` re-imports readable rows
+    from an archive into the live store; the archive survives. (Recovery
+    rotates the staged -wal/-shm next to the archive before the read-only
+    open, so nothing written next to the live store taints the read.)
+
+    Shape note (probed): SQLite cannot open a main whose page 0 is damaged
+    even with its WAL present — the salvageable case is an archive whose
+    main is intact (set aside after a transient mislabel) or whose WAL
+    page-cache made it readable in place. What this pins is the re-import
+    path and idempotence, not sqlite-level resurrection of arbitrary
+    header damage."""
+    _clear()
+    sid = "20250101-120000-dbc5"
+    assert db.store_session(sid, [_msg("user", "salvage me")], {"title": "kept"})
+    # Build the archive by hand from an INTACT store file (the case where
+    # recovery can genuinely help) and re-import it over a fresh store.
+    shutil.copy(db._store_path(), db._store_path() + ".corrupt")
+    assert db.store_session(sid, [_msg("user", "salvage me"),
+                                  _msg("assistant", "second")], {"title": "kept2"})
+    # drop the live session, keep the archive at the older snapshot
+    from nx._sessiondb import prune_stale  # noqa: F401  (existence check)
+    os.remove(db._store_path())
+    if os.path.exists(db._store_path() + "-wal"):
+        os.remove(db._store_path() + "-wal")
+    rc = db.recover_corrupt_archive()
+    assert rc["recovered"] == 1 and rc["failed"] == 0, rc
+    assert rc["error"] is None
+    data = db.load_session(sid)
+    assert data["messages"] == [_msg("user", "salvage me")]
+    assert data["title"] == "kept"
+    assert os.path.exists(db._store_path() + ".corrupt")  # archive survives
+    # idempotent-ish: recovering again re-imports the same rows harmlessly
+    assert db.recover_corrupt_archive()["recovered"] == 1
+
+
+def test_recover_unreadable_archive_reports_cleanly():
+    """A genuinely destroyed main (truncated to a text stub, WAL junk) is
+    not recoverable — recovery reports the failure, never raises, and
+    leaves the archive in place."""
+    _clear()
+    sid = "20250101-120000-dbc7"
+    assert db.store_session(sid, [_msg("user", "gone")], {"title": "t"})
+    with open(db._store_path(), "w", encoding="utf-8") as f:
+        f.write("not a database")
+    with open(db._store_path() + "-wal", "w", encoding="utf-8") as f:
+        f.write("junk")
+    db.load_session(sid)                          # set-aside archives all
+    assert os.path.exists(db._store_path() + ".corrupt")
+    rc = db.recover_corrupt_archive()
+    assert rc["recovered"] == 0 and rc["failed"] == 0
+    assert rc["error"] is not None
+    assert os.path.exists(db._store_path() + ".corrupt")  # kept in place
+
+
+def test_set_aside_leaves_no_stale_wal_next_to_fresh_store():
+    """The audit's F-2 hazard: a corrupt main's WAL/SHM re-attaching to the
+    recreated DB. After the 0.168.4 set-aside, the staged siblings live in
+    the archives — the fresh store's first open starts with no WAL (its
+    own is created fresh on first write), never the stale bytes."""
+    _clear()
+    sid = "20250101-120000-dbc9"
+    assert db.store_session(sid, [_msg("user", "x")], {"title": "t"})
+    sp = db._store_path()
+    with open(sp, "w", encoding="utf-8") as f:
+        f.write("not a database")
+    for suffix in ("-wal", "-shm"):
+        with open(sp + suffix, "w", encoding="utf-8") as f:
+            f.write("stale " + suffix)
+    db.load_session(sid)
+    # the fresh main was recreated by the retry; the stale bytes are gone
+    # from the live names (either archived or deleted), never re-attached
+    assert os.path.exists(sp + "-wal.corrupt")
+    assert os.path.exists(sp + "-shm.corrupt")
+    wal = open(sp + "-wal", "rb").read() if os.path.exists(sp + "-wal") else b""
+    assert wal != b"stale -wal"
+
+
+def test_recover_without_archive_is_clean():
+    _clear()
+    rc = db.recover_corrupt_archive()
+    assert rc == {"archive": rc["archive"], "exists": False,
+                  "recovered": 0, "failed": 0, "error": None}
+
+
 def test_list_ids_newest_order():
     _clear()
     for i, ts in enumerate((300.0, 100.0, 200.0)):

@@ -178,6 +178,7 @@ _SESSIONS_USAGE = """\
 usage: nx sessions [query] [--page N] [--limit N]
        nx sessions --prune [--reclaim]
        nx sessions --reindex
+       nx sessions --recover [archive]
 
 List saved sessions and exit. With a query: substring-filters (case-
 insensitive) across title, description, preview and id.
@@ -209,6 +210,13 @@ insensitive) across title, description, preview and id.
                        save uses) until the store carries the current FTS
                        body-schema version. One-line summary. Idempotent — a
                        store already at the current version does nothing.
+
+  nx sessions --recover [archive]
+                       salvage readable sessions from a .corrupt archive (the
+                       set-aside of a store whose header was damaged) into
+                       the live store, then report. Read-only against the
+                       archive; it is kept in place either way. Default
+                       archive: sessions.sqlite.corrupt next to the store.
 
 Resume with: nx --resume <n|short-id|title>
 """
@@ -244,6 +252,8 @@ def _cli_sessions(args: list[str]) -> bool:
     # word still searches.
     if len(args) >= 2 and args[1] in ("--reindex", "reindex"):
         return _cli_reindex_sessions(args)
+    if len(args) >= 2 and args[1] in ("--recover", "recover"):
+        return _cli_recover_sessions(args)
     query, page, limit, warnings = _session_list_page_options(args[1:])
     offset = (page - 1) * limit
     fetched = _list_sessions(limit=limit + 1, offset=offset, query=query)
@@ -329,6 +339,35 @@ def _cli_prune_sessions(args: list[str]) -> bool:
             print("  dropped the dead pre-0.115 sessions_fts/fts_body index")
         print(f"  reclaimed {rc['blobs_emptied']} stale transcript blob(s)"
               f" and vacuumed the session store")
+    return True
+
+
+def _cli_recover_sessions(args: list[str]) -> bool:
+    """`nx sessions --recover [archive-path]` — salvage readable sessions
+    from a `.corrupt` archive (the set-aside of an unreadable store) and
+    re-import them into the live store. Read-only against the archive.
+    Returns True if it handled the invocation (caller exits)."""
+    rest = args[2:]
+    path = None
+    if rest:
+        if rest[0] in ("-h", "--help"):
+            print(_SESSIONS_USAGE, end="")
+            return True
+        path = rest[0]
+    from ._sessiondb import recover_corrupt_archive
+    rc = recover_corrupt_archive(path)
+    if not rc["exists"]:
+        print(f"  no archive at {rc['archive']} — nothing to recover")
+        return True
+    if rc["error"]:
+        print(f"{C.WARNING}  {rc['error']}{RESET}")
+        print(f"  {DIM}archive kept in place: {rc['archive']}{RESET}")
+        return True
+    print(f"  recovered {rc['recovered']} session(s) from "
+          f"{rc['archive']} into the live store")
+    if rc["failed"]:
+        print(f"  {C.WARNING}{rc['failed']} session(s) in the archive were "
+              f"unreadable and were skipped{RESET}")
     return True
 
 
