@@ -122,7 +122,19 @@ def _handle_forced_final_text_calls(messages: list[Message], calls: list[tuple[s
                   f"final_answer; executing and continuing the turn{RESET}")
         delegated = _handle_text_tool_calls(messages, text, malformed_call_count,
                                             exclude=frozenset({"final_answer"}))
-        return delegated if delegated is not None else TURN_DONE
+        if delegated is None:
+            # Durability-audit P2 (stage 9) tripwire, replacing the
+            # `else TURN_DONE` that re-armed the 0.154.7 dishonesty trap. The
+            # `actionable` list above is non-empty by construction and the
+            # exclusion pre-filter guarantees the delegate re-parses at least
+            # one of those calls, so this branch is UNREACHABLE today — but if
+            # the filter ever changes so the delegate parses nothing, the turn
+            # produced NOTHING usable and must never score "done" headless.
+            # (Reachability pinned by
+            # tests/test_turn_loop_e2e.py::test_forced_final_text_no_call_state_trips_tripwire.)
+            from ._turn import _gave_up  # lazy: _turn imports this module
+            return _gave_up("forced-final text path reached no-call state")
+        return delegated
     if not quiet:
         print(f"{C.ERROR}  ✂ FORCED FINAL ANSWER EMPTY — returning to chat input{RESET}")
     # 0.154.7: the rescue turn produced no final_answer and no actionable call

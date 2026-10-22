@@ -266,6 +266,83 @@ def test_forced_final_empty_answer_gives_up():
     assert "no final_answer" in _turn._LAST_GIVE_UP_CAUSE
 
 
+# ---------------------------------------------------------------------------
+# 8. durability-audit P2 (stage 9): the give-up CAUSE is per-loop state. The
+#    two loops below run concurrently on one process (the batch/async
+#    fan-out shape the audit named: task A gives up on one failure class,
+#    task B on another). Each loop must report ITS OWN cause — both in the
+#    cause read at give-up time and in the status-"error" summary it returns.
+#    With the pre-stage-9 process-global str, the barrier between the write
+#    and the read makes the interleave DETERMINISTIC: both threads read the
+#    same (last-written) cause.
+# ---------------------------------------------------------------------------
+def test_interleaved_give_up_loops_record_distinct_causes():
+    import threading
+    from nx import _turn
+
+    barrier = threading.Barrier(2, timeout=10)
+    seen = {}
+
+    def fake_model_turn(messages, *a, **k):
+        tag = threading.current_thread().name  # "loop-A" / "loop-B"
+        _turn._gave_up(f"synthetic-cause-{tag}")
+        barrier.wait()  # both causes recorded before either is read
+        seen[tag] = _turn._give_up_cause()
+        return _turn.TURN_GAVE_UP
+
+    def run_loop(tag, out):
+        with mock.patch.object(m, "model_turn", fake_model_turn), \
+                mock.patch.object(builtins, "print", lambda *a, **k: None):
+            out[tag] = m._run_model_turn_loop(_messages())
+
+    summaries = {}
+    threads = [threading.Thread(target=run_loop, args=(f"loop-{t}", summaries),
+                                name=f"loop-{t}") for t in ("A", "B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "a give-up loop hung"
+
+    # (a) each loop saw ITS OWN cause at give-up time (the deterministic
+    # interleave: with the old global, both reads returned the same string)
+    assert seen == {"loop-A": "synthetic-cause-loop-A",
+                    "loop-B": "synthetic-cause-loop-B"}, seen
+    # (b) each loop's honest status summary names ITS OWN cause
+    for tag in ("loop-A", "loop-B"):
+        summary = summaries[tag]
+        assert summary["status"] == "error", summary
+        err = summary.get("error") or ""
+        assert f"synthetic-cause-{tag}" in err, (tag, summary)
+    other = {"loop-A": "loop-B", "loop-B": "loop-A"}
+    for tag in ("loop-A", "loop-B"):
+        assert other[tag] not in (summaries[tag].get("error") or ""), \
+            summaries[tag]
+    # (c) no frame leaked: both loops popped theirs, and a read outside any
+    # loop resolves the module-global default store again
+    assert _turn._GIVE_UP_HOME.get() is None
+    assert _turn._give_up_cause() in (
+        "", "synthetic-cause-loop-A", "synthetic-cause-loop-B")
+
+
+# ---------------------------------------------------------------------------
+# 9. drain contract (stage 9): the cause moved to a hidden home (a ContextVar
+#    frame + the scalar module global as default store), so the per-test
+#    teardown must drain it centrally — the repo's documented hidden-home
+#    rule. Pin conftest._restore() clears both parts.
+# ---------------------------------------------------------------------------
+def test_give_up_cause_home_is_drained_by_the_harness():
+    import conftest
+    from nx import _turn
+
+    _turn._LAST_GIVE_UP_CAUSE = "residue-cause"
+    stale = _turn._install_give_up_frame()  # simulate a loop that died mid-turn
+    stale.cause = "frame-residue"
+    conftest._restore(__file__)
+    assert _turn._LAST_GIVE_UP_CAUSE == ""
+    assert _turn._GIVE_UP_HOME.get() is None
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):

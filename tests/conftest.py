@@ -375,6 +375,19 @@ def _restore(fspath, item=None):
     from _nxtest import nx_state_reset_body
     nx_state_reset_body()
 
+    # Durability-audit P2 (stage 9): nx/_turn moved the TURN_GAVE_UP cause off
+    # the process-global str into a per-loop ContextVar frame (_GIVE_UP_HOME)
+    # with the scalar module global as default store. Neither is reachable by
+    # the module-dict rewind (scalars aren't swept) nor by the shared body
+    # (the new home predates _nxtest being extensible in this scope). Drained
+    # through the module's own _drain_give_up_state() hook; _nxtest's
+    # nx_state_reset_body is the right long-term home (report flagged).
+    _tn = sys.modules.get("nx._turn")
+    if _tn is not None:
+        _drain_give_up = getattr(_tn, "_drain_give_up_state", None)
+        if _drain_give_up is not None:
+            _drain_give_up()
+
     # Re-derive the SESSION_HOME mirror from the just-applied env intents.
     # The module-state rewind above restores nx.SESSION_HOME / st.SESSION_HOME
     # to the baseline snapshot (real ~/.nx, since the baseline import has no

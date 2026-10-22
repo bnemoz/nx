@@ -8,6 +8,7 @@ guards live.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import time
 from typing import Any, Callable, Optional
@@ -160,11 +161,82 @@ def _maybe_arm_native_escalation() -> None:
 
 
 # 0.154.6 honest-status latch: the transport/protocol cause of the most recent
-# TURN_GAVE_UP give-up. Every exhausted-ladder return below sets it so
+# TURN_GAVE_UP give-up. Every exhausted-ladder return sets it so
 # _run_model_turn_loop() can name the cause in the {"status": "error"} summary
 # it hands headless callers (nx run / nx eval / sub-agents) — the P3-2 lineage's
 # TURN_TIMED_OUT error string, generalized to the non-timeout cuts.
+#
+# Durability-audit P2 (stage 9): the cause used to be ONE process-global str.
+# Concurrent sub-agent/batch loops on one process interleaved it (task A's
+# malformed-stream give-up reported inside task B's JSONL summary — an operator
+# triaging the wrong failure class). The home is now a per-loop frame resolved
+# through a ContextVar — the same shape `_notices.py` uses for the notice slots
+# and for the same reason: a ContextVar beats threading.local because sync
+# sub-agents run the sub-loop nested ON the parent's thread and need the
+# seed/fold-back chain, while async workers get a fresh context automatically
+# on their worker thread. `_LAST_GIVE_UP_CAUSE` stays the default store outside
+# any loop (tests, REPL, model_turn() called directly) AND the fold-back target
+# of the outermost frame, so it remains importable/patchable exactly as before.
+# Drained centrally by tests/_nxtest.nx_state_reset_body via
+# _drain_give_up_state() (the documented hidden-home → central-fixture rule).
 _LAST_GIVE_UP_CAUSE: str = ""
+
+
+class _GiveUpFrame:
+    """One turn loop's private give-up-cause slot, seeded from its parent
+    (the enclosing loop's frame, or the module global at the outermost
+    level). Same lifecycle as _notices.NoticeFrame, one scalar."""
+
+    __slots__ = ("cause", "seed", "prev")
+
+    def __init__(self, prev: "_GiveUpFrame | None") -> None:
+        self.prev = prev
+        self.cause = prev.cause if prev is not None else _LAST_GIVE_UP_CAUSE
+        self.seed = self.cause
+
+
+_GIVE_UP_HOME: "contextvars.ContextVar[_GiveUpFrame | None]" = \
+    contextvars.ContextVar("nx_give_up_cause", default=None)
+
+
+def _install_give_up_frame() -> "_GiveUpFrame":
+    """Install a fresh per-loop cause frame; pair with _pop_give_up_frame()."""
+    fr = _GiveUpFrame(_GIVE_UP_HOME.get())
+    _GIVE_UP_HOME.set(fr)
+    return fr
+
+
+def _pop_give_up_frame(fr: "_GiveUpFrame") -> None:
+    """Fold this frame's cause back into its parent frame (or the module
+    global at the outermost level) and pop. Symmetric with
+    _install_give_up_frame(). A frame that never gave up folds nothing, so a
+    finished loop can never overwrite what its neighbours recorded. The stale-
+    finally guard (a swapped frame) mirrors _notices.pop_notice_ctx."""
+    if _GIVE_UP_HOME.get() is not fr:
+        return
+    if fr.cause != fr.seed:
+        if fr.prev is not None:
+            fr.prev.cause = fr.cause
+        else:
+            global _LAST_GIVE_UP_CAUSE
+            _LAST_GIVE_UP_CAUSE = fr.cause
+    _GIVE_UP_HOME.set(fr.prev)
+
+
+def _give_up_cause() -> str:
+    """This loop's recorded give-up cause (module global outside a loop)."""
+    fr = _GIVE_UP_HOME.get()
+    return fr.cause if fr is not None else _LAST_GIVE_UP_CAUSE
+
+
+def _drain_give_up_state() -> None:
+    """Test-harness hook (the state-reset drain contract): drop any frame a
+    test left installed and rewind the default store. The scalar module global
+    is invisible to conftest's derived _PENDING_*/notice sweeps, so it is
+    registered here — see tests/test_state_reset_contract.py for the pin."""
+    _GIVE_UP_HOME.set(None)
+    global _LAST_GIVE_UP_CAUSE
+    _LAST_GIVE_UP_CAUSE = ""
 
 
 def _gave_up(cause: str) -> str:
@@ -174,9 +246,17 @@ def _gave_up(cause: str) -> str:
     usable: before 0.154.6 these returned TURN_DONE, so headless callers scored
     a truncated, never-completed task as a clean pass (the same dishonesty
     P3-2 fixed for mid-stream timeouts).
-    """
-    global _LAST_GIVE_UP_CAUSE
-    _LAST_GIVE_UP_CAUSE = cause
+
+    Durability-audit P2 (stage 9): the write routes through the current loop's
+    frame when one is installed (so concurrent loops can't interleave causes);
+    outside a loop it lands in the module global, exactly as before for tests,
+    the REPL, and model_turn() called directly."""
+    fr = _GIVE_UP_HOME.get()
+    if fr is not None:
+        fr.cause = cause
+    else:
+        global _LAST_GIVE_UP_CAUSE
+        _LAST_GIVE_UP_CAUSE = cause
     return TURN_GAVE_UP
 
 
@@ -1028,6 +1108,13 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
     # enclosing loop by _notices, so nesting behaves exactly as before.
     from . import _notices
     _notice_frame = _notices.install_notice_ctx()
+    # Durability-audit P2 (stage 9): per-loop give-up-cause frame. The cause of
+    # the most recent TURN_GAVE_UP used to be one process-global str, so two
+    # concurrent loops (parallel batch tasks, async fan-out) interleaved it and
+    # task B's JSONL error summary named task A's failure. Same lifecycle as
+    # the recovery/notice frames: seeded from the enclosing loop, folded back
+    # into it (or the module global at the outermost level) in the finally.
+    _give_up_frame = _install_give_up_frame()
     # 0.148.2: bracket the user-turn footer accumulation. Every step of the
     # loop records its numbers (quiet turns record nothing); the finally
     # below flushes ONE aggregated footer when the loop settles — covering
@@ -1051,6 +1138,7 @@ def _run_model_turn_loop(messages: list[Message], force_final: bool = False,
         if ctx is not None:
             _recovery.copy_back_and_reset(ctx)
         _notices.pop_notice_ctx(_notice_frame)
+        _pop_give_up_frame(_give_up_frame)
 
 
 def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = False,
@@ -1317,7 +1405,7 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             return {"status": "error",
                     "error": ("stream cut: the response ended before the task "
                               "completed and recovery was exhausted ("
-                              f"{_LAST_GIVE_UP_CAUSE or 'cause unknown'})"),
+                              f"{_give_up_cause() or 'cause unknown'})"),
                     "turns": steps + 1}
         if status == TURN_LENGTH_CUT:
             # The response budget (NX_MAX_TOKENS, or a server-side cap) ran out
@@ -1457,7 +1545,7 @@ def _run_model_turn_loop_inner(messages: list[Message], force_final: bool = Fals
             return {"status": "error",
                     "error": ("stream cut: the forced-final answer turn ended "
                               "before completing and recovery was exhausted ("
-                              f"{_LAST_GIVE_UP_CAUSE or 'cause unknown'})"),
+                              f"{_give_up_cause() or 'cause unknown'})"),
                     "turns": steps + 1}
         if final_status == TURN_DONE:
             return {"status": "cap", "turns": steps + 1}

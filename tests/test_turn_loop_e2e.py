@@ -405,7 +405,10 @@ def test_repl_side_exhausted_ladder_is_not_a_done_turn(tmp_path, monkeypatch):
         turn either way — no new user-visible state);
       • the recorded cause names the transport failure, not silence.
     """
-    from nx._turn import _LAST_GIVE_UP_CAUSE
+    # (Durability-audit P2, stage 9: this test used to `from nx._turn import
+    # _LAST_GIVE_UP_CAUSE` BEFORE the model_turn call — a snapshot binding that
+    # only passed on cross-test residue. The live read below is the honest pin;
+    # the central drain now guarantees the home starts empty.)
     frames = [
         _sse(_chunk({"tool_calls": [{"index": 0, "id": "call_cut_0",
                                      "type": "function",
@@ -428,7 +431,8 @@ def test_repl_side_exhausted_ladder_is_not_a_done_turn(tmp_path, monkeypatch):
             "an exhausted-ladder give-up is not a completed turn — the REPL "
             f"would return to the prompt believing the task finished: {status!r}")
         assert status == TURN_GAVE_UP, status
-        assert _LAST_GIVE_UP_CAUSE, "the give-up cause must be recorded for the summary"
+        assert m._turn._give_up_cause(), \
+            "the give-up cause must be recorded for the summary"
         # (b) the same driver path the other scenarios use: the summary the
         # REPL loop consumes is not "done" either.
         summary, _msgs = _drive_turn()
@@ -510,3 +514,116 @@ def test_e2e_forced_final_empty_answer_honest_error(tmp_path, monkeypatch):
         assert status == TURN_GAVE_UP, status
     finally:
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# 6. text-protocol forced-final handler driven END TO END (durability-audit
+#    P2, stage 9). The audit's grep showed `_handle_forced_final_text_calls`
+#    appeared only in nx/ — no test ever drove it. This is that test: a
+#    TEXT-protocol turn under forced_final=True whose text carries a real
+#    tool_call block (the JSON-in-tag legacy dialect), streamed through the
+#    stub SSE server and the real model_turn dispatch.
+# ---------------------------------------------------------------------------
+
+def _text_block(frames_text):
+    """Wrap raw model text in the one-text-turn frame script (deltas split
+    mid-block — the same reassembly path the text protocol lives on)."""
+    return _text_frames(frames_text)
+
+
+def _tc(payload):
+    """One text-protocol tool_call block in the JSON-in-tag legacy dialect
+    (what parse_text_calls_with_errors accepts; the tags are assembled from
+    fragments so this source stays grep-readable)."""
+    open_tag, close_tag = "<" + "tool_call" + ">", "<" + "/tool_call" + ">"
+    return open_tag + json.dumps(payload) + close_tag
+
+
+def test_e2e_forced_final_text_actionable_call_executes(tmp_path, monkeypatch):
+    """The cap rescue (forced_final=True) lands on a TEXT-protocol turn whose
+    text carries a real (non-final_answer) tool_call block and no native
+    tool_calls — the only input shape that reaches _handle_forced_final_text_calls.
+    The handler must EXECUTE the call through the text path (TURN_TOOL: the
+    observation lands in the history, the tool's effect lands on disk) instead
+    of discarding it, and must NOT score the turn done/gave-up. A direct
+    rescue drive with a final_answer block then renders the answer as visible
+    assistant text (TURN_DONE)."""
+    import nx._turn_toolcalls as tt
+    call_block = _tc({"name": "run_bash",
+                      "arguments": {"command": "echo ok > e2e_fftext_marker.txt"}})
+    final_block = _tc({"name": "final_answer",
+                       "arguments": {"answer": "done: marker written"}})
+    server = _StubServer([
+        # loop step 1: a real native tool turn so the loop walks into the cap
+        {"frames": _tool_call_frames(
+            "run_bash", {"command": "echo step1 > e2e_fftext_step1.txt"})},
+        # the cap rescue (forced_final=True): a TEXT turn carrying an
+        # actionable tool_call block — no native tool_calls in any frame, so
+        # model_turn's dispatch falls into _handle_forced_final_text_calls
+        {"frames": _text_block(call_block)},
+    ])
+    server.start()
+    try:
+        ws = _stub_env(server, tmp_path, monkeypatch)
+        # (a) loop-driven: step 1 = native tool turn, then the turn cap
+        # (max_turns_override=1) forces the rescue turn, which the stub
+        # answers with the TEXT tool_call block.
+        messages = m._initial_messages() + [{"role": "user", "content": INSTRUCTION}]
+        summary = m._run_model_turn_loop(messages, on_step=None,
+                                         max_turns_override=1)
+        # the rescue executed the text call (TURN_TOOL) — the loop reports the
+        # turn-limit exit as a cap, never "done", never "error"
+        assert summary["status"] == "cap", summary
+        joined = "\n".join(str(x.get("content") or "")
+                           for x in messages if x.get("role") == "user")
+        assert "Observation (run_bash)" in joined, joined[-400:]
+        marker = ws / "e2e_fftext_marker.txt"
+        assert marker.is_file(), f"{marker} missing; ws={list(ws.iterdir())}"
+        assert marker.read_text().strip() == "ok"
+        assert not m._turn._give_up_cause(), \
+            "an executed call is not a give-up — the cause home stays clean"
+        # (b) handler-level direct drives.
+        # Honest leg of the delegation seam: with the raw text carrying the
+        # call (the exclusion filter behaves, the delegate re-parses it), the
+        # delegate's status is returned verbatim — the tripwire is NOT reached.
+        seam_messages = [{"role": "user", "content": "go"}]
+        delegated = tt._handle_forced_final_text_calls(
+            seam_messages, [("run_bash", {"command": "echo seam"})], call_block)
+        assert delegated == m.TURN_TOOL, delegated
+        assert "no-call state" not in m._turn._give_up_cause()
+        # the final_answer text block renders as visible assistant text
+        ans_messages = [{"role": "user", "content": "go"}]
+        status = tt._handle_forced_final_text_calls(
+            ans_messages,
+            [("final_answer", {"answer": "done: marker written"})],
+            final_block)
+        assert status == TURN_DONE, status
+        assert ans_messages[-1] == {"role": "assistant",
+                                    "content": "done: marker written"}
+    finally:
+        server.stop()
+
+
+def test_forced_final_text_no_call_state_trips_tripwire(monkeypatch):
+    """The durability-audit P2 tripwire: the `else TURN_DONE` in
+    _handle_forced_final_text_calls was the last unguarded member of the
+    0.154.7 dishonesty family. It is UNREACHABLE while the exclusion filter
+    behaves (part (b) of the e2e case above drives the honest leg); this pins
+    the tripwire leg: if the delegate ever parses NOTHING, the handler must
+    return the honest TURN_GAVE_UP naming the no-call state — never DONE."""
+    import nx._turn_toolcalls as tt
+    m._turn._drain_give_up_state()  # start from an empty cause home
+    messages = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "answer"}]
+    calls = [("run_bash", {"command": "echo hi"})]
+    # Simulate the future filter relaxation the audit names: the delegate
+    # comes back with no calls parsed (its None contract).
+    monkeypatch.setattr(tt, "_handle_text_tool_calls", lambda *a, **k: None)
+    status = tt._handle_forced_final_text_calls(
+        messages, calls, "some text")
+    assert status != TURN_DONE, (
+        "the no-call state returned TURN_DONE — the 0.154.7 dishonesty trap "
+        "re-armed: a silent non-answer would score as a clean pass headless")
+    assert status == TURN_GAVE_UP, status
+    cause = m._turn._give_up_cause()
+    assert "forced-final text path reached no-call state" in cause, cause

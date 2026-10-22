@@ -616,8 +616,35 @@ class StreamParser:
         if self._live_committed:
             # say_live was already frozen once (text-tool-tag path): never
             # reopen — a second Live would re-render the whole accumulated
-            # text again on screen.
-            return False
+            # text again on screen. The DISPLAY stops here, but the
+            # accumulation must not (0.168.6, audit stage-9 e2e): a tag
+            # opened mid-stream froze the panel, and returning early dropped
+            # every later chunk — the tag's own body and close tag never
+            # reached self.content, so _handle_text_tool_calls re-parsed a
+            # truncated half-tag and found no call. The model's actionable
+            # call was silently discarded. Split: once the tag is open, only
+            # the render/Live bookkeeping is skipped; the collapse detectors,
+            # content accumulation, and the tag-state machine below still
+            # run with the raw chunk.
+            self.mode = "say"
+            chunk = raw_chunk
+            if _LEAKED_SPECIAL_TOKEN_RE.search(chunk):
+                chunk = _strip_leaked_tokens(chunk)
+                self.leaked_token_run += 1
+            else:
+                self.leaked_token_run = 0
+            if chunk:
+                self.content.append(chunk)
+                self._content_len += len(chunk)
+                self.streamed_chars += len(chunk)
+                if chunk.strip():
+                    self.content_had_prose = True
+                tap_event("stream", chunk)
+                self.reasoning_only_chars = 0
+                if self.in_text_tool_tag:
+                    self._spec_text_poll(chunk)
+                    self.show_tool_status()
+            return self._collapse_cut()
         self.mode = "say"
         chunk = raw_chunk
         if _LEAKED_SPECIAL_TOKEN_RE.search(chunk):
@@ -745,6 +772,25 @@ class StreamParser:
             if self.in_text_tool_tag:
                 self._spec_text_poll(chunk)
                 self.show_tool_status()
+        if ((LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT)
+                or (REPEAT_CHUNK_LIMIT > 0 and self.repeat_chunk_run >= REPEAT_CHUNK_LIMIT)):
+            kind = ("special-token collapse" if self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
+                    else "repetition collapse")
+            if self.say_live is not None:
+                with write_lock():
+                    self.say_live.stop()
+                    self.say_live = None
+            if not self.quiet:
+                with write_lock():
+                    cprint(f"{C.ERROR}  ⚠ {kind.upper()} — cutting stream now; "
+                          f"discarding degenerated output{RESET}")
+            self.loop_cut = True
+            return True
+        return False
+
+    def _collapse_cut(self) -> bool:
+        """The shared leak/repeat collapse check+cut (tail of _handle_content,
+        factored so the live-committed fast path cuts identically)."""
         if ((LEAKED_TOKEN_RUN_LIMIT > 0 and self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT)
                 or (REPEAT_CHUNK_LIMIT > 0 and self.repeat_chunk_run >= REPEAT_CHUNK_LIMIT)):
             kind = ("special-token collapse" if self.leaked_token_run >= LEAKED_TOKEN_RUN_LIMIT
