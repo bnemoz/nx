@@ -221,6 +221,11 @@ _DECLARED_SKIPS = {
     # Its shape is pinned by the two source-level tests above.
     "write_file": "approval prompt on every non-error path; shape pinned at source",
     "run_bash": "spawns a real shell",
+    # MCP gateways launch the configured servers as subprocesses — the
+    # offline suite must never do that; their config-validation and
+    # JSON-RPC contracts are pinned by tests/test_mcp.py.
+    "search_mcp_tools": "launches .nx/mcp.json servers as subprocesses",
+    "call_mcp_tool": "launches .nx/mcp.json servers as subprocesses",
     "run_tests": "spawns a real pytest/xdist run",
     "lint_check": "spawns a real ruff run",
     "git_commit": "stages and commits; needs a scratch repo",

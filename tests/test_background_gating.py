@@ -86,7 +86,9 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # `diff` mode now, so the floor carries one fewer tool
     # 0.162.0: run_tools joins the schema (PTC Phase 2), gated on the NX_PTC
     # rollout resolver — the full list keeps it, the default floor does not.
-    assert len(m.TOOLS) == 28
+    # mcp-connector: the search_mcp_tools/call_mcp_tool gateways join, gated
+    # on NX_MCP (the project-tools posture).
+    assert len(m.TOOLS) == 30
 
 
 # ---------------------------------------------------------------------------

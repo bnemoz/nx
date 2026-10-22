@@ -95,7 +95,9 @@ def test_every_tool_appears_once():
     # mode, and the name no longer dispatches) — 27.
     # 0.162.0: run_tools joins (PTC Phase 2; registered in TOOLS, withheld
     # per-turn by its NX_PTC gate, the lint_check/critique posture) — 28.
-    assert len(names) == 28
+    # mcp-connector: search_mcp_tools/call_mcp_tool gateways join (NX_MCP
+    # gate, the project-tools posture) — 30.
+    assert len(names) == 30
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])
@@ -152,9 +154,9 @@ def test_property_shapes_are_the_flat_subset(tool):
             # then_run, nx/_fusion.py): same shape contract as the
             # array-of-objects case -- flat scalar properties, required keys.
             assert ((name in ("write_file", "edit_file", "multi_edit") and prop == "then_run")
-                    or (name == "call_project_tool" and prop == "arguments")), (
+                    or (name in ("call_project_tool", "call_mcp_tool") and prop == "arguments")), (
                 f"{name}.{prop}: unexpected object property")
-            if name == "call_project_tool":
+            if name in ("call_project_tool", "call_mcp_tool"):
                 continue
             inner = schema.get("properties") or {}
             assert schema.get("required"), f"{name}.{prop}: object property should require its keys"

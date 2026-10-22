@@ -53,8 +53,9 @@ def test_default_withholds_the_gated_four():
                                               "obs_recall",
                                               "lint_check", "search_project_tools",
                                               "call_project_tool",
+                                              "search_mcp_tools", "call_mcp_tool",
                                               "critique",
-                                              "run_tools"))  # web_fetch is ON by default (0.71.0), so it stays in names; opt-in project gateways and lint_check are OFF by default; run_tools is the PTC tool (0.162.0), gated on the NX_PTC rollout resolver (auto=off for unknown models)
+                                              "run_tools"))  # web_fetch is ON by default (0.71.0), so it stays in names; opt-in project gateways, MCP gateways, and lint_check are OFF by default; run_tools is the PTC tool (0.162.0), gated on the NX_PTC rollout resolver (auto=off for unknown models)
 
 
 def test_memoized_on_the_gate_vector():

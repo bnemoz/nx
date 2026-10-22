@@ -118,6 +118,11 @@ _TOOL_GATES: dict[str, Any] = {
     # two generic schemas never vary with the project's actual tool catalog.
     "search_project_tools": lambda: bool(os.environ.get("NX_PROJECT_TOOLS", "") not in ("", "0", "false", "False")),
     "call_project_tool": lambda: bool(os.environ.get("NX_PROJECT_TOOLS", "") not in ("", "0", "false", "False")),
+    # MCP connector (gateway schemas, like the project-tools pair): opt-in via
+    # NX_MCP=1 plus a .nx/mcp.json server list — external servers are trusted
+    # code, so the gate stays closed by default.
+    "search_mcp_tools": lambda: bool(os.environ.get("NX_MCP", "") not in ("", "0", "false", "False")),
+    "call_mcp_tool": lambda: bool(os.environ.get("NX_MCP", "") not in ("", "0", "false", "False")),
 }
 
 # Per-gate refusal text (the "why it's closed and what to do instead" line the
@@ -136,6 +141,8 @@ _GATE_REFUSALS: dict[str, str] = {
     "duckdb": "(NX_TOOL_FLOOR_SLIM=1 — the SQL tool is tier-2 in this session to keep the shared floor small). Ask search_tools for its schema, or shell out to the duckdb CLI with run_bash.",
     "search_project_tools": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",
     "call_project_tool": "(NX_PROJECT_TOOLS is off). Set NX_PROJECT_TOOLS=1 only for a repository whose .nx/tools/ contents you trust.",
+    "search_mcp_tools": "(NX_MCP is off). Set NX_MCP=1 and declare servers in .nx/mcp.json only for MCP servers you trust — they run as local subprocesses.",
+    "call_mcp_tool": "(NX_MCP is off). Set NX_MCP=1 and declare servers in .nx/mcp.json only for MCP servers you trust — they run as local subprocesses.",
 }
 
 _TOOL_LIST_CACHE: dict[tuple, list] = {}

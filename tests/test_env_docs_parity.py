@@ -115,6 +115,8 @@ _ALLOWLIST = {
     # near-cap window in test_initial_context for CI experiments; the budget
     # itself (NX_FLOOR_BUDGET) is still hard:
     "NX_FLOOR_SOFT_WINDOW": "test-suite only: widens the initial-context near-cap assert window",
+    # test_mcp's env-passthrough probe (asserted NOT forwarded to MCP servers):
+    "NX_SECRET_PASSTHROUGH_PROBE": "test fixture: asserted absent from a server's env in tests/test_mcp.py",
 }
 
 
