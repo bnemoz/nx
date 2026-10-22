@@ -178,6 +178,76 @@ def _addr(b: bytes) -> int:  # pragma: no cover — trivial helper
     return ctypes.cast(ctypes.c_char_p(b), ctypes.c_void_p).value
 
 
+# --- sandbox status (0.168.7, audit P3-1) --------------------------------------
+# The preexec layers run in the forked child and cannot report back, so the
+# status probe runs in the PARENT: each layer's install preconditions are
+# cheap to test without installing (find_library, the Landlock ABI probe,
+# the prctl call the kernel must accept for the other two layers anyway).
+# A True here means "this layer WILL install in a PTC child" — the probe
+# exercises the same detection the layer itself does. Probed once per
+# process, lazily, never per-call.
+
+_SANDBOX_PROBE: dict[str, bool] | None = None
+
+
+def _probe_sandbox_layers() -> dict[str, bool]:
+    """Which OS hardening layers a PTC child on this host would install.
+    Cached at module level after the first call; failures probe as False
+    (the layer would be absent, which is exactly what the status line must
+    say). Best-effort throughout: a probe that itself raises counts the
+    layer absent rather than breaking the diagnostics surface."""
+    global _SANDBOX_PROBE
+    if _SANDBOX_PROBE is not None:
+        return _SANDBOX_PROBE
+    out = {"seccomp": False, "landlock": False, "nnp": False}
+    try:
+        import ctypes
+        import ctypes.util
+        out["seccomp"] = ctypes.util.find_library("seccomp") is not None
+    except Exception:
+        pass
+    try:
+        import ctypes
+        import struct
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        libc.syscall.argtypes = [ctypes.c_long] * 7
+        # NNP: the kernel must accept the prctl the child relies on.
+        if libc.prctl(38, 0, 0, 0, 0) == 0:  # PR_GET_NO_NEW_PRIVS
+            out["nnp"] = True
+        # Landlock: the create-ruleset ABI probe the layer itself does
+        # (a ruleset with every right requested, immediately closed).
+        SYS_CREATE_RULESET = 444
+        attr = struct.pack("<Q", 0xFFFF)
+        b = ctypes.cast(ctypes.c_char_p(attr), ctypes.c_void_p).value
+        rs_fd = libc.syscall(SYS_CREATE_RULESET, b, len(attr), 0, 0, 0, 0)
+        if isinstance(rs_fd, int) and rs_fd >= 0:
+            out["landlock"] = True
+            os.close(rs_fd)
+    except Exception:
+        pass
+    _SANDBOX_PROBE = out
+    return out
+
+
+def sandbox_status() -> dict[str, bool]:
+    """Which PTC OS hardening layers this host provides (see
+    _probe_sandbox_layers). Read-only, cheap after the first call."""
+    return dict(_probe_sandbox_layers())
+
+
+def sandbox_summary() -> str:
+    """One human line for the diagnostics surfaces: the layers that WILL
+    install, or the honest 'no OS sandbox' when none do."""
+    st_l = sandbox_status()
+    landed = [n for n in ("seccomp", "landlock", "nnp") if st_l.get(n)]
+    if not landed:
+        missing = ", ".join(f"{n} unavailable" for n in
+                            ("seccomp", "landlock", "nnp") if not st_l.get(n))
+        return f"no OS sandbox ({missing})"
+    return " + ".join(landed)
+
+
 def _ptc_seccomp_net_deny(libc, ctypes_util) -> None:  # pragma: no cover
     """Layer 1: SCMP_ACT_ERRNO(EACCES) for the socket/connect family via
     libseccomp (when present). Kept separate from the Landlock layer so each

@@ -54,6 +54,13 @@ def _tools_report_lines() -> list[str]:
         lines.extend(f"  · {name} — {why}" for name, why in withheld)
     else:
         lines.append("  nothing withheld — every registered schema is active")
+    # PTC OS-sandbox status (0.168.7, audit P3-1): the preexec layers are
+    # silent on failure, so the diagnostics surface must say which landed.
+    try:
+        from ._ptc_exec import sandbox_summary
+        lines.append(f"  PTC sandbox: {sandbox_summary()}")
+    except Exception:
+        pass  # diagnostics never break the report
     return lines
 
 
