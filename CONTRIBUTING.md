@@ -309,6 +309,13 @@ uv run ruff check .      # style/lint — must be clean, zero suppressions debt
 uv run ty check nx       # type check over the nx/ package
 ```
 
+**CI enforces both gates** (0.168.3, durability audit P1-4): `.github/workflows/ci.yml`
+runs `uv sync` → `ruff check .` → `pytest tests/ -n 8` → `ty check nx` on every
+push/PR — lint and tests as required steps, `ty` advisory (`continue-on-error`,
+matching its ~130-pre-existing-diagnostics policy above). A commit that breaks
+an existing test or ruff now fails CI even when the local pre-commit convention
+was skipped.
+
 - **ruff is the gate**: a change that fails `ruff check .` is not done. New
   code must not add per-line `# noqa` suppressions — fix the code, or if the
   rule genuinely fights a deliberate pattern, extend the commented
