@@ -641,3 +641,103 @@ def test_reindex_leaves_a_current_store_alone():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- audit P2 acceptance: schema-epoch gate + hardened blob reclaim -----------
+
+def _set_user_version(version):
+    """Hand-stamp the store's PRAGMA user_version (the epoch marker)."""
+    conn = sqlite3.connect(db._store_path())
+    try:
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_newer_epoch_store_refused_and_left_untouched(monkeypatch):
+    """A store stamped with a NEWER epoch than this binary's is refused by
+    _open (None) and never mutated: load/store/migrate all degrade, the row
+    content is byte-identical afterward, and the refusal is loud (log)."""
+    _clear()
+    sid = "20250101-120000-ep001"
+    assert db.store_session(sid, [_msg("user", "future proof")], {"title": "t"})
+    # The store is now at the binary's epoch; force it "newer".
+    _set_user_version(db.SCHEMA_EPOCH + 1)
+    conn = sqlite3.connect(db._store_path())
+    before = conn.execute(
+        "SELECT data, revision, title FROM sessions"
+        " WHERE session_id = ?", (sid,)).fetchone()
+    before_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert before_version == db.SCHEMA_EPOCH + 1
+
+    logged: dict = {}
+    monkeypatch.setattr(db, "_log_event",
+                        lambda *a, **kw: logged.__setitem__(
+                            "n", logged.get("n", 0) + 1))
+    # Reads degrade without raising, without mutating, without a set-aside.
+    assert db.load_session(sid) is None
+    assert db.list_ids_newest() == []
+    # Writes refuse too (every _open path returns None; store_session
+    # signals refusal by returning a falsy/None result, never raising).
+    assert db.store_session(sid, [_msg("user", "clobber")],
+                            {"title": "x"}) is not True
+    assert db.load_session(sid) is None  # still refused, still no clobber
+    assert db.migrate_files(force=True) == 0
+    # No .corrupt archive was created: refusal is clean, not a crash path.
+    assert not os.path.exists(db._store_path() + ".corrupt")
+    # The refusal is loud.
+    assert logged.get("n", 0) >= 1, logged
+    # The row and the epoch marker are byte-identical: nothing was touched.
+    conn = sqlite3.connect(db._store_path())
+    after = conn.execute(
+        "SELECT data, revision, title FROM sessions"
+        " WHERE session_id = ?", (sid,)).fetchone()
+    after_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert after == before
+    assert after_version == db.SCHEMA_EPOCH + 1
+
+
+def test_reclaim_spares_blob_without_verified_event_text():
+    """audit P2 hardening: a >1 MB blob is only blanked when session_events
+    VERIFIABLY holds message text for the session. A row with NO events (the
+    blob is its only transcript copy) survives reclaim; a row with real
+    event text is still reclaimed as before."""
+    _clear()
+    big_blob = json.dumps({
+        "id": "20250101-120000-rc002",
+        "messages": [_msg("user", "transcript only the blob holds " * 34000)],
+        "updated_at": 1.0, "revision": 1})
+    assert len(big_blob) > 1048576
+    saved_sid = "20250101-120000-rc001"
+    db.store_session(saved_sid, [_msg("user", "reclaimed as before")])
+    conn = sqlite3.connect(db._store_path())
+    try:
+        with conn:
+            # the saved session: a >1 MB blob + real event text (as a normal
+            # post-0.115 save leaves it)
+            conn.execute(
+                "UPDATE sessions SET data = ?, image_shas = ?"
+                " WHERE session_id = ?",
+                (big_blob, "[]", saved_sid))
+            # the orphan session: >1 MB blob, NO session_events rows at all
+            # image_shas non-NULL: the orphan is NOT skipped by the sha
+            # guard — it is spared by the events-verification guard under
+            # test.
+            conn.execute(
+                "INSERT INTO sessions(session_id, data, updated_at,"
+                " revision, image_shas) VALUES (?,?,?,?,?)",
+                ("20250101-120000-rc002", big_blob, 1.0, 1, "[]"))
+        n = db._reclaim_stale_blobs(conn)
+        conn.commit()
+        assert n == 1, n  # only the verified row was blanked
+        data = dict(conn.execute(
+            "SELECT session_id, data FROM sessions").fetchall())
+        assert data[saved_sid] == "{}"
+        assert data["20250101-120000-rc002"] == big_blob, \
+            "the only-copy blob must survive reclaim"
+    finally:
+        conn.close()
+

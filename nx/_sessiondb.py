@@ -55,7 +55,36 @@ STORE_FILENAME = "sessions.sqlite"
 # A bump here is the ONLY way to signal a body-rule change to existing
 # stores; the amortized backfill (_fts_body_backfill_conn) rebuilds from the
 # event log via refresh_fts until the marker is written.
+#
+# PACKING: PRAGMA user_version carries BOTH markers - this body version in
+# the LOW 16 bits, the schema epoch (SCHEMA_EPOCH) in the HIGH 16 bits:
+#     user_version = (epoch << 16) | fts_body_version
+# So stamping the epoch never erases a store's body-rule marker, and vice
+# versa. A legacy store (written before the packing existed, when
+# user_version held ONLY this marker) has high bits 0, so it unpacks to
+# epoch 0 plus its old version verbatim - exactly the pre-epoch reading the
+# backfill needs.
 FTS_BODY_SCHEMA_VERSION = 1
+
+# Schema epoch, stamped via the same PRAGMA user_version. audit P2: the old
+# scheme used user_version ONLY as the FTS body-rule marker (0/1), so a store
+# written by a NEWER binary read as "pre-marker" and the auto-migrations ran
+# freely — including the once-per-process blob reclaim, which destroyed
+# transcripts an old binary had just re-inflated after a rollback. From epoch
+# 2 user_version is a real gate: _open refuses (loudly, read-only) a store
+# whose epoch is newer than the binary's, and stamps the current epoch in the
+# migration path. Bumping this constant is the ONLY way a breaking shape
+# change may ship: the newer binary must read older epochs, never write them
+# half-way back.
+#
+# PACKING: this epoch lives in the HIGH 16 bits of the same PRAGMA
+# user_version, beside the FTS body version in the low bits -
+#     user_version = (epoch << 16) | fts_body_version
+# _read_user_version / _refuse_newer_epoch / _stamp_schema_epoch only ever
+# touch the high half, so stamping the epoch no longer resets a store whose
+# body-rule backfill had already finished (which used to make the backfill's
+# early-return think v >= 1 and never run at all).
+SCHEMA_EPOCH = 2
 
 # Sessions rebuilt per amortized backfill invocation. Measured on a copy of
 # a real store (985 sessions, 271k indexed rows, 220 MB of bodies, 984/985
@@ -243,6 +272,72 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         pass  # keep whatever shape exists; search degrades but still works
 
 
+def _read_user_version(conn: sqlite3.Connection) -> int:
+    """The store's schema epoch (0 = never stamped, i.e. pre-epoch-2).
+
+    The epoch is the HIGH 16 bits of PRAGMA user_version; the LOW 16 bits
+    carry the FTS body-schema version (see FTS_BODY_SCHEMA_VERSION)."""
+    try:
+        raw = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    except sqlite3.Error:
+        return SCHEMA_EPOCH  # unreadable == assume current, like _fts_body_version
+    return (raw >> 16) & 0xFFFF
+
+
+def _refuse_newer_epoch(conn: sqlite3.Connection) -> bool:
+    """Refuse a store written by a NEWER binary (epoch > SCHEMA_EPOCH).
+
+    Loudly, read-only: the notice names the remedy, the log carries the
+    epoch, and the caller must treat the store as unusable (None-ish) —
+    never migrate, never reclaim, never write. Returns True when refused."""
+    epoch = _read_user_version(conn)
+    if epoch <= SCHEMA_EPOCH:
+        # A legacy (high-bits-0) store whose RAW user_version already exceeds
+        # this binary's epoch can only have come from a NEWER binary: no
+        # current writer leaves an unstamped (high-bits-0) raw value above
+        # SCHEMA_EPOCH, since every packer fills the high half. Refuse that
+        # too, or a newer binary's store would be migrated and reclaimed as
+        # if it were ours.
+        try:
+            raw = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        except sqlite3.Error:
+            raw = 0
+        if not (epoch == 0 and raw > SCHEMA_EPOCH):
+            return False
+        epoch = raw
+    msg = (f"session store was written by a newer nx (schema epoch {epoch} > "
+           f"{SCHEMA_EPOCH}) — upgrade nx to use it; this nx will not read "
+           f"or modify it ({_store_path()})")
+    try:
+        _log_event("error", {"where": "sessiondb",
+                             "error": "newer-schema store refused",
+                             "epoch": epoch})
+    except Exception:
+        pass
+    try:
+        from ._render import notice
+        notice("error", f"  {msg}")
+    except Exception:
+        pass  # never raise into a store path
+    return True
+
+
+def _stamp_schema_epoch(conn: sqlite3.Connection) -> None:
+    """Stamp the current epoch onto a store at an older (or zero) one.
+
+    Writes the epoch into the HIGH 16 bits and CARRIES FORWARD whatever FTS
+    body version the LOW 16 bits already held - stamping the epoch must
+    never reset a store that already finished its body-rule backfill."""
+    try:
+        raw = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if ((raw >> 16) & 0xFFFF) < SCHEMA_EPOCH:
+            # PRAGMA values cannot be bound; both halves are our own ints.
+            packed = (SCHEMA_EPOCH << 16) | (raw & 0xFFFF)
+            conn.execute(f"PRAGMA user_version = {int(packed)}")
+    except sqlite3.Error:
+        pass  # a store we cannot stamp still serves; the gate re-checks
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions("
@@ -298,6 +393,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "pid_start_time TEXT)")
     _ensure_file_claims_cwd(conn)
     _ensure_file_claims_pid_start_time(conn)
+    _stamp_schema_epoch(conn)
     conn.commit()
 
 
@@ -360,6 +456,12 @@ def _open() -> Optional[sqlite3.Connection]:
             time.sleep(0.02 * (2 ** (attempt - 1)) + random.random() * 0.01)
         try:
             conn = _connect()
+            if _refuse_newer_epoch(conn):
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                return None
             _ensure_schema(conn)
             return conn
         except sqlite3.OperationalError as e:
@@ -581,15 +683,21 @@ def _reclaim_stale_blobs(conn: sqlite3.Connection) -> int:
     Deliberately NOT touched: rows with NULL `image_shas` (their blob is the
     only image-ref source for the sidecar-GC fallback in image_live_shas),
     rows with no events (a pre-0.104 session's blob IS the transcript until
-    load_session inflates it), and anything under the size floor (a small
-    shell is the contract, not residue). Returns rows emptied."""
+    load_session inflates it), rows whose events table holds no message text
+    for the session (audit P2: the blob is the only copy left, so blanking it
+    destroys the transcript — events must be VERIFIED present, not merely
+    indexed), and anything under the size floor (a small shell is the
+    contract, not residue). Returns rows emptied."""
     try:
         cur = conn.execute(
             "UPDATE sessions SET data='{}'"
             " WHERE length(data) > 1048576"
             "   AND image_shas IS NOT NULL"
             "   AND EXISTS (SELECT 1 FROM session_events e"
-            "               WHERE e.session_id = sessions.session_id)")
+            "               WHERE e.session_id = sessions.session_id"
+            "               AND EXISTS (SELECT 1 FROM session_events m"
+            "                           WHERE m.session_id = e.session_id"
+            "                           AND length(m.msg) > 0))")
         return cur.rowcount or 0
     except sqlite3.Error:
         return 0
@@ -615,6 +723,8 @@ def reclaim_store() -> dict[str, Any]:
     except sqlite3.Error:
         return out
     try:
+        if _refuse_newer_epoch(conn):  # audit P2: never mutate a newer store
+            return out
         out["fts_dropped"] = _drop_legacy_fts_tables(conn)
         _ensure_schema(conn)  # no-op on a current store (step A is idempotent)
         out["blobs_emptied"] = _reclaim_stale_blobs(conn)
@@ -1410,17 +1520,31 @@ def refresh_fts(session_id: str, messages: list[dict[str, Any]],
 
 def _fts_body_version(conn: sqlite3.Connection) -> int:
     """The DB's body-schema version (0 on a store that never stamped one).
-    An unreadable marker counts as current: a PRAGMA read does not fail on
-    any readable DB, and assuming 0 there would re-backfill forever."""
+    It is the LOW 16 bits of PRAGMA user_version; the HIGH 16 bits hold the
+    schema epoch (see SCHEMA_EPOCH). An unreadable marker counts as current:
+    a PRAGMA read does not fail on any readable DB, and assuming 0 there
+    would re-backfill forever."""
     try:
-        return int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        raw = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
     except sqlite3.Error:
         return FTS_BODY_SCHEMA_VERSION
+    return raw & 0xFFFF
 
 
 def _fts_body_version_set(conn: sqlite3.Connection, version: int) -> None:
-    # PRAGMA values cannot be bound; version is our own int constant.
-    conn.execute(f"PRAGMA user_version = {int(version)}")
+    # PRAGMA values cannot be bound; both halves are our own int constants.
+    # Only the LOW half changes: the epoch in the high half is CARRIED
+    # FORWARD, defaulting to the current epoch on a store that was never
+    # stamped (such a store is stamped by _ensure_schema on the next open).
+    try:
+        raw = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+    except sqlite3.Error:
+        raw = 0
+    epoch = (raw >> 16) & 0xFFFF
+    if not epoch:
+        epoch = SCHEMA_EPOCH
+    packed = (epoch << 16) | (int(version) & 0xFFFF)
+    conn.execute(f"PRAGMA user_version = {int(packed)}")
     conn.commit()  # no-op unless a transaction is open; must survive close
 
 
