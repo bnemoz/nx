@@ -1076,8 +1076,8 @@ def _handle_update(upd: dict, allowed: set, allowed_users: set | None = None) ->
     # the window is NOT dropped silently: it gets a busy notice (the
     # docstring always claimed queuing; 0.153.2 makes it true).
     now = time.monotonic()
-    last = _LAST_TURN_AT.get(chat_id, 0.0)
-    if now - last < _TURN_COOLDOWN_SECS:
+    last = _LAST_TURN_AT.get(chat_id)
+    if last is not None and now - last < _TURN_COOLDOWN_SECS:
         _send(_api, chat_id, "⏳ still working on the previous message — "
                              "resend it in a moment.")
         return

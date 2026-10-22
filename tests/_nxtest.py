@@ -327,6 +327,14 @@ def nx_state_reset_body() -> None:
             t.join(timeout=2)
         with sa._ASYNC_LOCK:
             sa._ASYNC_AGENTS.clear()
+        # Post-join hard-drain: on a loaded 4-core CI runner a leaked worker
+        # can outlive the 2s join; parked ids in _ASYNC_QUEUED (status never
+        # advanced to finished) keep `_async_running()` True for the rest of
+        # the worker's life, making every later wake_due()/stall check on this
+        # xdist worker deterministically False (CI 39733134252's test_wake_stall
+        # signature). Drop the parked queue; a still-running thread re-reads
+        # its record only under the lock and stages nothing once cleared.
+        sa._ASYNC_QUEUED[:] = []
     # 0.163.0 (AUTOWAKE_SPEC Phase E) per-task OWNERSHIP residue: three hidden
     # homes a batch task can leave a live entry in if its finally never ran —
     # a published notice frame (a foreign thread could still stage a note into
