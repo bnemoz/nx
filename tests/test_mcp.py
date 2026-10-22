@@ -1,7 +1,12 @@
 """MCP connector (nx/_mcp.py): config validation, the stdio JSON-RPC client
-against a fake in-repo MCP server subprocess, gateway behavior, and gates."""
+against a fake in-repo MCP server subprocess, the Streamable-HTTP client
+against a fake localhost HTTP server, gateway behavior, and gates."""
 import json
 import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -94,7 +99,9 @@ def test_disabled_by_default(monkeypatch):
 
 def test_missing_config_reports_howto(monkeypatch, tmp_path):
     monkeypatch.setenv("NX_MCP", "1")
+    monkeypatch.setenv("NX_HOME", str(tmp_path / "nxhome"))  # empty user store
     monkeypatch.setattr(_state, "PROJECT_ROOT", str(tmp_path), raising=False)
+    monkeypatch.chdir(tmp_path)  # the cwd fallback must not see the repo config
     servers, problem = _mcp._servers()
     assert servers == {} and "mcp.json" in problem and "mcpServers" in problem
 
@@ -207,6 +214,125 @@ def test_env_is_minimal(tmp_path, monkeypatch, fake_server_path):
         assert "PATH" in env
     finally:
         _mcp.shutdown_sessions()
+
+
+# --- Streamable-HTTP transport (fake localhost server) ------------------
+
+class _FakeMCPHandler(BaseHTTPRequestHandler):
+    state = {"sessions": set(), "deleted": []}
+
+    def log_message(self, *a):
+        pass
+
+    def do_DELETE(self):
+        self.state["deleted"].append(self.headers.get("Mcp-Session-Id", ""))
+        self.state["sessions"].discard(self.headers.get("Mcp-Session-Id", ""))
+        self.send_response(200)
+        self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        msg = json.loads(self.rfile.read(length))
+        accept = self.headers.get("Accept", "")
+        assert "text/event-stream" in accept, accept
+        reply_id = msg.get("id")
+        if reply_id is None:
+            # notification: 202 Accepted, empty body
+            self.send_response(202)
+            self.end_headers()
+            return
+        method = msg["method"]
+        if method == "initialize":
+            sid = "fake-sid-1"
+            self.state["sessions"].add(sid)
+            result = {"protocolVersion": "2025-06-18",
+                      "serverInfo": {"name": "httpfake", "version": "1"}}
+            extra = {"mcp-session-id": sid}
+        else:
+            sid_header = self.headers.get("Mcp-Session-Id")
+            assert sid_header in self.state["sessions"], (
+                f"request without a live session: {sid_header!r}")
+            extra = {"mcp-session-id": sid_header}
+            if method == "tools/list":
+                result = {"tools": [{"name": "ping",
+                                     "description": "reply pong",
+                                     "inputSchema": {"type": "object"}}]}
+            elif method == "tools/call":
+                result = {"content": [{"type": "text",
+                                       "text": "pong: " + msg["params"]["arguments"]["x"]}],
+                          "isError": False}
+            else:
+                result = {}
+        sse = ("event: message\ndata: "
+               + json.dumps({"jsonrpc": "2.0", "id": reply_id, "result": result})
+               + "\n\n")
+        body = sse.encode()
+        self.send_response(200)
+        for key, value in extra.items():
+            self.send_header(key, value)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture()
+def http_server():
+    server = HTTPServer(("127.0.0.1", 0), _FakeMCPHandler)
+    _FakeMCPHandler.state = {"sessions": set(), "deleted": []}
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    server.shutdown()
+
+
+def test_http_transport_roundtrip(http_server):
+    session = _mcp._HttpSession("httpfake", {"url": http_server, "headers": {}})
+    session.start()
+    init = session.request("initialize", {}, 10)
+    assert init["serverInfo"]["name"] == "httpfake"
+    session.notify("notifications/initialized")
+    result = session.request("tools/list", {}, 10)
+    assert result["tools"][0]["name"] == "ping"
+    called = session.request("tools/call",
+                             {"name": "ping", "arguments": {"x": "hi"}}, 10)
+    assert _mcp._content_text(called) == "pong: hi"
+    session.stop()
+    assert _FakeMCPHandler.state["deleted"], "DELETE (session teardown) not sent"
+
+
+def test_http_remote_host_refused(monkeypatch):
+    monkeypatch.setenv("NX_MCP", "1")
+    with tempfile.TemporaryDirectory() as td:
+        nx_dir = Path(td) / ".nx"
+        nx_dir.mkdir()
+        (nx_dir / "mcp.json").write_text(json.dumps(
+            {"mcpServers": {"remote": {"url": "http://10.0.0.5/mcp"}}}))
+        _state.PROJECT_ROOT = td
+        try:
+            servers, problem = _mcp._servers()
+            assert problem and "localhost" in problem and servers == {}
+        finally:
+            _state.PROJECT_ROOT = None
+
+
+def test_http_localhost_url_accepted(http_server, monkeypatch):
+    monkeypatch.setenv("NX_MCP", "1")
+    monkeypatch.setenv("NX_HOME", "/tmp/nx-mcp-test-home")
+    with tempfile.TemporaryDirectory() as td:
+        nx_dir = Path(td) / ".nx"
+        nx_dir.mkdir()
+        (nx_dir / "mcp.json").write_text(json.dumps(
+            {"mcpServers": {"kb": {"url": http_server,
+                                   "headers": {"Authorization": "Bearer t"}}}}))
+        _state.PROJECT_ROOT = td
+        try:
+            servers, problem = _mcp._servers()
+            assert problem is None and "kb" in servers
+            assert _mcp.call_mcp_tool("kb", "ping", {"x": "deep"}) == "pong: deep"
+        finally:
+            _mcp.shutdown_sessions()
+            _state.PROJECT_ROOT = None
 
 
 def test_gate_closed_without_env(monkeypatch):

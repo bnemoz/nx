@@ -31,6 +31,9 @@ import json
 import os
 import subprocess
 import threading
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +50,10 @@ def _enabled() -> bool:
 
 def _config_candidates() -> list[Path]:
     from . import _state as st
-    roots = [Path(getattr(st, "PROJECT_ROOT", None) or Path.cwd()),
-             Path.cwd(), Path.home() / ".nx"]
+    roots = [Path(getattr(st, "PROJECT_ROOT", None) or Path.cwd()), Path.cwd()]
+    home = os.environ.get("NX_HOME") or os.path.expanduser("~")
+    home_store = Path(home) / ".nx"
+    roots.append(home_store)  # user-wide: $NX_HOME/.nx/mcp.json (or ~/.nx/)
     out, seen = [], set()
     for root in roots:
         path = root / ".nx" / "mcp.json" if root.name != ".nx" else root / "mcp.json"
@@ -93,6 +98,28 @@ def _servers() -> tuple[dict[str, dict[str, Any]], str | None]:
             return {}, f"{path}: invalid server name {name!r}"
         if not isinstance(spec, dict):
             return {}, f"{path}: {name}: server definition must be an object"
+        url = spec.get("url")
+        if url is not None:
+            # Streamable-HTTP transport (long-running server). Localhost only:
+            # MCP servers are trusted endpoints, and the connector refuses to
+            # point at anything a browser-tab/SSRF-style hop could widen.
+            if not isinstance(url, str):
+                return {}, f"{path}: {name}: url must be a string"
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower()
+            if parts.scheme not in ("http", "https") or not host:
+                return {}, f"{path}: {name}: url must be http(s)://host[:port]/path"
+            if host not in ("localhost", "127.0.0.1", "::1"):
+                return {}, (f"{path}: {name}: only localhost MCP endpoints are "
+                            "allowed (bound-to-localhost servers like a local "
+                            "gale-kb service); remote URLs would widen the trust "
+                            "surface")
+            headers = spec.get("headers", {})
+            if not isinstance(headers, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+                return {}, f"{path}: {name}: headers must be an object of strings"
+            out[name] = {"url": url, "headers": headers}
+            continue
         command = spec.get("command")
         if not isinstance(command, str) or not command.strip():
             return {}, f"{path}: {name}: command must be a non-empty string"
@@ -224,20 +251,155 @@ class _ServerSession:
                 pass
 
 
+class _HttpSession:
+    """One Streamable-HTTP MCP session (spec 2025-03-26+) against a long-
+    running server URL, e.g. a FastMCP service on 127.0.0.1:8765/mcp.
+
+    Every request is a POST carrying Accept: application/json,
+    text/event-stream; the server answers either a plain JSON body or an
+    SSE stream framing the same JSON-RPC response (FastMCP/uvicorn default).
+    A session id from the initialize response is echoed back on subsequent
+    POSTs via the Mcp-Session-Id header. Notifications POST and expect only
+    a 202. Single-threaded by design: the host's turn loop is serial, and
+    urllib keeps the dependency surface stdlib-only.
+    """
+
+    def __init__(self, name: str, spec: dict[str, Any]):
+        self.name = name
+        self.url = spec["url"]
+        self.headers = dict(spec.get("headers") or {})
+        self._session_id: str | None = None
+        self.negotiated_version: str | None = None
+        self.server_info: dict[str, Any] = {}
+
+    def start(self) -> None:
+        pass  # stateless transport; the initialize round-trip IS the start
+
+    def _post(self, payload: dict[str, Any], timeout: float,
+              stream: bool) -> tuple[int, dict[str, str], Any]:
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream",
+                   **self.headers}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        req = urllib.request.Request(self.url, data=body, headers=headers,
+                                     method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read(2000).decode("utf-8", "replace").strip()
+            except OSError:
+                pass
+            if exc.code == 404 and self._session_id:
+                # session expired server-side (e.g. service restart) — drop it
+                # so the next call re-initializes instead of failing forever
+                self._session_id = None
+            raise ConnectionError(
+                f"HTTP {exc.code} from {self.name} ({self.url}): {detail or exc.reason}") from exc
+        return resp.status, dict(resp.headers), resp
+
+    @staticmethod
+    def _read_sse_message(resp: Any) -> dict[str, Any] | None:
+        """Read one `event: message` / `data: <json>` pair from an SSE body."""
+        event_name = None
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if not line:
+                if event_name is not None:
+                    event_name = None  # blank line dispatches; keep scanning
+                continue
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
+            elif line.startswith("data:") and event_name in (None, "message"):
+                try:
+                    return json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    def request(self, method: str, params: dict[str, Any],
+                timeout: float) -> dict[str, Any]:
+        request_id = f"nx-{method}-{next(_REQ_COUNTER)}-{threading.get_ident()}"
+        status, headers, resp = self._post(
+            {"jsonrpc": "2.0", "id": request_id, "method": method,
+             "params": params}, timeout, stream=True)
+        try:
+            # HTTPMessage header names are case-insensitive in practice but
+            # dict() preserves the server's casing — normalize the two we read.
+            ctype = (headers.get("Content-Type")
+                     or headers.get("content-type") or "").lower()
+            if "text/event-stream" in ctype:
+                while True:
+                    msg = self._read_sse_message(resp)
+                    if msg is None:
+                        raise ConnectionError(
+                            f"server {self.name} closed the SSE stream before "
+                            f"answering {method}")
+                    if msg.get("id") == request_id:
+                        response = msg
+                        break
+                    # anything else (notifications, other ids) is skipped
+            else:
+                raw = resp.read(_MAX_RESPONSE_CHARS + 1)
+                body = raw.decode("utf-8", "replace").strip()
+                if not body:
+                    raise ConnectionError(
+                        f"server {self.name} returned an empty body for {method} "
+                        f"(HTTP {status}, content-type {ctype!r})")
+                response = json.loads(body)
+        finally:
+            resp.close()
+        new_session = (headers.get("mcp-session-id")
+                       or headers.get("Mcp-Session-Id"))
+        if new_session:
+            self._session_id = new_session
+        if not isinstance(response, dict) or "error" in response:
+            err = response.get("error") if isinstance(response, dict) else response
+            detail = err.get("message", json.dumps(err)) if isinstance(err, dict) else str(err)
+            raise ConnectionError(f"server error on {method}: {detail}")
+        return response.get("result") or {}
+
+    def notify(self, method: str) -> None:
+        try:
+            status, _headers, resp = self._post(
+                {"jsonrpc": "2.0", "method": method}, _CONNECT_TIMEOUT, stream=False)
+            resp.close()
+            # 202 Accepted is the expected acknowledgement for notifications
+        except (ConnectionError, OSError):
+            pass
+
+    def stop(self) -> None:
+        # Best-effort DELETE per the Streamable HTTP spec; ignore failures.
+        if not self._session_id:
+            return
+        try:
+            req = urllib.request.Request(
+                self.url, method="DELETE",
+                headers={**self.headers, "Mcp-Session-Id": self._session_id})
+            urllib.request.urlopen(req, timeout=5).close()
+        except (urllib.error.HTTPError, OSError):
+            pass
+        self._session_id = None
+
+
 _REQ_COUNTER = iter(range(1, 1 << 62))
 
 
 # --- one session per server per process, created lazily, torn down at exit ---
 
-_SESSIONS: dict[str, _ServerSession] = {}
+_SESSIONS: dict[str, Any] = {}
 _SESSIONS_LOCK = threading.Lock()
 
 
-def _get_session(name: str, spec: dict[str, Any]) -> _ServerSession:
+def _get_session(name: str, spec: dict[str, Any]):
     with _SESSIONS_LOCK:
         session = _SESSIONS.get(name)
         if session is None:
-            session = _ServerSession(name, spec)
+            session = (_HttpSession(name, spec) if "url" in spec
+                       else _ServerSession(name, spec))
             session.start()
             try:
                 result = session.request("initialize", {
