@@ -185,6 +185,112 @@ def test_pending_slots_are_derived_from_the_store():
         assert no.get(slot) in (None, False)
 
 
+def _scalar_slots(st):
+    """The declared scalar slots (st.SCALAR_SLOTS), san-checked: every name
+    must actually exist on the module. Kept next to _pending_slots' role —
+    the test-side oracle over the declaration, not a second hand list."""
+    missing = [n for n in st.SCALAR_SLOTS if not hasattr(st, n)]
+    assert not missing, f"SCALAR_SLOTS names missing from nx._state: {missing}"
+    return list(st.SCALAR_SLOTS)
+
+
+def test_scalar_slots_exist_and_are_drained_by_the_reset_body():
+    """Every declared SCALAR_SLOTS name exists on nx._state, is plantable
+    with residue, and is pinned to its reset-body default by construction —
+    the same plant/drain/assert shape as the _PENDING_* sweep above."""
+    slots = _scalar_slots(st)
+    residue = {
+        "_WAKE_ARMED": True, "_WAKE_DUE": True, "_WAKE_STREAK": 7,
+        "_WAKE_STALL_AT": 1234.5, "_WAKE_STALL_REVISION": 99,
+        "_WAKE_STALL_HOLD": True, "_WAKE_STALL_PENDING": True,
+        "_WAKE_CHAIN_SPEND": 999999, "_WAKE_CHAIN_BASE": 4242,
+        "_BG_SCAN_DONE": True, "_BG_NOTICE_SEEN": {"123"},
+        "_LAST_PROMPT": [{"stale": True}], "_LAST_COMPRESSION": {"kept": 1},
+    }
+    drained = {
+        "_WAKE_ARMED": False, "_WAKE_DUE": False, "_WAKE_STREAK": 0,
+        "_WAKE_STALL_AT": 0.0, "_WAKE_STALL_REVISION": -1,
+        "_WAKE_STALL_HOLD": False, "_WAKE_STALL_PENDING": False,
+        "_WAKE_CHAIN_SPEND": 0, "_WAKE_CHAIN_BASE": 0,
+        "_BG_SCAN_DONE": False, "_BG_NOTICE_SEEN": None,
+        "_LAST_PROMPT": None, "_LAST_COMPRESSION": None,
+    }
+    assert set(slots) == set(residue), "slot table and pin table drifted"
+    for name in slots:
+        assert hasattr(st, name)
+        setattr(st, name, residue[name])
+    nx_state_reset_body()
+    for name in slots:
+        assert getattr(st, name) == drained[name], name
+
+
+def _module_level_scalar_assignments(source: str) -> set[str]:
+    """AST oracle: names assigned at nx/_state.py module top level whose
+    initial value is a scalar (bool/int/float/str/None) or an inferred-unknown
+    env read (os.environ.get / os.getenv). Calls like threading.local(),
+    ContextVar(...), set() and dict literals are containers/TLS homes and are
+    swept structurally — not this class."""
+    import ast
+    tree = ast.parse(source)
+    scalar_names: set[str] = set()
+
+    def is_scalar_value(val) -> bool:
+        if isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.UAdd, ast.USub)):
+            val = val.operand
+        if isinstance(val, (ast.Constant, ast.Name, ast.Attribute)):
+            return True
+        if isinstance(val, ast.Call):
+            f = val.func
+            return (isinstance(f, ast.Attribute) and f.attr in ("get", "getenv")
+                    and isinstance(f.value, ast.Attribute)
+                    and f.value.attr == "environ")
+        return False
+
+    for node in tree.body:
+        targets: list[str] = []
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        if not targets:
+            continue
+        val = getattr(node, "value", None)
+        if val is None:  # bare AnnAssign declaration (`NAME: int`), no value
+            scalar_names.update(targets)
+            continue
+        if is_scalar_value(val):
+            scalar_names.update(targets)
+    return scalar_names
+
+
+def test_no_undeclared_module_global_scalars_in_state():
+    """Anti-vacuity pin (DURABILITY_AUDIT P2 acceptance criterion): planting
+    a new module-global *private* scalar in nx/_state.py without declaring it
+    in SCALAR_SLOTS (with a reset-body drain) or inventorying it in
+    _SCALAR_SLOTS_EXEMPT (a pre-contract home, with a written reason) fails
+    here. Public (no leading underscore) scalars are the startup/env-owned
+    configuration surface — the tests that monkeypatch them restore them —
+    and are out of scope by class, as are the _PENDING_* notice slots, which
+    the derived notices sweep already covers."""
+    import inspect
+    source = inspect.getsource(st)
+    scalars = _module_level_scalar_assignments(source)
+    declared = set(st.SCALAR_SLOTS) | set(st._SCALAR_SLOTS_EXEMPT)
+    pending = {a for a in dir(st) if a.startswith("_PENDING_")}
+    throwaways = {"_mode"}  # _state.py's env pre-parse for THINKING_MODE
+    private = {n for n in scalars if n.startswith("_")}
+    undeclared = private - declared - pending - throwaways
+    assert not undeclared, (
+        "undeclared module-global scalar(s) in nx/_state.py — add to "
+        f"SCALAR_SLOTS (with a reset-body drain) or _SCALAR_SLOTS_EXEMPT "
+        f"(pre-contract home with a written reason): {sorted(undeclared)}")
+    # the oracle itself is live: it sees the declared slots and would see a
+    # new one (guards against the scan silently matching nothing)
+    assert set(st.SCALAR_SLOTS) <= scalars
+    # and the notices slots really are covered by their own sweep
+    assert pending <= set(_pending_slots(st))
+
+
 def test_notice_ctx_and_bg_scan_state_are_swept():
     import nx._notices as no
     no.install_notice_ctx()

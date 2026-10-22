@@ -764,3 +764,134 @@ COMPRESS_MODEL: str = ""
 COMPRESS_SUMMARY_TOKENS: int = 8192
 _COMPRESS_SOURCE_WARNED: bool = False
 _SUBAGENT_SOURCE_WARNED: bool = False
+
+# --- SCALAR_SLOTS: the declared scalar homes of the per-test reset -------------
+# The reset contract (tests/_nxtest.nx_state_reset_body) drains containers and
+# TLS homes structurally, but a module-global SCALAR (bool/int/float/str/None)
+# can only be swept by name — which is why the wake/plan-stall/chain/bg-scan
+# residue below used to be hand-listed in the reset body with nothing
+# connecting the hand list back to this module. SCALAR_SLOTS is the declared
+# bridge: every module-global mutable scalar that genuinely needs a per-test
+# reset (session/turn-loop residue a leaked value would carry into an
+# unrelated later test) is named here, and tests/test_state_reset_contract.py
+# derives its sweep from the tuple — planting a new undeclared scalar in this
+# module fails the contract test (the P2 acceptance criterion in
+# docs/DURABILITY_AUDIT.md). Public config knobs (env-resolved at startup,
+# saved/restored by the tests that touch them) are NOT slots; the pre-existing
+# private scalars that are not yet reset-body-swept are inventoried in
+# _SCALAR_SLOTS_EXEMPT below — add a NEW scalar to SCALAR_SLOTS (plus the
+# reset body), never to the exempt list.
+SCALAR_SLOTS: tuple[str, ...] = (
+    # auto-continuation / wake state (see the sections above): a leftover
+    # _WAKE_DUE/_WAKE_ARMED/_WAKE_STREAK makes wake_due() fire in an unrelated
+    # later test; the stall/chain slots change which instruction the next wake
+    # picks and whether the chain budget trips.
+    "_WAKE_ARMED",
+    "_WAKE_DUE",
+    "_WAKE_STREAK",
+    "_WAKE_STALL_AT",
+    "_WAKE_STALL_REVISION",
+    "_WAKE_STALL_HOLD",
+    "_WAKE_STALL_PENDING",
+    "_WAKE_CHAIN_SPEND",
+    "_WAKE_CHAIN_BASE",
+    # background-completion scan state: _BG_NOTICE_SEEN is the "pids already
+    # announced" set (None = re-seed from the baseline) and _BG_SCAN_DONE gates
+    # the sweep — either left set makes the sweep announce a real bg job as a
+    # [Runtime note] mid-test.
+    "_BG_SCAN_DONE",
+    "_BG_NOTICE_SEEN",
+    # the last-prompt digest tap and the last-compression ledger are drained
+    # to None by the reset body (a stale row makes the /ctx as-sent /
+    # before-after views describe a request/fold a later test never ran).
+    "_LAST_PROMPT",
+    "_LAST_COMPRESSION",
+)
+
+# Private module-global scalars that predate the SCALAR_SLOTS contract and are
+# NOT drained by the reset body (per-turn latches consumed on read, one-shot
+# nudge flags, per-turn tally counters). Inventoried here so the contract
+# test's AST scan can distinguish "declared, deliberately exempt" from "new
+# undeclared hidden home" — a new scalar must NOT be added here.
+_SCALAR_SLOTS_EXEMPT: tuple[str, ...] = (
+    # turn-path latches (cleared/consumed by model_turn within the turn)
+    "_LAST_PROMPT_TOKENS",
+    "_LAST_API_ERROR",
+    "_LAST_CONTEXT_OVERRUN",
+    "_LAST_CACHE_HIT",
+    "_LAST_PARTIAL_TEXT",
+    "_LAST_REASONING",
+    "_LAST_TOOL_NAME",
+    "_LAST_TOOL_OUTPUT",
+    "_STALL_EPISODE_ACTED",
+    "_STALL_FORCE_NATIVE",
+    "_NATIVE_TOOL_CALLS_CONFIRMED",
+    # per-turn tally / PTC baseline counters (reset per turn by model_turn)
+    "_TALLY_ARG_REPAIRS",
+    "_TALLY_RETRIES",
+    "_PTC_TURN_TOOL_CALLS",
+    "_PTC_FANOUT_SIZE",
+    "_PTC_ENVELOPE_CHARS",
+    "_PTC_REPAIRED_BY_CANDIDATES",
+    "_PTC_BRACKET_SALVAGED",
+    "_PTC_NORMALIZED",
+    "_PTC_HARD_FAILED",
+    "_PTC_BREAKER_TRIPPED",
+    "_PTC_FANOUT_SCRIPTS",
+    # session-lifetime one-shot nudge flags / streaks (deliberate session scope)
+    "_PTC_NUDGED",
+    "_PTC_SOURCE_SHIPPED",
+    "_PTC_BREAKER_TRIPS",
+    "_PTC_DISABLED",
+    "_SESSION_HAS_BACKGROUNDED",
+    "_CONSECUTIVE_EDITS",
+    "_MULTI_EDIT_NUDGED",
+    "_YOLO_ASYNC_NUDGED",
+    "_READ_STREAK",
+    "_DELEGATION_NUDGE_COUNT",
+    "_PATH_FAIL_LAST",
+    "_PATH_FAIL_RUN",
+    "_OCC_NATIVE_COMPACTIONS",
+    "_SPAWNED_WRITE_TIER",
+    "_TURN_ACTIVE",
+    # dispatch/verify transient latches
+    "_ACTIVE_PTC_PROC",
+    "_VERIFY_INFLIGHT",
+    # None-initialized object references (spinner/console/metrics homes,
+    # recovery ContextVar holder, dispatch table) — cleared or restored by the
+    # structural drains, the module rewind, or the production code that owns
+    # them; not scalars in the reset-body sense.
+    "_ACTIVE_SPINNER",
+    "_TURN_SPINNER",
+    "_PROGRESS_SINK",
+    "_INTERRUPT_THREAD",
+    "_METRICS",
+    "_RECOVERY_CURRENT",
+    "_SUBAGENT_DISPATCH",
+    "_SUBAGENT_ACTIVE",
+    # /ctx pin is False once the turn completes; the plan slots and the /wip
+    # snapshot are persisted into the session JSON ("plan"/"wip" keys) and
+    # restored by /resume, not by the per-test drain.
+    "_PLAN_ACTIVE",
+    "_PLAN_GOAL",
+    "_PLAN_SLUG",
+    "_PLAN_STARTED",
+    "_WIP",
+    # wake-prefill buffer consumed by the prompt on the wake turn itself
+    "_WAKE_PREFILL",
+    # per-path verify bookkeeping (timestamps set + announced pids)
+    "_VERIFY_SEEN",
+    # malformed-args breaker identity (dropped when the endpoint changes; the
+    # sentinel key is re-armed by /toolcalls //reset, not by the test drain)
+    "_BREAKER_ENDPOINT_KEY",
+    # declaration-only config knob (no default here on purpose — __init__.py's
+    # NX_MALFORMED_TOOL_BREAKER resolution is the only owner)
+    "MALFORMED_TOOL_BREAKER_LIMIT",
+    # interrupt redirect (Esc handshake, consumed by the REPL prompt)
+    "_INTERRUPT_REDIRECT_TEXT",
+    "_INTERRUPT_REDIRECT_SUBMITTED",
+    "_INTERRUPT_REDIRECT_PREFILL",
+    # one-shot warned flags
+    "_COMPRESS_SOURCE_WARNED",
+    "_SUBAGENT_SOURCE_WARNED",
+)
