@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 from typing import Any, Optional, TypedDict
 
@@ -62,6 +63,10 @@ MAX_UNDO_BYTES = _env_int("NX_MAX_UNDO_BYTES", 32 * 1024 * 1024)
 # the turn boundary (_flush_undo_stack); undo_last/clear_persisted still write
 # inline, where the on-disk state must match the user's just-observed action.
 _UNDO_DIRTY = False
+# 0.168.5 (audit P2-undo): one-warning-per-streak latch for persist
+# failures — the loss is unrecoverable, the user must hear about it once,
+# and a failing path that fires every turn must not spam. Reset on success.
+_PERSIST_WARNED = False
 
 
 class FileSnapshot(TypedDict):
@@ -338,16 +343,28 @@ def persist_undo_stack() -> None:
     """Atomically write the pending stack as `<NX_HOME>/undo.json` (0600).
 
     Best-effort: an unwritable home degrades to the pre-0.47 memory-only
-    behavior; it must never break a tool call that is mid-flight. `indent` is
-    deliberately off the persist path (PF-05): the file is machine-written and
-    a 40 MB pretty-print costs write amplification for nothing."""
-    global _UNDO_DIRTY
+    behavior; it must never break a tool call that is mid-flight — but it
+    is no longer SILENT (0.168.5, audit P2-undo): the persisted file is
+    the whole /undo story across restarts, so losing it is unrecoverable
+    and gets exactly one user-visible warning per failure. `indent` is
+    deliberately off the persist path (PF-05): the file is machine-written
+    and a 40 MB pretty-print costs write amplification for nothing."""
+    global _UNDO_DIRTY, _PERSIST_WARNED
     _UNDO_DIRTY = False
     try:
         data = {"version": 1, "entries": st._UNDO_STACK}
         atomic_write_private(_undo_path(), f"{json.dumps(data)}\n")
-    except Exception:
-        pass
+        _PERSIST_WARNED = False  # recovered: warn again if it breaks later
+    except Exception as e:
+        if not _PERSIST_WARNED:
+            _PERSIST_WARNED = True
+            try:
+                from ._render import notice
+                notice("warning",
+                       f"  could not persist the undo stack to {_undo_path()}: "
+                       f"{e} — /undo history will not survive a restart")
+            except Exception:
+                pass  # never raise into a tool call
 
 
 def _load_persisted() -> None:
@@ -412,9 +429,36 @@ def swap_session() -> None:
 
 def _restore_one(path: str, existed: bool, content: Optional[str]) -> None:
     """Restore one file atomically: temp file + os.replace for a write,
-    os.remove for a re-delete. Raises OSError on failure."""
+    os.remove for a re-delete. Raises OSError on failure.
+
+    0.168.5 (audit P2-undo): the write is mode-PRESERVING, mirroring
+    `_edit_tools._atomic_write` — the pre-edit snapshot's file is the user's
+    checkout file (often 0755, group-readable), and restoring it at 0600
+    stripped the exec bit and turned the next CI run into "permission
+    denied" attributed to everything but the undo. The existing file's
+    mode is captured (the file being restored exists — the tool just
+    wrote it) and carried onto the temp file; symlink targets are
+    resolved so the real file is rewritten, not the link."""
     if existed:
-        atomic_write_private(path, content or "")
+        real = os.path.realpath(path)
+        parent = os.path.dirname(real) or "."
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".nx-undo-tmp-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content or "")
+            try:
+                mode = os.stat(real).st_mode & 0o7777
+            except OSError:
+                pass  # vanished between realpath and stat: keep 0600
+            else:
+                os.chmod(tmp, mode)
+            os.replace(tmp, real)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     elif os.path.exists(path):
         os.remove(path)
 

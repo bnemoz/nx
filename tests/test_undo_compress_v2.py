@@ -246,6 +246,65 @@ def test_failed_restore_keeps_entry_pending(nx_env, monkeypatch):
     assert msg2.startswith("ERROR")
 
 
+# --- 0.168.5 (audit P2-undo): mode-preserving restore + persist warning -------
+
+def test_undo_restores_mode_and_exec_bit(nx_env):
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "deploy.sh"
+    p.write_text("#!/bin/sh\necho hi\n")
+    os.chmod(p, 0o755)
+    nx.run_tool("write_file", {"path": str(p), "content": "#!/bin/sh\necho no\n"})
+    assert os.stat(p).st_mode & 0o777 == 0o755  # edit preserved the mode
+    entry, msg = _undo.undo_last()
+    assert "reverted" in msg, msg
+    assert p.read_text() == "#!/bin/sh\necho hi\n"
+    # the undo must not have stripped the exec bit / group bits
+    assert os.stat(p).st_mode & 0o777 == 0o755, oct(os.stat(p).st_mode)
+
+
+def test_undo_preserves_mode_of_newly_created_file(nx_env):
+    nx, tmp = nx_env
+    from nx import _undo
+    p = tmp / "made.sh"
+    nx.run_tool("write_file", {"path": str(p), "content": "x"})
+    os.chmod(p, 0o755)
+    nx.run_tool("write_file", {"path": str(p), "content": "y"})
+    _undo.undo_last()
+    # the file being restored existed post-first-edit at 0755
+    assert os.stat(p).st_mode & 0o777 == 0o755, oct(os.stat(p).st_mode)
+
+
+def test_persist_failure_warns_once_then_stays_quiet(nx_env, monkeypatch, capsys):
+    nx, tmp = nx_env
+    from nx import _undo
+    monkeypatch.setattr(_undo, "atomic_write_private",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only home")))
+    _undo._PERSIST_WARNED = False
+    _undo.push_checkpoint("write_file", [{"path": "/tmp/x", "existed": False,
+                                          "content": None}])
+    _undo.flush_undo_stack()
+    out1 = capsys.readouterr().out
+    assert "could not persist the undo stack" in out1, out1
+    assert "not survive a restart" in out1
+    # the next failing persist is silent (one warning per streak)
+    _undo.push_checkpoint("write_file", [{"path": "/tmp/y", "existed": False,
+                                          "content": None}])
+    _undo.flush_undo_stack()
+    assert capsys.readouterr().out == ""
+    # recovery resets the latch: a later failure warns again
+    monkeypatch.setattr(_undo, "atomic_write_private",
+                        lambda *a, **k: None)
+    _undo.persist_undo_stack()
+    monkeypatch.setattr(_undo, "atomic_write_private",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("gone again")))
+    _undo._mark_dirty()
+    _undo.flush_undo_stack()
+    assert "could not persist the undo stack" in capsys.readouterr().out
+    # and the call itself never raises
+    _undo.persist_undo_stack()
+
+
 # --- data-loss guard (stale/cross-session checkpoints) -------------------------
 
 def test_undo_refuses_when_file_changed_since_checkpoint(nx_env):
