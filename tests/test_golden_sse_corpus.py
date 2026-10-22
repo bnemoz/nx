@@ -31,9 +31,20 @@ Invariants asserted for EVERY trace:
     trace is never mistaken for a degenerated stream.
 
 Two traces are CHARACTERIZATION traces: they pin what the parser does TODAY
-with a shape it does not handle (legacy `function_call`, and an SSE event split
-over two `data:` lines). Both are labelled in place and reported to the audit;
-a future fix has to update them deliberately.
+with an awkward shape (an SSE event split over two `data:` lines stays
+unreassembled but counted; an n>1 stream's alternative choice stays
+unexecuted). Both are labelled in place and reported to the audit; a future
+fix has to update them deliberately.
+
+Two shapes the audit found SILENTLY DISCARDED are now parsed and are pinned as
+regression guards rather than as characterizations of the loss: the legacy
+`delta.function_call` shape (accumulated into the same tool-call records the
+native path fills, so a translating gateway's call dispatches), and the
+non-zero choices of an n>1 chunk (recorded + warned about, deliberately not
+dispatched — see `_account_alternative_choices` for why alternatives are not
+parallel calls). Both were `dropped_lines == 0` losses, i.e. invisible to the
+turn layer's dropped-frame warning, which is exactly why they are pinned here
+at the wire layer.
 
 Tier A: no threads (speculative reads forced off — they would hand work to a
 ThreadPoolExecutor), no network (httpx.MockTransport answers in-process), no
@@ -82,9 +93,11 @@ def delta_chunk(choice_deltas: list[dict], finish: str | None = None) -> dict:
     choice i's delta, `finish` the (same) finish_reason for each.
 
     NOT a way to send several content deltas in one frame — a real chunk
-    carries exactly ONE delta per choice, and `StreamParser` reads
-    `choices[0]` only, so a second element here is a choice the parser drops
-    (see check_choice1_not_parsed). Several prose deltas = several events."""
+    carries exactly ONE delta per choice, and `StreamParser` dispatches
+    `choices[0]` only, so a second element here is an ALTERNATIVE whose calls
+    are recorded and warned about but never executed (see
+    check_choice1_counted_not_dispatched). Several prose deltas = several
+    events."""
     out: list[dict] = []
     for i, d in enumerate(choice_deltas):
         c: dict[str, Any] = {"index": i, "delta": d}
@@ -142,6 +155,9 @@ class Turn:
     timings: Any
     dropped_lines: int
     loop_cut: bool
+    # n>1 only: choice 0's alternatives, keyed (choice_idx, call_idx). Present
+    # so a lost alternative is assertable instead of simply absent.
+    dropped_choice_calls: dict = field(default_factory=dict)
 
     def args(self, index: int) -> str:
         return self.tcs[index]["args"]
@@ -168,14 +184,30 @@ class Trace:
 # --------------------------------------------------------------------------
 # checks for shapes a field cannot express
 # --------------------------------------------------------------------------
-def check_choice1_not_parsed(t: Turn) -> None:
-    """n>1 multi-choice streaming: `_ChatStream` yields the whole chunk (both
-    choices) but `StreamParser.process` reads `chunk.choices[0]` only, so
-    choice 1's tool call is silently absent from the turn — with
-    `dropped_lines == 0`, so nothing reports it. Pinned as a known limitation:
-    it is a capability gap, not arg truncation (choice 0's args stay exact)."""
-    assert "call_99" not in {c["id"] for c in t.tcs.values()}, t.tcs
+def check_choice1_counted_not_dispatched(t: Turn) -> None:
+    """n>1 multi-choice streaming. `_ChatStream` yields the whole chunk (both
+    choices); `StreamParser.process` still DISPATCHES choice 0 only — in OpenAI
+    semantics the choices of one completion are alternatives to choose between,
+    not parallel calls, and nx always requests n=1, so executing choice 1's
+    sample would run a call the model never asked for.
+
+    What the audit's fix guarantees is that the alternative is no longer
+    SILENT: its argument fragments are accumulated byte-exactly into
+    `parser.dropped_choice_calls` (the structure the parser warns from), so the
+    trace can prove the wire carried them and the loss can't be mistaken for
+    arg truncation. Choice 0's args stay exact either way."""
+    ids = {c["id"] for c in t.tcs.values()}
+    assert "call_99" not in ids, ("an n>1 alternative got dispatched — choices "
+                                 f"are alternatives, not parallel calls: {t.tcs}")
     assert len(t.tcs) == 1, t.tcs
+    # `{"command"` + `: "ls"` + `"` — the trace's own choice-1 fragments, byte
+    # for byte (deliberately not a balanced object: the point is that nothing
+    # was lost on the way in, not that the alternative was well-formed).
+    assert t.dropped_choice_calls == {(1, 0): {"id": "call_99",
+                                              "name": "run_bash",
+                                              "args": '{"command": "ls""'}}, (
+        "choice 1's tool call stopped being accounted for — the loss is silent "
+        f"again: {t.dropped_choice_calls}")
 
 
 def check_reasoning(t: Turn) -> None:
@@ -193,12 +225,33 @@ def check_incomplete_json(t: Turn) -> None:
     assert t.dropped_lines == 0
 
 
-def check_legacy_function_call_dropped(t: Turn) -> None:
-    assert t.tcs == {}, ("legacy function_call support appeared — update this "
-                         "characterization trace to assert the parsed call")
+def check_legacy_function_call_parsed(t: Turn) -> None:
+    """`delta.function_call` is parsed into the SAME tcs shape the native path
+    fills (the harness above already proved name/args byte-exact), so
+    `_handle_native_tool_calls` can dispatch it. Two things that shape must
+    still satisfy for the turn layer not to reject the turn:
+
+      * a NON-EMPTY id — `_turn_toolcalls` writes c["id"] into the
+        assistant(tool_calls) message and into every matching tool result, and
+        the legacy wire shape has no id at all (the parser synthesizes one);
+      * it must not disturb the rest of the turn: no prose, and nothing on the
+        wire was malformed, so the counter stays at 0 (the pre-fix failure mode
+        was total arg loss with `dropped_lines == 0`)."""
+    assert len(t.tcs) == 1, t.tcs
+    call = t.tcs[0]
+    assert call["id"], ("legacy function_call has no wire id; an empty one "
+                        "produces a tool result the next request rejects")
+    assert call["name"] == "get_weather", call
+    assert call["args"] == '{"city": "Oslo"}', call
     assert t.content == ""
-    # the silent part: nothing on the wire was malformed, so nothing was counted
     assert t.dropped_lines == 0
+
+
+def check_single_call_dispatched(t: Turn) -> None:
+    """Both tool-call fields describing ONE call must yield exactly one call.
+    The harness above pinned its id/name/args against the native copy."""
+    assert len(t.tcs) == 1, (
+        f"the legacy `function_call` copy was dispatched too: {t.tcs}")
 
 
 def check_multiline_data_not_reassembled(t: Turn) -> None:
@@ -263,7 +316,7 @@ VLLM_TOOL_MULTI_CHOICE = Trace(
                 '{"path": "src/app.py", "limit": 40}')],
     finish_reasons=["tool_calls"],
     has_usage=True,
-    check=check_choice1_not_parsed,
+    check=check_choice1_counted_not_dispatched,
 )
 
 # vLLM plain-text answer: role delta, prose, finish_reason=stop, and a
@@ -391,17 +444,19 @@ MALFORMED_JSON_TOOL_ARGS = Trace(
     check=check_incomplete_json,
 )
 
-# CHARACTERIZATION — legacy `function_call`. Pre-`tool_calls` OpenAI, still
-# emitted by older llama.cpp builds and by proxies that translate
-# Anthropic/Gemini tool_use for old clients. `StreamParser` has no branch for
-# `delta.function_call`, so this turn yields NO tool calls with
-# `dropped_lines == 0`: a completely silent capability loss, which is exactly
-# the audit's "is nx wrong or is the gateway wrong?" scenario. Pinned so the
-# blind spot is on the record.
+# Legacy `function_call`. Pre-`tool_calls` OpenAI, still emitted by older
+# llama.cpp builds and by proxies that translate Anthropic/Gemini tool_use for
+# old clients. The parser had NO branch for `delta.function_call`, so this turn
+# yielded no tool calls at all with `dropped_lines == 0` — a completely silent
+# capability loss, exactly the audit's "is nx wrong or is the gateway wrong?"
+# scenario. Now parsed: the fragments accumulate into the same call record the
+# native path fills, so a translating gateway's call dispatches like a modern
+# one. The id the wire shape does not carry is asserted non-empty in the check
+# (the turn layer round-trips it into the tool result).
 LEGACY_FUNCTION_CALL = Trace(
     provider="legacy hosted API (pre-tool_calls `function_call`)",
-    shape="delta.function_call {name, arguments} — a shape the parser does not "
-          "support today (characterization: args are lost SILENTLY)",
+    shape="delta.function_call {name, arguments} — legacy shape, parsed into "
+          "the same tool-call records the native path fills",
     body=(
         ev({"choices": [{"index": 0,
                          "delta": {"role": "assistant", "content": None}}]})
@@ -411,9 +466,75 @@ LEGACY_FUNCTION_CALL = Trace(
         + ev(delta_chunk([{}], finish="function_call"))
         + DONE
     ),
+    # The wire carried no id, so `call_fc_0` is the parser's synthesized one
+    # (first free tcs slot). Pinned deliberately: an id is REQUIRED downstream.
+    calls=[Call(0, "call_fc_0", "get_weather", '{"city": "Oslo"}')],
     finish_reasons=["function_call"],
-    check=check_legacy_function_call_dropped,
+    check=check_legacy_function_call_parsed,
 )
+
+# A translating gateway that fills BOTH tool-call fields of every delta — the
+# deprecated `function_call` for old clients AND native `tool_calls` for new
+# ones (real behaviour of some Anthropic/Gemini→OpenAI proxies). `tool_calls` is
+# authoritative, so exactly ONE call may survive: without the parser's native
+# gate this turn would dispatch the same call twice, the second copy under a
+# synthesized id. (The two deltas are named so each wire object stays readable.)
+_DUAL_FIRST = {
+    "tool_calls": [{"index": 0, "id": "call_p", "type": "function",
+                    "function": {"name": "read_file",
+                                 "arguments": "{\"path\""}}],
+    "function_call": {"name": "read_file", "arguments": "{\"path\""},
+}
+_DUAL_REST = {
+    "tool_calls": [{"index": 0,
+                    "function": {"arguments": ": \"a.md\"}"}}],
+    "function_call": {"arguments": ": \"a.md\"}"},
+}
+
+DUAL_SHAPED_GATEWAY = Trace(
+    provider="translating gateway (fills `tool_calls` AND legacy `function_call`)",
+    shape="same call streamed twice, once per tool-call field — native wins, no "
+          "duplicate dispatch",
+    body=(
+        ev(role_only())
+        + ev(delta_chunk([_DUAL_FIRST]))
+        + ev(delta_chunk([_DUAL_REST]))
+        + ev(delta_chunk([{}], finish="tool_calls"))
+        + DONE
+    ),
+    calls=[Call(0, "call_p", "read_file", '{"path": "a.md"}')],
+    finish_reasons=["tool_calls"],
+    check=check_single_call_dispatched,
+)
+
+# Same gateway, but the deprecated field arrives in its OWN frame FIRST (some
+# proxies emit the legacy preamble before the native deltas). Order must not
+# matter: the native copy still wins, and the earlier legacy fragment must not be
+# merged into it (that would double the argument text and surface as a bogus
+# "malformed tool call").
+DUAL_SHAPED_LEGACY_FIRST = Trace(
+    provider="translating gateway (legacy `function_call` frame first)",
+    shape="legacy preamble frame then the same call natively — native wins, no "
+          "merged/duplicated args",
+    body=(
+        ev(role_only())
+        + ev(delta_chunk([{"function_call": {"name": "read_file",
+                                             "arguments": "{\"path\""}}]))
+        + ev(delta_chunk([{"tool_calls": [
+                {"index": 0, "id": "call_p", "type": "function",
+                 "function": {"name": "read_file",
+                              "arguments": "{\"path\""}}]}]))
+        + ev(delta_chunk([{"tool_calls": [
+                {"index": 0,
+                 "function": {"arguments": ": \"a.md\"}"}}]}]))
+        + ev(delta_chunk([{}], finish="tool_calls"))
+        + DONE
+    ),
+    calls=[Call(0, "call_p", "read_file", '{"path": "a.md"}')],
+    finish_reasons=["tool_calls"],
+    check=check_single_call_dispatched,
+)
+
 
 # CHARACTERIZATION — one SSE event split over two `data:` lines, which the
 # WHATWG event-stream spec explicitly allows (the client joins them with "\n"
@@ -450,6 +571,8 @@ CORPUS: dict[str, Trace] = {
     "hosted_parallel_tool_calls": HOSTED_PARALLEL_TOOL_CALLS,
     "malformed_json_tool_args": MALFORMED_JSON_TOOL_ARGS,
     "legacy_function_call": LEGACY_FUNCTION_CALL,
+    "dual_shaped_gateway": DUAL_SHAPED_GATEWAY,
+    "dual_shaped_legacy_first": DUAL_SHAPED_LEGACY_FIRST,
     "sse_multiline_data_event": SSE_MULTILINE_DATA_EVENT,
 }
 
@@ -514,6 +637,8 @@ def replay(body: str) -> Turn:
         timings=parser.timings,
         dropped_lines=stream.dropped_lines,
         loop_cut=parser.loop_cut,
+        dropped_choice_calls={k: dict(v)
+                              for k, v in parser.dropped_choice_calls.items()},
     )
 
 

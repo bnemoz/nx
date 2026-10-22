@@ -47,6 +47,17 @@ from . import REASONING_ONLY_TIME_LIMIT
 # usefully, it's just the resolution boundary of what the client can observe.
 _TPS_TRUST_WINDOW = 0.5
 
+
+def _fc_field(fc: Any, key: str) -> Any:
+    """Read one field of a `delta.function_call` payload from whichever wrapper
+    the transport used: `_Obj`/the openai SDK's pydantic models expose it as an
+    attribute, a hand-built dict (tests, ad-hoc gateways) as an item."""
+    v = getattr(fc, key, None)
+    if v is None and isinstance(fc, dict):
+        v = fc.get(key)
+    return v
+
+
 # Below this, the span isn't pacing at all — it's SSE arrival quantization.
 # A bursty server (vLLM on a short tool-call turn) can deliver an entire
 # generation in one or two reads a fraction of a millisecond apart, and
@@ -228,6 +239,23 @@ class StreamParser:
         self._content_len = 0
         self._clean_len = 0
         self.tcs: dict[int, dict[str, Any]] = {}
+        # n>1 visibility counter (see _account_alternative_choices): tool-call
+        # deltas that arrived on a NON-zero choice index. OpenAI choices are
+        # ALTERNATIVES, not parallel calls, so these are deliberately never
+        # dispatched — but they are no longer silently discarded either. Keyed
+        # (choice_index, call_index) with the same {"id","name","args"} shape as
+        # `tcs`, so a lost alternative stays inspectable after the turn.
+        self.dropped_choice_calls: dict[tuple[int, Any], dict[str, Any]] = {}
+        self._dropped_choice_warned = False
+        # The legacy `delta.function_call` shape carries neither a per-call key
+        # nor an id: exactly one slot per stream (see
+        # _handle_function_call_delta).
+        self._fc_key: int | None = None
+        # True once a NATIVE `tool_calls` delta landed. Compatibility gateways
+        # sometimes populate the deprecated `function_call` field alongside
+        # `tool_calls` for old clients; native is then authoritative and the
+        # legacy branch must not add a second copy of the same call.
+        self._saw_native_tcs = False
         self.mode: str | None = None  # None | "think" | "say"
         self.say_live: Live | None = None
         self.reasoning_parts: list[str] = []
@@ -508,7 +536,12 @@ class StreamParser:
         d_extra = getattr(d, "model_extra", None) or {}
         rc = (getattr(d, "reasoning_content", None) or
               d_extra.get("reasoning_content") or d_extra.get("reasoning"))
-        if d.content or d.tool_calls or rc:
+        # The legacy (pre-`tool_calls`) function-calling shape: older llama.cpp
+        # builds and proxies that translate Anthropic/Gemini tool_use for old
+        # clients still stream `delta.function_call`. `model_extra` is read too,
+        # because some gateways ship it as a non-standard key.
+        fc = getattr(d, "function_call", None) or d_extra.get("function_call")
+        if d.content or d.tool_calls or fc or rc:
             # Token-arrival bookkeeping for gen_window(): first sets TTFT,
             # every one paces the decode window.
             if self.t_first is None:
@@ -523,6 +556,10 @@ class StreamParser:
             return True
         for tc in (d.tool_calls or []):
             self._handle_tool_call_delta(tc)
+        if fc is not None and not self._saw_native_tcs:
+            self._handle_function_call_delta(fc)
+        if len(chunk.choices) > 1:
+            self._account_alternative_choices(chunk.choices)
         return False
 
     def _handle_reasoning(self, rc: str) -> bool:
@@ -807,7 +844,10 @@ class StreamParser:
             return True
         return False
 
-    def _handle_tool_call_delta(self, tc: Any) -> None:
+    def _enter_tool_call_mode(self) -> None:
+        """Shared prologue of both tool-call shapes (native `tool_calls`,
+        legacy `function_call`): close whatever text block is open so the call
+        takes over the terminal."""
         if self.mode == "think":
             self.close_think_block()
             self.mode = None
@@ -824,14 +864,17 @@ class StreamParser:
             self._clean_len = 0
             self._last_render_len = -1
         self.had_tool_call = True
-        s = self.tcs.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-        if tc.id:
-            s["id"] = tc.id
-        if tc.function and tc.function.name:
-            s["name"] = tc.function.name
-        if tc.function and tc.function.arguments:
-            s["args"] += tc.function.arguments
-            self.streamed_chars += len(tc.function.arguments)
+
+    def _accumulate_tool_call(self, s: dict[str, Any], name: Any,
+                              args: Any) -> None:
+        """Append one delta fragment to a call record. Both wire shapes land
+        here, so both get the same args accounting and the same speculative
+        read dispatch."""
+        if name:
+            s["name"] = name
+        if args:
+            s["args"] += args
+            self.streamed_chars += len(args)
             # Speculative read-only dispatch (0.103.3, nx/_spec_reads): the
             # args of a cacheable read that just became BALANCED JSON are
             # already a complete call, so start it now on a background pool
@@ -842,7 +885,135 @@ class StreamParser:
             # json.loads.
             from ._spec_reads import maybe_speculate
             maybe_speculate(s["name"], s["args"])
+
+    def _handle_tool_call_delta(self, tc: Any) -> None:
+        if not self._saw_native_tcs and self._fc_key is not None:
+            # A legacy `function_call` frame arrived BEFORE the first native
+            # delta. A gateway that streams both fields emits the SAME call
+            # twice, and native is authoritative: keep a legacy slot here would
+            # merge the two copies into one record (doubled argument text,
+            # under the synthesized id), which the turn layer can only report as
+            # malformed args. Drop it — `process` keeps the legacy branch off
+            # for the rest of the turn once `_saw_native_tcs` is set.
+            self.tcs.pop(self._fc_key, None)
+            self._fc_key = None
+        self._saw_native_tcs = True
+        self._enter_tool_call_mode()
+        s = self.tcs.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+        if tc.id:
+            s["id"] = tc.id
+        fn = tc.function
+        self._accumulate_tool_call(s, getattr(fn, "name", None),
+                                   getattr(fn, "arguments", None))
         self.show_tool_status()
+
+    def _handle_function_call_delta(self, fc: Any) -> None:
+        """`delta.function_call` — the pre-`tool_calls` OpenAI function-calling
+        shape: the same wire content as a native call (a name plus streamed
+        argument fragments) under different keys, still emitted by older
+        llama.cpp builds and by gateways that translate other vendors'
+        tool_use blocks for old clients.
+
+        It lands in the SAME `tcs` records the native path fills, so
+        _handle_native_tool_calls / _handle_forced_final_tool_call dispatch it
+        byte-identically. Two things the native shape has and this one lacks:
+
+          * no per-call `index`: legacy function-calling defines exactly ONE
+            call per response, so one slot per stream, allocated AFTER any
+            native calls (the turn handlers iterate `sorted(tcs)`, so it
+            dispatches last — which is also its arrival order);
+          * no `id`: the turn layer writes c["id"] into the
+            assistant(tool_calls) message AND into every matching tool result,
+            so an empty id would hand back a history the next request rejects
+            — so it synthesizes a stable local one.
+        """
+        name, args = _fc_field(fc, "name"), _fc_field(fc, "arguments")
+        if not name and not args:
+            # A bare `function_call: {}` frame (some gateways emit one as a
+            # preamble, the way others send a role-only delta first) carries no
+            # call at all: creating a slot for it would hand the turn layer a
+            # phantom tool named "", and entering tool-call mode would freeze a
+            # say-panel the prose is still streaming into.
+            return
+        self._enter_tool_call_mode()
+        if self._fc_key is None:
+            # Next free slot AFTER any native calls. `tcs` keys are the wire's
+            # per-call indexes; only the int ones can take part in max() (a
+            # gateway inventing a string index must not break the turn).
+            ints = [k for k in self.tcs if isinstance(k, int)]
+            key = max(ints) + 1 if ints else 0
+            self._fc_key = key
+            self.tcs[key] = s = {"id": f"call_fc_{key}", "name": "", "args": ""}
+        else:
+            s = self.tcs[self._fc_key]
+        self._accumulate_tool_call(s, name, args)
+        self.show_tool_status()
+
+    def _account_alternative_choices(self, choices: list[Any]) -> None:
+        """n>1 stream: choice 0 was already parsed by `process`; here every
+        tool call on a LATER choice is recorded in `dropped_choice_calls` and
+        reported once, instead of vanishing.
+
+        Why COUNT rather than accumulate-and-execute: in OpenAI semantics the
+        choices of an n>1 completion are ALTERNATIVES to choose between (n
+        independent samples of the same prompt), NOT parallel calls. Executing
+        all of them would run two different samples' tool calls for one turn
+        (e.g. both `read_file` and `run_bash` where the model meant one), and
+        none of them is what the model would have emitted under the single
+        sample the server should have returned (nx never passes `n`, so the API
+        default of 1 is what every request asks for). A multi-choice chunk
+        therefore means a server ignoring the parameter or a gateway merging
+        results, and for the audit's
+        silent-loss class the honest fix is visibility, not execution: the
+        alternative's args are still accumulated byte-exactly (so the trace can
+        prove the wire carried them) and one warning names the loss, so a
+        dropped alternative can no longer be mistaken for a model bug or for
+        truncated arguments."""
+        for pos, choice in enumerate(choices[1:], start=1):
+            d = getattr(choice, "delta", None)
+            if d is None:
+                continue
+            for tc in (getattr(d, "tool_calls", None) or []):
+                s = self.dropped_choice_calls.setdefault(
+                    (pos, getattr(tc, "index", None) or 0),
+                    {"id": "", "name": "", "args": ""})
+                if tc.id:
+                    s["id"] = tc.id
+                fn = tc.function
+                self._accumulate_dropped(s, getattr(fn, "name", None),
+                                         getattr(fn, "arguments", None))
+            fc = getattr(d, "function_call", None)
+            if fc is not None:
+                fname, fargs = _fc_field(fc, "name"), _fc_field(fc, "arguments")
+                # Same empty-frame guard as _handle_function_call_delta.
+                if not fname and not fargs:
+                    continue
+                # -1 keeps the legacy shape's slot distinct from a native
+                # call_index 0 inside the same alternative choice.
+                s = self.dropped_choice_calls.setdefault(
+                    (pos, -1), {"id": "", "name": "", "args": ""})
+                self._accumulate_dropped(s, fname, fargs)
+        if not self.dropped_choice_calls or self._dropped_choice_warned:
+            return
+        self._dropped_choice_warned = True
+        if not self.quiet:
+            with write_lock():
+                cprint(f"{C.WARNING}  ⚠ n>1 multi-choice stream: an alternative "
+                       f"choice carried tool call(s) nx will NOT execute — "
+                       f"choices are alternatives to one answer, not parallel "
+                       f"calls; choice 0 is dispatched, the rest are counted "
+                       f"(parser.dropped_choice_calls){RESET}")
+
+    def _accumulate_dropped(self, s: dict[str, Any], name: Any,
+                            args: Any) -> None:
+        """`_accumulate_tool_call` for a call that will never be dispatched:
+        same byte-exact accumulation, none of the side effects — no
+        `streamed_chars` credit (that feeds the executed turn's tok/s footer)
+        and no speculative execution of an alternative's arguments."""
+        if name:
+            s["name"] = name
+        if args:
+            s["args"] += args
 
     def finish(self) -> None:
         """Close out any open reasoning/say block. Call once the loop ends
