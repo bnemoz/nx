@@ -2,7 +2,16 @@
 
 ## 1. Where we are
 
-- **~192 test files, ~2,180 tests.** Parallel `-n auto`: **~34s**, but **0–15 flaky failures per run** (measured: 14 consecutive runs, median 6). Serial/fallback: order-dependent, slower, and cannot run standalone anymore (`uv run pytest tests/ -q` without xdist dies at collection — several files execute module-scope code that assumes xdist's worker bootstrap).
+- **~227 test files, ~3,075 tests** (measure with `uv run pytest --co -q | tail -1`;
+  0.168.x: 3,075 collected here, 3,044 before this file's tool-result contract
+  joined, 3,015 at the 0.168.0 durability-audit baseline — quote the command's
+  output rather than this line when precision matters). Parallel `-n 8`:
+  **~26s**. Serial (`uv run pytest tests/ -q`, no xdist): **green in ~92s** —
+  the 0.142.x note here claimed serial collection was *impossible* (module-scope
+  `m.main()` calls racing `sys.argv` without xdist's worker bootstrap); those
+  calls moved into fixtures and the argv rewind landed in conftest, so the
+  serial run is now a supported mode, not a fallback. The flake numbers below
+  are the 0.142.x starting state, kept as history.
 - **The suite's only isolation mechanism is `tests/conftest.py`'s `_restore()`** (361 lines): before and after *every* test it scrubs `NX_*` env, rewinds every live `nx.*` module dict to a first-import snapshot, and re-derives mirrors. This was built for a smaller, mostly-single-threaded suite. It no longer holds because the runtime under test has grown state the rewind **cannot see**:
 
 | Hidden state | Home | Visible to `_restore()`? |
@@ -118,7 +127,11 @@ It's the *cheap* guarantee; `_restore()` was the *expensive* one. Tests that obe
    - Failures that only appear when two full suites run concurrently on one box (23s wall runs) are machine contention, not regressions — check `ps` before bisecting.
 1. **Reset TLS + async registry in conftest `_restore()`** (one block, ~10 lines). Kills families 1–4 immediately. This is the highest-value single diff in this document.
 2. **`--dist loadfile` as the documented default** for `-n auto` (measured: 15 failures → ≤1, +14s). Adopt now, revisit after fix 1. *(0.145.1: revisited — the +14s was straggler sleeps, not packing; with them gone loadfile runs ~14s, see §2 update.)*
-3. **Fix standalone collection** (currently `uv run pytest tests/ -q` without xdist INTERNALERRORs at import — module-scope `m.main()` calls in 6 files race `sys.argv`). Move those calls into fixtures; until then document `-n auto` as required.
+3. **(DONE) Fix standalone collection** — `uv run pytest tests/ -q` without xdist
+   used to INTERNALERROR at import (module-scope `m.main()` calls in 6 files
+   racing `sys.argv`); the calls moved into fixtures and conftest rewinds
+   `sys.argv[:]`, so the serial run collects and passes green in ~92s (0.168.x).
+   `-n auto` remains the default for speed, not for correctness.
 4. **Kill the two real-sleep outliers**: `test_perf_turn_tax`'s 30s sleep is a worker-thread busy-keep (the fake endpoint must not return while the assertion measures `flush()`'s enqueue latency), not a wedged call — shrink it behind an `NX_TEST_WAKE_HOLD` tunable (siblings at `:113-124` already use this pattern) instead of skipping the test in non-CI; `ram_stress*.py` → move out of `tests/` into `scripts/`.
 5. **`reconfigure()` entry point** in `nx/__init__.py` re-reading the ~10 env-derived module attrs (the subset tests actually need: `NX_SUBAGENT_*`, `NX_VISION`, `NX_WEBFETCH`, `NX_SUBAGENTS`, timing budgets). Then delete `importlib.reload(nx)` from the 64 files file-by-file; each deletion removes one forked-module risk.
 6. **Env/attr single-home**: for `NX_SUBAGENT_WRITE`, `NX_SUBAGENT_ASYNC`, `NX_VISION`, `NX_SUBAGENTS`, make the *module attr* the only runtime truth (env read once at import), and fix tests that set only the env var.
@@ -145,6 +158,8 @@ Each phase leaves the suite green and runnable; phase 4 is only reached when zer
 ## 8. Success criteria
 
 - `uv run pytest tests -n auto` green on **20 consecutive runs** (~14s each, 0.145.1; was ~35s).
-- `uv run pytest tests` (serial) collects and passes (~4min) — currently impossible.
+- `uv run pytest tests` (serial) collects and passes — **DONE**: green in ~92s
+  (3,015 tests at 0.168.0; the 0.142.x note here said "~4min — currently
+  impossible").
 - conftest.py under 100 lines; zero `importlib.reload(nx)` in tests.
 - The 0.142.5-era flake classes (TLS leak, reload fork, notice routing) each have a regression test that fails deterministically against the old conftest.

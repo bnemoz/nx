@@ -30,10 +30,30 @@ Design (settled; the Audit section is authoritative where the spec body is not):
   escaping a deeper prompt is additionally handled as a kill+skip-fill
   (turn-layer parity below).
 
-* **Sandbox honesty** (Audit): the subprocess is untrusted but
-  capability-poor. There is no OS-level network isolation and none is
-  claimed — the read-only allowlist plus the write fence inside `run_tool`
-  are the actual boundary. No unshare/seccomp is added.
+* **Sandbox honesty** (Audit, corrected 0.168.x — the previous revision of
+  this bullet claimed "no unshare/seccomp is added", which has been false
+  since 0.165.x; `_ptc_preexec` below is the source of truth). The
+  subprocess is untrusted but capability-poor, and the boundary is TWO
+  layers deep:
+
+  1. **Logical** (always present): the stub allowlist (six pure reads) plus
+     the write fence inside `run_tool`, plus a scrubbed env at the `Popen`
+     site (only PATH/HOME/LANG/PYTHONIOENCODING cross over, so API keys are
+     not in the child's `os.environ`).
+  2. **OS-level, best-effort** in `_ptc_preexec`, installed as `preexec_fn`:
+     seccomp deny for the socket/connect family (libseccomp when present),
+     Landlock filesystem lockdown (read+execute under `/`, read+write only
+     under the script's workdir, /dev writable + /proc read), and prctl
+     NO_NEW_PRIVS — see that function's docstring for the exact grant set.
+
+  Every hardening layer is `try/except Exception: pass` and `# pragma: no
+  cover`: on macOS, on kernels without Landlock (< 5.13 or LSM disabled),
+  with no libseccomp, or in a container that blocks those syscalls, **the
+  layer is silently absent** and the child degrades to the 0.165.2 posture
+  (layer 1 only). No status line reports which layers landed, so OS
+  isolation is opportunistic defense-in-depth, never the guarantee — the
+  guarantee remains layer 1: the allowlist plus the write fence inside
+  `run_tool`.
 
 * **Turn-layer parity**: per-call failures come back as `"ERROR: ..."`
   result strings inside the script (never raise across the pipe); a
@@ -586,12 +606,15 @@ def run_tools(code: str = "", timeout: int = 0) -> str:
     like every tool result by run_tool's tail) — per-call results live inside
     the script, exactly as tool results live inside a JSON-mode turn.
 
-    Isolation posture: the child is NOT OS-sandboxed (it runs as this user
-    with filesystem/network reach); the read-only allowlist governs the stub
-    pipe, not the Python language. The boundary here is the scrubbed
-    environment (no secrets via os.environ), the allowlist + write fence
-    inside run_tool for pipe-routed calls, and the process-group kill on
-    timeout/cancel."""
+    Isolation posture: best-effort OS hardening only. `_ptc_preexec` (the
+    `preexec_fn` below) tries seccomp net-deny + Landlock + NO_NEW_PRIVS,
+    and every layer is silently skipped where the kernel/library doesn't
+    support it — so on macOS/old kernels the child runs as this user with
+    filesystem/network reach, and even on a fully hardened Linux box the
+    read-only allowlist governs the stub pipe, not the Python language.
+    The boundary that is *always* in force: the scrubbed environment (no
+    secrets via os.environ), the allowlist + write fence inside run_tool
+    for pipe-routed calls, and the process-group kill on timeout/cancel."""
     from ._approval import _EscToChat
     from ._interrupt import cancel_requested
 
