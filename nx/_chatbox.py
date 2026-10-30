@@ -951,7 +951,18 @@ def _chatbox_raw(initial: str = "", history: list[str] | None = None,
                 # so the wake never eats half a message.
                 if wake is not None and st._WAKE_DUE:
                     st._WAKE_PREFILL = "\n".join(buf)
-                    finish()
+                    if not any(line.strip() for line in buf):
+                        # Wake return with an empty buffer: finish() normally
+                        # leaves the painted frame in scrollback as the record
+                        # of a submitted message, but there is nothing submitted
+                        # here — erase it or the next prompt stacks a second,
+                        # orphaned box below it (seen after backgrounded
+                        # spawn_agent notices). Same discipline as the
+                        # fullscreen handoffs.
+                        erase_stale_frame()
+                        finish(anchor_above=True)
+                    else:
+                        finish()
                     return cast(str, wake)
                 # Poll instead of blocking so a terminal resize repaints the
                 # frame within ~0.2s: each idle tick compares the current
