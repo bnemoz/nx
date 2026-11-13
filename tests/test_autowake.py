@@ -12,10 +12,11 @@ These tests pin the three pieces that fix that:
      blocking, stashing typed text so the wake never eats half a message.
   3. the REPL — the WAKE sentinel becomes a synthetic user turn that flushes
      the staged note and calls model_turn, with no history/slash side effects.
-  4. the 0.36.3 loop fix — a bg job finished after its turn answered in plain
-     text used to re-wake forever (every wake turn also ended text-only, so
-     nothing ever marked the job seen); wake_due() must run the completion
-     sweep itself, and a text-only wake turn must deliver its note.
+  4. the 0.36.3 loop fix + its 0.171.8 read-only turn — a bg job finished
+     after its turn answered in plain text used to re-wake forever. The wake
+     turn's own sweep (before its up-front flush) delivers the note and
+     marks the job seen; wake_due() itself must only READ (the poller calls
+     it every 2s; a mutating sweep there raced run_tool()'s first-tool scan).
   5. the 0.37.1 phantom-wake fix — a _WAKE_DUE flag raised in the race window
      between the editor's last poll and a USER-typed turn's start survived the
      turn that delivered the note itself (first-tool-call flush), so the flag
@@ -405,14 +406,18 @@ def test_repl_wake_restores_typed_prefill(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. the 0.36.3 loop fix: wake_due() runs the sweep; a text-only wake turn
-#    delivers the note so the loop terminates
+# 4. the 0.36.3 loop fix + 0.171.8 read-only decision: wake_due() finds the
+#    unannounced job without staging/marking anything; the wake turn's own
+#    sweep + flush deliver the note once and terminate the loop
 # ---------------------------------------------------------------------------
-def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
-    """A finished job nothing ever announced must be staged by wake_due()
-    itself (the containing turn ended as plain text, so run_tool()'s scan
-    never ran) — and the NEXT wake_due() must be False, not an endless
-    'background job finished — auto-continuing' loop."""
+def test_wake_due_reads_only_and_wake_turn_delivers(monkeypatch):
+    """A finished job nothing ever announced must wake (the read-only
+    predicate sees it) but wake_due() must NOT run the mutating sweep: the
+    poller evaluates it every 2s and that sweep raced run_tool()'s
+    first-tool-of-turn scan (duplicated poller-staged notes, seen-marks
+    burned on decisions that never became turns). The wake turn's own sweep
+    stages the note, the flush consumes it, and the NEXT wake_due() must be
+    False — no endless 'background job finished — auto-continuing' loop."""
     _silence()
     m.st._WAKE_ARMED = True
     fake_jobs = [{"pid": "424243", "alive": False,
@@ -425,6 +430,13 @@ def test_wake_due_runs_sweep_and_marks_seen(monkeypatch):
     m.st._PENDING_BG_COMPLETION_NOTICE = None
     try:
         assert _autowake.wake_due() is True
+        # The decision is read-only: nothing staged, nothing marked seen.
+        assert m.st._PENDING_BG_COMPLETION_NOTICE is None, \
+            "wake_due() must not stage the note"
+        assert m.st._BG_NOTICE_SEEN is None, \
+            "wake_due() must not burn the seen-mark"
+        # The wake turn delivers: its sweep stages, its flush consumes.
+        m._run_bg_completion_scan()
         note = m.st._PENDING_BG_COMPLETION_NOTICE
         assert note and "424243" in note, "the sweep must stage the exit note"
         # The wake turn flushes the note it staged; only then is the job both
@@ -539,7 +551,7 @@ def test_repl_user_turn_clears_stale_wake_flag(monkeypatch):
     flush), so the flag describes already-delivered work and the REPL must
     not fire a banner-only wake for it after the turn. A turn therefore
     clears _WAKE_DUE at its start; anything genuinely undelivered is
-    re-derived by wake_due()'s fresh sweep after the turn."""
+    re-derived by wake_due()'s fresh read-only pass after the turn."""
     _silence()
     old_argv = sys.argv
     sys.argv = ["nx"]  # argv pin (0.139.0 strict main() argv check)

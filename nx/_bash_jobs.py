@@ -1110,7 +1110,7 @@ def _mark_bg_notice_seen(pid: int | str | None) -> None:
 
     Without this, every short-lived bash command leaks exactly such an
     orphan: _finish_bg_job deletes the LOG but leaves the pid->log MAP file,
-    so the next scan (or wake_due's sweep) finds a dead pid, no log, and no
+    so the next scan (or wake turn's sweep) finds a dead pid, no log, and no
     seen-entry — "exited (code unknown)" — once per turn, forever.
 
     Locks the same mutex as the scan so a concurrent poller sweep can't
@@ -1122,13 +1122,20 @@ def _mark_bg_notice_seen(pid: int | str | None) -> None:
     if not pid.isdigit():
         return
     try:
-        from ._dispatch import _BG_SCAN_LOCK
+        from ._bg_completions import _BG_SCAN_LOCK
+        from . import _notices
         with _BG_SCAN_LOCK:
-            seen = getattr(st, "_BG_NOTICE_SEEN", None)
+            # The unified access path (0.171.8): read AND write through
+            # _notices exactly like the sweep in _bg_completions does. The
+            # bare-module read/write here could miss (or clobber) marks a
+            # turn loop made in its per-thread notice frame — the frame's
+            # pop fold-back merges sets, so a mark made here into the frame
+            # survives, while the old direct st write bypassed it.
+            seen = _notices.get("_BG_NOTICE_SEEN")
             if seen is None:
                 seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
             seen.add(pid)
-            st._BG_NOTICE_SEEN = seen
+            _notices.set_("_BG_NOTICE_SEEN", seen)
     except Exception:
         pass  # a seen-marking hint must never break the tool result
 

@@ -544,14 +544,15 @@ def _repl() -> None:
             # is about to drain itself (first-tool-call flush). Leaving it set
             # produced a phantom wake — a banner with no note — right after
             # that turn's own delivery. Anything genuinely undelivered is
-            # re-derived by wake_due()'s fresh sweep after the turn.
+            # re-derived by wake_due()'s fresh read-only pass after the turn.
             st._WAKE_DUE = False
             if wake:
-                # Run the completion sweep before flushing: wake_due() ran it
-                # too (0.36.3), and its note is only staged here — the flush
-                # below just drains the slots. A text-only wake turn therefore
-                # still delivers the finished job's exit line, and the next
-                # wake_due() finds nothing (no infinite wake loop).
+                # Run the completion sweep before flushing: wake_due() is
+                # read-only (0.171.8), so THIS turn's sweep is what stages the
+                # note — the flush below just drains the slots. A text-only
+                # wake turn therefore still delivers the finished job's exit
+                # line, marks it seen, and the next wake_due() finds nothing
+                # (no infinite wake loop).
                 _m._run_bg_completion_scan()
                 # Flush the staged completion note(s) up front: the wake turn
                 # may end as plain text (no tool call), and the notes otherwise

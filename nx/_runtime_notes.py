@@ -84,11 +84,22 @@ def _flush_pending_background_notice(messages: list[dict[str, Any]]) -> None:
         messages.append({"role": "user", "content": st._PENDING_BACKGROUND_NOTICE})
         _delivered.add(st._PENDING_BACKGROUND_NOTICE)
         st._PENDING_BACKGROUND_NOTICE = None
-    if _notices.get("_PENDING_BG_COMPLETION_NOTICE"):
-        messages.append({"role": "user",
-                         "content": _notices.get("_PENDING_BG_COMPLETION_NOTICE")})
-        _delivered.add(_notices.get("_PENDING_BG_COMPLETION_NOTICE"))
+    _bg_note = _notices.get("_PENDING_BG_COMPLETION_NOTICE")
+    if _bg_note:
+        messages.append({"role": "user", "content": _bg_note})
+        _delivered.add(_bg_note)
         _notices.set_("_PENDING_BG_COMPLETION_NOTICE", None)
+        # Flush BOTH layers (0.171.8): with a per-thread frame installed, the
+        # set_ above clears only the frame slot. A duplicate the frameless
+        # wake poller staged into the module store while this turn ran (the
+        # sweep-vs-poller race) would otherwise outlive its delivery: the
+        # module-store drain would re-deliver it, or _any_pending_notice()
+        # would raise a wake turn for a job already announced. Mirror of the
+        # 0.152.6 preserve logic in _notices.pop_notice_ctx — when the frame
+        # DELIVERED the note, the module copy describes delivered work and
+        # must be cleared, not kept.
+        if isinstance(getattr(st, "_PENDING_BG_COMPLETION_NOTICE", None), str):
+            st._PENDING_BG_COMPLETION_NOTICE = None
     # Finished async sub-agent answer(s): staged by the agent worker itself
     # (nx/_subagent.py) the moment the sub-loop completes, swept by run_tool()'s
     # first-tool-of-turn scan, and delivered here as the parent's runtime note.

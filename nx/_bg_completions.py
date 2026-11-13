@@ -2,8 +2,10 @@
 bg jobs that finished since the model last looked.
 
 Split out of `_dispatch.py` (which keeps run_tool — the first-tool-of-turn
-hook that calls the sweep). Shared by the wake path (`_autowake.wake_due`),
-whose text-only turns otherwise never run it."""
+hook that calls the sweep). Marking-side callers only: since 0.171.8 the wake
+decision (`_autowake.wake_due`) is read-only and never sweeps; the REPL /
+Telegram wake turns and the batch driver run this scan themselves as part of
+delivering the note."""
 from __future__ import annotations
 
 import os
@@ -98,6 +100,42 @@ def _in_scope(pid: str) -> bool:
     return pids is None or pid in pids
 
 
+# 0.171.8: seed-once parity with the test harness (tests/_nxtest.py's
+# _seed_bg_notice_baseline). The sweep treats `_BG_NOTICE_BASELINE` pids as
+# already-announced; nothing in PRODUCT code ever seeded it, so a process
+# inheriting file-based residue in its bg-logs home (finished jobs its pid
+# owns whose logs outlived the run that started them — chained batch tasks,
+# crash residue) announced each one as a fresh exit note and woke a turn for
+# work that finished before the process cared. Seeded ONCE per process, at
+# the first arm_wake (the "this process will do background work" moment);
+# only assigns when the slot is absent/None, so a pinned baseline wins.
+_BG_NOTICE_BASELINE_SEEDED = False
+
+
+def seed_bg_notice_baseline() -> None:
+    """Seed st._BG_NOTICE_BASELINE with the pids of already-finished owned
+    bg jobs that still have logs. Once per process, exception-safe: no
+    baseline is better than a broken one."""
+    global _BG_NOTICE_BASELINE_SEEDED
+    if _BG_NOTICE_BASELINE_SEEDED:
+        return
+    _BG_NOTICE_BASELINE_SEEDED = True
+    if getattr(st, "_BG_NOTICE_BASELINE", None):
+        return  # a caller pinned a real baseline — keep it
+    try:
+        from ._bash_jobs import list_bg_jobs
+        mine = os.getpid()
+        pids = {
+            str(j.get("pid")) for j in list_bg_jobs(mine_only=True)
+            if not j.get("alive") and j.get("owner_pid") == mine
+            and j.get("log_path") and os.path.exists(j["log_path"])
+        }
+    except Exception:
+        return
+    if pids:
+        st._BG_NOTICE_BASELINE = pids
+
+
 def _scan_background_completions(jobs=None) -> str | None:
     """One-time notice for tracked background jobs that finished since the
     model last looked (checked on the first tool call of each turn).
@@ -108,8 +146,8 @@ def _scan_background_completions(jobs=None) -> str | None:
     exit codes once, then marks them seen — no repeated noise.
 
     *jobs* is an already-computed list_bg_jobs() result a caller can share
-    (wake_due scans the map once and threads it through the whole sweep);
-    None scans it here."""
+    (wake_due scans the map once for its read-only predicate, and the wake
+    turn's own sweep shares it through here); None scans it here."""
     from ._bash_jobs import list_bg_jobs, _read_bg_exit_status
     from ._verify import _is_verify_job  # verify jobs report via _stage_verify_outcome instead
     with _BG_SCAN_LOCK:
@@ -216,12 +254,13 @@ def _stage_subagent_completions_safe() -> None:
 def _run_bg_completion_scan(jobs=None) -> None:
     """The completion sweep run_tool() runs on the first tool call of a turn:
     scan finished bg jobs, NX_VERIFY_CMD outcomes, and finished async agents,
-    staging each as its one-time [Runtime note]. The wake path shares it —
-    see _autowake.wake_due for why a wake turn must not fire on an empty
-    sweep.
+    staging each as its one-time [Runtime note]. Marking side only
+    (0.171.8): the wake DECISION (`_autowake.wake_due`) reads predicates
+    instead of sweeping — the wake turns run this scan themselves before
+    flushing, which is what lets a text-only wake turn deliver its note.
 
-    *jobs* lets a caller (wake_due) pass the list_bg_jobs() result it already
-    paid for, so one keystroke scans the pid->log map once, not three times."""
+    *jobs* lets a caller pass the list_bg_jobs() result it already paid for,
+    so one decision scans the pid->log map once, not three times."""
     note = _scan_background_completions(jobs=jobs)
     if note:
         _stage_bg_note(note)

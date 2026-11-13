@@ -13,8 +13,10 @@ Two halves:
 - a poller thread, armed the first time this session backgrounds a run_bash
   job or launches an async sub-agent. It sleeps on a Condition (not a busy
   loop) and sets st._WAKE_DUE as soon as any pending-notice slot is non-empty
-  or a sweep finds a finished-but-unseen job — exactly the condition
-  run_tool()'s first-tool-of-turn scan would have staged a notice for.
+  or the read-only predicates find a finished-but-unseen job — exactly the
+  condition run_tool()'s first-tool-of-turn scan would have staged a notice
+  for. The decision marks nothing; the sweep belongs to the hooks that
+  deliver (0.171.8).
 
 - a wake-aware prompt: read_multiline()'s editor accepts wake=True and
   returns the WAKE_INPUT sentinel when st._WAKE_DUE flips while the user
@@ -23,12 +25,18 @@ Two halves:
   stashed in st._WAKE_PREFILL and restored after the wake turn, so the wake
   never eats half a message.
 
-Since 0.36.3 the wake path also runs the completion sweep itself (the one
-run_tool() runs on a turn's first tool call): a turn that backgrounded a job
-and then answered in plain text never runs that scan, so its finished job
-used to wake the REPL again and again while every wake turn — also text-only
-— left it unseen, ad infinitum. The sweep marks what it reports seen, so the
-first wake delivers the exit line and the next wake_due() is False.
+The wake decision is READ-ONLY since 0.171.8. It used to run the completion
+sweep itself (0.36.3) so a job whose containing turn died as plain text —
+run_tool()'s first-tool scan never ran, there was no tool call — would be
+announced by the wake turn instead of re-waking forever. But wake_due() is
+evaluated by the 2s poller as well as the REPL, so that mutating sweep raced
+run_tool()'s own first-tool sweep: poller-staged notes outlived their
+delivery as duplicates, and seen-marks were spent on decisions that never
+became turns. Marking now belongs to the hooks that DELIVER: run_tool()'s
+first-tool-of-turn scan, and the REPL/Telegram wake turns' explicit sweep
+before their up-front flush (both unchanged) — so a text-only wake turn
+still delivers the exit line, the next wake_due() finds nothing, and the
+poller can never race the turn's own scan.
 
 NX_WAKE_PROMPT=0 turns the whole mechanism off (the notes then wait for the
 next real user turn, as before).
@@ -388,6 +396,11 @@ def arm_wake() -> None:
     if not _wake_enabled():
         return
     st._WAKE_ARMED = True
+    try:
+        from ._bg_completions import seed_bg_notice_baseline
+        seed_bg_notice_baseline()
+    except Exception:
+        pass  # baseline seeding is a hint; arming must never fail on it
     ensure_poller()
 
 
@@ -455,19 +468,28 @@ def _finished_unstaged_subagents() -> list[str]:
 def _finished_unseen_bg_jobs(jobs=None) -> list[str]:
     """Finished bg-bash pids the completion sweep hasn't announced yet.
 
-    Mirrors _dispatch._scan_background_completions' filter (this process's
-    jobs only, verify jobs excluded) but read-only: it never mutates
-    _BG_NOTICE_SEEN, so the real sweep still announces them later.
+    Mirrors _bg_completions._scan_background_completions' filter (this
+    process's jobs only, verify jobs excluded, this thread's bg scope only)
+    but read-only: it never mutates _BG_NOTICE_SEEN, so the real sweep still
+    announces them later.
+
+    The seen-set is read through _notices exactly like the sweep does — the
+    ONE access path, so a turn loop's frame-local marks can never be missed
+    here (0.171.8). A frameless reader (the wake poller thread) falls back to
+    the module store inside _notices.get — frame-None means "read the module
+    store", never "empty set".
 
     *jobs* lets a caller that already ran list_bg_jobs() (wake_due) share that
     single scan instead of paying a second listdir+json+tail pass."""
     try:
         from ._bash_jobs import list_bg_jobs
         from ._verify import _is_verify_job
+        from ._bg_completions import _in_scope
+        from . import _notices
         if jobs is None:
             jobs = list_bg_jobs()
         mine = os.getpid()
-        seen = getattr(st, "_BG_NOTICE_SEEN", None)
+        seen = _notices.get("_BG_NOTICE_SEEN")
         if seen is None:
             seen = set(getattr(st, "_BG_NOTICE_BASELINE", set()) or set())
         out = []
@@ -476,6 +498,12 @@ def _finished_unseen_bg_jobs(jobs=None) -> list[str]:
             if not pid or pid in seen or j.get("alive"):
                 continue
             if j.get("owner_pid") != mine or _is_verify_job(j):
+                continue
+            if not _in_scope(pid):
+                # A batch task never hears about a sibling's job — the sweep
+                # deliberately leaves those unmarked for the owning task, so
+                # this mirror must not wake anybody for them either
+                # (0.171.8; mirrors _bg_completions' _in_scope filter).
                 continue
             # A dead job whose log is already gone has nothing left to
             # announce: nx delivered its output inline (run_bash finished in
@@ -517,14 +545,18 @@ def wake_due(due_out: dict | None = None) -> bool:
     machinery, not while a sub-agent is still running (its own finish will
     wake later), and never before the session has backgrounded anything.
 
-    With nothing staged it runs the same completion sweep run_tool()'s
-    first-tool-of-turn hook runs (0.36.3) and re-checks the slots. That scan
-    marks what it reports seen, so a job whose containing turn died as plain
-    text — no tool call, scan never ran — is announced by the wake turn
-    itself instead of re-waking forever with nothing to deliver: the wake
-    turn ends text-only, nothing marks the job seen, and the poller (which
-    also calls this) would find it again every 2s. A sweep that comes back
-    empty therefore means "nothing left to say" — no wake."""
+    With nothing staged it asks the READ-ONLY predicates whether a sweep
+    would find anything to announce (0.171.8). It no longer RUNS the mutating
+    sweep itself: wake_due() is evaluated every 2s by the poller thread and
+    again by the REPL's re-check, so a sweep here raced run_tool()'s
+    first-tool-of-turn sweep — poller-staged notes could outlive their
+    delivery as duplicates, and the sweep's seen-marks were spent on a
+    decision that might never become a turn (the batch mirror
+    `batch_wake_pending` established the read-only pattern in 0.163.1).
+    Marking belongs to the hooks that deliver: run_tool()'s first-tool scan
+    and the REPL wake turn's own sweep before its up-front flush (both
+    unchanged), so a finished job is still announced exactly once and a
+    predicate that finds nothing means "nothing left to say" — no wake."""
     # Phase C: the one-shot "this wake came from the stall branch" marker is
     # decided here, per evaluation, so the instruction the consumer picks
     # matches the branch that actually returned True (wake_instruction()
@@ -607,16 +639,16 @@ def wake_due(due_out: dict | None = None) -> bool:
         # exists for, so it falls through to that last resort instead of
         # returning False here.
     else:
-        try:
-            from ._dispatch import _run_bg_completion_scan
-            _run_bg_completion_scan(jobs=jobs)
-        except Exception:
-            pass
+        # Read-only (0.171.8): the sweep-mutating branch this replaced raced
+        # the poller against run_tool()'s first-tool-of-turn scan. Everything
+        # here is a read: staged slots, the agent records, and the job list
+        # plus this thread's seen set and bg scope (nothing is marked,
+        # nothing is staged — the delivering hooks do that).
         if _any_pending_notice():
             return True
-        # Anything left here is finished-but-unstaged work the sweep could not
-        # announce (e.g. a sub-agent record with no answer) — still
-        # wake-worthy, and it wins over the stall branch by position.
+        # Finished-but-unstaged work a sweep would announce (a bg job nobody
+        # announced, or a sub-agent record with no note yet) — wake-worthy,
+        # and it wins over the stall branch by position.
         if (_finished_unstaged_subagents()
                 or _finished_unseen_bg_jobs(jobs=jobs)):
             return True
@@ -678,11 +710,11 @@ class _WakePoller(threading.Thread):
                 continue  # already raised; the REPL clears it
             try:
                 if wake_due() and not st._TURN_ACTIVE:
-                    # Re-check _TURN_ACTIVE after wake_due() returns: the sweep
-                    # it ran can take longer than the turn that just started
-                    # (it listdirs + json-loads + log-tails EVERY job), and a
-                    # flag decided by a pre-turn snapshot must not fire a
-                    # phantom wake at the post-turn prompt (0.109.5).
+                    # Re-check _TURN_ACTIVE after wake_due() returns: the job
+                    # scan it runs can take longer than the turn that just
+                    # started (it listdirs + json-loads + log-tails EVERY
+                    # job), and a flag decided by a pre-turn snapshot must not
+                    # fire a phantom wake at the post-turn prompt (0.109.5).
                     st._WAKE_DUE = True
             except Exception:
                 pass  # a wake poll must never take the REPL down
