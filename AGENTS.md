@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Handoffs
+<!-- handoffs-standard -->
+Workstream state (decisions, what is measured, what is still running, next steps) lives in `docs/HANDOFF_<slug>.md` with YAML frontmatter, not in this file. Before starting work run `uv run ../tools/handoffs.py list --project nx` (or `ls docs/HANDOFF_*.md`) and read any `active` or `blocked` handoff first, in its `read_first` order; update it in place before you stop (bump `touched`, refresh `in_flight` and `next`). Standard: `../AGENTS/handoffs.md`.
+
 ## Project Structure & Module Organization
 
 `nx/` contains the Python package for the `nx` coding-agent CLI. Keep concerns in focused private modules and expose/wire them through `nx/__init__.py` only as needed. The formerly monolithic core files were decomposed across 0.87.2–0.103.x; the current map:
@@ -67,7 +71,7 @@ Use standard Python conventions: four-space indentation, `snake_case` functions 
 
 ### Prompt & schema budget
 
-We target models with 128K-1M-token context windows, so the per-turn floor of `SYSTEM` prompt + always-on tool schemas is held under a **hard, recorded budget of ~5K tokens** (`BUDGET_TOKENS` in `tests/test_initial_context.py`; currently 5200, measured floor ~5.1K (5120) per the 0.103.22 measurement; `SOFT_TOKENS = BUDGET_TOKENS - 50`). Within that ceiling, favor *clarity over terseness*: every argument the model can pass gets a `description`, overlapping tools name each other, and self-healing behavior is spelled out in the schema. Do not abbreviate prose to save a handful of tokens — the budget is enforced mechanically, so a schema only needs trimming when the floor actually approaches the ceiling.
+We target models with 128K-1M-token context windows, so the per-turn floor of `SYSTEM` prompt + always-on tool schemas is held under a **hard, recorded budget of ~5K tokens** (`BUDGET_TOKENS` in `tests/test_initial_context.py`; currently 6000, measured floor ~5.5K (5547) per the 0.171.5 measurement; `SOFT_TOKENS = BUDGET_TOKENS - 50`). Within that ceiling, favor *clarity over terseness*: every argument the model can pass gets a `description`, overlapping tools name each other, and self-healing behavior is spelled out in the schema. Do not abbreviate prose to save a handful of tokens — the budget is enforced mechanically, so a schema only needs trimming when the floor actually approaches the ceiling.
 
 The budget is a forcing function, not a soft warn: a change that pushes the floor past `BUDGET_TOKENS` fails the suite until either a schema is trimmed or the number is raised **with a ledger entry justifying the cost**. A new always-on tool should first consider displacing an existing one into tier 2 (a `_TOOL_GATES` entry in `nx/_tool_gates.py`, surfaced by `search_tools`) — tier-2 tools cost 0 tokens until used. Adding a gated tool is a **one-file** change: one entry in `_TOOL_GATES` plus one in `_GATE_REFUSALS`, both in `nx/_tool_gates.py` — the gate vector, the withheld-tool refusals, and run_tool's pre-dispatch re-check all derive from that registry. See CONTRIBUTING.md for the tool touch points.
 
