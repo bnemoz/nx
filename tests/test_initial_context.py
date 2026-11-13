@@ -168,6 +168,11 @@ import nx as m  # noqa: E402
 # stays 6000 — headroom absorbs it. (The redaction pass and the `_summary_of:`
 # footer field cost ZERO floor tokens: both are store-side, and the redaction
 # notice rides a tool RESULT, not the per-turn schema.)
+# 0.171.5: SYSTEM gains five short lines borrowed from Claude's own prompt:
+# act-on-enough-info, faithful outcome reporting, look-before-delete + git
+# restraint, path:line references, and no user/project details in web requests.
+# Measured floor (chars/3.5): 5369 -> 5547 (+178 tok); BUDGET_TOKENS stays 6000
+# -- headroom absorbs it.
 BUDGET_TOKENS = _env_int("NX_FLOOR_BUDGET", 6000)  # hard: recorded, justified
 # Near-cap window (see the assert at the bottom of the budget test): failing
 # within this many tokens of BUDGET_TOKENS. 50 = one small schema tweak of
