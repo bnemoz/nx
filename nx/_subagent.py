@@ -78,7 +78,7 @@ from . import _state as st
 from ._env import _env_int
 from . import _notices
 from ._progress import note_progress
-from ._subagent_tls import tap_event  # EVENTSURFACE_SPEC Phase 2 writer
+from ._subagent_tls import tap_event, _SubagentKilled  # EVENTSURFACE_SPEC Phase 2 + kill_subagent
 from ._state import _posture_scope  # 0.155.0 per-agent posture installer
 # NOTE: `_eventsink` is imported lazily at its two call sites (register/drop)
 # rather than here — a module-level import adds `nx._eventsink` to the conftest
@@ -160,7 +160,7 @@ def _subagent_write_turns() -> int:
 
 SUBAGENT_TOOL = {"type": "function", "function": {
     "name": "spawn_agent",
-    "description": "Hand one task/investigation to a sub-agent; returns only findings. Read-tier (default) changes no files; write/implement tiers edit when NX_SUBAGENT_WRITE=1. PROACTIVELY spawn one per independent area for multi-file work you haven't read — callers/uses of a symbol, cross-module traces, unfamiliar code, independent multi-file edits (tier='write'/'implement'). ONE CALL PER QUESTION, all in one turn; they run concurrently. Prefer 2-3 concurrent spawn_agent calls over a long serial read sequence when the task spans multiple areas. Not for: one known file, one targeted search, edits already in progress.",
+    "description": "Hand one task/investigation to a sub-agent; returns only findings. Read-tier (default) changes no files; write/implement tiers edit when NX_SUBAGENT_WRITE=1. PROACTIVELY spawn one per independent area for multi-file work you haven't read — callers/uses of a symbol, cross-module traces, unfamiliar code, independent multi-file edits (tier='write'/'implement'). ONE CALL PER QUESTION, all in one turn; they run concurrently. Prefer 2-3 concurrent spawn_agent calls over a long serial read sequence when the task spans multiple areas. Not for: one known file, one targeted search, edits already in progress. A no-longer-needed background agent can be killed via kill_subagent.",
     "parameters": {"type": "object", "properties": {
         "instruction": {"type": "string", "description": "The one question to answer, with paths/context needed. The agent cannot see this conversation and cannot ask back."},
         "max_turns": {"type": "integer", "description": "Tool-turn budget (default 100, 250 for write/implement; both are FLOORS: smaller requests are raised; ceiling 500). Omit for broad work — an agent that runs out spends its last turn answering instead of searching."},
@@ -607,6 +607,90 @@ def list_async_agents() -> list[dict[str, Any]]:
     return out
 
 
+_KILLED_ANSWER = "[cancelled] killed by parent"
+
+
+def kill_subagent(job_id: str) -> str:
+    """Cooperatively kill a background sub-agent by job id (kill_subagent tool).
+
+    Subagents run as daemon threads — they cannot be force-killed — so this
+    follows the check-at-boundary cancel contract (see nx/_interrupt.py): set
+    the record's per-job cancel event, and the agent's turn loop aborts at its
+    NEXT tool-call boundary (agent_cancel_requested() -> _SubagentKilled),
+    finalizing itself as "killed" via the normal finalize path. A QUEUED job
+    (still parked on the concurrency semaphore) is finalized immediately from
+    here instead — its worker will find a killed record and exit without
+    running. Never raises: unknown/finished ids return an error string.
+    """
+    with _ASYNC_LOCK:
+        rec = _ASYNC_AGENTS.get(job_id)
+        if rec is None:
+            return (f"[error] kill_subagent: no such sub-agent job: {job_id} "
+                    "(the id spawn_agent returned; finished agents may have "
+                    "been evicted already).")
+        status = rec.get("status")
+        if status not in ("queued", "running"):
+            return (f"[error] kill_subagent: job {job_id} is already "
+                    f"{status or 'finished'} — nothing to kill.")
+        rec["cancel"].set()
+        if status == "queued":
+            # Finalize immediately: the worker is parked on the semaphore and
+            # would otherwise wait for a slot to discover the kill. Remove it
+            # from the queue; _prune_queued (and the worker's early exit) also
+            # cover it, but both are harmless after this.
+            _ASYNC_QUEUED[:] = [jid for jid in _ASYNC_QUEUED if jid != job_id]
+            rec["answer"] = _KILLED_ANSWER
+            rec["status"] = "killed"
+            rec["finished"] = time.time()
+            rec["exit_state"] = "BLOCKED"
+            rec["exit_origin"] = "killed"
+        elif rec.get("worktree") is None:
+            pass  # worktree caveat handled in the note below
+    if status == "running":
+        # A pending run_bash child the agent registered a cancel hook for:
+        # kill it now so a kill isn't delayed behind a stuck shell command.
+        from ._interrupt import fire_tool_cancel
+        try:
+            fire_tool_cancel()
+        except Exception:  # noqa: BLE001 — a kill must never take down the caller
+            pass
+        try:
+            from . import _eventsink as _es
+            if hasattr(_es, "drop_sink"):
+                _es.drop_sink(job_id)
+        except Exception:  # noqa: BLE001 — display-only, never fatal
+            pass
+        return (f"[killing] sub-agent {job_id} — cooperative stop: it halts "
+                "at its next tool-call boundary and its KILLED [Runtime note] "
+                "arrives then. A pending run_bash child was killed now.")
+    # Queued path: finish the bookkeeping the worker would have done. Do NOT
+    # pop _LIVE_WORKERS (the parked thread exits itself and pops) and do NOT
+    # touch _ASYNC_SEM (the worker's finally releases the slot it holds).
+    try:
+        _write_agent_report(job_id, rec.get("instruction", ""), "killed",
+                            _KILLED_ANSWER)
+    except Exception:  # noqa: BLE001 — the note below matters more
+        pass
+    _clear_agent_intent(job_id)
+    handle = rec.get("handle")
+    announce = rec.get("announce", True)
+    if handle is not None:
+        with _ASYNC_LOCK:
+            r = _ASYNC_AGENTS.get(job_id)
+            if r is not None:
+                handle._full_answer = r.get("answer")
+    _stage_subagent_answer(job_id)  # idempotent via the record's `announced`
+    if not announce:
+        with _ASYNC_LOCK:
+            r = _ASYNC_AGENTS.get(job_id)
+            if r is not None:
+                r["announced"] = True
+    if handle is not None:
+        handle.done.set()
+    return (f"[killed] queued sub-agent {job_id} — finalized as killed "
+            "without running; the KILLED [Runtime note] is staged.")
+
+
 def _async_duplicate_running(instruction: str) -> str | None:
     """Job id of a still-running async agent with the SAME instruction, or
     None. Flash-tier parents re-spawn an investigation while the original is
@@ -653,6 +737,7 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     outcome_base = None
     outcome_alt_tree = None  # the other tree to consult (see 0.171.1 above)
     outcome_alt_base = None
+    killed = False  # kill_subagent set this job's cancel event mid-run
     try:
         if tier in ("write", "implement") and worktree:
             # Caller-supplied (pre-created) checkout — e.g. /build creates the
@@ -745,6 +830,13 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
                        "finished — its answer is a plan, not a completed "
                        "change. Re-delegate with the plan baked in, or run "
                        "it inline (async:false) if it still matters.]")
+    except _SubagentKilled:
+        # kill_subagent: the per-job cancel event fired and the turn loop
+        # aborted at a tool-call boundary — finalize as "killed" (the except
+        # jumps past _answer_completion and the outcome downgrade on purpose).
+        killed = True
+        answer = _KILLED_ANSWER
+        status = "killed"
     except Exception as e:  # noqa: BLE001 — a failed agent is a note, not a crash
         answer = f"{type(e).__name__}: {e}"
         status = "error"
@@ -761,7 +853,9 @@ def _run_async_agent(job_id: str, instruction: str, max_turns: int,
     # of the sub-loop (the async worker's view) AND the foreground body, so
     # both delivery paths strip the marker from the prose the parent sees.
     exit_state, exit_origin = "", ""
-    if tier in ("write", "implement") and isinstance(answer, str) and answer.strip():
+    if killed:
+        exit_state, exit_origin = "BLOCKED", "killed"
+    elif tier in ("write", "implement") and isinstance(answer, str) and answer.strip():
         # read/advisor tiers are out of scope — parse write/implement only.
         # _extract_exit_state strips the line only when explicit; on a missing
         # line it returns the prose unchanged plus the heuristic state.
@@ -907,6 +1001,16 @@ def _stage_subagent_answer(job_id: str) -> None:
                     " finished" +
                     (f" ({exit_tag} via {exit_origin})" if exit_tag else "") +
                     ". Its answer:\n" + head + marker + report_line + "]")
+        elif status == "killed":
+            wt = rec.get("worktree")
+            wt_note = ("\nIts write-tier edits may remain unrecovered in the "
+                       "worktree " + wt + " (sweep_stale_worktrees cleans it "
+                       "later) — nothing is reverted." if wt else "")
+            where = "\nFull report: " + report if report else ""
+            note = ("[Runtime note: background sub-agent " + job_id + spent +
+                    " was KILLED by the parent (kill_subagent — killed by "
+                    "parent, cooperative stop at the next tool-call "
+                    "boundary)." + wt_note + where + "]")
         elif answer.startswith("ERROR: an identical async agent"):
             # duplicate-in-flight refusal: nothing ran, nothing to wait for —
             # the parent must retry later, so don't announce a [Runtime note]
@@ -1024,6 +1128,15 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
             # The spawning task's live pid set object (shared, not copied) —
             # installed by the worker thread; see `bg_scope_adopt`.
             "owner_bg_scope": owner_bg_scope,
+            # kill_subagent (cooperative per-job cancel): set by kill_subagent;
+            # the worker's turn loop checks it at every tool-dispatch boundary
+            # alongside the global cancel_requested() (see _subagent_tls).
+            "cancel": threading.Event(),
+            # Joinable handle + announce posture, kept on the record so
+            # kill_subagent can finalize a QUEUED job (whose worker is parked
+            # on the semaphore and never reaches _finalize_async_record).
+            "handle": job,
+            "announce": announce,
         }
         if queued:
             _ASYNC_QUEUED.append(job_id)
@@ -1059,11 +1172,18 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
         # no streamed text, no footer) and never arms the interrupt watcher —
         # those belong to the parent's loop while this agent runs.
         acquired = sem is not None
+        cancelled_while_queued = False
         if sem is not None:
             sem.acquire()
             with _ASYNC_LOCK:
                 rec = _ASYNC_AGENTS.get(job_id)
-                if rec is not None and rec.get("status") == "queued":
+                if rec is None or rec.get("status") == "killed":
+                    # kill_subagent finalized a QUEUED job (or teardown
+                    # rewound the ledger): nothing to run. `acquired` stays
+                    # True, so the finally below returns the semaphore slot
+                    # just taken and pops _LIVE_WORKERS as usual.
+                    cancelled_while_queued = True
+                elif rec is not None and rec.get("status") == "queued":
                     rec["status"] = "running"
                     rec["started"] = time.time()
                 _prune_queued()
@@ -1077,6 +1197,8 @@ def spawn_agent_job(instruction: str, max_turns: int, tier: str = "read",
             _rec = _ASYNC_AGENTS.get(job_id)
         prev_bg_scope = bg_scope_adopt((_rec or {}).get("owner_bg_scope"))
         try:
+            if cancelled_while_queued:
+                return
             _run_async_agent(job_id, instruction, max_turns, tier=tier,
                              scope=scope, worktree=worktree,
                              announce=announce, handle=job)
@@ -1389,6 +1511,13 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
     except Exception:  # noqa: BLE001 — telemetry must never break a spawn
         pass
     _SUBAGENT_TLS.ctx = ctx
+    # kill_subagent (cooperative per-job cancel): attach THIS job's cancel
+    # event so the turn loop's boundary checks (agent_cancel_requested() in
+    # _turn_toolcalls) can raise _SubagentKilled. No event (foreground/sync
+    # agent) leaves ctx.cancel None — never killed.
+    if job_id:
+        with _ASYNC_LOCK:
+            ctx.cancel = (_ASYNC_AGENTS.get(job_id) or {}).get("cancel")
     # 0.155.0: the agent's approval posture is THREAD-LOCAL and installed by the
     # `with _posture_scope(...)` below, whose body is the sub-loop TRY ITSELF —
     # read-only non-quiet agents force (True, "high") there, write/quiet agents
@@ -1472,6 +1601,8 @@ def _run_sync_agent_body(instruction: str, max_turns: int, tier: str = "read",
                 max_turns_override=max_turns,
                 on_step=_progress_step,
             )
+    except _SubagentKilled:
+        raise  # kill_subagent: finalize in _run_async_agent as "killed"
     except Exception as e:  # noqa: BLE001 — a failed subagent is a tool error, not a crash
         return f"ERROR: sub-agent failed: {type(e).__name__}: {e}"
     finally:

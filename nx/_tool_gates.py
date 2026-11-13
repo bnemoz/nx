@@ -82,6 +82,9 @@ _TOOL_GATES: dict[str, Any] = {
     # only act on jobs THIS session started, so a session where nothing has
     # backgrounded has nothing to kill and shouldn't pay the schema rent.
     "kill_background": lambda: st._SESSION_HAS_BACKGROUNDED,
+    # kill_subagent (0.171.6): reaches only jobs THIS session spawned, so gate
+    # it like kill_background — plus the session's own async sub-agents.
+    "kill_subagent": lambda: st._SESSION_HAS_BACKGROUNDED or _subagents_active(),
     "spawn_agent": _delegation_enabled,
     "read_image": lambda: (bool(_m_safe().NX_VISION)
                             and st._NATIVE_TOOL_CALLS_CONFIRMED
@@ -124,9 +127,16 @@ _TOOL_GATES: dict[str, Any] = {
 # model needs so it doesn't conclude the capability doesn't exist). Keyed by
 # tool name; a gated tool without an entry gets the generic withheld wording
 # in _unknown_tool_error.
+def _subagents_active() -> bool:
+    """True when this session has a queued or running async sub-agent."""
+    from ._subagent import _async_running
+    return _async_running()
+
+
 _GATE_REFUSALS: dict[str, str] = {
     "wait_background": "(no command has backgrounded yet — nothing to wait on). run_bash returns a '[background] PID' line when a command needs waiting on; read_file that log path in the meantime.",
     "kill_background": "(no command has backgrounded yet in this session — nothing to kill, and the tool only reaches jobs this session started).",
+    "kill_subagent": "(no background sub-agent is queued or running in this session — nothing to kill; it reaches only jobs this session spawned).",
     "read_image": "(NX_VISION is off, native tool calls are not confirmed on this source, or NX_TOOL_FLOOR_SLIM=1 withholds it this session). Describe images by other means or ask the user to paste the relevant details.",
     "spawn_agent": "(NX_SUBAGENTS is off). Do the investigation yourself with search_files/read_file/run_bash.",
     "plan_edit": "(no plan is active). Start one with /plan <goal>, or just proceed with the normal edit tools.",

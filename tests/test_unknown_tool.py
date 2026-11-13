@@ -59,6 +59,13 @@ def test_withheld_read_image_names_the_gate():
     assert "unknown tool" not in out
 
 
+def test_withheld_kill_subagent_names_the_gate():
+    out = run_tool("kill_subagent", {"job_id": "agent-1-x"})
+    assert "not available in this session" in out
+    assert "sub-agent" in out
+    assert "unknown tool" not in out
+
+
 def test_retired_tools_get_the_re_route_refusal():
     """0.158.9: git_status/git_diff/git_log/sed_edit retire from the offered
     floor like list_dir (0.129.8) — still dispatchable for direct callers, but

@@ -38,6 +38,7 @@ from ._approval import _EscToChat
 # in the T-9 conftest snapshot).
 from ._surfaces import write_lock
 from ._bash_jobs import run_bash, wait_background, kill_background
+from ._subagent import spawn_agent, critique, kill_subagent
 from ._edit_tools import (write_file, edit_file, multi_edit, sed_edit, delete_file)
 from ._memory_cmd import memory_write, memory_search, memory_delete
 from ._metrics import _abbr
@@ -46,7 +47,6 @@ from ._render import panel_footer, panel_header, panel_row
 from ._text_fallback import _sanitize_tool_result
 from ._todo import todo_write, render_todos_display
 from ._plan import plan_edit, check_gate
-from ._subagent import spawn_agent, critique
 from ._delegation_note import _delegation_enabled
 from ._images import read_image
 from ._tools import read_file, list_dir, search_files, git_status, git_diff, git_log
@@ -87,6 +87,7 @@ DISPATCH = {
     "read_file": read_file, "write_file": write_file, "edit_file": edit_file,
     "list_dir": list_dir, "run_bash": run_bash, "wait_background": wait_background,
     "kill_background": kill_background,
+    "kill_subagent": kill_subagent,
     "search_files": search_files, "multi_edit": multi_edit, "sed_edit": sed_edit,
     "git_status": git_status, "git_diff": git_diff, "git_log": git_log,
     "todo_write": todo_write, "delete_file": delete_file,

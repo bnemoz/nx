@@ -628,6 +628,21 @@ def _cmd_bg(user: str, state: _ReplState) -> None:
             print(f"{C.WARNING}  usage: /bg kill <pid>{RESET}")
             return
         target_pid = parts[2]
+        # A sub-agent job id routes to the cooperative kill first (threads
+        # can't be SIGTERM'd); bash PIDs fall through to the signal path.
+        from ._subagent import kill_subagent
+        if not target_pid.isdigit():
+            # Sub-agent job ids are strings ("agent-…"); a numeric arg is
+            # always a bash PID — don't spend a kill_subagent lookup on it.
+            res = kill_subagent(target_pid)
+        else:
+            res = "[error] no such sub-agent job"
+        if res.startswith("[killing]"):
+            print(f"{DIM}  ↳ {res}{RESET}")
+            return
+        if not res.startswith("[error] no such sub-agent job"):
+            print(f"{C.WARNING}  {res}{RESET}")
+            return
         # The killable set is THIS process's jobs only. bg-logs is shared by
         # every nx session on the machine, so the unfiltered pid set let one
         # session SIGTERM another session's work.

@@ -25,6 +25,27 @@ def _subagent_ctx() -> "_SubagentContext | None":
     return getattr(_SUBAGENT_TLS, "ctx", None)
 
 
+class _SubagentKilled(Exception):
+    """Raised at a cooperative check-at-boundary inside a killed sub-agent's
+    turn loop (see kill_subagent in _subagent.py). The sub-loop's abort signal
+    rides the exception so it unwinds the shared turn machinery (model_turn,
+    the tool-call handlers) without any of them having to know about sub-agents;
+    _run_sync_agent_body re-raises it past its generic error fold and
+    _run_async_agent converts it into the "killed" finalization."""
+
+
+def agent_cancel_requested() -> bool:
+    """True when THIS thread's sub-agent loop has been individually killed
+    (kill_subagent set its per-job cancel event). Complements the process-wide
+    cancel_requested() (Esc ladder): the two form the sub-loop's cancel
+    contract — check at every boundary against global OR per-job cancel.
+    False on the parent thread and for sync (non-async) agents, which have no
+    job record and therefore no per-job event."""
+    ctx = _subagent_ctx()
+    ev = getattr(ctx, "cancel", None) if ctx is not None else None
+    return ev is not None and ev.is_set()
+
+
 def tap_event(kind: str, text: str) -> None:
     """Phase 2 event-sink writer (EVENTSURFACE_SPEC §1): append a DISPLAY line
     to the CURRENT thread's agent sink, if one is attached.

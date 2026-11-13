@@ -476,6 +476,12 @@ TOOLS.append(_KILL_BACKGROUND_TOOL)
 _WAIT_BACKGROUND_TOOL = {"type": "function", "function": {"name": "wait_background", "description": "Wait for a run_bash-backgrounded command; returns its output when it exits. Default waits up to ~30 min (then returns log path); Esc cancels the WAIT, never the process. Cannot kill — not a pkill substitute.",
     "parameters": {"type": "object", "properties": {"pid": {"type": "integer", "description": "The PID from the `[background]` result"}, "timeout": {"type": "integer", "description": "Give up after this many seconds (default 0 = wait up to 1800s, then report the log path; explicit values are capped at 120 — poll briefly and check back, don't blind-block)"}}, "required": ["pid"]}}}
 TOOLS.append(_WAIT_BACKGROUND_TOOL)  # kept in TOOLS for callers that want the full schema (e.g. --tokens); _active_tools() is what's actually sent per-turn
+# kill_subagent (0.171.6): cooperatively kill a background sub-agent THIS
+# session spawned (threads can't be force-killed; the agent stops at its next
+# tool-call boundary). Gated in _tool_gates like kill_background.
+_KILL_SUBAGENT_TOOL = {"type": "function", "function": {"name": "kill_subagent", "description": "Kill a background sub-agent by job id (the id spawn_agent returned). Cooperative: a running agent stops at its NEXT tool-call boundary and finalizes as killed with a KILLED [Runtime note]; a queued agent is finalized as killed immediately. Write-tier edits in the agent's worktree are NOT reverted (the note names the worktree). Does not reach run_bash jobs — use kill_background for those.",
+    "parameters": {"type": "object", "properties": {"job_id": {"type": "string", "description": "The job id spawn_agent returned"}}, "required": ["job_id"]}}}
+TOOLS.append(_KILL_SUBAGENT_TOOL)
 TOOLS.append(SUBAGENT_TOOL)
 # critique (0.132.0, feature #3): the scoped minimal reviewer — a read-only
 # sub-agent that reports findings instead of fixing them. Schema lives in

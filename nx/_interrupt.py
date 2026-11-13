@@ -148,6 +148,24 @@ def clear_tool_cancel() -> None:
         _CANCEL_FN = None
 
 
+def fire_tool_cancel() -> bool:
+    """Run the live tool-cancel hook ONCE and retire the slot (used by
+    kill_subagent to kill a killed agent's pending run_bash child at kill
+    time). Takes the slot before calling so the Esc ladder can't double-fire
+    the same hook. Never raises; returns whether a hook ran."""
+    global _CANCEL_FN
+    with _CANCEL_LOCK:
+        fn = _CANCEL_FN
+        _CANCEL_FN = None
+    if fn is None:
+        return False
+    try:
+        fn()
+    except Exception:
+        pass  # a kill hook must never take down the caller
+    return True
+
+
 def request_hard_cancel(reason: str = "") -> bool:
     """Escalate: mark the turn hard-cancelled and fire the live tool hook.
     Returns whether a tool hook ran. Idempotent-safe (the event is sticky

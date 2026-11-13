@@ -61,7 +61,7 @@ class _SubagentContext:
 
     __slots__ = ("table", "active", "write", "quiet", "model_target", "scope",
                  "worktree", "job_id", "consults_left", "advisor", "tier",
-                 "write_calls", "churn_nudged", "churn_escalated")
+                 "write_calls", "churn_nudged", "churn_escalated", "cancel")
 
     def __init__(self, table: dict[str, Any], write: bool = False,
                  quiet: bool = False, scope: "list[str] | None" = None,
@@ -85,6 +85,11 @@ class _SubagentContext:
         # or None to inherit the parent's active source/model. Pinned by
         # _subagent_model.install() at agent start (NX_SUBAGENT_SOURCE/_MODEL).
         self.model_target = None
+        # kill_subagent (cooperative per-job cancel): the killed record's
+        # threading.Event, attached by _run_sync_agent_body after the ctx is
+        # built; agent_cancel_requested() reads it at tool-call boundaries.
+        # None = no per-job event (parent thread / sync agents).
+        self.cancel = None
         # Job id for an async worker (0.106.0): lets the turn loop resolve this
         # thread's per-agent steering queue and stamp steer breadcrumbs on the
         # job record. None for foreground/parent loops.

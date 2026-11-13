@@ -95,7 +95,8 @@ def test_every_tool_appears_once():
     # mode, and the name no longer dispatches) — 27.
     # 0.162.0: run_tools joins (PTC Phase 2; registered in TOOLS, withheld
     # per-turn by its NX_PTC gate, the lint_check/critique posture) — 28.
-    assert len(names) == 28
+    # 0.171.6: kill_subagent joins (gated like kill_background) — 29.
+    assert len(names) == 29
 
 
 @pytest.mark.parametrize("tool", _all_tools(), ids=lambda t: _fn(t)["name"])

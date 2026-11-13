@@ -106,7 +106,7 @@ _SPECS = [
     ("/status", "snapshot: source, model, caps, budgets, fence, approval",
      None, [], None, 1, "context"),
     ("/bg", "this session's background jobs, full screen; Ctrl-B — "
-     "/bg kill <pid> stops one, /bg all lists every session's",
+     "/bg kill <pid> stops a bash job (a sub-agent job id routes to kill_subagent), /bg all lists every session's",
      "[kill <pid>|all]", [("/jobs", "alias for /bg", True)],
      ["kill", "all"], 1, "workflow"),
     ("/tabs", "live dashboard of running surfaces (main turn, sub-agents); Ctrl-T",

@@ -86,7 +86,9 @@ def test_full_tools_list_still_has_every_tool_for_callers_that_want_the_whole_sc
     # `diff` mode now, so the floor carries one fewer tool
     # 0.162.0: run_tools joins the schema (PTC Phase 2), gated on the NX_PTC
     # rollout resolver — the full list keeps it, the default floor does not.
-    assert len(m.TOOLS) == 28
+    # 0.171.6: kill_subagent joins (model-facing /bg kill for sub-agents),
+    # gated like kill_background.
+    assert len(m.TOOLS) == 29
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from ._ansi import DIM, RESET, C, strip_ansi_for_display
 from ._approval import _EscToChat
 from ._interrupt import cancel_requested, _HARD_CANCEL
+from ._subagent_tls import _SubagentKilled, agent_cancel_requested
 from . import _state as st
 from . import run_tool, _tool_args_parse_error
 from ._compress import _nudge_current_user_turn, _flush_pending_background_notice
@@ -306,7 +307,14 @@ def _handle_native_tool_calls(messages: list[Message], tcs: dict, text: str, fin
         # C1 boundary check: once the hard-cancel ladder has fired, the whole
         # remaining group is cancelled — the model must see a cancelled
         # result for EVERY call (the transcript stays honest; a tool result
-        # must never silently vanish).
+        # must never silently vanish). A killed sub-agent (kill_subagent) uses
+        # the same boundary with its own event: the exception unwinds the loop
+        # (the sub-agent's tool calls are its own transcript, which dies with
+        # it, so no honesty-fill is needed) and _run_async_agent finalizes
+        # "killed". Never set on the parent thread, so the interactive path
+        # is unchanged.
+        if agent_cancel_requested():
+            raise _SubagentKilled()
         if cancel_requested():
             messages.append({"role": "tool", "tool_call_id": c["id"],
                              "content": "CANCELLED by user (hard cancel) — not started"})
@@ -448,6 +456,8 @@ def _handle_text_tool_calls(messages: list[Message], text: str, malformed_call_c
     obs = []
     esc_action = None
     for ci, (n, a) in enumerate(calls):
+        if agent_cancel_requested():  # killed sub-agent (see native path above)
+            raise _SubagentKilled()
         if cancel_requested():  # C1 boundary check (see native path above)
             obs.append(f"Observation ({n}): CANCELLED by user (hard cancel) — not started")
             for n2, _a2 in calls[ci + 1:]:

@@ -49,6 +49,7 @@ def test_default_withholds_the_gated_four():
     all_names = [t["function"]["name"] for t in m.TOOLS]
     assert sorted(names) == sorted(
         n for n in all_names if n not in ("wait_background", "kill_background",
+                                              "kill_subagent",
                                               "spawn_agent", "read_image", "plan_edit",
                                               "obs_recall",
                                               "lint_check", "search_project_tools",

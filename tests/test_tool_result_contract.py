@@ -198,6 +198,7 @@ _SAFE_PROBES = {
     "sed_edit": lambda d, w: d["sed_edit"]("a", "b", os.path.join(w, "nope.txt")),
     "delete_file": lambda d, w: d["delete_file"](os.path.join(w, "nope.txt")),
     "kill_background": lambda d, w: d["kill_background"]("not-a-pid"),
+    "kill_subagent": lambda d, w: d["kill_subagent"]("agent-1-none"),
     "wait_background": lambda d, w: d["wait_background"]("not-a-pid"),
     # `search_tools` is the lambda above — covered by its own body-annotation
     # test, and its probe here checks the runtime shape of the lambda itself.
